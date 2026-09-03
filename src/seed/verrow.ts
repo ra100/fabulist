@@ -43,6 +43,7 @@ const ENTITIES: SeedEntity[] = [
   { id: 'char:sergeant-doff', type: 'Character', name: 'Sergeant Doff', summary: 'Sered\'s sergeant. Enjoys the work more than his captain does.', props: { status: 'alive' } },
   { id: 'char:prior-galt', type: 'Character', name: 'Prior Galt', summary: 'Head of the Order. Believes accommodation has kept them alive and cannot see what it has cost.', props: { status: 'alive' } },
   { id: 'char:the-widow-marn', type: 'Character', name: 'The Widow Marn', summary: 'Keeps the inn by the north gate. Hears everything, sells about a third of it.', props: { status: 'alive' } },
+  { id: 'char:dural-vask', type: 'Character', name: 'Dural Vask', summary: "Hela's younger brother. Walks the high route in weather nobody else will.", props: { status: 'alive' } },
 
   // Items and concepts
   { id: 'item:the-verrow-psalter', type: 'Item', name: 'The Verrow Psalter', summary: 'The Order\'s oldest book. Also, in the back pages, a list of everyone they have moved over the pass.' },
@@ -59,6 +60,9 @@ const EDGES: Array<[string, string, string, number]> = [
   ['char:captain-sered', 'LEADS', 'fac:the-garrison', 0.95],
   ['char:sergeant-doff', 'MEMBER_OF', 'fac:the-garrison', 0.8],
   ['char:hela-vask', 'MEMBER_OF', 'fac:the-pass-carriers', 0.8],
+  ['char:dural-vask', 'MEMBER_OF', 'fac:the-pass-carriers', 0.7],
+  ['char:dural-vask', 'KIN_OF', 'char:hela-vask', 0.9],
+  ['char:hela-vask', 'KIN_OF', 'char:dural-vask', 0.9],
   ['char:brother-anselm', 'MENTORS', 'char:novice-tem', 0.8],
   ['char:brother-anselm', 'TRUSTS', 'char:sister-oria', 0.85],
   ['char:brother-anselm', 'KEEPS_SECRET_FROM', 'char:prior-galt', 0.7],
@@ -185,6 +189,7 @@ export function seedWorld(world: World, opts: SeedOptions = {}): void {
     ['char:sergeant-doff', 'Flat, cheerful, faintly hungry.', ['catch the Order at it'], 'loc:the-garrison-yard', 'keen'],
     ['char:prior-galt', 'Formal, tired, speaks in the passive voice about anything difficult.', ['keep the Accommodation'], 'loc:saint-verrow', 'anxious'],
     ['char:the-widow-marn', 'Chatty, shrewd, never quite lies.', ['stay on everyone\'s good side'], 'loc:the-north-gate', 'watchful'],
+    ['char:dural-vask', 'Few words, all of them concrete. Talks about weather and footing.', ['keep his sister out of the cells'], 'loc:the-north-gate', 'uneasy'],
   ];
 
   for (const [id, diction, goals, locationId, mood] of supporting) {
@@ -213,6 +218,8 @@ export function seedWorld(world: World, opts: SeedOptions = {}): void {
     ['char:hela-vask', 'char:brother-anselm', 0.4, 0.2, 0.5, 'reliable payer, terrible liar'],
     ['char:prior-galt', 'char:brother-anselm', 0.3, 0.4, 0.5, 'suspects him of something and does not want to know'],
     ['char:the-widow-marn', 'char:captain-sered', 0.3, 0.1, 0.3, 'sells him the third of it that is safe'],
+    ['char:dural-vask', 'char:hela-vask', 0.8, 0.9, 0.6, 'would burn the pass down for her'],
+    ['char:hela-vask', 'char:dural-vask', 0.7, 0.8, 0.4, 'thinks he takes stupid risks, which he does'],
   ];
   for (const [from, to, trust, affection, respect, note] of rels) {
     world.cast.adjustRelationship(from, to, { trust, affection, respect, note });

@@ -561,13 +561,16 @@ const titleCaseHeadings: LintRule = {
       const headingText = m[2]!;
       const words = headingText.split(/\s+/).filter(Boolean);
       if (words.length < 4) continue;
-      const capitalized = words.filter((w) => {
+      // Ratio is computed over content words only: small function words ("a", "to",
+      // "of"...) are conventionally lowercase in title case too, so counting them
+      // against the heading would make a textbook Title-Cased heading score as if it
+      // weren't one, just because it happens to contain "of" or "the".
+      const contentWords = words.filter((w) => {
         const bare = w.replace(/[^A-Za-z]/g, '');
-        if (bare.length === 0) return false;
-        if (SMALL.has(bare.toLowerCase())) return false;
-        return /^[A-Z]/.test(bare);
+        return bare.length > 0 && !SMALL.has(bare.toLowerCase());
       });
-      const ratio = capitalized.length / words.length;
+      const capCount = contentWords.filter((w) => /^[A-Z]/.test(w)).length;
+      const ratio = contentWords.length === 0 ? 0 : capCount / contentWords.length;
       if (ratio >= 0.85) {
         const headingOffset = lineOffset + line.indexOf(headingText);
         findings.push(
@@ -1053,6 +1056,7 @@ export const RULES: LintRule[] = [
   dialogueTagMonotony,
   adverbDensityInDialogueTags,
   overwroughtMetaphorDensity,
+  emDashDensityFiction,
   aiVocabularyFiction,
 ];
 
