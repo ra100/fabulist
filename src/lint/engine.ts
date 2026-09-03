@@ -124,6 +124,7 @@ const STOPWORDS = new Set([
   'the', 'a', 'an', 'and', 'or', 'but', 'of', 'in', 'on', 'at', 'to', 'for', 'with',
   'as', 'is', 'was', 'were', 'are', 'be', 'been', 'it', 'its', 'his', 'her', 'their',
   'he', 'she', 'they', 'that', 'this', 'had', 'have', 'has', 'not', 'so', 'into',
+  'then', 'than', 'when', 'what', 'who', 'which', 'there', 'here', 'no', 'all',
 ]);
 
 function tokenizeWords(text: string): Array<{ word: string; index: number }> {

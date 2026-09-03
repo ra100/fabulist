@@ -33,7 +33,7 @@ The paper was thinner than she expected, the ink gone brown at the edges. She re
 
 Devon didn't push. He'd learned that much, at least, in the two years since his mother's funeral, when pushing had cost him three weeks of silence.
 
-Later, packing the kitchen boxes, Mara found herself thinking about the house differently: the crack in the ceiling that had always been there, the smell of her grandmother's coffee that had never quite left the cabinets, the particular slant of afternoon light across the counter that no other house she'd lived in had managed to reproduce. She wrapped the last of the plates in newspaper and did not cry, though she had expected to.
+Later, packing the kitchen boxes, Mara found herself thinking about the house differently: the crack in the ceiling that had always been there, the smell of her grandmother's coffee that had never quite left the cabinets, the particular slant of afternoon light across the counter that no other house she'd lived in had managed to reproduce.
 
 They loaded the van in silence broken only by directions — left here, mind the step, careful with that one — and by the time the house was empty the sun had gone orange over the ridge behind it. Devon locked the door out of habit, though the house would be someone else's within the month.
 
@@ -239,16 +239,49 @@ test('fiction: does NOT flag dialogue-length uniformity with fewer than 4 lines'
   assert.ok(!report.findings.some((f) => f.rule === 'uniform-dialogue-length'));
 });
 
-test('fiction: catches symmetrical paragraph architecture (>= 4 paragraphs, same sentence count)', () => {
+test('fiction: catches symmetrical paragraph architecture (>= 5 paragraphs of 3+ sentences)', () => {
   const text = `One. Two. Three sentences here.
 
 Four. Five. Six sentences here.
 
 Seven. Eight. Nine sentences here.
 
-Ten. Eleven. Twelve sentences here.`;
+Ten. Eleven. Twelve sentences here.
+
+Thirteen. Fourteen. Fifteen sentences here.`;
   const report = lintProse(text, { profile: 'fiction' });
   assert.ok(report.findings.some((f) => f.rule === 'symmetrical-paragraph-architecture'));
+});
+
+test('fiction: uniform runs of one- and two-sentence paragraphs are left alone', () => {
+  // A short beat paragraph is a deliberate device in close third. Flagging a run
+  // of them punishes exactly the rhythm good fiction uses, and a false positive
+  // here is worse than a miss: the gate must not flatten voice.
+  const twos = `He waited. The ink stayed frozen.
+
+She came back empty-handed. Nobody had opened the gate.
+
+The bell rang twice. Tem did not look up.
+
+Outside, the yard filled. The gravel took the sound out of it.
+
+He counted the desks again. Twelve, as ever.`;
+  const ones = `He waited.
+
+She said nothing.
+
+The bell rang.
+
+Tem did not look up.
+
+The yard filled.`;
+  for (const text of [twos, ones]) {
+    const report = lintProse(text, { profile: 'fiction' });
+    assert.ok(
+      !report.findings.some((f) => f.rule === 'symmetrical-paragraph-architecture'),
+      'short-paragraph rhythm is not a templated shape',
+    );
+  }
 });
 
 test('fiction: catches dialogue-tag monotony from flashy "said"-replacement verbs', () => {
@@ -565,12 +598,14 @@ test('user blocklist finds every occurrence of a banned phrase, not just the fir
 });
 
 test('user blocklist phrases apply on top of built-in rules and both contribute to the score', () => {
-  const builtinOnly = lintProse('Her jaw clenched.', { profile: 'fiction' });
-  const withBlocklist = lintProse('Her jaw clenched, shimmering with resolve.', {
+  const padding =
+    'The morning was ordinary in every way that mattered, and nothing about the walk to the station suggested otherwise. ';
+  const builtinOnly = lintProse(`${padding}Her jaw clenched.`, { profile: 'fiction' });
+  const withBlocklist = lintProse(`${padding}Her jaw clenched, shimmering with resolve.`, {
     profile: 'fiction',
     blocklist: ['shimmering'],
   });
-  assert.ok(withBlocklist.score > builtinOnly.score);
+  assert.ok(withBlocklist.score > builtinOnly.score, `builtin=${builtinOnly.score} withBlocklist=${withBlocklist.score}`);
 });
 
 // -------------------------------------------------------------------- crossSceneTells

@@ -64,6 +64,14 @@ const EDGES: Array<[string, string, string, number]> = [
   ['char:dural-vask', 'KIN_OF', 'char:hela-vask', 0.9],
   ['char:hela-vask', 'KIN_OF', 'char:dural-vask', 0.9],
   ['char:brother-anselm', 'MENTORS', 'char:novice-tem', 0.8],
+  // Edges pointing *at* the player character matter as much as the ones leaving
+  // it: they are how consequences find their way back when something happens
+  // to the protagonist.
+  ['char:novice-tem', 'LOYAL_TO', 'char:brother-anselm', 0.85],
+  ['char:sister-oria', 'TRUSTS', 'char:brother-anselm', 0.8],
+  ['char:sergeant-doff', 'SUSPECTS', 'char:brother-anselm', 0.65],
+  ['char:prior-galt', 'RELIES_ON', 'char:brother-anselm', 0.5],
+  ['char:captain-sered', 'WATCHES', 'char:brother-anselm', 0.6],
   ['char:brother-anselm', 'TRUSTS', 'char:sister-oria', 0.85],
   ['char:brother-anselm', 'KEEPS_SECRET_FROM', 'char:prior-galt', 0.7],
   ['char:brother-anselm', 'DEALS_WITH', 'char:hela-vask', 0.6],

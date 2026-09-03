@@ -307,7 +307,7 @@ const negativeParallelism = multiPatternRule({
   weight: 3,
   description: '"Not just X, it\'s Y" and "not only... but also" rhetorical scaffolding.',
   patterns: [
-    /not just [^,]+,\s*(?:it'?s|it is)\s+[^.!?]+[.!?]/gi,
+    /(?:is|are|was|were|isn'?t|aren'?t|wasn'?t|weren'?t|not)\s+just\s+[^,]+,\s*(?:it'?s|it is|they'?re|they are)\s+[^.!?]+[.!?]/gi,
     /\bnot only\b[^.!?]*\bbut also\b[^.!?]*[.!?]/gi,
     /\bit'?s not merely\b[^.!?]*[.!?]/gi,
   ],
@@ -326,12 +326,6 @@ const copulaAvoidance = phraseListRule({
   phrases: ['serves as', 'stands as', 'functions as', 'represents a', 'boasts'],
   message: (p) => `"${p}" avoids a plain "is" — consider stating the fact directly.`,
 });
-
-function ruleOfThreeMatcher(text: string): RegExpExecArray[] {
-  const pattern =
-    /\b([A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,2}),\s+([A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,2}),\s+(?:and|or)\s+([A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,2})\b/g;
-  return [...iterMatches(text, pattern)];
-}
 
 // Rule-of-three (tricolon) is a real, deliberate rhetorical device — Caesar used it.
 // One instance is craft. Prose-doc, though, gets these from models padding a sentence
@@ -596,7 +590,9 @@ const inlineHeaderBullets: LintRule = {
   description: 'Bullet list where each item opens with a bolded fake sub-heading.',
   check(text) {
     const findings: LintFinding[] = [];
-    const pattern = /^[-*]\s+\*\*[^*\n]{1,80}\*\*:/gm;
+    // Covers both `**Label:**` (colon inside the bold) and `**Label**:` (colon after) —
+    // both are the same LLM list habit of dressing every bullet as its own sub-heading.
+    const pattern = /^[-*]\s+\*\*[^*\n]{1,80}:\*\*|^[-*]\s+\*\*[^*\n]{1,80}\*\*:/gm;
     for (const m of iterMatches(text, pattern)) {
       findings.push(
         makeFinding(
@@ -827,24 +823,38 @@ const uniformDialogueLength: LintRule = {
 };
 
 // Sentence-count-per-paragraph is a structural fingerprint humans vary without thinking
-// about it. Four or more paragraphs in a row landing on the exact same count — three is
-// the classic case, since it's also the model's favorite rule-of-three at the paragraph
-// level — means the shape was templated rather than felt out scene by scene.
+// about it. Five or more narrative paragraphs in a row landing on the same count of three
+// or more — three being the classic case, since it is also the model's favourite
+// rule-of-three at the paragraph level — means the shape was templated rather than felt
+// out scene by scene. Shorter and more uniform runs are left alone: see the check body.
 const symmetricalParagraphArchitecture: LintRule = {
   id: 'symmetrical-paragraph-architecture',
   profiles: ['fiction'],
   severity: 'info',
   weight: 2,
-  description: 'Four or more consecutive paragraphs sharing the exact same sentence count.',
+  description: 'Five or more consecutive narrative paragraphs sharing the same 3+ sentence count.',
   check(text) {
-    const paragraphs = splitParagraphs(text).map((p) => ({ ...p, count: splitSentences(p.text).length }));
+    // Dialogue exchanges naturally produce a run of short, one-sentence "paragraphs"
+    // — that's just what a volley of back-and-forth lines looks like on the page, not
+    // a templated structure. The tell this rule is after is narrative paragraphs
+    // (description, interiority, scene-setting) landing on an identical shape, so
+    // any paragraph containing a quoted line is excluded before looking for runs.
+    //
+    // Runs of one- and two-sentence paragraphs are excluded for the same reason:
+    // a short beat paragraph is a deliberate device in close third, and flagging
+    // it punishes precisely the rhythm good fiction uses. Uniform blocks of three
+    // or more sentences are what machine prose actually does.
+    const isDialogueParagraph = (t: string) => /["\u201C\u201D]/.test(t);
+    const paragraphs = splitParagraphs(text)
+      .map((p) => ({ ...p, count: splitSentences(p.text).length }))
+      .filter((p) => !isDialogueParagraph(p.text));
     const findings: LintFinding[] = [];
     let runStart = 0;
     for (let i = 1; i <= paragraphs.length; i++) {
       const sameAsPrev = i < paragraphs.length && paragraphs[i]!.count === paragraphs[runStart]!.count;
       if (!sameAsPrev) {
         const runLen = i - runStart;
-        if (runLen >= 4 && paragraphs[runStart]!.count > 0) {
+        if (runLen >= 5 && paragraphs[runStart]!.count >= 3) {
           const count = paragraphs[runStart]!.count;
           const first = paragraphs[runStart]!;
           findings.push(
@@ -1060,6 +1070,6 @@ export const RULES: LintRule[] = [
   aiVocabularyFiction,
 ];
 
-// Exposed for the fiction em-dash rule, which needs different thresholds than prose-doc
-// (see engine.ts comment on why em dash density is deliberately NOT a shared rule).
-export { countWords, dedupeOverlaps, iterMatches, ruleOfThreeMatcher };
+// Exposed for potential reuse by CLI tooling that wants to run the same regex-scan
+// helpers over arbitrary text outside a registered rule.
+export { countWords, dedupeOverlaps, iterMatches };

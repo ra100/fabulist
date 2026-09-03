@@ -1,0 +1,417 @@
+/**
+ * HTTP API for the inspector UI. See DESIGN.md §11.
+ *
+ * Plain node:http — the surface is about twenty routes and a framework would
+ * only add indirection. The UI is essentially a debugger for the world model,
+ * so most routes are reads.
+ */
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFileSync, existsSync, statSync } from 'node:fs';
+import { extname, join, normalize } from 'node:path';
+import type { Engine } from '../loop/engine.ts';
+import type { World } from '../store/index.ts';
+import {
+  applyDirectiveRecalc,
+  seedConsequences,
+  tickConsequences,
+  worldTick,
+} from '../consequence/propagate.ts';
+import type { Condition, Directive, Knobs, StyleContract } from '../domain/types.ts';
+
+export interface ServerOptions {
+  world: World;
+  engine: Engine;
+  port?: number;
+  /** Directory of built UI assets; when absent the API runs alone. */
+  webRoot?: string;
+}
+
+type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
+
+interface RouteContext {
+  world: World;
+  engine: Engine;
+  url: URL;
+  body: unknown;
+  params: Record<string, string>;
+}
+
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2',
+};
+
+function send(res: ServerResponse, status: number, body: unknown): void {
+  const text = JSON.stringify(body);
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(text);
+}
+
+async function readBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  if (!chunks.length) return undefined;
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+// ------------------------------------------------------------------- routes
+
+const routes: Array<{ method: string; pattern: RegExp; handler: Handler }> = [];
+
+function route(method: string, path: string, handler: Handler): void {
+  // `:name` becomes a named capture, so params come out typed as strings.
+  const pattern = new RegExp(
+    `^${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/:(\w+)/g, '(?<$1>[^/]+)')}$`,
+  );
+  routes.push({ method, pattern, handler });
+}
+
+route('GET', '/api/state', (_req, res, { world }) => {
+  const session = world.session.get();
+  send(res, 200, {
+    session,
+    counts: world.graph.counts(),
+    scenes: world.chronicle.scenes(),
+    threads: world.threads.open(20),
+    directives: world.directives.active(),
+    pendingConsequences: world.consequences.pending().length,
+    hiddenFired: world.consequences.hiddenFiredCount(),
+    divergences: world.chronicle.divergences(),
+  });
+});
+
+route('GET', '/api/graph', (_req, res, { world, url }) => {
+  const layer = url.searchParams.get('layer');
+  const type = url.searchParams.get('type');
+  const entities = world.graph.list({
+    limit: Number(url.searchParams.get('limit') ?? 400),
+    ...(layer === 'canon' || layer === 'chronicle' ? { layer } : {}),
+    ...(type ? { type: type as never } : {}),
+  });
+  const ids = new Set(entities.map((e) => e.id));
+  const scene = world.session.get().scene;
+  const edges = world.graph
+    .allEdges(3000)
+    .filter((e) => ids.has(e.subject) && ids.has(e.object))
+    .filter((e) => e.validTo === null || e.validTo > scene);
+  send(res, 200, { entities, edges, scene });
+});
+
+route('GET', '/api/entity/:id', (_req, res, { world, params }) => {
+  const id = decodeURIComponent(params.id ?? '');
+  const entity = world.graph.get(id);
+  if (!entity) return send(res, 404, { error: 'not found' });
+  const scene = world.session.get().scene;
+  send(res, 200, {
+    entity,
+    canon: world.graph.getCanon(id),
+    sheet: world.cast.get(id),
+    edgesOut: world.graph.edgesFrom(id, scene),
+    edgesIn: world.graph.edgesTo(id, scene),
+    relationships: world.cast.relationshipsOf(id),
+    relationshipsToward: world.cast.relationshipsToward(id),
+    knowledge: world.chronicle.knowledgeOf(id),
+  });
+});
+
+route('GET', '/api/cast', (_req, res, { world }) => {
+  const sheets = world.cast.list();
+  send(
+    res,
+    200,
+    sheets.map((s) => ({ sheet: s, entity: world.graph.get(s.entityId) })),
+  );
+});
+
+route('PUT', '/api/sheet/:id', (_req, res, { world, params, body }) => {
+  const id = decodeURIComponent(params.id ?? '');
+  const existing = world.cast.get(id);
+  if (!existing) return send(res, 404, { error: 'no sheet' });
+  const patch = (body ?? {}) as Record<string, unknown>;
+  world.cast.put({
+    ...existing,
+    identity: (patch.identity as typeof existing.identity) ?? existing.identity,
+    contract: (patch.contract as typeof existing.contract) ?? existing.contract,
+    voice: (patch.voice as typeof existing.voice) ?? existing.voice,
+    condition: (patch.condition as Condition) ?? existing.condition,
+    locks: (patch.locks as string[]) ?? existing.locks,
+  });
+  send(res, 200, world.cast.get(id));
+});
+
+route('POST', '/api/sheet/:id/lock', (_req, res, { world, params, body }) => {
+  const id = decodeURIComponent(params.id ?? '');
+  const { path, locked } = (body ?? {}) as { path?: string; locked?: boolean };
+  if (!path) return send(res, 400, { error: 'path required' });
+  if (locked === false) world.cast.unlock(id, path);
+  else world.cast.lock(id, path);
+  send(res, 200, world.cast.get(id));
+});
+
+route('GET', '/api/book', (_req, res, { world }) => {
+  const turns = world.chronicle.turns({ limit: 1000 });
+  send(res, 200, {
+    scenes: world.chronicle.scenes(),
+    turns: turns.map((t) => ({
+      id: t.id,
+      scene: t.scene,
+      turn: t.turn,
+      rawInput: t.rawInput,
+      bookProse: t.bookProse,
+      pinned: t.pinned,
+      move: t.meta.move,
+      integrity: t.meta.integrity?.distance ?? null,
+      lintScore: t.meta.lint?.score ?? null,
+    })),
+  });
+});
+
+route('GET', '/api/turn/:id', (_req, res, { world, params }) => {
+  const turn = world.chronicle.getTurn(decodeURIComponent(params.id ?? ''));
+  if (!turn) return send(res, 404, { error: 'not found' });
+  send(res, 200, turn);
+});
+
+route('POST', '/api/turn/:id/pin', (_req, res, { world, params, body }) => {
+  const id = decodeURIComponent(params.id ?? '');
+  const { pinned } = (body ?? {}) as { pinned?: boolean };
+  world.chronicle.setPinned(id, pinned !== false);
+  send(res, 200, world.chronicle.getTurn(id));
+});
+
+route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
+  const { input, overrideIntegrity } = (body ?? {}) as { input?: string; overrideIntegrity?: boolean };
+  if (!input || !input.trim()) return send(res, 400, { error: 'input required' });
+
+  const outcome = await engine.takeTurn(input, { overrideIntegrity: overrideIntegrity === true });
+
+  // Consequence seeding and the world tick run after the turn commits, so the
+  // response can report what the act set in motion.
+  let seeded = 0;
+  let tick = null;
+  if (outcome.kind === 'narrated') {
+    seeded = seedConsequences(world, outcome.delta, outcome.commit.events).length;
+    tick = tickConsequences(world);
+    worldTick(world);
+  }
+  send(res, 200, { outcome, seeded, tick });
+});
+
+route('GET', '/api/threads', (_req, res, { world }) => {
+  send(res, 200, world.threads.all());
+});
+
+route('PUT', '/api/thread/:id', (_req, res, { world, params, body }) => {
+  const id = decodeURIComponent(params.id ?? '');
+  const patch = (body ?? {}) as { tension?: number; status?: string; title?: string; stakes?: string };
+  world.threads.update(id, patch as never);
+  send(res, 200, world.threads.get(id));
+});
+
+route('GET', '/api/consequences', (_req, res, { world }) => {
+  const all = world.consequences.all();
+  send(
+    res,
+    200,
+    all.map((c) => ({ ...c, actorName: world.graph.get(c.actorId)?.name ?? c.actorId })),
+  );
+});
+
+/**
+ * The causality map: player act to seeded chain to fired to ripening.
+ * Being able to see that scene 3 is why scene 19 went the way it did is most of
+ * the payoff of building the propagation engine at all.
+ */
+route('GET', '/api/causality', (_req, res, { world }) => {
+  const events = world.chronicle.events({ limit: 500 });
+  const consequences = world.consequences.all(500);
+  const nodes = events.map((e) => ({
+    id: e.id,
+    kind: 'event' as const,
+    label: e.text.slice(0, 90),
+    scene: e.scene,
+    visibility: e.visibility,
+    fromConsequenceId: e.fromConsequenceId,
+  }));
+  const links: Array<{ from: string; to: string; kind: string; maturity: string }> = [];
+  for (const c of consequences) {
+    nodes.push({
+      id: c.id,
+      kind: 'consequence' as never,
+      label: `${world.graph.get(c.actorId)?.name ?? c.actorId} ${c.action}`,
+      scene: c.createdScene,
+      visibility: c.visibility,
+      fromConsequenceId: null,
+    });
+    links.push({ from: c.causeEventId, to: c.id, kind: 'seeds', maturity: c.maturity });
+    const derived = events.filter((e) => e.fromConsequenceId === c.id);
+    for (const d of derived) links.push({ from: c.id, to: d.id, kind: 'fired', maturity: c.maturity });
+  }
+  send(res, 200, { nodes, links });
+});
+
+route('GET', '/api/facts', (_req, res, { world }) => {
+  const facts = world.chronicle.facts(200);
+  send(
+    res,
+    200,
+    facts.map((f) => ({
+      ...f,
+      knowers: world.chronicle.knowersOf(f.id).map((k) => ({
+        ...k,
+        name: world.graph.get(k.entityId)?.name ?? k.entityId,
+      })),
+    })),
+  );
+});
+
+route('GET', '/api/directives', (_req, res, { world }) => {
+  send(res, 200, world.directives.active());
+});
+
+/**
+ * A directive steers the future and reports the recalculation, because silent
+ * recalculation in a system with offscreen machinery is how you stop trusting it.
+ */
+route('POST', '/api/directive', (_req, res, { world, body }) => {
+  const b = (body ?? {}) as Partial<Directive>;
+  if (!b.text) return send(res, 400, { error: 'text required' });
+  const created = world.directives.create({
+    text: b.text,
+    scope: b.scope ?? 'chapter',
+    strength: b.strength ?? 'push',
+    lifetimeScenes: b.lifetimeScenes ?? 5,
+    status: 'active',
+    createdScene: world.session.get().scene,
+  });
+  const diff = applyDirectiveRecalc(world, created.id, created.text);
+  send(res, 200, {
+    directive: created,
+    diff: {
+      ...diff,
+      raisedThreadTitles: diff.raisedThreads.map((id) => world.threads.get(id)?.title ?? id),
+      loweredThreadTitles: diff.loweredThreads.map((id) => world.threads.get(id)?.title ?? id),
+    },
+  });
+});
+
+route('DELETE', '/api/directive/:id', (_req, res, { world, params }) => {
+  world.directives.setStatus(decodeURIComponent(params.id ?? ''), 'retired');
+  send(res, 200, { ok: true });
+});
+
+route('GET', '/api/style', (_req, res, { world }) => {
+  send(res, 200, world.session.get().style);
+});
+
+route('PUT', '/api/style', (_req, res, { world, body }) => {
+  const cur = world.session.get();
+  const next = { ...cur.style, ...((body ?? {}) as Partial<StyleContract>) };
+  world.session.set({ style: next });
+  send(res, 200, next);
+});
+
+route('GET', '/api/knobs', (_req, res, { world }) => {
+  send(res, 200, world.session.get().knobs);
+});
+
+route('PUT', '/api/knobs', (_req, res, { world, body }) => {
+  const cur = world.session.get();
+  const next = { ...cur.knobs, ...((body ?? {}) as Partial<Knobs>) };
+  world.session.set({ knobs: next });
+  send(res, 200, next);
+});
+
+route('GET', '/api/frames', (_req, res, { engine }) => {
+  // Slot sizes for the last turn. Sounds like plumbing; it is the fastest way to
+  // diagnose a scene that felt thin.
+  const out: Record<string, unknown> = {};
+  for (const [role, frame] of Object.entries(engine.lastFrames)) out[role] = frame.log;
+  send(res, 200, out);
+});
+
+route('GET', '/api/anchors', (_req, res, { world }) => {
+  send(res, 200, world.chronicle.anchors(20));
+});
+
+route('POST', '/api/anchor', (_req, res, { world, body }) => {
+  const { text, note } = (body ?? {}) as { text?: string; note?: string };
+  if (!text) return send(res, 400, { error: 'text required' });
+  world.chronicle.addAnchor(text, note ?? '', world.session.get().scene);
+  send(res, 200, { ok: true });
+});
+
+route('POST', '/api/tick', (_req, res, { world }) => {
+  const tick = tickConsequences(world);
+  const notes = worldTick(world);
+  send(res, 200, { tick, notes });
+});
+
+route('GET', '/api/search', (_req, res, { world, url }) => {
+  const q = url.searchParams.get('q') ?? '';
+  send(res, 200, q ? world.graph.search(q, 30) : []);
+});
+
+// ------------------------------------------------------------------- server
+
+function serveStatic(res: ServerResponse, webRoot: string, pathname: string): boolean {
+  // Normalise and confine to webRoot so `..` cannot escape it.
+  const rel = normalize(pathname === '/' ? '/index.html' : pathname).replace(/^(\.\.[/\\])+/, '');
+  const file = join(webRoot, rel);
+  if (!file.startsWith(normalize(webRoot))) return false;
+
+  const target = existsSync(file) && statSync(file).isFile() ? file : join(webRoot, 'index.html');
+  if (!existsSync(target)) return false;
+
+  res.writeHead(200, { 'content-type': MIME[extname(target)] ?? 'application/octet-stream' });
+  res.end(readFileSync(target));
+  return true;
+}
+
+export function createApiServer(opts: ServerOptions) {
+  const { world, engine, webRoot } = opts;
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+    res.setHeader('access-control-allow-origin', '*');
+    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('access-control-allow-headers', 'content-type');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      return res.end();
+    }
+
+    if (url.pathname.startsWith('/api/')) {
+      const match = routes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
+      if (!match) return send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
+      const params = url.pathname.match(match.pattern)?.groups ?? {};
+      try {
+        const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
+        await match.handler(req, res, { world, engine, url, body, params });
+      } catch (err) {
+        // Surface the message: this is a local single-user tool, and a silent
+        // 500 during a session is worse than a leaked stack trace.
+        send(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (webRoot && serveStatic(res, webRoot, url.pathname)) return;
+    send(res, 404, { error: 'not found' });
+  });
+
+  return server;
+}
+
+export function listRoutes(): string[] {
+  return routes.map((r) => `${r.method} ${r.pattern.source}`);
+}
