@@ -113,13 +113,13 @@ export class CastStore {
    */
   updateCondition(entityId: EntityId, patch: Partial<Condition>): void {
     const sheet = this.getOrBlank(entityId);
-    const next: Condition = { ...sheet.condition };
+    const next = { ...sheet.condition } as unknown as Record<string, unknown>;
     for (const [k, v] of Object.entries(patch)) {
       if (v === undefined) continue;
       if (sheet.locks.includes(`condition.${k}`)) continue;
-      (next as Record<string, unknown>)[k] = v;
+      next[k] = v;
     }
-    sheet.condition = next;
+    sheet.condition = next as unknown as Condition;
     this.put(sheet);
   }
 

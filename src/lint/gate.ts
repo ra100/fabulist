@@ -88,7 +88,7 @@ export function makeProseGate(opts: GateOptions = {}): ProseGate {
 
       const res = await provider.complete(req);
       const parts = res.text.split(/^---$/m);
-      const revised = (parts.length > 1 ? parts[parts.length - 1] : res.text).trim();
+      const revised = (parts.length > 1 ? (parts[parts.length - 1] ?? res.text) : res.text).trim();
 
       // Never accept a rewrite that made things worse or lost most of the text.
       if (!revised || revised.length < text.length * 0.5) return text;

@@ -40,7 +40,7 @@ test('state endpoint reports the world at a glance', async () => {
   await withServer(async (base) => {
     const { status, body } = await get(base, '/api/state');
     assert.equal(status, 200);
-    const s = body as Record<string, never>;
+    const s = body as Record<string, unknown>;
     assert.equal((s.session as { scene: number }).scene, 1);
     assert.ok((s.counts as { entities: number }).entities > 15);
     assert.ok((s.threads as unknown[]).length >= 3);
@@ -63,7 +63,7 @@ test('entity endpoint returns the sheet, both edge directions, and knowledge', a
   await withServer(async (base) => {
     const { status, body } = await get(base, '/api/entity/char:brother-anselm');
     assert.equal(status, 200);
-    const b = body as Record<string, never>;
+    const b = body as Record<string, unknown>;
     assert.ok(b.sheet, 'sheet included');
     assert.ok((b.edgesOut as unknown[]).length > 0);
     assert.ok((b.edgesIn as unknown[]).length > 0);
