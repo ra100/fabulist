@@ -227,15 +227,31 @@ test('fiction: catches eyes/weather doing emotional labour', () => {
   assert.ok(report.findings.some((f) => f.rule === 'eyes-weather-emotional-labour'));
 });
 
-test('fiction: catches suspiciously uniform dialogue-line lengths across >= 4 lines', () => {
-  const text = '"I am fine." "I am okay." "I am ready." "I am here."';
+test('fiction: catches suspiciously uniform dialogue-line lengths across >= 6 lines', () => {
+  const text = '"I am fine." "I am okay." "I am ready." "I am here." "I am calm." "I am done."';
   const report = lintProse(text, { profile: 'fiction' });
   assert.ok(report.findings.some((f) => f.rule === 'uniform-dialogue-length'));
 });
 
-test('fiction: does NOT flag dialogue-length uniformity with fewer than 4 lines', () => {
-  const text = '"I am fine." "I am okay." "I am ready."';
+test('fiction: does NOT flag dialogue-length uniformity with fewer than 6 lines', () => {
+  const text = '"I am fine." "I am okay." "I am ready." "I am here." "I am calm."';
   const report = lintProse(text, { profile: 'fiction' });
+  assert.ok(!report.findings.some((f) => f.rule === 'uniform-dialogue-length'));
+});
+
+test('fiction: does NOT flag ordinary snappy banter that happens to land at similar lengths', () => {
+  // Four short natural retorts can coincidentally sit within a word of each other -
+  // that is what a snappy exchange looks like, not a template. A false positive here
+  // is worse than a miss.
+  const snappy = '"You should sit down." "I am fine standing." "You never listen." "I always listen."';
+  const report = lintProse(snappy, { profile: 'fiction' });
+  assert.ok(!report.findings.some((f) => f.rule === 'uniform-dialogue-length'));
+});
+
+test('fiction: does NOT flag a longer natural exchange with genuinely uneven line lengths', () => {
+  const uneven =
+    '"Wait." "For what?" "Just—wait, okay? Give me a second to think about this before you say anything else." "Fine." "You always do this." "Do what?"';
+  const report = lintProse(uneven, { profile: 'fiction' });
   assert.ok(!report.findings.some((f) => f.rule === 'uniform-dialogue-length'));
 });
 
@@ -297,11 +313,50 @@ test('fiction: catches dialogue-tag monotony from every tag being "said" + adver
   assert.ok(report.findings.some((f) => f.rule === 'dialogue-tag-monotony'));
 });
 
+test('fiction: catches adverb-heavy dialogue tags across a large enough sample', () => {
+  const text =
+    '"Go," she said quietly. "Wait," he said softly. "No," she said firmly. "Enough," he said sharply. "Stop," he said loudly. "Fine," she said calmly.';
+  const report = lintProse(text, { profile: 'fiction' });
+  assert.ok(report.findings.some((f) => f.rule === 'adverb-density-in-dialogue-tags'));
+});
+
+test('fiction: does NOT flag adverb density from a small sample of tags, even if all carry an adverb', () => {
+  // Three tags is too small a sample to distinguish "the writer leaned on adverbs" from
+  // "each of these three specific beats happened to want one" - the rule needs volume.
+  const text = '"Go," she said quietly. "Wait," he said softly. "No," she said firmly.';
+  const report = lintProse(text, { profile: 'fiction' });
+  assert.ok(!report.findings.some((f) => f.rule === 'adverb-density-in-dialogue-tags'));
+});
+
+test('fiction: does NOT flag adverb density from a tense scene that legitimately mixes adverbed and plain tags', () => {
+  const text =
+    '"Please," she said quietly. "I mean it," she said. "Okay," he said. "Truly," he said softly. "Fine," she said.';
+  const report = lintProse(text, { profile: 'fiction' });
+  assert.ok(!report.findings.some((f) => f.rule === 'adverb-density-in-dialogue-tags'));
+});
+
 test('fiction: catches AI vocabulary specific to fiction (tapestry, myriad, symphony of)', () => {
   const report = lintProse('The room felt like a tapestry of loss and a symphony of grief.', {
     profile: 'fiction',
   });
   assert.ok(report.findings.some((f) => f.rule === 'ai-vocabulary-fiction'));
+});
+
+test('fiction: catches overwrought metaphor density from 3+ similes stacked closely together', () => {
+  const text =
+    'Her thoughts moved like a river of glass, sharp and cold, and her heart beat like a drum of war, relentless and loud, while grief settled over her like a blanket of ash, heavy and grey.';
+  const report = lintProse(text, { profile: 'fiction' });
+  assert.ok(report.findings.some((f) => f.rule === 'overwrought-metaphor-density'));
+});
+
+test('fiction: does NOT flag two ordinary similes spread across a normal-length passage', () => {
+  const text =
+    "The letter sat on the table like a shadow of doubt neither of them wanted to name, and for a long time nobody moved to pick it up. Outside, traffic went by in the ordinary way traffic does, indifferent to whatever was happening inside. Later, at the wedding, the band's first song hit the room like a wall of sound, and for a moment conversation simply stopped, the way it does when something is briefly too loud to argue with.";
+  const report = lintProse(text, { profile: 'fiction' });
+  assert.ok(
+    !report.findings.some((f) => f.rule === 'overwrought-metaphor-density'),
+    'two similes spaced apart in a full paragraph is ordinary figurative language, not a crutch',
+  );
 });
 
 test('fiction: only flags em dash density at extreme levels, not ordinary use', () => {
