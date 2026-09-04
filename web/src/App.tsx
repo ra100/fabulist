@@ -17,8 +17,27 @@ import {
 import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
+import { Mark } from './Mark.tsx';
 
 type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'settings';
+
+/** Scene numbers read as roman, the way a book numbers its parts. */
+function roman(n: number): string {
+  if (n < 1) return String(n);
+  const table: Array<[number, string]> = [
+    [1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'],
+    [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i'],
+  ];
+  let out = '';
+  let left = n;
+  for (const [v, s] of table) {
+    while (left >= v) {
+      out += s;
+      left -= v;
+    }
+  }
+  return out;
+}
 
 export function App() {
   const [tab, setTab] = useState<Tab>('book');
@@ -66,7 +85,10 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <h1>{state?.worldTitle ?? 'Fabulist'}</h1>
+        <h1>
+          <Mark size={14} />
+          {state?.worldTitle ?? 'Fabulist'}
+        </h1>
         {state ? (
           <div className="meta">
             <span>scene <b>{state.session.scene}·{state.session.turn}</b></span>
@@ -207,10 +229,20 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
             {turns.length === 0 ? (
               <p className="empty">Nothing written yet. Describe what you do below.</p>
             ) : null}
-            {turns.map((t) => (
+            {turns.map((t, i) => {
+              // A scene opening earns the rubricated initial and, unless it is the
+              // very first, a break above it.
+              const opensScene = i === 0 || turns[i - 1]!.scene !== t.scene;
+              return (
+              <Fragment key={t.id}>
+                {opensScene && i > 0 ? (
+                  <div className="scene-break" role="separator" aria-label={`scene ${t.scene}`}>
+                    <Mark size={14} />
+                    <span>scene {roman(t.scene)}</span>
+                  </div>
+                ) : null}
               <div
-                key={t.id}
-                className={`turn${t.pinned ? ' pinned' : ''}${t.id === arrivingId ? ' arriving' : ''}`}
+                className={`turn${t.pinned ? ' pinned' : ''}${t.id === arrivingId ? ' arriving' : ''}${opensScene ? ' opens-scene' : ''}`}
               >
                 <span className="folio">{t.scene}·{t.turn}</span>
                 <div className="raw">{t.rawInput}</div>
@@ -231,7 +263,9 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
                   </button>
                 </div>
               </div>
-            ))}
+              </Fragment>
+              );
+            })}
             {/* The words are committed; the ink has not arrived yet. */}
             {awaiting ? (
               <div className="turn awaiting" aria-live="polite">

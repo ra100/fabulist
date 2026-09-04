@@ -17,10 +17,19 @@ machine that shows its work, and those are the two things it has to look like at
 
 ## Five rules this imposes
 
-1. **Type — three registers, each owning a domain.** Serif (Iowan Old Style) for
-   the narrative only; grotesque for interface chrome; monospace for machine values
-   only. Tabular figures anywhere numbers stack. Tracking inverse to size, leading
-   inverse to size.
+1. **Type — three registers, each owning a domain, and every face chosen.**
+   *Hoefler Text* carries the editorial voice: the narrative **and its apparatus**
+   — section labels, running heads, the move line — because it has real small caps,
+   and real small caps are how a book sets a label. *Big Caslon* appears once per
+   scene on the rubricated initial, the way a manuscript hand differs from its text
+   hand. *Seravek* is a humanist sans for machine chrome that holds at 11px without
+   being the operating system's default. *PT Mono* marks machine values. Tabular
+   figures anywhere numbers stack; tracking and leading both inverse to size.
+
+   *Amended from the original rule, which said serif was for narrative only. That
+   was a simplification: small-caps labels set in the text serif are ordinary book
+   practice, and the earlier version left every face at a system fallback — which
+   is the single largest reason the result read as anonymous.*
 2. **Colour — iron gall on vellum.** Warm, low chroma, built in OKLCH with tinted
    neutrals at hue 68–82. One accent (gold leaf) with a budget of three appearances
    per view. Red-oxide rubric is the second colour and means divergence from canon.
@@ -37,7 +46,11 @@ machine that shows its work, and those are the two things it has to look like at
    markers hang in the gutter as marginalia.
 4. **Space — a 4px base.** Steps 4, 8, 12, 16, 24, 32, 48. Gaps between groups are
    always strictly larger than gaps within them.
-5. **Depth — light, not shadow.** Dark ground, so elevation is carried by a
+5. **Shape — softened on purpose.** Radius grows with the element it wraps:
+   2px on hairline meters, 5px on tags, 9px on controls, 16px on cards, 22px on the
+   wizard. The object being borrowed from is a well-thumbed paperback and a hand of
+   cards — both of which have rounded corners — not a guillotined ledger sheet.
+6. **Depth — light, not shadow.** Dark ground, so elevation is carried by a
    lighter surface plus a 1px top-edge highlight plus a hairline rule. One material
    idea only: vellum grain at 3.5%. No black shadows anywhere.
 
@@ -52,18 +65,31 @@ machine that shows its work, and those are the two things it has to look like at
 5. **No unbounded measure.** Prose and lists obey a measure; nothing stretches to
    1400px because the window is 1400px.
 
-## The one deliberate departure
+## The deliberate departures
+
+Two, and only two.
 
 The **graph view breaks the ruled column entirely** — it is a plate, bled to the
 panel edge, with its own controls floating over it. A force-directed network has no
 reading order, so imposing a column on it would be costume rather than structure.
 
+The **rubricated initial breaks the sacred left edge**, once per scene, by hanging
+out past the measure into the gutter. Everywhere else that edge is inviolable; this
+is the one place it gives, and it gives exactly where a manuscript put its initial.
+
 ## Signature details
 
-Two, both derived from the lineage rather than added on top:
+Four, each derived from the lineage rather than added on top:
 
-- **The folio marginal.** Every turn's scene·turn number hangs in the left gutter
-  in tracked small caps, the way a verse number sits in a psalter. Pinned turns
-  take a red-oxide rubric rule in the same gutter instead of gold.
+- **The rubricated initial.** The first turn of every scene opens with a Big Caslon
+  capital in the rubric colour, dropped two lines and hanging into the margin. It is
+  the loudest thing in the book and it happens once per scene.
+- **The mark.** A drawn nib, in the masthead, in the wizard, and on every scene
+  break. One shape in three places is what makes a mark rather than a decoration.
+  Drawn as SVG so it never depends on a font shipping the ornament, and it inherits
+  `currentColor` so every preset tints it.
+- **The folio marginal.** Every turn's scene·turn number hangs in the left gutter,
+  the way a verse number sits in a psalter. Pinned turns take a rubric rule at the
+  outer margin, where it reads as a bookmark tab.
 - **The instrument scale.** Tension and budget are drawn as ruled scales with tick
   marks and a thin engraved marker, not as filled progress bars.

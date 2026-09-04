@@ -23,14 +23,25 @@
   --s5: 24px;
   --s6: 32px;
   --s7: 48px;
-  /* --- radius grows with element size --- */
-  --r-sm: 2px;
-  --r-md: 3px;
-  --r-lg: 5px;
-  /* --- type: three registers, each owning a domain --- */
-  --serif: "Iowan Old Style", Charter, "Source Serif 4", "Palatino Linotype", Palatino, Georgia, serif;
-  --sans: -apple-system, "SF Pro Text", "Helvetica Neue", Inter, system-ui, sans-serif;
-  --mono: "SF Mono", "Berkeley Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+  /* --- radius grows with the element it wraps. Softened deliberately: the
+     object this borrows from is a well-thumbed paperback and a hand of cards,
+     both of which have rounded corners, not a ruled ledger sheet. --- */
+  --r-hair: 2px;
+  --r-sm: 5px;
+  --r-md: 9px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-pill: 999px;
+  /* --- type: four faces, each with a domain and a reason ---------------
+     Hoefler Text carries the editorial voice because it has REAL small caps,
+     which is what the section labels are set in. Big Caslon appears once per
+     scene, on the rubricated initial, the way a manuscript hand differs from
+     its text hand. Seravek is a humanist sans that holds at 11px without
+     being the operating system's default. PT Mono marks machine values. */
+  --serif: "Hoefler Text", "Iowan Old Style", Charter, "Source Serif 4", Georgia, serif;
+  --display: "Big Caslon", "Hoefler Text", Didot, "Iowan Old Style", Georgia, serif;
+  --sans: Seravek, "Avenir Next", -apple-system, "Helvetica Neue", system-ui, sans-serif;
+  --mono: "PT Mono", "SF Mono", Menlo, ui-monospace, monospace;
   /* --- measures --- */
   --measure-prose: 40rem;
   --gutter: 5rem;
@@ -919,8 +930,11 @@ hr {
   flex-shrink: 0;
 }
 .topbar h1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-family: var(--serif);
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 600;
   line-height: 1;
   letter-spacing: -0.01em;
@@ -1007,12 +1021,14 @@ hr {
 .card h3,
 .eyebrow {
   margin: 0 0 var(--s3);
-  font-family: var(--sans);
-  font-size: 10px;
+  /* Real small caps, not uppercase at a reduced size. Hoefler Text has them,
+     and caps of any kind always need the extra tracking. */
+  font-family: var(--serif);
+  font-size: 13px;
   font-weight: 600;
+  font-variant-caps: small-caps;
   line-height: 1;
-  text-transform: uppercase;
-  letter-spacing: 0.11em;
+  letter-spacing: 0.085em;
   color: var(--ink-3);
 }
 .eyebrow.rule {
@@ -1157,10 +1173,12 @@ hr {
   color: var(--ink-3);
   white-space: nowrap;
 }
+/* Out at the outer margin, where it reads as a bookmark tab and stays clear of
+   both the folio and the rubricated initial — which share this gutter. */
 .turn.pinned::before {
   content: "";
   position: absolute;
-  left: calc(var(--gutter) - var(--s3));
+  left: 0;
   top: var(--s4);
   bottom: var(--s4);
   width: 2px;
@@ -1205,11 +1223,11 @@ hr {
   color: var(--ink-3);
 }
 .turn-tools .move {
-  font-family: var(--sans);
-  font-size: 9.5px;
+  font-family: var(--serif);
+  font-size: 12.5px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.075em;
   color: var(--ink-3);
 }
 /* tools stay quiet until the turn is under the pointer */
@@ -1222,6 +1240,60 @@ hr {
 .turn:hover .turn-tools button,
 .turn-tools button:focus-visible { opacity: 1; }
 .turn.pinned .turn-tools button { opacity: 1; }
+
+/* ---- the rubricated initial ---------------------------------------------- */
+/* One per scene, in the display face, in the rubric colour, hanging out past
+   the measure into the gutter. Everywhere else the left edge is sacred; this
+   is the one place it is broken, once per scene, on purpose — which is exactly
+   where a manuscript put its initial too. */
+
+.turn.opens-scene .prose::first-letter {
+  float: left;
+  font-family: var(--display);
+  font-size: 3.4em;
+  font-weight: 400;
+  line-height: 0.78;
+  color: var(--divergent);
+  padding: 0.04em 0.07em 0 0;
+  margin-left: -0.075em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- the scene break ----------------------------------------------------- */
+/* Asymmetric on purpose: mark, label, then a rule that runs out to the measure.
+   A centred ornament between two rules is the version of this with no author. */
+
+.scene-break {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  max-width: var(--measure-book);
+  margin: var(--s6) auto var(--s5);
+  padding-left: var(--gutter);
+}
+.scene-break .mark { color: var(--divergent); flex: none; }
+.scene-break span {
+  font-family: var(--serif);
+  font-size: 13px;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.scene-break::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+/* ---- the mark ------------------------------------------------------------ */
+/* A drawn nib. It recurs in the masthead, the wizard and every scene break —
+   one shape in three places, which is what makes it read as a mark. */
+
+.mark { display: inline-block; vertical-align: -0.12em; }
+.topbar .mark { color: var(--accent); flex: none; }
+.wizard-mark .mark { color: var(--accent); margin-right: 7px; }
 
 /* ---- waiting: a ruled page, not a shimmer -------------------------------- */
 /* The author's words are already real and shown. What is missing is the ink,
@@ -1812,19 +1884,21 @@ button.rel-name:hover:not(:disabled) { background: none; color: var(--accent); }
   margin: auto 0;
 }
 .wizard-mark {
+  display: flex;
+  align-items: center;
   margin: 0 0 var(--s3);
-  font-family: var(--sans);
-  font-size: 10px;
+  font-family: var(--serif);
+  font-size: 14px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
-  color: var(--ink-3);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.14em;
+  color: var(--ink-2);
 }
 .wizard-card {
   width: 100%;
   background: var(--surface-1);
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: var(--r-xl);
   padding: var(--s6);
   box-shadow: var(--elev-panel);
 }
@@ -1927,7 +2001,7 @@ button.link:hover { background: none; color: var(--ink); }
 .chip {
   font-size: 12px;
   padding: 4px 10px;
-  border-radius: 11px;
+  border-radius: var(--r-pill);
   background: var(--ground);
   border: 1px solid var(--rule);
   color: var(--ink-2);

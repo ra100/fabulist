@@ -13,6 +13,25 @@ preset can move any hue without a single component changing.
 Non-colour tiers — space, radius, type, measures, motion — live in `:root` and
 are preset-independent.
 
+### The type tier
+
+Four faces, each with a domain and a reason, because leaving them at system
+fallbacks was the single largest reason the result read as anonymous.
+
+| Token | Face | Domain | Why this one |
+| --- | --- | --- | --- |
+| `--serif` | Hoefler Text | Narrative **and its apparatus** | It has *real* small caps, so section labels can be set the way a book sets them rather than as uppercase at a reduced size |
+| `--display` | Big Caslon | The rubricated initial, once per scene | A manuscript's initial hand differs from its text hand |
+| `--sans` | Seravek | Machine chrome — tabs, buttons, status | Humanist, holds at 11px, and is not the OS default |
+| `--mono` | PT Mono | Machine values, tabular figures | More character than Menlo, still unambiguous |
+
+### The radius tier
+
+`--r-hair` 2px · `--r-sm` 5px · `--r-md` 9px · `--r-lg` 16px · `--r-xl` 22px ·
+`--r-pill`. Radius grows with the element it wraps — a 3px meter and a 640px panel
+do not share a corner. Softened from the original 2/3/5px because the object being
+borrowed from is a well-thumbed paperback, not a guillotined ledger sheet.
+
 ## Why the values are generated
 
 `.design/palettes.mjs` is the source of truth. It defines every preset in OKLCH,
@@ -132,7 +151,7 @@ Two layers, and they catch different things.
    and the `--ink-4` guard. Runs without a browser.
 2. **Rendered**, a browser sweep that walks every text node in every view under
    every preset and measures the *actual composited* colours. Latest run:
-   **5,067 composited text instances across 9 presets × 7 views, 0 failures.**
+   **5,211 composited text instances across 9 presets × 7 views, 0 failures.**
 
 The static pass alone is not enough — it does not know which surface a component
 actually puts text on. The rendered pass alone is not enough either; it missed

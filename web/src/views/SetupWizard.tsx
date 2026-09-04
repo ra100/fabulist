@@ -16,6 +16,7 @@ import {
   type StyleContract,
   type WikiCandidate,
 } from '../api.ts';
+import { Mark } from '../Mark.tsx';
 
 type Step = 'source' | 'universe' | 'wish' | 'plan' | 'preview' | 'running' | 'cast' | 'ready';
 
@@ -76,7 +77,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
     <div className="wizard">
       <div className="wizard-shell">
         {/* The only screen with no topbar, so it carries the masthead. */}
-        <p className="wizard-mark">Fabulist</p>
+        <p className="wizard-mark"><Mark size={14} />Fabulist</p>
         <div className="wizard-card">
           <div className="wizard-head">
             <h2>Where are we playing?</h2>
