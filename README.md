@@ -44,7 +44,7 @@ pnpm play                 # interactive session
 ```
 
 ```bash
-pnpm test                 # 403 tests, offline
+pnpm test                 # 437 tests, offline
 pnpm typecheck
 ```
 
@@ -188,10 +188,19 @@ Then set a profile in `fabulist.config.json`:
 An unavailable profile falls back to the mock with a note rather than failing — an
 unconfigured provider should not stop you playing.
 
-**Switching is a button, not a file edit.** Settings shows every profile the probe found
-usable; picking one swaps the live registry and persists the choice, with no restart. It
-refuses rather than silently degrading, because discovering three turns later that the mock
-is writing is worse than being told a profile is unavailable.
+**Everything here is editable in the UI.** Settings covers the whole of
+`fabulist.config.json`: which profile is active, which model handles each role, provider
+specs including local base URLs and model ids, the lint threshold, and your blocklist.
+Changes apply to the next turn — no restart, and no hand-edited file.
+
+Switching profile refuses rather than silently degrading, because discovering three turns
+later that the mock is writing is worse than being told a profile is unavailable. Provider
+specs can be **tested before they are kept**, which matters most for local servers: the
+defaults guess port 8000 and a model id of `default`, and both are usually wrong.
+
+Two fields are deliberately not editable at runtime. `dbPath` would leave the UI talking to
+a database the engine is not using, and a context window below 64k is refused outright
+rather than accepted into a frame budget that assumes it.
 
 Narration **streams**. Prose arrives as it is written, with the current stage shown while
 the gates run — for a writing tool that is the difference between watching and waiting.
@@ -335,8 +344,11 @@ echo "He let out a breath he didn't know he was holding." | pnpm lint:prose
 The knob to be careful with is strictness. Anti-AI lint pushes toward the *absence* of
 tells, which is not the same as the presence of style, and an over-tuned gate produces
 careful characterless prose. The style anchors in `settings` do more against drift than
-the lint does. Keep a personal blocklist in the config; it becomes the most valuable file
-in the project within a month.
+the lint does. Keep a personal blocklist; it becomes the most valuable thing in the project within a
+month, because it is calibrated to your ear rather than to a general rule. It is editable in
+settings, and every lint finding in the **why** panel has a `block` button — the moment a
+phrase annoys you is the only moment you will reliably bother, so that is where the button
+is.
 
 ---
 

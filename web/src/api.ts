@@ -247,6 +247,51 @@ export interface ProvidersReport {
   profiles: string[];
 }
 
+export interface ProviderSpec {
+  kind: string;
+  model: string;
+  baseUrl?: string;
+  auth?: string;
+  apiKeyEnv?: string;
+  dialect?: string;
+  profile?: string;
+  region?: string;
+  project?: string;
+  location?: string;
+  allowUnofficial?: boolean;
+  note?: string;
+  capabilities?: Record<string, unknown>;
+}
+
+export interface AppConfig {
+  profile: string;
+  routes: Record<string, string>;
+  providers: Record<string, ProviderSpec>;
+  dbPath: string;
+  proseLintThreshold: number;
+  blocklist: string[];
+  mockTokenDelayMs?: number;
+}
+
+export interface ConfigBundle {
+  config: AppConfig;
+  providerKeys: string[];
+  profiles: string[];
+  roles: string[];
+  presets: Record<string, ProviderSpec | undefined>;
+}
+
+export interface ValidationIssue {
+  field: string;
+  message: string;
+}
+
+export interface PatchResult {
+  config: AppConfig;
+  issues: ValidationIssue[];
+  registryRebuilt: boolean;
+}
+
 export interface CandidateCharacter {
   id: string;
   name: string;
@@ -305,6 +350,17 @@ export const api = {
   addAnchor: (text: string, note: string) => post('/anchor', { text, note }),
   search: (q: string) => req<Entity[]>(`/search?q=${encodeURIComponent(q)}`),
   providers: () => req<ProvidersReport>('/providers'),
+
+  config: {
+    get: () => req<ConfigBundle>('/config'),
+    patch: (partial: Partial<AppConfig>) => put<PatchResult>('/config', partial),
+    putProvider: (key: string, spec: ProviderSpec) => put<PatchResult>(`/config/provider/${encodeURIComponent(key)}`, spec),
+    removeProvider: (key: string) => req<PatchResult>(`/config/provider/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+    testProvider: (key: string, spec: ProviderSpec) =>
+      post<ProbeResult & { issues: ValidationIssue[] }>('/config/provider/test', { key, spec }),
+    block: (phrase: string) => post<PatchResult>('/config/blocklist', { phrase }),
+    unblock: (phrase: string) => post<PatchResult>('/config/blocklist', { phrase, remove: true }),
+  },
   setProfile: (profile: string) => post<{ profile: string; ok: boolean; notes: string[] }>('/providers/profile', { profile }),
 
   /**

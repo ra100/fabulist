@@ -17,6 +17,13 @@ import { adaptRequest, type Provider } from '../providers/provider.ts';
 export interface GateOptions {
   threshold?: number;
   blocklist?: string[];
+  /**
+   * Read instead of `threshold`/`blocklist` when supplied, so both can change
+   * during a session and affect the very next turn. A gate that captured them at
+   * construction meant editing the blocklist required a restart, which is the
+   * opposite of the one-click habit the list depends on to become useful.
+   */
+  live?: () => { threshold: number; blocklist: string[] };
   /** Supplying a provider enables the rewrite pass; without one the gate is lint-only. */
   provider?: Provider;
   /** Cap on rewrite attempts. One is almost always enough. */
@@ -53,12 +60,13 @@ prose only, no commentary.`;
  * the extra tokens on the rare turns the gate trips.
  */
 export function makeProseGate(opts: GateOptions = {}): ProseGate {
-  const threshold = opts.threshold ?? 6;
-  const blocklist = opts.blocklist ?? [];
   const provider = opts.provider;
+  const settings = opts.live ?? (() => ({ threshold: opts.threshold ?? 6, blocklist: opts.blocklist ?? [] }));
 
-  const lint = (text: string): LintReport =>
-    lintProse(text, { profile: 'fiction', threshold, blocklist });
+  const lint = (text: string): LintReport => {
+    const { threshold, blocklist } = settings();
+    return lintProse(text, { profile: 'fiction', threshold, blocklist });
+  };
 
   if (!provider) return { lint };
 

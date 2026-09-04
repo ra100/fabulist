@@ -2194,3 +2194,8 @@ button.link:hover { background: none; color: var(--ink); }
   animation: blink 1.05s step-end infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
+
+/* A lint finding you can act on, not just read. */
+.lint-finding { display: flex; align-items: center; gap: 6px; }
+.lint-finding button { padding: 0 5px; font-size: 10px; opacity: 0; transition: opacity 0.12s; }
+.lint-finding:hover button { opacity: 1; }

@@ -21,6 +21,7 @@ import { branchSave } from '../loop/branch.ts';
 import type { SetupService } from '../setup/service.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
 import { switchProfile } from '../config/config.ts';
+import { ROUTABLE_ROLES, validateSpec, type ConfigService } from '../config/service.ts';
 import { seedConsequences as seedCons, tickConsequences as tickCons, worldTick as wTick } from '../consequence/propagate.ts';
 
 export interface ServerOptions {
@@ -33,6 +34,8 @@ export interface ServerOptions {
   setup?: SetupService;
   /** Enables live provider profile switching. */
   registry?: SwappableRegistry;
+  /** Enables the configuration routes. */
+  config?: ConfigService;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -42,6 +45,7 @@ interface RouteContext {
   engine: Engine;
   setup: SetupService | undefined;
   registry: SwappableRegistry | undefined;
+  config: ConfigService | undefined;
   url: URL;
   body: unknown;
   params: Record<string, string>;
@@ -466,13 +470,79 @@ route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => 
   }
 });
 
+// ------------------------------------------------------------------- config
+// Everything here was a hand-edited file plus a restart. Each route validates
+// per field, so a bad value comes back pointing at itself rather than breaking
+// the engine several turns later.
+
+function requireConfig(res: ServerResponse, config: ConfigService | undefined): ConfigService | null {
+  if (!config) {
+    send(res, 503, { error: 'configuration editing is not enabled on this server' });
+    return null;
+  }
+  return config;
+}
+
+route('GET', '/api/config', (_req, res, { config }) => {
+  const svc = requireConfig(res, config);
+  if (!svc) return;
+  send(res, 200, {
+    config: svc.get(),
+    providerKeys: svc.providerKeys(),
+    profiles: svc.profileNames(),
+    roles: ROUTABLE_ROLES,
+    presets: Object.fromEntries(svc.providerKeys().map((k) => [k, svc.resolveSpec(k)])),
+  });
+});
+
+route('PUT', '/api/config', (_req, res, { config, body }) => {
+  const svc = requireConfig(res, config);
+  if (!svc) return;
+  send(res, 200, svc.patch((body ?? {}) as never));
+});
+
+route('PUT', '/api/config/provider/:key', (_req, res, { config, params, body }) => {
+  const svc = requireConfig(res, config);
+  if (!svc) return;
+  const key = decodeURIComponent(params.key ?? '');
+  send(res, 200, svc.putProvider(key, (body ?? {}) as never));
+});
+
+route('DELETE', '/api/config/provider/:key', (_req, res, { config, params }) => {
+  const svc = requireConfig(res, config);
+  if (!svc) return;
+  send(res, 200, svc.removeProvider(decodeURIComponent(params.key ?? '')));
+});
+
+/** Validates and probes one spec without saving it, so "test" precedes "keep". */
+route('POST', '/api/config/provider/test', async (_req, res, { body }) => {
+  const { key, spec } = (body ?? {}) as { key?: string; spec?: unknown };
+  const name = (key ?? 'candidate').trim() || 'candidate';
+  const checked = validateSpec(name, spec);
+  if (!checked.spec) return send(res, 200, { status: 'unavailable', issues: checked.issues, detail: 'the spec is not valid yet' });
+
+  const { probeProvider } = await import('../providers/probe.ts');
+  const result = await probeProvider(name, checked.spec, {});
+  send(res, 200, { ...result, issues: checked.issues });
+});
+
+route('POST', '/api/config/blocklist', (_req, res, { config, body }) => {
+  const svc = requireConfig(res, config);
+  if (!svc) return;
+  const { phrase, remove } = (body ?? {}) as { phrase?: string; remove?: boolean };
+  if (!phrase) return send(res, 400, { error: 'phrase is required' });
+  send(res, 200, remove === true ? svc.removeBlocked(phrase) : svc.addBlocked(phrase));
+});
+
 /** Switches provider profile without a restart. */
-route('POST', '/api/providers/profile', (_req, res, { registry, body }) => {
+route('POST', '/api/providers/profile', (_req, res, ctx) => {
+  const { registry, body } = ctx;
   if (!registry) return send(res, 503, { error: 'profile switching is not enabled on this server' });
   const { profile } = (body ?? {}) as { profile?: string };
   if (!profile) return send(res, 400, { error: 'profile is required' });
 
   const result = switchProfile(registry, profile);
+  if (result.ok) ctx.config?.reload();
   if (!result.ok) {
     return send(res, 400, {
       error: `"${profile}" is not usable here, so nothing changed`,
@@ -649,7 +719,7 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
 }
 
 export function createApiServer(opts: ServerOptions) {
-  const { world, engine, webRoot, setup, registry } = opts;
+  const { world, engine, webRoot, setup, registry, config } = opts;
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -668,7 +738,7 @@ export function createApiServer(opts: ServerOptions) {
       const params = url.pathname.match(match.pattern)?.groups ?? {};
       try {
         const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
-        await match.handler(req, res, { world, engine, setup, registry, url, body, params });
+        await match.handler(req, res, { world, engine, setup, registry, config, url, body, params });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.

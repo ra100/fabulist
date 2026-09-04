@@ -9,6 +9,7 @@ import { createApiServer } from '../server/api.ts';
 import { buildSwappableRegistry, loadConfig } from '../config/config.ts';
 import { makeProseGate } from '../lint/gate.ts';
 import { SetupService } from '../setup/service.ts';
+import { ConfigService } from '../config/service.ts';
 
 const cfg = loadConfig();
 const args = process.argv.slice(2);
@@ -25,13 +26,15 @@ if (args.includes('--sample')) {
 }
 
 const { registry, notes } = buildSwappableRegistry(cfg);
+const configService = new ConfigService({ registry });
 for (const n of notes) console.log(n);
 if (cfg.profile === 'mock') console.log('tip: pnpm providers — the UI can switch profile without a restart');
 
 const engine = new Engine({
   world,
   providers: registry,
-  proseGate: makeProseGate({ threshold: cfg.proseLintThreshold, blocklist: cfg.blocklist }),
+  // Live settings, so editing the blocklist affects the very next turn.
+  proseGate: makeProseGate({ live: () => configService.lintOptions() }),
 });
 
 const webRoot = existsSync('web/dist') ? 'web/dist' : undefined;
@@ -40,7 +43,7 @@ if (!webRoot) console.log('web/dist not built; serving the API only (pnpm build:
 const setup = new SetupService({ world, providers: registry });
 if (setup.isFresh()) console.log('no world yet - the UI will open the setup wizard');
 
-const server = createApiServer({ world, engine, webRoot, setup, registry });
+const server = createApiServer({ world, engine, webRoot, setup, registry, config: configService });
 server.listen(port, '127.0.0.1', () => {
   console.log(`fabulist on http://127.0.0.1:${port}`);
 });

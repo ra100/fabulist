@@ -17,6 +17,7 @@ import {
 } from './api.ts';
 import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
+import { ConfigPanels } from './views/ConfigPanels.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 
@@ -434,8 +435,18 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
             <dt>prose lint</dt>
             <dd>
               {meta.lint.score} {meta.lint.tripped ? <span className="warn">tripped</span> : <span className="ok">clean</span>}
-              {meta.lint.findings.slice(0, 4).map((f, i) => (
-                <div key={i} className="dimmer small">{f.rule}</div>
+              {meta.lint.findings.slice(0, 5).map((f, i) => (
+                <div key={i} className="dimmer small lint-finding">
+                  <span className="grow">{f.rule}</span>
+                  {f.excerpt ? (
+                    <button
+                      title={`never write "${f.excerpt}" again`}
+                      onClick={() => void api.config.block(f.excerpt).catch(() => {})}
+                    >
+                      block
+                    </button>
+                  ) : null}
+                </div>
               ))}
             </dd>
           </>
@@ -1222,6 +1233,7 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
         ) : null}
 
         <ProvidersPanel />
+        <ConfigPanels />
 
         {anchors.length ? (
           <div className="card">

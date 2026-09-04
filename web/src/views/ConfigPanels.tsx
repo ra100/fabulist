@@ -1,0 +1,391 @@
+/**
+ * Configuration panels.
+ *
+ * Everything here was previously a hand-edited JSON file plus a restart. The one
+ * that matters most is the blocklist: the design expects it to become the most
+ * valuable file in the project, which only happens if adding to it costs a click
+ * at the moment a phrase annoys you — so it is also addable straight from a lint
+ * finding in the why panel.
+ */
+import { useCallback, useEffect, useState } from 'react';
+import {
+  api,
+  type AppConfig,
+  type ConfigBundle,
+  type ProbeResult,
+  type ProviderSpec,
+  type ValidationIssue,
+} from '../api.ts';
+
+const KINDS = ['openai-compat', 'anthropic', 'ollama', 'bedrock', 'google', 'copilot'] as const;
+const DIALECTS = ['openai', 'vllm', 'llamacpp'] as const;
+
+/** Fields that only make sense for some kinds; showing all of them is noise. */
+function relevantFields(kind: string): Array<'baseUrl' | 'dialect' | 'apiKeyEnv' | 'profile' | 'region' | 'project' | 'location' | 'allowUnofficial'> {
+  switch (kind) {
+    case 'openai-compat':
+      return ['baseUrl', 'dialect', 'apiKeyEnv'];
+    case 'anthropic':
+      return ['baseUrl', 'apiKeyEnv'];
+    case 'ollama':
+      return ['baseUrl'];
+    case 'bedrock':
+      return ['profile', 'region'];
+    case 'google':
+      return ['project', 'location'];
+    case 'copilot':
+      return ['allowUnofficial'];
+    default:
+      return [];
+  }
+}
+
+export function ConfigPanels({ onChanged }: { onChanged?: () => void }) {
+  const [bundle, setBundle] = useState<ConfigBundle | null>(null);
+  const [issues, setIssues] = useState<ValidationIssue[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setBundle(await api.config.get());
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const apply = async (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const result = await fn();
+      setIssues(result.issues);
+      setBundle((prev) => (prev ? { ...prev, config: result.config } : prev));
+      if (result.registryRebuilt) setNote('models reloaded — takes effect on the next turn');
+      onChanged?.();
+      // Provider keys may have changed, so refresh the surrounding lists.
+      setBundle(await api.config.get());
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  if (!bundle) return <div className="card"><h3>configuration</h3><p className="empty">loading…</p></div>;
+  const cfg = bundle.config;
+
+  return (
+    <>
+      {note ? <div className="card small dim">{note}</div> : null}
+      {issues.length ? (
+        <div className="card">
+          <h3>needs attention</h3>
+          {issues.map((i) => (
+            <div key={i.field} className="small warn">
+              <span className="mono">{i.field}</span> — {i.message}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <ProsePanel cfg={cfg} busy={busy} apply={apply} />
+      <RoutingPanel bundle={bundle} busy={busy} apply={apply} />
+      <ProvidersEditor bundle={bundle} busy={busy} apply={apply} reload={load} />
+    </>
+  );
+}
+
+// ------------------------------------------------------------------- prose
+
+function ProsePanel({
+  cfg,
+  busy,
+  apply,
+}: {
+  cfg: AppConfig;
+  busy: boolean;
+  apply: (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => Promise<void>;
+}) {
+  const [phrase, setPhrase] = useState('');
+
+  return (
+    <div className="card">
+      <h3>prose gate</h3>
+      <div className="knob">
+        <label>
+          <span>lint threshold</span>
+          <span className="mono">{cfg.proseLintThreshold}</span>
+        </label>
+        <input
+          type="range" min="0" max="40" step="1" value={cfg.proseLintThreshold} disabled={busy}
+          onChange={(e) => void apply(() => api.config.patch({ proseLintThreshold: Number(e.target.value) }))}
+        />
+        <p className="hint">
+          Lower rewrites more often. Over-tuned it produces careful, characterless prose, so the style anchors above do
+          more good than dragging this down.
+        </p>
+      </div>
+
+      <h3 style={{ marginTop: 14 }}>your blocklist</h3>
+      <p className="hint">
+        Phrases you never want to read. Add one whenever something annoys you — this list is worth more than any general
+        rule, because it is calibrated to your ear.
+      </p>
+      <div className="row" style={{ marginTop: 7 }}>
+        <input
+          value={phrase}
+          placeholder="a phrase you are tired of"
+          onChange={(e) => setPhrase(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && phrase.trim()) {
+              void apply(() => api.config.block(phrase)).then(() => setPhrase(''));
+            }
+          }}
+        />
+        <button
+          disabled={busy || phrase.trim().length < 2}
+          onClick={() => void apply(() => api.config.block(phrase)).then(() => setPhrase(''))}
+        >
+          block
+        </button>
+      </div>
+      {cfg.blocklist.length ? (
+        <div className="chips" style={{ marginTop: 9 }}>
+          {cfg.blocklist.map((p) => (
+            <button key={p} className="chip on" disabled={busy} title="stop blocking this" onClick={() => void apply(() => api.config.unblock(p))}>
+              {p} ×
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="small dimmer" style={{ marginTop: 7 }}>Nothing blocked yet.</p>
+      )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------- routing
+
+function RoutingPanel({
+  bundle,
+  busy,
+  apply,
+}: {
+  bundle: ConfigBundle;
+  busy: boolean;
+  apply: (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const cfg = bundle.config;
+
+  return (
+    <div className="card">
+      <div className="row">
+        <h3 className="grow" style={{ margin: 0 }}>which model does what</h3>
+        <button onClick={() => setOpen(!open)}>{open ? 'less' : 'more'}</button>
+      </div>
+      <p className="hint">
+        Empty means the profile decides. Worth pinning <span className="mono">extract</span> and{' '}
+        <span className="mono">passb</span> deliberately: they write your world model, and changing them mid-campaign
+        yields a subtly inconsistent world with no obvious cause.
+      </p>
+
+      {open ? (
+        <div style={{ marginTop: 10 }}>
+          {bundle.roles.map((role) => (
+            <div className="row" key={role} style={{ marginBottom: 6 }}>
+              <span className="dim mono" style={{ width: 92 }}>{role}</span>
+              <select
+                value={cfg.routes[role] ?? ''}
+                disabled={busy}
+                onChange={(e) => void apply(() => api.config.patch({ routes: { ...cfg.routes, [role]: e.target.value } }))}
+              >
+                <option value="">(profile default)</option>
+                {bundle.providerKeys.map((key) => (
+                  <option key={key} value={key}>{key}</option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- providers
+
+const BLANK: ProviderSpec = { kind: 'openai-compat', model: '', baseUrl: 'http://127.0.0.1:8000/v1', auth: 'none', dialect: 'vllm' };
+
+function ProvidersEditor({
+  bundle,
+  busy,
+  apply,
+  reload,
+}: {
+  bundle: ConfigBundle;
+  busy: boolean;
+  apply: (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => Promise<void>;
+  reload: () => Promise<void>;
+}) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [key, setKey] = useState('');
+  const [spec, setSpec] = useState<ProviderSpec>(BLANK);
+  const [tested, setTested] = useState<(ProbeResult & { issues: ValidationIssue[] }) | null>(null);
+  const cfg = bundle.config;
+
+  const startEdit = (name: string) => {
+    const existing = bundle.presets[name] ?? BLANK;
+    setEditing(name);
+    setKey(name);
+    setSpec({ ...existing });
+    setTested(null);
+  };
+
+  const startNew = () => {
+    setEditing('');
+    setKey('');
+    setSpec({ ...BLANK });
+    setTested(null);
+  };
+
+  const field = (name: keyof ProviderSpec, label: string, placeholder = '') => (
+    <div className="row" key={name} style={{ marginBottom: 6 }}>
+      <span className="dim" style={{ width: 96 }}>{label}</span>
+      <input
+        value={String(spec[name] ?? '')}
+        placeholder={placeholder}
+        onChange={(e) => setSpec({ ...spec, [name]: e.target.value })}
+      />
+    </div>
+  );
+
+  return (
+    <div className="card">
+      <div className="row">
+        <h3 className="grow" style={{ margin: 0 }}>models</h3>
+        <button disabled={busy} onClick={startNew}>add</button>
+      </div>
+      <p className="hint">
+        Local servers rarely match the defaults — the port and the model id are whatever you launched. Edit them here
+        rather than in a file.
+      </p>
+
+      <div style={{ marginTop: 9 }}>
+        {bundle.providerKeys.map((name) => {
+          const custom = name in cfg.providers;
+          return (
+            <div className="row small" key={name} style={{ marginBottom: 4 }}>
+              <span className="grow mono">{name}</span>
+              {custom ? <span className="tag locked">yours</span> : <span className="tag">built in</span>}
+              <button style={{ padding: '2px 7px', fontSize: 11 }} onClick={() => startEdit(name)}>edit</button>
+              {custom ? (
+                <button
+                  style={{ padding: '2px 7px', fontSize: 11 }}
+                  disabled={busy}
+                  onClick={() => void apply(() => api.config.removeProvider(name))}
+                >
+                  ×
+                </button>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+
+      {editing !== null ? (
+        <div style={{ marginTop: 13, borderTop: '1px solid var(--line)', paddingTop: 11 }}>
+          <div className="row" style={{ marginBottom: 6 }}>
+            <span className="dim" style={{ width: 96 }}>name</span>
+            <input value={key} placeholder="vllm:my-model" onChange={(e) => setKey(e.target.value)} />
+          </div>
+          <div className="row" style={{ marginBottom: 6 }}>
+            <span className="dim" style={{ width: 96 }}>kind</span>
+            <select value={spec.kind} onChange={(e) => setSpec({ ...spec, kind: e.target.value })}>
+              {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+          </div>
+          {field('model', 'model id', 'the id the server was launched with')}
+
+          {relevantFields(spec.kind).map((name) => {
+            if (name === 'allowUnofficial') {
+              return (
+                <div className="row" key={name} style={{ marginBottom: 6 }}>
+                  <span className="dim" style={{ width: 96 }}>unofficial</span>
+                  <label className="small grow">
+                    <input
+                      type="checkbox"
+                      style={{ width: 'auto', marginRight: 7 }}
+                      checked={spec.allowUnofficial === true}
+                      onChange={(e) => setSpec({ ...spec, allowUnofficial: e.target.checked })}
+                    />
+                    I understand this uses an undocumented endpoint and may breach Copilot's terms
+                  </label>
+                </div>
+              );
+            }
+            if (name === 'dialect') {
+              return (
+                <div className="row" key={name} style={{ marginBottom: 6 }}>
+                  <span className="dim" style={{ width: 96 }}>dialect</span>
+                  <select value={spec.dialect ?? 'openai'} onChange={(e) => setSpec({ ...spec, dialect: e.target.value })}>
+                    {DIALECTS.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </div>
+              );
+            }
+            const labels: Record<string, [string, string]> = {
+              baseUrl: ['base url', 'http://127.0.0.1:8000/v1'],
+              apiKeyEnv: ['key from env', 'OPENAI_API_KEY'],
+              profile: ['aws profile', 'leave blank for AWS_PROFILE'],
+              region: ['aws region', 'leave blank to use the profile'],
+              project: ['gcp project', 'leave blank to discover'],
+              location: ['gcp location', 'us-central1'],
+            };
+            const [label, placeholder] = labels[name] ?? [name, ''];
+            return field(name, label, placeholder);
+          })}
+
+          {tested ? (
+            <div className="small" style={{ marginTop: 8 }}>
+              <span className={tested.status === 'ready' ? 'ok' : 'warn'}>{tested.status}</span>{' '}
+              <span className="dim">{tested.detail}</span>
+              {tested.fix ? <div className="warn">→ {tested.fix}</div> : null}
+              {tested.issues.map((i) => (
+                <div key={i.field} className="warn">
+                  <span className="mono">{i.field}</span> — {i.message}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="row" style={{ marginTop: 10 }}>
+            <button
+              disabled={busy || !spec.model.trim()}
+              onClick={() => void api.config.testProvider(key || 'candidate', spec).then(setTested)}
+            >
+              test it
+            </button>
+            <button
+              className="primary"
+              disabled={busy || !key.trim() || !spec.model.trim()}
+              onClick={() =>
+                void apply(() => api.config.putProvider(key, spec)).then(async () => {
+                  setEditing(null);
+                  await reload();
+                })
+              }
+            >
+              keep
+            </button>
+            <button onClick={() => setEditing(null)}>cancel</button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
