@@ -19,6 +19,9 @@ import {
 import type { Condition, Directive, Knobs, StyleContract } from '../domain/types.ts';
 import { branchSave } from '../loop/branch.ts';
 import type { SetupService } from '../setup/service.ts';
+import type { SwappableRegistry } from '../providers/provider.ts';
+import { switchProfile } from '../config/config.ts';
+import { seedConsequences as seedCons, tickConsequences as tickCons, worldTick as wTick } from '../consequence/propagate.ts';
 
 export interface ServerOptions {
   world: World;
@@ -28,6 +31,8 @@ export interface ServerOptions {
   webRoot?: string;
   /** Enables the setup wizard routes. */
   setup?: SetupService;
+  /** Enables live provider profile switching. */
+  registry?: SwappableRegistry;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -36,6 +41,7 @@ interface RouteContext {
   world: World;
   engine: Engine;
   setup: SetupService | undefined;
+  registry: SwappableRegistry | undefined;
   url: URL;
   body: unknown;
   params: Record<string, string>;
@@ -401,7 +407,7 @@ route('POST', '/api/branch', (_req, res, { world, body }) => {
  * servers and credential helpers), so the UI fetches it on demand rather than
  * with the rest of the state.
  */
-route('GET', '/api/providers', async (_req, res) => {
+route('GET', '/api/providers', async (_req, res, ctx) => {
   const [{ probeAll, usableProfiles }, { PROFILES }, { loadConfig }] = await Promise.all([
     import('../providers/probe.ts'),
     import('../providers/http.ts'),
@@ -410,11 +416,71 @@ route('GET', '/api/providers', async (_req, res) => {
   const cfg = loadConfig();
   const results = await probeAll(cfg.providers, {});
   send(res, 200, {
-    profile: cfg.profile,
+    profile: ctx.registry?.profile() ?? cfg.profile,
     results,
     usableProfiles: usableProfiles(results, PROFILES),
     profiles: Object.keys(PROFILES),
   });
+});
+
+/**
+ * Streaming turn. Narration arrives as it is written, which for a writing tool is
+ * the difference between watching and waiting.
+ *
+ * Server-sent events rather than a websocket: the traffic is one-directional and
+ * short-lived, and SSE reconnects itself.
+ */
+route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => {
+  const { input, overrideIntegrity } = (body ?? {}) as { input?: string; overrideIntegrity?: boolean };
+  if (!input || !input.trim()) return send(res, 400, { error: 'input required' });
+
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  const emit = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const outcome = await engine.takeTurn(input, {
+      overrideIntegrity: overrideIntegrity === true,
+      onStage: (stage) => emit('stage', { stage }),
+      onToken: (chunk) => emit('token', { chunk }),
+    });
+
+    let seeded = 0;
+    let tick = null;
+    if (outcome.kind === 'narrated') {
+      seeded = seedCons(world, outcome.delta, outcome.commit.events).length;
+      tick = tickCons(world);
+      wTick(world);
+    }
+    emit('done', { outcome, seeded, tick });
+  } catch (err) {
+    emit('error', { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    res.end();
+  }
+});
+
+/** Switches provider profile without a restart. */
+route('POST', '/api/providers/profile', (_req, res, { registry, body }) => {
+  if (!registry) return send(res, 503, { error: 'profile switching is not enabled on this server' });
+  const { profile } = (body ?? {}) as { profile?: string };
+  if (!profile) return send(res, 400, { error: 'profile is required' });
+
+  const result = switchProfile(registry, profile);
+  if (!result.ok) {
+    return send(res, 400, {
+      error: `"${profile}" is not usable here, so nothing changed`,
+      notes: result.notes,
+      profile: result.profile,
+    });
+  }
+  send(res, 200, result);
 });
 
 route('GET', '/api/search', (_req, res, { world, url }) => {
@@ -583,7 +649,7 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
 }
 
 export function createApiServer(opts: ServerOptions) {
-  const { world, engine, webRoot, setup } = opts;
+  const { world, engine, webRoot, setup, registry } = opts;
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -602,7 +668,7 @@ export function createApiServer(opts: ServerOptions) {
       const params = url.pathname.match(match.pattern)?.groups ?? {};
       try {
         const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
-        await match.handler(req, res, { world, engine, setup, url, body, params });
+        await match.handler(req, res, { world, engine, setup, registry, url, body, params });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.

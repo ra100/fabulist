@@ -9,6 +9,7 @@ import {
   type Fact,
   type Interrupt,
   type Sheet,
+  type PlayResponse,
   type ProvidersReport,
   type State,
   type Thread,
@@ -119,6 +120,9 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
   const [interrupt, setInterrupt] = useState<{ interrupt: Interrupt; input: string } | null>(null);
   const [lastMeta, setLastMeta] = useState<TurnMeta | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
+  // Prose as it arrives, plus which gate the turn is currently passing through.
+  const [streaming, setStreaming] = useState('');
+  const [stage, setStage] = useState('');
   const bottom = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -138,13 +142,14 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
     if (!text.trim() || busy) return;
     setBusy(true);
     setNotes([]);
-    try {
-      const res = await api.play(text, override);
+    setStreaming('');
+    setStage('');
+
+    const finish = async (res: PlayResponse) => {
       const o = res.outcome;
 
       if (o.kind === 'interrupted') {
         setInterrupt({ interrupt: o.interrupt, input: text });
-        setBusy(false);
         return;
       }
 
@@ -167,9 +172,21 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
       } else if (o.kind === 'blocked') {
         setNotes([`the world model refused that: ${o.reason}`, ...o.validation.issues.filter((i) => !i.repaired).map((i) => `${i.tier}: ${i.message}`)]);
       }
+    };
+
+    try {
+      await api.playStream(text, override, {
+        onStage: setStage,
+        onToken: (chunk) => setStreaming((prev) => prev + chunk),
+        onDone: (res) => void finish(res),
+        onError: (message) => setNotes([message]),
+      });
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
     }
+    // The committed turn is now in the book, so the provisional copy can go.
+    setStreaming('');
+    setStage('');
     setBusy(false);
   }
 
@@ -200,6 +217,15 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
                 </div>
               </div>
             ))}
+            {streaming ? (
+              <div className="turn streaming">
+                <div className="raw">{input}</div>
+                <p className="prose">
+                  {streaming}
+                  <span className="caret" />
+                </p>
+              </div>
+            ) : null}
             <div ref={bottom} />
           </div>
         </div>
@@ -245,7 +271,9 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
             }}
           />
           <div className="row" style={{ marginTop: 8 }}>
-            <span className="hint grow">⌘↵ to play · shorthand is fine · leading “ooc” for a directive</span>
+            <span className="hint grow">
+              {busy && stage ? <span className="dim">{stage}…</span> : '⌘↵ to play · shorthand is fine · leading “ooc” for a directive'}
+            </span>
             <button className="primary" disabled={busy || !input.trim()} onClick={() => void play(input)}>
               {busy ? 'writing…' : 'play'}
             </button>
@@ -1008,9 +1036,36 @@ function ProvidersPanel() {
               {r.fix ? <div className="small warn" style={{ paddingLeft: 46 }}>→ {r.fix}</div> : null}
             </div>
           ))}
-          <p className="small dimmer">
-            Switching profile is a config change (fabulist.config.json), so the engine reloads it on restart.
-          </p>
+          {report.usableProfiles.length ? (
+            <>
+              <h3 style={{ marginTop: 13 }}>switch profile</h3>
+              <div className="row wrap">
+                {(report.usableProfiles.includes('mock') ? report.usableProfiles : [...report.usableProfiles, 'mock']).map((name) => (
+                  <button
+                    key={name}
+                    className={name === report.profile ? 'primary' : ''}
+                    disabled={busy || name === report.profile}
+                    onClick={() =>
+                      void (async () => {
+                        setBusy(true);
+                        setError(null);
+                        try {
+                          await api.setProfile(name);
+                          setReport(await api.providers());
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : String(e));
+                        }
+                        setBusy(false);
+                      })()
+                    }
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+              <p className="small dimmer">Takes effect on the next turn. No restart.</p>
+            </>
+          ) : null}
         </>
       ) : null}
     </div>

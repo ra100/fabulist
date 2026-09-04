@@ -37,6 +37,13 @@ export interface CompletionRequest {
   /** When set, the provider must return JSON conforming to this shape. */
   schema?: JsonSchema;
   stop?: string[];
+  /**
+   * Called with each text fragment as it arrives. Only honoured by providers
+   * whose capabilities declare streaming, and never used with `schema`: a
+   * half-arrived JSON object is worthless, whereas half a paragraph of prose is
+   * exactly what a writer wants to see.
+   */
+  onToken?: (chunk: string) => void;
 }
 
 export interface CompletionResult {
@@ -152,6 +159,41 @@ export function extractJson(text: string): unknown {
 export interface Registry {
   get(role: string): Provider;
   all(): Provider[];
+}
+
+/**
+ * A registry whose backing registry can be replaced.
+ *
+ * The engine and the setup service both hold their registry for the process
+ * lifetime, so switching provider profile would otherwise mean a restart. They
+ * hold this instead, and swapping is one assignment — which is what makes
+ * "you have Bedrock available, use it" a button rather than a documentation note.
+ */
+export class SwappableRegistry implements Registry {
+  private current: Registry;
+  private label: string;
+
+  constructor(initial: Registry, label = 'mock') {
+    this.current = initial;
+    this.label = label;
+  }
+
+  get(role: string): Provider {
+    return this.current.get(role);
+  }
+
+  all(): Provider[] {
+    return this.current.all();
+  }
+
+  swap(next: Registry, label: string): void {
+    this.current = next;
+    this.label = label;
+  }
+
+  profile(): string {
+    return this.label;
+  }
 }
 
 export class ProviderRegistry implements Registry {

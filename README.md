@@ -44,7 +44,7 @@ pnpm play                 # interactive session
 ```
 
 ```bash
-pnpm test                 # 378 tests, offline
+pnpm test                 # 403 tests, offline
 pnpm typecheck
 ```
 
@@ -187,6 +187,17 @@ Then set a profile in `fabulist.config.json`:
 
 An unavailable profile falls back to the mock with a note rather than failing — an
 unconfigured provider should not stop you playing.
+
+**Switching is a button, not a file edit.** Settings shows every profile the probe found
+usable; picking one swaps the live registry and persists the choice, with no restart. It
+refuses rather than silently degrading, because discovering three turns later that the mock
+is writing is worse than being told a profile is unavailable.
+
+Narration **streams**. Prose arrives as it is written, with the current stage shown while
+the gates run — for a writing tool that is the difference between watching and waiting.
+Only the narrator streams: the mechanical roles return structured output, where a partial
+result is worthless. To see it without a real model attached, set `"mockTokenDelayMs": 45`,
+since the mock otherwise emits a whole passage faster than a browser can paint.
 
 ### Running without API keys
 
@@ -392,6 +403,9 @@ Node 24 runs TypeScript directly, so there is no backend build step. That rules 
 ---
 
 ## Known gaps
+
+- **Streaming stops at the narrator.** The mechanical roles are not streamed and should not
+  be, but that means a turn still has a silent stretch before prose starts.
 
 - **No vector store.** The Scene Frame uses graph traversal and fixed slots, which is the
   meal; embeddings were always the garnish and are not wired up.

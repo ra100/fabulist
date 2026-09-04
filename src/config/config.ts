@@ -6,7 +6,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { MockProvider } from '../providers/mock.ts';
-import { ProviderRegistry, type Provider } from '../providers/provider.ts';
+import { ProviderRegistry, SwappableRegistry, type Provider } from '../providers/provider.ts';
 import { buildProvider, MECHANIC_ROLES, PRESETS, PROFILES, type ProviderSpec } from '../providers/http.ts';
 
 export interface Config {
@@ -20,6 +20,11 @@ export interface Config {
   proseLintThreshold: number;
   /** Personal blocklist. The design expects this to become the most valuable file here. */
   blocklist: string[];
+  /**
+   * Slows the mock provider's streaming, in milliseconds per fragment. Only
+   * useful for seeing the streaming view render without a real model attached.
+   */
+  mockTokenDelayMs?: number;
 }
 
 export function defaultConfig(): Config {
@@ -55,7 +60,8 @@ export function buildRegistry(cfg: Config, env = process.env): { registry: Provi
   const notes: string[] = [];
 
   if (cfg.profile === 'mock') {
-    return { registry: new ProviderRegistry(new MockProvider()), notes: ['using the deterministic mock provider'] };
+    const mock = new MockProvider(cfg.mockTokenDelayMs ? { tokenDelayMs: cfg.mockTokenDelayMs } : {});
+    return { registry: new ProviderRegistry(mock), notes: ['using the deterministic mock provider'] };
   }
 
   const specs = { ...PRESETS, ...cfg.providers };
@@ -105,4 +111,44 @@ export function buildRegistry(cfg: Config, env = process.env): { registry: Provi
   }
 
   return { registry, notes };
+}
+
+/**
+ * Builds a registry that can be swapped later, and persists the chosen profile.
+ *
+ * Switching profile used to mean hand-editing JSON and restarting, which meant a
+ * machine with a perfectly good provider would sit on the mock and write
+ * deliberately plain prose. The app knew the answer and could not act on it.
+ */
+export function buildSwappableRegistry(cfg: Config, env = process.env): { registry: SwappableRegistry; notes: string[] } {
+  const { registry, notes } = buildRegistry(cfg, env);
+  return { registry: new SwappableRegistry(registry, cfg.profile), notes };
+}
+
+export interface SwitchResult {
+  profile: string;
+  ok: boolean;
+  notes: string[];
+}
+
+/**
+ * Points a live registry at a different profile. Refuses rather than silently
+ * degrading: being told "that profile is not available and here is why" beats
+ * discovering three turns later that the mock is writing.
+ */
+export function switchProfile(
+  registry: SwappableRegistry,
+  profile: string,
+  configPath = 'fabulist.config.json',
+  env = process.env,
+): SwitchResult {
+  const cfg = { ...loadConfig(configPath), profile };
+  const { registry: next, notes } = buildRegistry(cfg, env);
+
+  const fellBack = profile !== 'mock' && next.get('narrate').id === 'mock';
+  if (fellBack) return { profile: registry.profile(), ok: false, notes };
+
+  registry.swap(next, profile);
+  saveConfig(cfg, configPath);
+  return { profile, ok: true, notes };
 }

@@ -251,3 +251,13 @@ button.link:hover { color: var(--ink); }
   color: var(--dim); margin: 0 0 8px;
 }
 .opening { font: 16px/1.7 var(--serif); margin: 0 0 20px; }
+
+/* Prose arriving mid-turn: provisional, so it reads as unfinished. */
+.turn.streaming { opacity: 0.85; border-bottom: none; }
+.turn.streaming .prose::after { content: ''; }
+.caret {
+  display: inline-block; width: 7px; height: 1em; margin-left: 2px;
+  background: var(--accent); vertical-align: -2px;
+  animation: blink 1.05s step-end infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }

@@ -305,6 +305,65 @@ export const api = {
   addAnchor: (text: string, note: string) => post('/anchor', { text, note }),
   search: (q: string) => req<Entity[]>(`/search?q=${encodeURIComponent(q)}`),
   providers: () => req<ProvidersReport>('/providers'),
+  setProfile: (profile: string) => post<{ profile: string; ok: boolean; notes: string[] }>('/providers/profile', { profile }),
+
+  /**
+   * Streams a turn. Narration arrives as it is written, which for a writing tool
+   * is the difference between watching and waiting.
+   */
+  playStream: async (
+    input: string,
+    overrideIntegrity: boolean,
+    handlers: {
+      onStage?: (stage: string) => void;
+      onToken?: (chunk: string) => void;
+      onDone?: (res: PlayResponse) => void;
+      onError?: (message: string) => void;
+    },
+  ): Promise<void> => {
+    const res = await fetch('/api/play/stream', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ input, overrideIntegrity }),
+    });
+    if (!res.ok || !res.body) {
+      const body = await res.json().catch(() => ({}));
+      handlers.onError?.((body as { error?: string }).error ?? `stream failed (${res.status})`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let event = '';
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let newline = buffer.indexOf('\n');
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line.startsWith('event:')) {
+          event = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          const payload = line.slice(5).trim();
+          try {
+            const data = JSON.parse(payload) as Record<string, never>;
+            if (event === 'stage') handlers.onStage?.(String(data.stage));
+            else if (event === 'token') handlers.onToken?.(String(data.chunk));
+            else if (event === 'done') handlers.onDone?.(data as unknown as PlayResponse);
+            else if (event === 'error') handlers.onError?.(String(data.error));
+          } catch {
+            // A partial event; the next read completes it.
+          }
+        }
+        newline = buffer.indexOf('\n');
+      }
+    }
+  },
 
   setup: {
     status: () => req<SetupStatus>('/setup/status'),

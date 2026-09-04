@@ -6,7 +6,7 @@ import { World } from '../store/index.ts';
 import { seedWorld } from '../seed/verrow.ts';
 import { Engine } from '../loop/engine.ts';
 import { createApiServer } from '../server/api.ts';
-import { buildRegistry, loadConfig } from '../config/config.ts';
+import { buildSwappableRegistry, loadConfig } from '../config/config.ts';
 import { makeProseGate } from '../lint/gate.ts';
 import { SetupService } from '../setup/service.ts';
 
@@ -24,8 +24,9 @@ if (args.includes('--sample')) {
   console.log('seeded the Saint Verrow sample');
 }
 
-const { registry, notes } = buildRegistry(cfg);
+const { registry, notes } = buildSwappableRegistry(cfg);
 for (const n of notes) console.log(n);
+if (cfg.profile === 'mock') console.log('tip: pnpm providers — the UI can switch profile without a restart');
 
 const engine = new Engine({
   world,
@@ -39,7 +40,7 @@ if (!webRoot) console.log('web/dist not built; serving the API only (pnpm build:
 const setup = new SetupService({ world, providers: registry });
 if (setup.isFresh()) console.log('no world yet - the UI will open the setup wizard');
 
-const server = createApiServer({ world, engine, webRoot, setup });
+const server = createApiServer({ world, engine, webRoot, setup, registry });
 server.listen(port, '127.0.0.1', () => {
   console.log(`fabulist on http://127.0.0.1:${port}`);
 });
