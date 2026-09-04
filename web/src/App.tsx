@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
   type BookTurn,
@@ -68,12 +68,14 @@ export function App() {
         <h1>{state?.worldTitle ?? 'Fabulist'}</h1>
         {state ? (
           <div className="meta">
-            <span>scene {state.session.scene}·{state.session.turn}</span>
-            <span>{state.counts.entities}e / {state.counts.edges}v</span>
-            <span title="pending consequences">{state.pendingConsequences} in motion</span>
+            <span>scene <b>{state.session.scene}·{state.session.turn}</b></span>
+            <span title="entities and live edges in the world model">
+              <b>{state.counts.entities}</b> entities <b>{state.counts.edges}</b> edges
+            </span>
+            <span title="pending consequences"><b>{state.pendingConsequences}</b> in motion</span>
             {state.hiddenFired > 0 ? (
               <span className="warn" title="fired offscreen and still unseen">
-                {state.hiddenFired} unseen
+                <b>{state.hiddenFired}</b> unseen
               </span>
             ) : null}
           </div>
@@ -178,16 +180,19 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
       <div className="pane" style={{ display: 'flex', flexDirection: 'column', padding: 0 }}>
         <div className="pane" style={{ flex: 1 }}>
           <div className="book">
-            {turns.length === 0 ? <p className="empty">Nothing written yet.</p> : null}
+            {turns.length === 0 ? (
+              <p className="empty">Nothing written yet. Describe what you do below.</p>
+            ) : null}
             {turns.map((t) => (
               <div key={t.id} className={`turn${t.pinned ? ' pinned' : ''}`}>
+                <span className="folio">{t.scene}·{t.turn}</span>
                 <div className="raw">{t.rawInput}</div>
                 <p className="prose">{t.bookProse}</p>
                 <div className="turn-tools">
-                  <span>s{t.scene}·{t.turn}</span>
-                  {t.move ? <span title="gm move">{t.move}</span> : null}
-                  {t.integrity && t.integrity !== 'in-character' ? <span className="warn">{t.integrity}</span> : null}
-                  {t.lintScore != null && t.lintScore > 0 ? <span className="dimmer">lint {t.lintScore}</span> : null}
+                  {t.move ? <span className="move" title="gm move">{t.move}</span> : null}
+                  {t.integrity && t.integrity !== 'in-character' ? <span className="status ripening">{t.integrity}</span> : null}
+                  {t.lintScore != null && t.lintScore > 0 ? <span className="mono">lint {t.lintScore}</span> : null}
+                  <span className="grow" />
                   <button
                     onClick={async () => {
                       await api.pin(t.id, !t.pinned);
@@ -205,50 +210,55 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
         </div>
 
         <div className="composer">
-          {interrupt ? (
-            <div className="interrupt">
-              <p>{interrupt.interrupt.message}</p>
-              <div className="opts">
-                {interrupt.interrupt.options.map((o) => (
-                  <button
-                    key={o.key}
-                    onClick={() => {
-                      if (o.effect === 'revise' || o.effect === 'switch-character') {
-                        setInterrupt(null);
-                        setNotes(['nothing written — revise and try again']);
-                        return;
-                      }
-                      void play(interrupt.input, true);
-                    }}
-                  >
-                    <b>{o.key}</b> — {o.label}
-                  </button>
+          <div className="measure">
+            {interrupt ? (
+              <div className="interrupt">
+                <p>{interrupt.interrupt.message}</p>
+                <div className="opts">
+                  {interrupt.interrupt.options.map((o) => (
+                    <button
+                      key={o.key}
+                      onClick={() => {
+                        if (o.effect === 'revise' || o.effect === 'switch-character') {
+                          setInterrupt(null);
+                          setNotes(['nothing written — revise and try again']);
+                          return;
+                        }
+                        void play(interrupt.input, true);
+                      }}
+                    >
+                      <b>{o.key}</b> {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {notes.length ? (
+              <div className="notes">
+                <b>what followed</b>
+                {notes.map((n, i) => (
+                  <div key={i}>{n}</div>
                 ))}
               </div>
-            </div>
-          ) : null}
+            ) : null}
 
-          {notes.length ? (
-            <div className="small dim" style={{ marginBottom: 8 }}>
-              {notes.map((n, i) => (
-                <div key={i}>{n}</div>
-              ))}
+            <textarea
+              value={input}
+              placeholder="Write roughly. The book gets the worked version."
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void play(input);
+              }}
+            />
+            <div className="row" style={{ marginTop: 'var(--s2)' }}>
+              <span className="hint grow" style={{ marginTop: 0 }}>
+                ⌘↵ to play · shorthand is fine · leading “ooc” for a directive
+              </span>
+              <button className="primary" disabled={busy || !input.trim()} onClick={() => void play(input)}>
+                {busy ? 'writing…' : 'play'}
+              </button>
             </div>
-          ) : null}
-
-          <textarea
-            value={input}
-            placeholder="Write roughly. The book gets the worked version."
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void play(input);
-            }}
-          />
-          <div className="row" style={{ marginTop: 8 }}>
-            <span className="hint grow">⌘↵ to play · shorthand is fine · leading “ooc” for a directive</span>
-            <button className="primary" disabled={busy || !input.trim()} onClick={() => void play(input)}>
-              {busy ? 'writing…' : 'play'}
-            </button>
           </div>
         </div>
       </div>
@@ -258,24 +268,33 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
         {state ? (
           <div className="card">
             <h3>open threads</h3>
-            {state.threads.slice(0, 6).map((t) => (
-              <div key={t.id} style={{ marginBottom: 9 }}>
-                <div className="small">{t.title}</div>
-                <div className="bar">
-                  <i style={{ width: `${t.tension * 100}%` }} />
+            <div className="stack">
+              {state.threads.slice(0, 6).map((t) => (
+                <div key={t.id}>
+                  <div className="row baseline" style={{ marginBottom: 5 }}>
+                    <span className="small grow">{t.title}</span>
+                    <span className="mono dimmer">{t.tension.toFixed(2)}</span>
+                  </div>
+                  <div className={`meter ${t.tension >= 0.75 ? 'high' : t.tension >= 0.45 ? 'mid' : ''}`}>
+                    <i style={{ width: `${t.tension * 100}%` }} />
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         ) : null}
         {state?.divergences.length ? (
           <div className="card">
             <h3>divergence ledger</h3>
-            {state.divergences.map((d) => (
-              <div key={d.id} className="small dim">
-                s{d.scene} {d.kind}: {d.detail}
-              </div>
-            ))}
+            <div className="stack">
+              {state.divergences.map((d) => (
+                <div key={d.id} className="small">
+                  <span className="tag chronicle">{d.kind}</span>{' '}
+                  <span className="dim">{d.detail}</span>{' '}
+                  <span className="mono dimmer">s{d.scene}</span>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
       </aside>
@@ -408,11 +427,13 @@ function EntityPanel({ detail, onSelect }: { detail: EntityDetail | null; onSele
   return (
     <>
       <div className="card">
-        <div className="row">
-          <h3 className="grow" style={{ margin: 0 }}>{entity.name}</h3>
+        <div className="row baseline">
+          <h2 className="name grow">{entity.name}</h2>
           <span className={`tag ${entity.layer}`}>{entity.layer}</span>
         </div>
-        <p className="small" style={{ marginTop: 8 }}>{entity.summary || <i className="dimmer">no summary</i>}</p>
+        <p className="small dim" style={{ margin: 'var(--s2) 0 var(--s3)' }}>
+          {entity.summary || <i className="dimmer">no summary</i>}
+        </p>
         <dl className="kv small">
           <dt>id</dt><dd className="mono">{entity.id}</dd>
           <dt>type</dt><dd>{entity.type}</dd>
@@ -508,92 +529,128 @@ function CastTab() {
     void load();
   }, [load]);
 
+  // Location ids are slugs in the model; the reader wants the name.
+  const placeName = (id: string | null | undefined) =>
+    id ? (id.split(':').pop() ?? id).replace(/-/g, ' ') : 'nowhere stated';
+
   return (
     <div className="main">
       <div className="pane">
-        {cast.map(({ sheet, entity }) => (
-          <div key={sheet.entityId} className="card">
-            <div className="row">
-              <h3 className="grow" style={{ margin: 0 }}>
-                {entity?.name ?? sheet.entityId} {sheet.isPlayer ? <span className="tag locked">player</span> : null}
-              </h3>
-              <button onClick={() => setOpenId(openId === sheet.entityId ? null : sheet.entityId)}>
-                {openId === sheet.entityId ? 'less' : 'more'}
-              </button>
-            </div>
-            <p className="small dim">{entity?.summary}</p>
-            <div className="small">
-              at {sheet.condition.locationId ?? '—'} · {sheet.condition.mood || 'unreadable'}
-              {sheet.condition.intent ? ` · ${sheet.condition.intent}` : ''}
-            </div>
-
-            {openId === sheet.entityId ? (
-              <div style={{ marginTop: 11, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
-                {sheet.contract.vows.length ? (
-                  <>
-                    <h3>contract</h3>
-                    {[...sheet.contract.vows].sort((a, b) => a.rank - b.rank).map((v) => (
-                      <div key={v.id} className="small">
-                        <span className={v.broken ? 'warn' : 'ok'}>{v.broken ? 'broken' : 'held'}</span> r{v.rank} {v.text}
-                      </div>
-                    ))}
-                    {sheet.contract.breakingPoint ? (
-                      <div className="small dim" style={{ marginTop: 5 }}>breaking point: {sheet.contract.breakingPoint}</div>
-                    ) : null}
-                    {sheet.contract.costOfBreak ? (
-                      <div className="small dim">cost of breaking: {sheet.contract.costOfBreak}</div>
-                    ) : null}
-                  </>
-                ) : null}
-
-                {sheet.voice.diction ? (
-                  <>
-                    <h3 style={{ marginTop: 11 }}>voice</h3>
-                    <div className="small">{sheet.voice.diction}</div>
-                    {sheet.voice.samples.map((s, i) => (
-                      <div key={i} className="small dim" style={{ fontStyle: 'italic' }}>“{s}”</div>
-                    ))}
-                    {sheet.voice.never.length ? (
-                      <div className="small dimmer">never: {sheet.voice.never.join('; ')}</div>
-                    ) : null}
-                  </>
-                ) : null}
-
-                <h3 style={{ marginTop: 11 }}>identity</h3>
-                {(['goals', 'wounds', 'fears', 'secrets'] as const).map((k) =>
-                  sheet.identity[k].length ? (
-                    <div key={k} className="small">
-                      <span className="dim">{k}:</span> {sheet.identity[k].join('; ')}
-                    </div>
-                  ) : null,
-                )}
-
-                {/* Locks are how nudging parameters actually works. */}
-                <h3 style={{ marginTop: 11 }}>locks</h3>
-                <div className="row small" style={{ flexWrap: 'wrap', gap: 6 }}>
-                  {['condition.mood', 'condition.intent', 'condition.locationId', 'condition.inventory'].map((path) => {
-                    const on = sheet.locks.includes(path);
-                    return (
-                      <button
-                        key={path}
-                        className={on ? 'primary' : ''}
-                        onClick={async () => {
-                          await api.lock(sheet.entityId, path, !on);
-                          await load();
-                        }}
-                      >
-                        {on ? '🔒' : '🔓'} {path.replace('condition.', '')}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="small dimmer" style={{ marginTop: 5 }}>
-                  A locked field is ground truth; the AI may not overwrite it.
-                </div>
+        <div className="cast-grid">
+          {cast.map(({ sheet, entity }) => {
+            const open = openId === sheet.entityId;
+            return (
+            <div key={sheet.entityId} className={`card${open ? ' span' : ''}`}>
+              <div className="row baseline">
+                <h2 className="name grow">
+                  {entity?.name ?? sheet.entityId}{' '}
+                  {sheet.isPlayer ? <span className="tag locked">player</span> : null}
+                </h2>
+                <button onClick={() => setOpenId(open ? null : sheet.entityId)}>
+                  {open ? 'less' : 'more'}
+                </button>
               </div>
-            ) : null}
-          </div>
-        ))}
+              <p className="small dim" style={{ margin: '6px 0 8px', maxWidth: '46rem' }}>
+                {entity?.summary}
+              </p>
+              <div className="small dimmer cast-cond">
+                {placeName(sheet.condition.locationId)} · {sheet.condition.mood || 'unreadable'}
+                {sheet.condition.intent ? ` · ${sheet.condition.intent}` : ''}
+              </div>
+
+              {openId === sheet.entityId ? (
+                <div style={{ marginTop: 'var(--s4)', borderTop: '1px solid var(--rule)', paddingTop: 'var(--s4)' }}>
+                  {sheet.contract.vows.length ? (
+                    <>
+                      <h3 className="eyebrow rule">contract</h3>
+                      <div className="stack" style={{ marginBottom: 'var(--s3)' }}>
+                        {[...sheet.contract.vows].sort((a, b) => a.rank - b.rank).map((v) => (
+                          <div key={v.id} className="row baseline small">
+                            <span className={`status ${v.broken ? 'ripening' : 'fired'}`} style={{ minWidth: '4rem' }}>
+                              {v.broken ? 'broken' : 'held'}
+                            </span>
+                            <span className="mono dimmer">r{v.rank}</span>
+                            <span className="grow">{v.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {sheet.contract.breakingPoint ? (
+                        <div className="small dim">breaking point — {sheet.contract.breakingPoint}</div>
+                      ) : null}
+                      {sheet.contract.costOfBreak ? (
+                        <div className="small dim">cost of breaking — {sheet.contract.costOfBreak}</div>
+                      ) : null}
+                    </>
+                  ) : null}
+
+                  {sheet.voice.diction ? (
+                    <>
+                      <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>voice</h3>
+                      <div className="small dim">{sheet.voice.diction}</div>
+                      {sheet.voice.samples.map((s, i) => (
+                        <p
+                          key={i}
+                          style={{
+                            font: 'italic 15px/1.55 var(--serif)',
+                            color: 'var(--ink)',
+                            borderLeft: '1px solid var(--rule-strong)',
+                            padding: '2px 0 2px var(--s3)',
+                            margin: 'var(--s2) 0 0',
+                            maxWidth: '38rem',
+                          }}
+                        >
+                          “{s}”
+                        </p>
+                      ))}
+                      {sheet.voice.never.length ? (
+                        <div className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
+                          never — {sheet.voice.never.join('; ')}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
+
+                  <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>identity</h3>
+                  <dl className="kv">
+                    {(['goals', 'wounds', 'fears', 'secrets'] as const).map((k) =>
+                      sheet.identity[k].length ? (
+                        <Fragment key={k}>
+                          <dt>{k}</dt>
+                          <dd>{sheet.identity[k].join('; ')}</dd>
+                        </Fragment>
+                      ) : null,
+                    )}
+                  </dl>
+
+                  {/* Locks are how nudging parameters actually works. */}
+                  <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>locks</h3>
+                  <div className="row wrap">
+                    {['condition.mood', 'condition.intent', 'condition.locationId', 'condition.inventory'].map((path) => {
+                      const on = sheet.locks.includes(path);
+                      return (
+                        <button
+                          key={path}
+                          className={on ? 'primary' : ''}
+                          aria-pressed={on}
+                          onClick={async () => {
+                            await api.lock(sheet.entityId, path, !on);
+                            await load();
+                          }}
+                        >
+                          {on ? '◆' : '◇'} {path.replace('condition.', '')}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
+                    A locked field is ground truth; the AI may not overwrite it.
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -615,30 +672,43 @@ function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () =
   return (
     <div className="main">
       <div className="pane">
-        {threads.map((t) => (
-          <div key={t.id} className="card">
-            <div className="row">
-              <span className="grow">{t.title}</span>
-              <span className="tag">{t.status}</span>
+        <div className="measure-tool">
+          <p className="lede">
+            Tension is the dial the director reads before it chooses what happens next. Raise one
+            and the story leans on it.
+          </p>
+          {threads.map((t) => (
+            <div key={t.id} className="card">
+              <div className="row baseline">
+                <h2 className="name sm grow">{t.title}</h2>
+                <span className="tag">{t.status}</span>
+              </div>
+              <div className="small dim" style={{ margin: '5px 0 var(--s4)', maxWidth: '44rem' }}>
+                {t.stakes}
+              </div>
+              <div className="row" style={{ maxWidth: '30rem' }}>
+                <span className="eyebrow" style={{ margin: 0, minWidth: '4.5rem' }}>tension</span>
+                <div className="scale">
+                  <input
+                    type="range" min="0" max="1" step="0.05" value={t.tension}
+                    aria-label={`tension for ${t.title}`}
+                    onChange={async (e) => {
+                      const tension = Number(e.target.value);
+                      setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, tension } : x)));
+                      await api.updateThread(t.id, { tension });
+                      onChanged();
+                    }}
+                  />
+                </div>
+                <span className="mono" style={{ width: 34, textAlign: 'right' }}>{t.tension.toFixed(2)}</span>
+              </div>
+              <div className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
+                <span className="status" style={{ marginRight: 'var(--s2)' }}>ways out</span>
+                {t.resolutions.join(' · ')}
+              </div>
             </div>
-            <div className="small dim" style={{ margin: '5px 0' }}>{t.stakes}</div>
-            <div className="row">
-              <input
-                type="range" min="0" max="1" step="0.05" value={t.tension}
-                onChange={async (e) => {
-                  const tension = Number(e.target.value);
-                  setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, tension } : x)));
-                  await api.updateThread(t.id, { tension });
-                  onChanged();
-                }}
-              />
-              <span className="mono dimmer" style={{ width: 40 }}>{t.tension.toFixed(2)}</span>
-            </div>
-            <div className="small dimmer" style={{ marginTop: 5 }}>
-              possible: {t.resolutions.join(' / ')}
-            </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
 
       <aside className="side">
@@ -714,41 +784,83 @@ function CausalityTab() {
 
   const byDepth = [...cons].sort((a, b) => a.depth - b.depth || a.createdScene - b.createdScene);
 
+  /**
+   * Identical consequences seeded in the same scene are collapsed to one row with
+   * a count. The key covers every dimension the row displays, so nothing is hidden
+   * by the collapse — only the repetition goes.
+   */
+  const collapsed: Array<Consequence & { count: number }> = [];
+  const seen = new Map<string, Consequence & { count: number }>();
+  for (const c of byDepth) {
+    const key = [
+      c.createdScene, c.depth, c.actorName, c.action, c.maturity, c.visibility,
+      c.significance.toFixed(2), c.firedScene ?? '', JSON.stringify(c.trigger),
+    ].join('|');
+    const hit = seen.get(key);
+    if (hit) {
+      hit.count += 1;
+    } else {
+      const row = { ...c, count: 1 };
+      seen.set(key, row);
+      collapsed.push(row);
+    }
+  }
+
+  // Grouped by the scene that seeded them: a flat list of near-identical rows is
+  // unreadable, and the scene is the thing the reader is actually tracking.
+  const scenes = [...new Set(collapsed.map((c) => c.createdScene))].sort((a, b) => a - b);
+
   return (
     <div className="main">
       <div className="pane">
-        <div className="row" style={{ marginBottom: 12 }}>
-          <span className="grow dim small">
-            What your acts set in motion. Indentation is depth from the original act.
-          </span>
-          <button className={reveal ? 'primary' : ''} onClick={() => setReveal(!reveal)}>
-            {reveal ? 'hide spoilers' : 'reveal hidden'}
-          </button>
-          <button onClick={async () => { await api.tick(); setCons(await api.consequences()); }}>tick world</button>
-        </div>
+        <div className="measure-tool">
+          <div className="row" style={{ marginBottom: 'var(--s4)' }}>
+            <p className="lede grow" style={{ margin: 0 }}>
+              What your acts set in motion. Indentation is depth from the original act.
+            </p>
+            <button className={reveal ? 'primary' : ''} onClick={() => setReveal(!reveal)}>
+              {reveal ? 'hide spoilers' : 'reveal hidden'}
+            </button>
+            <button onClick={async () => { await api.tick(); setCons(await api.consequences()); }}>tick world</button>
+          </div>
 
-        <div className="chain">
-          {byDepth.length === 0 ? <p className="empty">Nothing in motion yet.</p> : null}
-          {byDepth.map((c) => {
-            const hidden = c.visibility === 'offscreen-hidden' && !reveal;
-            return (
-              <div key={c.id} className={`node ${c.maturity} depth-${Math.min(4, c.depth)}`}>
-                <div className="row">
-                  <span className="grow">
-                    <span className={hidden ? 'spoiler hidden' : 'spoiler'}>
-                      <span>{c.actorName} {c.action}</span>
+          <div className="chain">
+            {byDepth.length === 0 ? <p className="empty">Nothing in motion yet.</p> : null}
+            {scenes.map((scene) => {
+              const rows = collapsed.filter((c) => c.createdScene === scene);
+              const total = rows.reduce((n, r) => n + r.count, 0);
+              return (
+                <Fragment key={scene}>
+                  <div className="scene-head">
+                    <span>scene {scene}</span>
+                    <span className="dimmer" style={{ letterSpacing: 0 }}>
+                      {total} seeded
                     </span>
-                  </span>
-                  <span className="dimmer">{c.maturity}</span>
-                </div>
-                <div className="dimmer" style={{ fontSize: 11 }}>
-                  d{c.depth} · {c.visibility} · sig {c.significance.toFixed(2)} · seeded s{c.createdScene}
-                  {c.firedScene != null ? ` · fired s${c.firedScene}` : ''}
-                  {c.trigger.kind === 'after-scenes' ? ` · after ${c.trigger.scenes} scene(s)` : ''}
-                </div>
-              </div>
-            );
-          })}
+                  </div>
+                  {rows.map((c) => {
+                    const hidden = c.visibility === 'offscreen-hidden' && !reveal;
+                    return (
+                      <div key={c.id} className={`node ${c.maturity} depth-${Math.min(4, c.depth)}`}>
+                        <span className={`status ${c.maturity}`}>{c.maturity}</span>
+                        <span className="act">
+                          <span className={hidden ? 'spoiler hidden' : 'spoiler'}>
+                            <span>{c.actorName} {c.action}</span>
+                          </span>
+                          {c.count > 1 ? <span className="mult">×{c.count}</span> : null}
+                        </span>
+                        <span className="node-meta">
+                          depth {c.depth} · {c.visibility.replace('-', ' ')} · significance{' '}
+                          {c.significance.toFixed(2)}
+                          {c.firedScene != null ? ` · fired in s${c.firedScene}` : ''}
+                          {c.trigger.kind === 'after-scenes' ? ` · after ${c.trigger.scenes} scene(s)` : ''}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </Fragment>
+              );
+            })}
+          </div>
         </div>
       </div>
       <aside className="side">
@@ -759,11 +871,11 @@ function CausalityTab() {
             machinery is indistinguishable from no machinery at all, so the engine steers traces
             toward you once too much has matured unseen.
           </p>
-          <div className="small" style={{ marginTop: 9 }}>
-            <div><span className="ok">fired</span> — it happened</div>
-            <div><span className="warn">ripening</span> — arriving soon</div>
-            <div><span className="dim">pending</span> — waiting on a trigger</div>
-            <div><span className="dimmer">superseded</span> — a directive moved past it</div>
+          <div className="legend-list" style={{ marginTop: 'var(--s4)' }}>
+            <div><span className="status fired">fired</span> <span className="dim">it happened</span></div>
+            <div><span className="status ripening">ripening</span> <span className="dim">arriving soon</span></div>
+            <div><span className="status pending">pending</span> <span className="dim">waiting on a trigger</span></div>
+            <div><span className="status superseded">superseded</span> <span className="dim">a directive moved past it</span></div>
           </div>
         </div>
       </aside>
@@ -782,34 +894,41 @@ function FactsTab() {
   return (
     <div className="main">
       <div className="pane">
-        <p className="small dim">
-          Facts are true in the world; knowledge of them is per-character. The gap between the two
-          is what produces dramatic irony instead of NPCs reacting to what they cannot know.
-        </p>
-        <table>
-          <thead>
-            <tr><th>fact</th><th>scene</th><th>who holds a version of it</th></tr>
-          </thead>
-          <tbody>
-            {facts.map((f) => (
-              <tr key={f.id}>
-                <td>{f.text}</td>
-                <td className="mono dimmer">{f.scene}</td>
-                <td className="small">
-                  {f.knowers.length === 0 ? <i className="dimmer">nobody</i> : null}
+        <div className="measure-tool">
+          <p className="lede">
+            Facts are true in the world; knowledge of them is per-character. The gap between the two
+            is what produces dramatic irony instead of NPCs reacting to what they cannot know.
+          </p>
+          {facts.map((f) => (
+            <div key={f.id} className="card">
+              <div className="row baseline">
+                <p className="name sm" style={{ maxWidth: '38rem' }}>{f.text}</p>
+                <span className="grow" />
+                <span className="mono dimmer">s{f.scene}</span>
+              </div>
+              <h3 className="eyebrow rule" style={{ margin: 'var(--s4) 0 var(--s2)' }}>
+                who holds a version of it
+              </h3>
+              {f.knowers.length === 0 ? (
+                <p className="empty" style={{ padding: 0 }}>Nobody. This is still only true.</p>
+              ) : (
+                <div className="knowers">
                   {f.knowers.map((k) => (
-                    <span key={k.entityId} style={{ marginRight: 9 }}>
-                      <span className={k.level === 'knows' ? 'ok' : k.level === 'wrong' ? 'warn' : 'dim'}>
-                        {k.name}
+                    <div key={k.entityId} className="knower">
+                      <span className="knower-name">{k.name}</span>
+                      <span className={`status ${k.level === 'knows' ? 'fired' : k.level === 'wrong' ? 'ripening' : 'pending'}`}>
+                        {k.level}
                       </span>
-                      <span className="dimmer"> {k.level}{k.distortion > 0 ? ` ${k.distortion.toFixed(1)}` : ''}</span>
-                    </span>
+                      <span className="mono dimmer">
+                        {k.distortion > 0 ? k.distortion.toFixed(1) : ''}
+                      </span>
+                    </div>
                   ))}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -840,6 +959,7 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
   return (
     <div className="main">
       <div className="pane">
+        <div className="measure-tool">
         {style ? (
           <div className="card">
             <h3>style contract</h3>
@@ -851,35 +971,35 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
               ['humor', ['none', 'dry', 'absurd']],
               ['pacing', ['languid', 'steady', 'breakneck']],
             ] as const).map(([key, opts]) => (
-              <div className="row" key={key} style={{ marginBottom: 7 }}>
-                <span className="dim" style={{ width: 110 }}>{key}</span>
+              <label className="field-row" key={key}>
+                <span>{key}</span>
                 <select value={style[key] as string} onChange={(e) => void saveStyle({ [key]: e.target.value })}>
                   {opts.map((o) => <option key={o} value={o}>{o}</option>)}
                 </select>
-              </div>
+              </label>
             ))}
-            <div className="row" style={{ marginBottom: 7 }}>
-              <span className="dim" style={{ width: 110 }}>genre</span>
+            <label className="field-row">
+              <span>genre</span>
               <input
                 defaultValue={style.genreLens}
                 onBlur={(e) => void saveStyle({ genreLens: e.target.value })}
               />
-            </div>
-            <div className="row" style={{ marginBottom: 7 }}>
-              <span className="dim" style={{ width: 110 }}>comparables</span>
+            </label>
+            <label className="field-row">
+              <span>comparables</span>
               <input
                 defaultValue={style.comparables.join(', ')}
                 placeholder="naming a work beats any stack of adjectives"
                 onBlur={(e) => void saveStyle({ comparables: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
               />
-            </div>
-            <div className="row">
-              <span className="dim" style={{ width: 110 }}>scene target</span>
+            </label>
+            <label className="field-row">
+              <span>scene target</span>
               <input
                 type="number" defaultValue={style.sceneTarget}
                 onBlur={(e) => void saveStyle({ sceneTarget: Number(e.target.value) })}
               />
-            </div>
+            </label>
           </div>
         ) : null}
 
@@ -888,14 +1008,27 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
         {anchors.length ? (
           <div className="card">
             <h3>style anchors</h3>
-            <p className="small dimmer">
+            <p className="small dimmer" style={{ marginTop: 0 }}>
               Re-injected periodically. These do more to prevent drift than the lint pass does.
             </p>
             {anchors.map((a) => (
-              <div key={a.id} className="small dim" style={{ fontStyle: 'italic', marginBottom: 6 }}>“{a.text}”</div>
+              <p
+                key={a.id}
+                style={{
+                  font: 'italic 15px/1.55 var(--serif)',
+                  color: 'var(--ink-2)',
+                  borderLeft: '1px solid var(--rule-strong)',
+                  padding: '2px 0 2px var(--s3)',
+                  margin: 'var(--s2) 0 0',
+                  maxWidth: '40rem',
+                }}
+              >
+                “{a.text}”
+              </p>
             ))}
           </div>
         ) : null}
+        </div>
       </div>
 
       <aside className="side">
@@ -931,13 +1064,16 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
             ] as const).map(([key, min, max, step]) => (
               <div className="knob" key={key}>
                 <label>
-                  <span>{key}</span>
+                  {/* camelCase is the field name, not a label */}
+                  <span>{key.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}</span>
                   <span className="mono">{knobs[key]}</span>
                 </label>
-                <input
-                  type="range" min={min} max={max} step={step} value={knobs[key] as number}
-                  onChange={(e) => void saveKnobs({ [key]: Number(e.target.value) })}
-                />
+                <div className="scale">
+                  <input
+                    type="range" min={min} max={max} step={step} value={knobs[key] as number}
+                    onChange={(e) => void saveKnobs({ [key]: Number(e.target.value) })}
+                  />
+                </div>
               </div>
             ))}
             <p className="small dimmer">

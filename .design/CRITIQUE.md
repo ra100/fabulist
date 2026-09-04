@@ -261,3 +261,61 @@ Nine, from the `design-humanizer` catalogue:
 The three-register type split, the `why` transparency panel, the canon/chronicle
 tag distinction, and the redaction-bar concept are all genuinely good ideas. They
 are kept and strengthened rather than replaced.
+
+---
+
+# What changed
+
+Lineage committed in `LINEAGE.md` before any visual work: the monastic chronicle
+crossed with the technical instrument panel. Palette rebuilt in OKLCH and verified
+numerically in `contrast.mjs`. Screens `10`–`28` are the result.
+
+| Finding | Rating | Resolution |
+| --- | --- | --- |
+| Entry point never the prose | major | Prose to 19px at full ink; raw echo demoted to a ruled marginal; all native control chrome removed |
+| Three competing left edges | major | One measure — turns, notes and composer share the book column and its exact left edge |
+| `.card h3` doing labels *and* names | major | Split into `.eyebrow` (engraved label) and `.name` (17px serif); fixes cast and the graph panel at once |
+| Accent spent 9× per view | major | Budgeted to ~3; meters go neutral and take gold only above a threshold |
+| Top-loaded, 400–700px of dead canvas | major | Tool views get a measure; cast tiles 3-up; graph auto-fits its plate |
+| 19 arbitrary spacing values | major | 4px base, fixed steps 4/8/12/16/24/32/48 |
+| Card gap == card padding | major | Internal 16px, between 12px, hairline rules carry separation |
+| Figure/ground at 1.06:1 | major | Surface ramp plus 1px top-edge highlight — dark-mode elevation is light, not shadow |
+| Native macOS blue sliders | major | Drawn instrument scale: hairline track, quartered ticks, engraved gold marker |
+| `--dimmer` at 3.6:1 on 11–12px text | major | Dimmest text step now 5.43:1; a decoration-only step is quarantined and never used for text |
+| Status colour carrying meaning alone | major | Every state also names itself in tracked caps; survives greyscale |
+| Causality: 20 uniform rows, 4× duplicated | major | Grouped by scene; rows identical in every displayed dimension collapse to one with `×n`; status moved adjacent to its subject |
+| Facts: fact cramped, knowers sprawling | major | Fact is the entry point; knowers become a delimited grid, one per row, figures tabular |
+| Emoji lock icons | tell | Replaced with `◆`/`◇` and `aria-pressed` |
+| Flat, no light source | tell | One material idea — 3.5% vellum grain — plus a single consistent light direction |
+| Proportional figures in columns | tell | `tabular-nums` everywhere numbers stack |
+| Graph ramp a generic categorical palette | major | Re-derived in-palette and separated by lightness (0.18–0.66) so the encoding survives greyscale |
+
+Two content defects found while looking at pixels and fixed at the source:
+`seedWorld` never set `worldTitle`, so the app opened on "Untitled world"; and the
+opening line joined a thread title to the next sentence with no stop, giving
+"the lower cells At stake:".
+
+## Verification
+
+- **Contrast**, measured on rendered pixels across all seven tabs — 20 distinct
+  text styles, **0 failures**. The deliberately redacted spoiler text is excluded:
+  it is invisible by design and legible when revealed.
+- **Greyscale** (`20`) — hierarchy fully intact; nothing depended on hue.
+- **Squint** (`21`) — three distinct prose blocks, unequal weights, one accent.
+  Does not blur to an even grey field.
+- **Mirror** — asymmetric; the folio gutter and right rail make the flip obvious.
+- **Responsive** (`22`) — at 600px the gutter collapses, the folio moves inline,
+  prose steps to 17px, the rail stacks.
+- **Lineage test** — an iron-gall chronicle page, Bloomberg's chart plates,
+  Braun instrument panels. Three specific artifacts, not a genre.
+- 378 tests pass; `tsc --noEmit` clean.
+
+## Known remaining
+
+- Dead space below content on `causality`, `threads` and `facts` is now *honest* —
+  it reflects how little data the seed holds, and padding it would be worse.
+- `Brother Anselm`'s condition line shows a pre-truncated engine intent string.
+  Clamped to one line with an ellipsis so it reads as deliberate, but the
+  truncation itself is engine-side.
+- The mock provider's prose is intentionally plain, so type was judged on setting
+  rather than on the writing.

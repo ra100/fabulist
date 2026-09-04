@@ -3,7 +3,7 @@
  * is about eighty lines, and owning it means canon/chronicle layering and edge
  * predicates can be rendered exactly as the design wants them.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Edge, Entity } from '../api.ts';
 
 interface Node {
@@ -19,13 +19,18 @@ interface Node {
   vy: number;
 }
 
+/**
+ * Derived inside the palette: warm, low chroma, and separated by *lightness* as
+ * well as hue so the type encoding survives greyscale and colour-vision deficiency.
+ * Values verified in .design/contrast.mjs.
+ */
 const TYPE_COLOR: Record<string, string> = {
-  Character: '#c9a227',
-  Location: '#6b8fb5',
-  Faction: '#b5766b',
-  Item: '#7a9a6b',
-  Concept: '#8f7fb5',
-  Event: '#b59a6b',
+  Character: '#e9b452',
+  Location: '#6898c0',
+  Faction: '#bb584a',
+  Item: '#8fb98f',
+  Concept: '#8e7ab5',
+  Event: '#dfd5ac',
 };
 
 export function GraphView({
@@ -45,6 +50,27 @@ export function GraphView({
   const drag = useRef<{ id: string | null; panning: boolean; lastX: number; lastY: number }>({
     id: null, panning: false, lastX: 0, lastY: 0,
   });
+  // Latest positions, readable from a timer without re-subscribing the effect.
+  const nodesRef = useRef<Node[]>([]);
+  nodesRef.current = nodes;
+  // Once the reader has moved the camera, stop moving it for them.
+  const touched = useRef(false);
+
+  /** Frame the settled layout in the plate, instead of leaving it adrift in a fixed viewBox. */
+  const fitView = useCallback(() => {
+    const ns = nodesRef.current;
+    if (ns.length < 2) return;
+    const xs = ns.map((n) => n.x);
+    const ys = ns.map((n) => n.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    // Labels sit above and beside the dots, so the margin is generous.
+    const mx = 130, my = 70;
+    const k = Math.max(0.35, Math.min(2.2,
+      Math.min(1000 / (maxX - minX + mx * 2), 700 / (maxY - minY + my * 2)),
+    ));
+    setView({ k, x: -(minX + maxX) / 2, y: -(minY + maxY) / 2 });
+  }, []);
 
   const adjacency = useMemo(() => {
     const m = new Map<string, Set<string>>();
@@ -156,6 +182,16 @@ export function GraphView({
     return () => cancelAnimationFrame(frame);
   }, [edges, adjacency, nodes.length]);
 
+  // Fit once the simulation has substantially settled.
+  useEffect(() => {
+    touched.current = false;
+    if (!entities.length) return;
+    const t = window.setTimeout(() => {
+      if (!touched.current) fitView();
+    }, 1500);
+    return () => window.clearTimeout(t);
+  }, [entities, fitView]);
+
   const toWorld = (clientX: number, clientY: number) => {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
@@ -166,6 +202,7 @@ export function GraphView({
   };
 
   const onPointerDown = (e: React.PointerEvent, id?: string) => {
+    touched.current = true;
     drag.current = { id: id ?? null, panning: !id, lastX: e.clientX, lastY: e.clientY };
     (e.target as Element).setPointerCapture?.(e.pointerId);
   };
@@ -194,9 +231,9 @@ export function GraphView({
   return (
     <div className="graph-wrap">
       <div className="graph-controls">
-        <button onClick={() => setView((v) => ({ ...v, k: Math.min(3, v.k * 1.25) }))}>+</button>
-        <button onClick={() => setView((v) => ({ ...v, k: Math.max(0.25, v.k / 1.25) }))}>−</button>
-        <button onClick={() => setView({ x: 0, y: 0, k: 1 })}>reset</button>
+        <button title="zoom in" onClick={() => { touched.current = true; setView((v) => ({ ...v, k: Math.min(3, v.k * 1.25) })); }}>+</button>
+        <button title="zoom out" onClick={() => { touched.current = true; setView((v) => ({ ...v, k: Math.max(0.25, v.k / 1.25) })); }}>−</button>
+        <button title="frame the whole graph" onClick={() => { touched.current = false; fitView(); }}>fit</button>
       </div>
 
       <svg
@@ -219,11 +256,11 @@ export function GraphView({
               <g key={e.id} opacity={active ? 1 : 0.16}>
                 <line
                   x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                  stroke={e.layer === 'canon' ? '#3d4a57' : '#57403d'}
+                  stroke={e.layer === 'canon' ? '#3b4a5a' : '#5a3d36'}
                   strokeWidth={0.6 + e.weight * 1.5}
                 />
                 {active && selectedId ? (
-                  <text x={mx} y={my - 3} fill="#6b6559" fontSize="7" textAnchor="middle" fontFamily="monospace">
+                  <text x={mx} y={my - 3} fill="#8c857c" fontSize="7.5" textAnchor="middle" fontFamily="ui-monospace, monospace" stroke="#0c0a07" strokeWidth={2.2} strokeLinejoin="round" paintOrder="stroke">
                     {e.predicate.toLowerCase().replace(/_/g, ' ')}
                   </text>
                 ) : null}
@@ -251,16 +288,22 @@ export function GraphView({
               >
                 <circle
                   cx={n.x} cy={n.y} r={r}
-                  fill={TYPE_COLOR[n.type] ?? '#8a8378'}
-                  stroke={selected ? '#e8e2d4' : n.emergent ? '#b5766b' : 'none'}
+                  fill={TYPE_COLOR[n.type] ?? '#8c857c'}
+                  stroke={selected ? '#ede7de' : n.emergent ? '#d6715e' : 'none'}
                   strokeWidth={selected ? 2 : n.emergent ? 1.4 : 0}
                   strokeDasharray={n.emergent && !selected ? '2 1.5' : undefined}
                 />
+                {/* A halo in the ground colour, so labels stay legible over edges. */}
                 <text
-                  x={n.x} y={n.y - r - 3.5}
-                  fill={selected ? '#e8e2d4' : '#97907f'}
-                  fontSize={selected ? 10 : 8.5}
+                  x={n.x} y={n.y - r - 4}
+                  fill={selected ? '#ede7de' : '#b0aaa0'}
+                  fontSize={selected ? 10.5 : 9}
+                  fontWeight={selected ? 600 : 400}
                   textAnchor="middle"
+                  stroke="#0c0a07"
+                  strokeWidth={2.6}
+                  strokeLinejoin="round"
+                  paintOrder="stroke"
                 >
                   {n.label}
                 </text>
@@ -272,16 +315,15 @@ export function GraphView({
 
       <div className="legend">
         {Object.entries(TYPE_COLOR).map(([t, c]) => (
-          <span key={t} style={{ marginRight: 10 }}>
+          <span key={t}>
             <i style={{ background: c }} />
             {t}
           </span>
         ))}
         <span>
-          <i style={{ border: '1.4px dashed #b5766b', background: 'none' }} />
+          <i style={{ border: '1.4px dashed #d6715e', background: 'none' }} />
           emergent
         </span>
-      </div>
-    </div>
+      </div>    </div>
   );
 }

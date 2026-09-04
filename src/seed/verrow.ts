@@ -101,6 +101,8 @@ export interface SeedOptions {
 }
 
 export function seedWorld(world: World, opts: SeedOptions = {}): void {
+  // The header reads this. Without it the app opens on "Untitled world".
+  world.chronicle.setMeta('worldTitle', 'Saint Verrow');
   for (const e of ENTITIES) {
     world.graph.upsert(
       {

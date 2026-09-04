@@ -296,8 +296,11 @@ export function proposeOpening(world: World, fallback = ''): string {
       .map((p) => world.graph.get(p)?.name)
       .filter(Boolean);
     const where = world.graph.get(session.currentLocationId ?? '')?.name;
+    // Thread titles are written as fragments, so they need a stop before the
+    // next sentence or the opening reads as one run-on line.
+    const stop = (s: string) => (/[.!?…]$/.test(s.trim()) ? s.trim() : `${s.trim()}.`);
     return [
-      thread.title,
+      stop(thread.title),
       thread.stakes ? `At stake: ${thread.stakes}.` : '',
       others.length ? `Present: ${others.join(', ')}.` : '',
       where ? `You are at ${where}.` : '',

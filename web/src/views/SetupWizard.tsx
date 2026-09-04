@@ -74,13 +74,16 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
 
   return (
     <div className="wizard">
-      <div className="wizard-card">
-        <div className="wizard-head">
-          <h2>Where are we playing?</h2>
-          {step !== 'source' && step !== 'running' ? (
-            <button className="link" onClick={() => setStep('source')}>start over</button>
-          ) : null}
-        </div>
+      <div className="wizard-shell">
+        {/* The only screen with no topbar, so it carries the masthead. */}
+        <p className="wizard-mark">Fabulist</p>
+        <div className="wizard-card">
+          <div className="wizard-head">
+            <h2>Where are we playing?</h2>
+            {step !== 'source' && step !== 'running' ? (
+              <button className="link" onClick={() => setStep('source')}>start over</button>
+            ) : null}
+          </div>
 
         {error ? <div className="wizard-error">{error}</div> : null}
 
@@ -459,6 +462,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
             </div>
           </>
         ) : null}
+        </div>
       </div>
     </div>
   );
