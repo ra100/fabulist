@@ -250,10 +250,19 @@ export interface IngestPlan {
 }
 
 export class SetupPlanner {
-  private provider: Provider;
+  private getProvider: () => Provider;
 
-  constructor(provider: Provider) {
-    this.provider = provider;
+  /**
+   * Takes a getter, not a resolved `Provider`. A `SwappableRegistry` swap (the
+   * "you have Bedrock available, use it" button) replaces what `.get()` returns
+   * without replacing the registry object itself — so capturing the provider
+   * once at construction, as this used to, means the planner keeps silently
+   * writing on the profile that was live when the server started, no matter
+   * what the UI later switches to. `Engine` never had this bug because it holds
+   * the `Registry` and calls `.get(role)` per turn; this now does the same.
+   */
+  constructor(provider: Provider | (() => Provider)) {
+    this.getProvider = typeof provider === 'function' ? provider : () => provider;
   }
 
   async plan(req: PlanRequest): Promise<IngestPlan> {
@@ -341,6 +350,7 @@ export class SetupPlanner {
   }
 
   private async call(role: string, system: string, user: string, schema: JsonSchema): Promise<unknown> {
+    const provider = this.getProvider();
     const req = adaptRequest(
       {
         role,
@@ -352,9 +362,9 @@ export class SetupPlanner {
         temperature: 0.4,
         maxTokens: 3000,
       },
-      this.provider.capabilities,
+      provider.capabilities,
     );
-    const res = await this.provider.complete(req);
+    const res = await provider.complete(req);
     return extractJson(res.text);
   }
 }

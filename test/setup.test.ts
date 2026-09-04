@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { World } from '../src/store/index.ts';
 import { MockProvider } from '../src/providers/mock.ts';
-import { ProviderRegistry } from '../src/providers/provider.ts';
+import { ProviderRegistry, SwappableRegistry } from '../src/providers/provider.ts';
 import { WikiDirectory, directoryFixture } from '../src/setup/directory.ts';
 import { SetupPlanner } from '../src/setup/planner.ts';
 import { applyCustomWorld, assignPlayerCharacter, proposeOpening } from '../src/setup/apply.ts';
@@ -121,6 +121,33 @@ test('free text becomes a plan with seeds drawn only from real starting points',
   assert.ok(plan.seeds.length > 0);
   assert.ok(plan.seeds.every((s) => offered.has(s)), 'a hallucinated page title would leave an empty world');
   assert.ok(['skim', 'mid', 'deep'].includes(plan.mode));
+});
+
+test('the planner sees a live profile switch instead of the provider captured at construction', async () => {
+  // The real bug: SetupService used to resolve `providers.get('setup')` once in
+  // its constructor and hand SetupPlanner that concrete Provider. Switching the
+  // live profile afterwards — the wizard's own "you have Bedrock, use it"
+  // button — replaced what the registry's `.get()` returns without replacing
+  // the object SetupPlanner had already captured, so every plan kept silently
+  // running on whatever was live at server startup. The engine never had this
+  // bug: it holds the Registry and calls `.get(role)` per turn.
+  const before = new MockProvider({ id: 'before' });
+  const after = new MockProvider({ id: 'after' });
+  const registry = new SwappableRegistry(new ProviderRegistry(before), 'a');
+
+  const planner = new SetupPlanner(() => registry.get('setup'));
+  const startingPoints = [{ title: 'Ashgrove Arc', kind: 'category', members: 18 }];
+  const wiki = { name: 'W', baseUrl: 'https://vale.fandom.com', articles: 4200, language: 'en', via: 'directory' as const, confidence: 0.9 };
+
+  await planner.plan({ wish: 'a minor character in the Ashgrove arc', wiki, startingPoints });
+  assert.equal(before.calls.length, 1, 'the profile live at construction serves the first call');
+  assert.equal(after.calls.length, 0);
+
+  registry.swap(new ProviderRegistry(after), 'b');
+
+  await planner.plan({ wish: 'a minor character in the Ashgrove arc', wiki, startingPoints });
+  assert.equal(before.calls.length, 1, 'the old provider is not called again after the swap');
+  assert.equal(after.calls.length, 1, 'the swapped-in provider serves the very next call, no restart needed');
 });
 
 test('a plan gives the player character ranked vows', async () => {
@@ -287,6 +314,38 @@ test('the full wizard path produces a playable world', async () => {
   assert.equal(world.session.get().playerCharacterId, result.playerCharacterId);
   assert.ok(world.session.get().currentLocationId, 'and put somewhere');
   assert.ok(result.opening.length > 0);
+  world.close();
+});
+
+test('SetupService.plan reflects a live profile swap, not the provider it was built with', async () => {
+  // Same regression as the SetupPlanner-level test, one layer up: this is
+  // where the real bug was found, running the actual 4.1 session against
+  // bedrock. `SetupService`'s constructor used to call `providers.get('setup')`
+  // once and hand that concrete Provider to `SetupPlanner`. Wiring it through a
+  // `SwappableRegistry`, exactly as `serve.ts` does for real, catches the case
+  // a unit test on `SetupPlanner` alone cannot: whether the *service* passes a
+  // live getter through, not just whether the planner would honour one if given it.
+  const before = new MockProvider({ id: 'before' });
+  const after = new MockProvider({ id: 'after' });
+  const registry = new SwappableRegistry(new ProviderRegistry(before), 'a');
+  const world = World.open(':memory:');
+  const svc = new SetupService({
+    world,
+    providers: registry,
+    directoryOptions: { fetcher: directoryFixture(FIXTURE), delayMs: 0 },
+    wikiFetcher: fixtureFetcher(WIKI),
+  });
+
+  const candidates = await svc.resolveWiki('the ashen vale');
+  await svc.plan('play in the Ashgrove arc as a minor figure', candidates[0]!);
+  assert.equal(before.calls.length, 1);
+  assert.equal(after.calls.length, 0);
+
+  registry.swap(new ProviderRegistry(after), 'b');
+
+  await svc.plan('play in the Ashgrove arc as a minor figure', candidates[0]!);
+  assert.equal(before.calls.length, 1, 'no restart happened, so the pre-swap provider took no further calls');
+  assert.equal(after.calls.length, 1, 'the service sees the swap on its very next plan() call');
   world.close();
 });
 

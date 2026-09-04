@@ -62,7 +62,10 @@ export class SetupService {
     this.world = opts.world;
     this.providers = opts.providers;
     this.directory = new WikiDirectory(opts.directoryOptions ?? {});
-    this.planner = new SetupPlanner(opts.providers.get('setup'));
+    // A getter, not a resolved provider: a live profile switch replaces what
+    // `this.providers.get()` returns, and the planner must see that on its next
+    // call rather than keep writing on whatever was live at construction.
+    this.planner = new SetupPlanner(() => opts.providers.get('setup'));
     this.wikiFetcher = opts.wikiFetcher;
     this.jobs = opts.jobs ?? new JobRegistry();
   }
