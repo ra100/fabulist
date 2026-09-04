@@ -319,3 +319,77 @@ opening line joined a thread title to the next sentence with no stop, giving
   truncation itself is engine-side.
 - The mock provider's prose is intentionally plain, so type was judged on setting
   rather than on the writing.
+
+---
+
+# Second pass: the states nobody had looked at
+
+The first pass judged every view in its default state. Four states were restyled
+but never actually rendered, and the product's core loop had no design at all.
+Screens `33`–`40`.
+
+## Raw database keys in the entity panel — `major`
+
+**Observation.** The graph's entity panel listed every relationship as its primary
+key: `char:brother-anselm`, `fac:the-order-of-verrow`, `item:the-verrow-psalter`.
+Predicates were raw snake_case, and `keeps_secret_from` overflowed its fixed
+118px column into the value beside it.
+
+**Problem.** The graph exists to make relationships legible, and its detail panel
+was the least legible surface in the app. The `id` row also sat first in the list,
+so the most developer-facing value had the most prominent position.
+
+**Fix.** Ids resolve to names from the loaded graph, with a humanised slug as the
+fallback so a missing lookup still never shows a key. Predicates become tracked
+caps labels — `KEEPS SECRET FROM` — in a grid that cannot collide. `id` moved last
+and dim. Relationship metrics gained real labels (`TRUST 0.9`, not `t0.9`) and a
+true minus sign, since these values are frequently negative.
+
+## Smaller findings
+
+| Finding | Fix |
+| --- | --- |
+| `--` used as the "unavailable" provider marker | `NOT SET` in neutral tracked caps; amber is reserved for the actionable fix line, so state is information and only the action takes colour |
+| Six amber fix lines competing with the accent | State demoted to neutral, halving the amber on the screen |
+| `locationId` shown as a lock label | Reads `location` |
+| Expanded cast sheet stretched its ruled headings to 1330px | Content capped at a 62rem measure inside the spanning card |
+| Directive readout padded three zeros at the same weight as the one real number | Only effects that actually happened are listed; `no change` when nothing moved |
+| Bare `×` retire button | Given an `aria-label` naming the directive |
+
+## The core loop had no design
+
+**Observation.** Pressing `play` disabled the button, changed its label to
+`writing…`, and did nothing else. Prose then appeared instantly, with no
+transition.
+
+**Problem.** The wait *is* the product — six provider calls run behind it — and it
+was rendered as a greyed-out button. Nothing acknowledged that the words had been
+committed, and prose arrived by popping into place.
+
+**Fix — the waiting page.** A provisional turn appears in the book carrying its
+folio number, the author's real words in the marginal treatment, and beneath them
+the ruling of a chronicle page waiting for ink: three lines at the exact prose
+leading, the last at 62% for a paragraph's shape, breathing slowly. This is honest
+— every element shown is real, and no progress is claimed that the engine has not
+made. It also restates the product's central idea, that prose is a separate
+register rendered onto what you actually said.
+
+The ruling waits 150ms before appearing, so a fast turn does not flash it.
+
+**Fix — arrival.** New prose fades and rises 6px over 280ms on a decelerate curve,
+with the marginalia following 70ms behind. Only the turn that actually just landed
+animates; history does not re-animate on re-render.
+
+**Motion tokens.** Four, replacing the ad-hoc durations scattered before:
+`--dur-fast` 90ms, `--dur-normal` 160ms, `--dur-enter` 280ms, plus a standard and
+an enter easing. `prefers-reduced-motion` is handled once at system level:
+movement is removed, and motion that carries state — the spinner, the breathing
+ruling — is preserved. Verified under emulated reduced motion.
+
+## Verification
+
+- **Contrast on rendered pixels: 27 distinct text styles across all seven tabs
+  plus the entity panel, expanded cast sheet and provider list — 0 failures.**
+- Reduced motion verified: arrival animation resolves to `none`, ruling keeps
+  breathing at 3s.
+- 378 tests pass; typecheck clean.

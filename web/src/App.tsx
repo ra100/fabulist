@@ -122,6 +122,11 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
   const [lastMeta, setLastMeta] = useState<TurnMeta | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
   const bottom = useRef<HTMLDivElement>(null);
+  /** The words already committed, waiting for their prose. */
+  const [awaiting, setAwaiting] = useState<string | null>(null);
+  /** Which turn just landed, so only that one animates in. */
+  const [arrivingId, setArrivingId] = useState<string | null>(null);
+  const seenIds = useRef<Set<string> | null>(null);
 
   const load = useCallback(async () => {
     const book = await api.book();
@@ -132,14 +137,30 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
     void load();
   }, [load]);
 
+  // The first render is history, not an arrival, so it does not animate.
+  useEffect(() => {
+    if (seenIds.current === null) {
+      seenIds.current = new Set(turns.map((t) => t.id));
+      return;
+    }
+    const fresh = turns.filter((t) => !seenIds.current!.has(t.id));
+    for (const t of fresh) seenIds.current.add(t.id);
+    if (!fresh.length) return;
+    setArrivingId(fresh[fresh.length - 1]!.id);
+    const h = window.setTimeout(() => setArrivingId(null), 600);
+    return () => window.clearTimeout(h);
+  }, [turns]);
+
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [turns.length]);
+  }, [turns.length, awaiting]);
 
   async function play(text: string, override = false) {
     if (!text.trim() || busy) return;
     setBusy(true);
     setNotes([]);
+    // Under ~150ms the page would only flash, so the ruling waits that long.
+    const revealAwaiting = window.setTimeout(() => setAwaiting(text), 150);
     try {
       const res = await api.play(text, override);
       const o = res.outcome;
@@ -172,6 +193,8 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
     }
+    window.clearTimeout(revealAwaiting);
+    setAwaiting(null);
     setBusy(false);
   }
 
@@ -184,7 +207,10 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
               <p className="empty">Nothing written yet. Describe what you do below.</p>
             ) : null}
             {turns.map((t) => (
-              <div key={t.id} className={`turn${t.pinned ? ' pinned' : ''}`}>
+              <div
+                key={t.id}
+                className={`turn${t.pinned ? ' pinned' : ''}${t.id === arrivingId ? ' arriving' : ''}`}
+              >
                 <span className="folio">{t.scene}·{t.turn}</span>
                 <div className="raw">{t.rawInput}</div>
                 <p className="prose">{t.bookProse}</p>
@@ -205,6 +231,19 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
                 </div>
               </div>
             ))}
+            {/* The words are committed; the ink has not arrived yet. */}
+            {awaiting ? (
+              <div className="turn awaiting" aria-live="polite">
+                <span className="folio">
+                  {state ? `${state.session.scene}·${state.session.turn + 1}` : '·'}
+                </span>
+                <div className="raw">{awaiting}</div>
+                <div className="ruled" aria-hidden="true"><i /><i /><i /></div>
+                <div className="turn-tools">
+                  <span className="status ripening">writing</span>
+                </div>
+              </div>
+            ) : null}
             <div ref={bottom} />
           </div>
         </div>
@@ -415,13 +454,39 @@ function GraphTab() {
         ) : null}
       </div>
       <aside className="side">
-        <EntityPanel detail={detail} onSelect={setSelected} />
+        <EntityPanel detail={detail} onSelect={setSelected} entities={data?.entities} />
       </aside>
     </div>
   );
 }
 
-function EntityPanel({ detail, onSelect }: { detail: EntityDetail | null; onSelect: (id: string) => void }) {
+/**
+ * The graph's whole purpose is reading relationships, so nothing here shows a raw
+ * id. Names come from the loaded graph; anything missing falls back to a
+ * humanised slug rather than exposing the key.
+ */
+function entityNamer(entities: Entity[] | undefined) {
+  const byId = new Map((entities ?? []).map((e) => [e.id, e.name]));
+  return (id: string) =>
+    byId.get(id) ?? (id.split(':').pop() ?? id).replace(/-/g, ' ');
+}
+
+/** `keeps_secret_from` is a database predicate, not something a reader should see. */
+const readPredicate = (p: string) => p.toLowerCase().replace(/_/g, ' ');
+
+/** A real minus (U+2212), not a hyphen. Relationship values are often negative. */
+const signed = (n: number, places = 1) => n.toFixed(places).replace('-', '\u2212');
+
+function EntityPanel({
+  detail,
+  onSelect,
+  entities,
+}: {
+  detail: EntityDetail | null;
+  onSelect: (id: string) => void;
+  entities?: Entity[];
+}) {
+  const nameOf = entityNamer(entities);
   if (!detail) return <div className="card"><h3>entity</h3><p className="empty">Select a node.</p></div>;
   const { entity, canon, sheet } = detail;
   return (
@@ -435,15 +500,16 @@ function EntityPanel({ detail, onSelect }: { detail: EntityDetail | null; onSele
           {entity.summary || <i className="dimmer">no summary</i>}
         </p>
         <dl className="kv small">
-          <dt>id</dt><dd className="mono">{entity.id}</dd>
           <dt>type</dt><dd>{entity.type}</dd>
           <dt>salience</dt><dd>{entity.salience.toFixed(2)}</dd>
           <dt>depth</dt><dd>{['none', 'skim', 'mid', 'deep'][entity.depthLevel] ?? entity.depthLevel}</dd>
-          <dt>provenance</dt><dd className="mono dimmer">{entity.provenance}</dd>
+          <dt>provenance</dt><dd>{entity.provenance}</dd>
+          {/* The key is developer information, so it goes last and stays quiet. */}
+          <dt>id</dt><dd className="mono dimmer">{entity.id}</dd>
         </dl>
         {/* Canon divergence is the point of the two-layer model, so show it. */}
         {canon && canon.summary !== entity.summary ? (
-          <div className="small" style={{ marginTop: 9, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+          <div className="small" style={{ marginTop: 'var(--s3)', borderTop: '1px solid var(--rule)', paddingTop: 'var(--s3)' }}>
             <span className="tag canon">canon said</span>
             <div className="dim" style={{ marginTop: 5 }}>{canon.summary}</div>
           </div>
@@ -453,65 +519,87 @@ function EntityPanel({ detail, onSelect }: { detail: EntityDetail | null; onSele
       {sheet?.contract.vows.length ? (
         <div className="card">
           <h3>vows</h3>
-          {[...sheet.contract.vows].sort((a, b) => a.rank - b.rank).map((v) => (
-            <div key={v.id} className="small" style={{ marginBottom: 5 }}>
-              <span className={v.broken ? 'warn' : 'ok'}>{v.broken ? 'broken' : 'held'}</span>{' '}
-              <span className="dimmer mono">r{v.rank}</span> {v.text}
-            </div>
-          ))}
+          <div className="stack">
+            {[...sheet.contract.vows].sort((a, b) => a.rank - b.rank).map((v) => (
+              <div key={v.id} className="row baseline small">
+                <span className={`status ${v.broken ? 'ripening' : 'fired'}`} style={{ minWidth: '3.4rem' }}>
+                  {v.broken ? 'broken' : 'held'}
+                </span>
+                <span className="mono dimmer">r{v.rank}</span>
+                <span className="grow">{v.text}</span>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
 
       <div className="card">
-        <h3>edges out</h3>
-        {detail.edgesOut.length === 0 ? <p className="empty">none</p> : null}
-        {detail.edgesOut.map((e) => (
-          <div key={e.id} className="small row">
-            <span className="mono dimmer" style={{ width: 118 }}>{e.predicate.toLowerCase()}</span>
-            <button className="grow" style={{ textAlign: 'left', background: 'none', border: 'none', padding: 0 }} onClick={() => onSelect(e.object)}>
-              {e.object}
+        <h3>connections out</h3>
+        {detail.edgesOut.length === 0 ? <p className="empty" style={{ padding: 0 }}>none</p> : null}
+        <div className="rels">
+          {detail.edgesOut.map((e) => (
+            <button key={e.id} className="rel" onClick={() => onSelect(e.object)}>
+              <span className="rel-pred">{readPredicate(e.predicate)}</span>
+              <span className="rel-name">{nameOf(e.object)}</span>
             </button>
-          </div>
-        ))}
-        <h3 style={{ marginTop: 12 }}>edges in</h3>
-        {detail.edgesIn.length === 0 ? <p className="empty">none</p> : null}
-        {detail.edgesIn.map((e) => (
-          <div key={e.id} className="small row">
-            <span className="mono dimmer" style={{ width: 118 }}>{e.predicate.toLowerCase()}</span>
-            <button className="grow" style={{ textAlign: 'left', background: 'none', border: 'none', padding: 0 }} onClick={() => onSelect(e.subject)}>
-              {e.subject}
+          ))}
+        </div>
+        <h3 style={{ marginTop: 'var(--s4)' }}>connections in</h3>
+        {detail.edgesIn.length === 0 ? <p className="empty" style={{ padding: 0 }}>none</p> : null}
+        <div className="rels">
+          {detail.edgesIn.map((e) => (
+            <button key={e.id} className="rel" onClick={() => onSelect(e.subject)}>
+              <span className="rel-pred">{readPredicate(e.predicate)}</span>
+              <span className="rel-name">{nameOf(e.subject)}</span>
             </button>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
 
-      {/* Asymmetry is the normal case, so both directions are shown side by side. */}
+      {/* Asymmetry is the normal case, so both directions are shown. */}
       {detail.relationships.length || detail.relationshipsToward.length ? (
         <div className="card">
-          <h3>relationships</h3>
-          {detail.relationships.map((r) => (
-            <div key={`o${r.toId}`} className="small">
-              → {r.toId} <span className="dimmer mono">t{r.trust.toFixed(1)} a{r.affection.toFixed(1)} r{r.respect.toFixed(1)}</span>
-              {r.note ? <div className="dimmer">{r.note}</div> : null}
-            </div>
-          ))}
-          {detail.relationshipsToward.map((r) => (
-            <div key={`i${r.fromId}`} className="small" style={{ marginTop: 4 }}>
-              ← {r.fromId} <span className="dimmer mono">t{r.trust.toFixed(1)} a{r.affection.toFixed(1)} r{r.respect.toFixed(1)}</span>
-              {r.note ? <div className="dimmer">{r.note}</div> : null}
-            </div>
-          ))}
+          <h3>how they regard each other</h3>
+          <div className="stack">
+            {[
+              ...detail.relationships.map((r) => ({ ...r, id: r.toId, outward: true })),
+              ...detail.relationshipsToward.map((r) => ({ ...r, id: r.fromId, outward: false })),
+            ].map((r) => (
+              <div key={`${r.outward ? 'o' : 'i'}${r.id}`} className="regard">
+                <div className="row baseline">
+                  <span className="regard-dir" title={r.outward ? 'toward them' : 'toward this character'}>
+                    {r.outward ? '→' : '←'}
+                  </span>
+                  <button className="rel-name grow" onClick={() => onSelect(r.id)}>{nameOf(r.id)}</button>
+                </div>
+                <div className="regard-metrics">
+                  <span><i>trust</i>{signed(r.trust)}</span>
+                  <span><i>affection</i>{signed(r.affection)}</span>
+                  <span><i>respect</i>{signed(r.respect)}</span>
+                </div>
+                {r.note ? <div className="small dimmer">{r.note}</div> : null}
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
 
       {detail.knowledge.length ? (
         <div className="card">
-          <h3>knows</h3>
-          {detail.knowledge.map((k) => (
-            <div key={k.factId} className="small">
-              <span className={k.level === 'knows' ? 'ok' : k.level === 'wrong' ? 'warn' : 'dim'}>[{k.level}]</span> {k.text}
-            </div>
-          ))}
+          <h3>what they hold</h3>
+          <div className="stack">
+            {detail.knowledge.map((k) => (
+              <div key={k.factId} className="row baseline small">
+                <span
+                  className={`status ${k.level === 'knows' ? 'fired' : k.level === 'wrong' ? 'ripening' : 'pending'}`}
+                  style={{ minWidth: '4.2rem' }}
+                >
+                  {k.level}
+                </span>
+                <span className="grow">{k.text}</span>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
     </>
@@ -559,7 +647,7 @@ function CastTab() {
               </div>
 
               {openId === sheet.entityId ? (
-                <div style={{ marginTop: 'var(--s4)', borderTop: '1px solid var(--rule)', paddingTop: 'var(--s4)' }}>
+                <div className="sheet-detail">
                   {sheet.contract.vows.length ? (
                     <>
                       <h3 className="eyebrow rule">contract</h3>
@@ -637,7 +725,7 @@ function CastTab() {
                             await load();
                           }}
                         >
-                          {on ? '◆' : '◇'} {path.replace('condition.', '')}
+                          {on ? '◆' : '◇'} {path.replace('condition.', '').replace('locationId', 'location')}
                         </button>
                       );
                     })}
@@ -662,7 +750,7 @@ function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () =
   const [threads, setThreads] = useState<Thread[]>([]);
   const [text, setText] = useState('');
   const [strength, setStrength] = useState('push');
-  const [diff, setDiff] = useState<string[] | null>(null);
+  const [diff, setDiff] = useState<Array<[string, string]> | null>(null);
 
   const load = useCallback(async () => setThreads(await api.threads()), []);
   useEffect(() => {
@@ -731,13 +819,19 @@ function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () =
               onClick={async () => {
                 const res = await api.addDirective(text, strength);
                 // Recalculation is reported, never silent: that is what keeps it
-                // trustworthy in a system with offscreen machinery.
-                setDiff([
-                  `raised: ${res.diff.raisedThreadTitles.join('; ') || 'none'}`,
-                  `lowered: ${res.diff.loweredThreads.length}`,
-                  `superseded: ${res.diff.supersededConsequences.length} pending consequence(s)`,
-                  `retimed: ${res.diff.retimedConsequences.length}`,
-                ]);
+                // trustworthy in a system with offscreen machinery. Zeros are not
+                // news, so only the effects that actually happened are listed.
+                const d = res.diff;
+                const entries: Array<[string, string]> = [];
+                if (d.raisedThreadTitles.length) entries.push(['raised', d.raisedThreadTitles.join('; ')]);
+                if (d.loweredThreads.length) entries.push(['lowered', `${d.loweredThreads.length} thread(s)`]);
+                if (d.supersededConsequences.length) {
+                  entries.push(['superseded', `${d.supersededConsequences.length} pending consequence(s)`]);
+                }
+                if (d.retimedConsequences.length) {
+                  entries.push(['retimed', `${d.retimedConsequences.length} consequence(s)`]);
+                }
+                setDiff(entries.length ? entries : [['no change', 'nothing needed moving']]);
                 setText('');
                 await load();
                 onChanged();
@@ -747,9 +841,16 @@ function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () =
             </button>
           </div>
           {diff ? (
-            <div className="small dim" style={{ marginTop: 9 }}>
-              <b>recalculated</b>
-              {diff.map((d, i) => <div key={i}>{d}</div>)}
+            <div style={{ marginTop: 'var(--s4)' }}>
+              <h3 className="eyebrow rule">recalculated</h3>
+              <dl className="kv small">
+                {diff.map(([k, v]) => (
+                  <Fragment key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </Fragment>
+                ))}
+              </dl>
             </div>
           ) : null}
         </div>
@@ -762,7 +863,13 @@ function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () =
                 <span className="grow">
                   <span className="tag">{d.strength}</span> {d.text}
                 </span>
-                <button onClick={async () => { await api.retireDirective(d.id); onChanged(); }}>×</button>
+                <button
+                  aria-label={`retire directive: ${d.text}`}
+                  title="retire this directive"
+                  onClick={async () => { await api.retireDirective(d.id); onChanged(); }}
+                >
+                  ×
+                </button>
               </div>
             ))}
           </div>
@@ -1107,8 +1214,15 @@ function ProvidersPanel() {
     setBusy(false);
   };
 
+  // The state is information; the fix is the action. Only the action takes colour.
   const badge = (status: string) =>
-    status === 'ready' ? <span className="ok">ready</span> : status === 'unknown' ? <span className="dimmer">?</span> : <span className="warn">--</span>;
+    status === 'ready' ? (
+      <span className="status fired">ready</span>
+    ) : status === 'unknown' ? (
+      <span className="status pending">unknown</span>
+    ) : (
+      <span className="status pending">not set</span>
+    );
 
   return (
     <div className="card">
@@ -1134,17 +1248,15 @@ function ProvidersPanel() {
             {report.usableProfiles.length ? ` · usable now: ${report.usableProfiles.join(', ')}` : ' · nothing but the mock is usable'}
           </p>
           {report.results.map((r) => (
-            <div key={r.key} style={{ marginBottom: 7 }}>
-              <div className="row small">
-                <span style={{ width: 46 }}>{badge(r.status)}</span>
-                <span className="grow mono">{r.key}</span>
-                <span className="dimmer">{r.auth}</span>
-              </div>
-              {r.detail ? <div className="small dimmer" style={{ paddingLeft: 46 }}>{r.detail}</div> : null}
-              {r.fix ? <div className="small warn" style={{ paddingLeft: 46 }}>→ {r.fix}</div> : null}
+            <div key={r.key} className="provider">
+              <span className="provider-status">{badge(r.status)}</span>
+              <span className="mono">{r.key}</span>
+              <span className="provider-auth">{r.auth}</span>
+              {r.detail ? <span className="provider-detail">{r.detail}</span> : null}
+              {r.fix ? <span className="provider-fix">→ {r.fix}</span> : null}
             </div>
           ))}
-          <p className="small dimmer">
+          <p className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
             Switching profile is a config change (fabulist.config.json), so the engine reloads it on restart.
           </p>
         </>

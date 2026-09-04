@@ -59,6 +59,13 @@
   --gutter: 5rem;
   --measure-book: 45rem;
   --measure-tool: 60rem;
+
+  /* --- motion: four tokens, semantic names. Nothing here is decorative. --- */
+  --dur-fast: 90ms;
+  --dur-normal: 160ms;
+  --dur-enter: 280ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0, 0, 0.2, 1);
 }
 
 * {
@@ -114,7 +121,7 @@ button {
   cursor: pointer;
   /* elevation on dark = light from above, never shadow */
   box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.045);
-  transition: color 90ms ease, border-color 90ms ease, background-color 90ms ease;
+  transition: color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
 button:hover:not(:disabled) {
   color: var(--ink);
@@ -598,11 +605,47 @@ hr {
   padding: 2px 8px;
   font-size: 11px;
   opacity: 0;
-  transition: opacity 110ms ease;
+  transition: opacity var(--dur-normal) var(--ease-standard);
 }
 .turn:hover .turn-tools button,
 .turn-tools button:focus-visible { opacity: 1; }
 .turn.pinned .turn-tools button { opacity: 1; }
+
+/* ---- waiting: a ruled page, not a shimmer -------------------------------- */
+/* The author's words are already real and shown. What is missing is the ink,
+   so the placeholder is the ruling a chronicle page gets before it is written.
+   Nothing here implies progress the engine has not actually made. */
+
+.turn.awaiting .folio { color: var(--gold-dim); }
+.ruled {
+  max-width: var(--measure-prose);
+  margin-top: 2px;
+  animation: ruled-breathe 2.4s ease-in-out infinite;
+}
+.ruled > i {
+  display: block;
+  /* one prose line: 19px × 1.62 leading */
+  height: calc(19px * 1.62);
+  border-bottom: 1px solid var(--rule);
+}
+.ruled > i:last-child { width: 62%; }
+@keyframes ruled-breathe {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* ---- arrival: prose leads, marginalia follows ---------------------------- */
+
+@keyframes turn-arrive {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.turn.arriving .prose {
+  animation: turn-arrive var(--dur-enter) var(--ease-enter) both;
+}
+.turn.arriving .turn-tools {
+  animation: turn-arrive var(--dur-enter) var(--ease-enter) 70ms both;
+}
 
 /* the composer shares the book's measure and its exact left edge */
 .composer {
@@ -907,12 +950,120 @@ tr.clickable:hover { background: var(--surface-1); }
   flex-direction: column;
 }
 .cast-grid > .card.span { grid-column: 1 / -1; }
+/* The opened sheet spans every column for room, but its content keeps a measure
+   so the ruled headings do not stretch across the whole window. */
+.sheet-detail {
+  max-width: 62rem;
+  margin-top: var(--s4);
+  border-top: 1px solid var(--rule);
+  padding-top: var(--s4);
+}
 /* the condition line is one line: engine intent strings can be long and pre-truncated */
 .cast-cond {
   margin-top: auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ----------------------------------------------------------------- providers */
+/* status, key and auth on one ruled line; detail and fix hang under the key */
+
+.provider {
+  display: grid;
+  grid-template-columns: 4.6rem 1fr auto;
+  gap: 2px var(--s3);
+  align-items: baseline;
+  padding: var(--s2) 0;
+  border-bottom: 1px solid oklch(0.32 0.012 68 / 0.5);
+}
+.provider:last-of-type { border-bottom: none; }
+.provider-status { grid-column: 1; }
+.provider-auth {
+  grid-column: 3;
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.provider-detail,
+.provider-fix {
+  grid-column: 2 / -1;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.provider-detail { color: var(--ink-3); }
+.provider-fix { color: var(--warn); }
+
+/* --------------------------------------------------------------- relations */
+/* The predicate is the label, the name is the content. Nothing shows a raw id. */
+
+.rels { display: flex; flex-direction: column; }
+.rel {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--s3);
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid oklch(0.32 0.012 68 / 0.5);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 5px 0;
+}
+.rel:last-child { border-bottom: none; }
+.rel:hover:not(:disabled) { background: none; }
+.rel:hover .rel-name { color: var(--gold); }
+.rel-pred {
+  font-family: var(--sans);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-3);
+  max-width: 8.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rel-name {
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--ink);
+  text-align: right;
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+button.rel-name {
+  text-align: left;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+button.rel-name:hover:not(:disabled) { background: none; color: var(--gold); }
+
+.regard { padding: var(--s2) 0; border-bottom: 1px solid oklch(0.32 0.012 68 / 0.5); }
+.regard:last-child { border-bottom: none; }
+.regard-dir { font-family: var(--mono); font-size: 12px; color: var(--ink-4); }
+.regard-metrics {
+  display: flex;
+  gap: var(--s3);
+  margin-top: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.regard-metrics i {
+  font-style: normal;
+  font-family: var(--sans);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-3);
+  margin-right: 4px;
 }
 
 /* --------------------------------------------------------------------- facts */
@@ -1139,9 +1290,28 @@ button.link:hover { background: none; color: var(--ink); }
   animation: spin 0.75s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Handled at system level, not per component. Motion that carries state — the
+   spinner and the waiting page — is preserved as a fade; movement is removed. */
 @media (prefers-reduced-motion: reduce) {
-  .spinner { animation-duration: 2s; }
-  * { transition-duration: 1ms !important; }
+  *, *::before, *::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+  .spinner {
+    animation-duration: 1.4s !important;
+    animation-iteration-count: infinite !important;
+  }
+  .ruled {
+    animation-duration: 3s !important;
+    animation-iteration-count: infinite !important;
+  }
+  .turn.arriving .prose,
+  .turn.arriving .turn-tools {
+    animation: none !important;
+  }
 }
 
 .log { margin-top: var(--s3); }
