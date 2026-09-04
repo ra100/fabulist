@@ -192,6 +192,36 @@ export class ChronicleStore {
     return r ? toTurn(r) : undefined;
   }
 
+  /**
+   * Sums every provider call recorded across every turn's meta. Per-turn calls
+   * are logged and shown in the why panel; nothing accumulated them, which on a
+   * paid provider is exactly the number a player wants without doing the sum
+   * themselves.
+   */
+  usageTotals(): {
+    tokensIn: number;
+    tokensOut: number;
+    calls: number;
+    byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }>;
+  } {
+    const total = { tokensIn: 0, tokensOut: 0, calls: 0 };
+    const byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }> = {};
+    const metas = rows<{ meta: string }>(this.db.prepare(`SELECT meta FROM turns`).all());
+    for (const row_ of metas) {
+      const meta = jsonGet<TurnMeta | null>(row_.meta, null);
+      for (const c of meta?.providerCalls ?? []) {
+        total.tokensIn += c.tokensIn;
+        total.tokensOut += c.tokensOut;
+        total.calls += 1;
+        const r = (byRole[c.role] ??= { tokensIn: 0, tokensOut: 0, calls: 0 });
+        r.tokensIn += c.tokensIn;
+        r.tokensOut += c.tokensOut;
+        r.calls += 1;
+      }
+    }
+    return { ...total, byRole };
+  }
+
   /** Re-render changes how it is told, never what happened (DESIGN §7.2). */
   setProse(id: string, prose: string): void {
     this.db.prepare(`UPDATE turns SET book_prose = ? WHERE id = ? AND pinned = 0`).run(prose, id);

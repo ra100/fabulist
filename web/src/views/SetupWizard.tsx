@@ -13,6 +13,7 @@ import {
   type IngestPlan,
   type Job,
   type PreviewResult,
+  type ProvidersReport,
   type StyleContract,
   type WikiCandidate,
 } from '../api.ts';
@@ -35,6 +36,20 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   const [customDesc, setCustomDesc] = useState('');
   const [cast, setCast] = useState<CandidateCharacter[]>([]);
   const [opening, setOpening] = useState('');
+
+  // Half-closed already: settings can switch profile live, but the wizard used
+  // to build the world silently on the mock regardless. A first-time visitor
+  // meets deliberately plain prose at exactly the moment they are deciding
+  // whether any of this is good, so offer the better model up front instead.
+  const [providers, setProviders] = useState<ProvidersReport | null>(null);
+  const [switchingProfile, setSwitchingProfile] = useState(false);
+  const [dismissedOffer, setDismissedOffer] = useState(false);
+
+  useEffect(() => {
+    void api.providers().then(setProviders).catch(() => {});
+  }, []);
+
+  const betterProfiles = (providers?.usableProfiles ?? []).filter((p) => p !== 'mock' && p !== providers?.profile);
 
   const guard = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -90,33 +105,70 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
 
         {/* ---------------------------------------------------------- source */}
         {step === 'source' ? (
-          <div className="choices">
-            <button
-              className="choice"
-              onClick={() => setStep('universe')}
-            >
-              <b>An existing world</b>
-              <span>A book, film, game or show. I'll find its wiki and read enough of it to run a game there.</span>
-            </button>
-            <button className="choice" onClick={() => setStep('wish')}>
-              <b>A world I describe</b>
-              <span>Tell me the premise and I'll invent the places, factions and cast, with tensions already running.</span>
-            </button>
-            <button
-              className="choice"
-              disabled={busy}
-              onClick={() =>
-                void guard(async () => {
-                  const res = await api.setup.sample();
-                  setOpening(res.opening);
-                  setStep('ready');
-                })
-              }
-            >
-              <b>Use the built-in example</b>
-              <span>Saint Verrow: a monastery under a secular garrison. Fastest way to see how this plays.</span>
-            </button>
-          </div>
+          <>
+            {providers?.profile === 'mock' && betterProfiles.length && !dismissedOffer ? (
+              <div className="wizard-provider-offer">
+                <p className="small">
+                  This machine can also run on <b>{betterProfiles.join(', ')}</b> instead of the built-in mock.
+                  The mock proves the machinery, not the prose — worth switching before you judge either.
+                </p>
+                <div className="row">
+                  {betterProfiles.map((name) => (
+                    <button
+                      key={name}
+                      disabled={switchingProfile}
+                      onClick={() =>
+                        void guard(async () => {
+                          setSwitchingProfile(true);
+                          try {
+                            const res = await api.setProfile(name);
+                            if (res.ok) setProviders(await api.providers());
+                            else setError(res.notes.join(' ') || `could not switch to ${name}`);
+                          } finally {
+                            setSwitchingProfile(false);
+                          }
+                        })
+                      }
+                    >
+                      use {name}
+                    </button>
+                  ))}
+                  <button className="link" onClick={() => setDismissedOffer(true)}>
+                    stay on the mock
+                  </button>
+                </div>
+              </div>
+            ) : providers && providers.profile !== 'mock' ? (
+              <p className="small dim wizard-provider-note">writing with <b>{providers.profile}</b></p>
+            ) : null}
+            <div className="choices">
+              <button
+                className="choice"
+                onClick={() => setStep('universe')}
+              >
+                <b>An existing world</b>
+                <span>A book, film, game or show. I'll find its wiki and read enough of it to run a game there.</span>
+              </button>
+              <button className="choice" onClick={() => setStep('wish')}>
+                <b>A world I describe</b>
+                <span>Tell me the premise and I'll invent the places, factions and cast, with tensions already running.</span>
+              </button>
+              <button
+                className="choice"
+                disabled={busy}
+                onClick={() =>
+                  void guard(async () => {
+                    const res = await api.setup.sample();
+                    setOpening(res.opening);
+                    setStep('ready');
+                  })
+                }
+              >
+                <b>Use the built-in example</b>
+                <span>Saint Verrow: a monastery under a secular garrison. Fastest way to see how this plays.</span>
+              </button>
+            </div>
+          </>
         ) : null}
 
         {/* -------------------------------------------------------- universe */}

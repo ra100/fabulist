@@ -197,3 +197,34 @@ test('pinned prose is never overwritten by a re-render', () => {
   assert.equal(world.chronicle.getTurn(t.id)?.bookProse, 'The sentence I loved.');
   world.close();
 });
+
+test('usage totals sum provider calls across every turn and by role', () => {
+  const world = w();
+  world.chronicle.addTurn({
+    scene: 1, turn: 1, rawInput: 'x', intent: null, delta: null, bookProse: '', pinned: false,
+    meta: {
+      integrity: null, referee: null, move: null, frameLog: null, lint: null,
+      providerCalls: [
+        { role: 'narrate', provider: 'mock', model: 'mock', tokensIn: 100, tokensOut: 40 },
+        { role: 'referee', provider: 'mock', model: 'mock', tokensIn: 30, tokensOut: 10 },
+      ],
+    },
+  });
+  world.chronicle.addTurn({
+    scene: 1, turn: 2, rawInput: 'y', intent: null, delta: null, bookProse: '', pinned: false,
+    meta: {
+      integrity: null, referee: null, move: null, frameLog: null, lint: null,
+      providerCalls: [{ role: 'narrate', provider: 'mock', model: 'mock', tokensIn: 50, tokensOut: 20 }],
+    },
+  });
+
+  const usage = world.chronicle.usageTotals();
+  assert.equal(usage.calls, 3);
+  assert.equal(usage.tokensIn, 180);
+  assert.equal(usage.tokensOut, 70);
+  assert.equal(usage.byRole.narrate?.calls, 2);
+  assert.equal(usage.byRole.narrate?.tokensIn, 150);
+  assert.equal(usage.byRole.referee?.calls, 1);
+  world.close();
+});
+

@@ -84,6 +84,7 @@ export interface State {
   pendingConsequences: number;
   hiddenFired: number;
   divergences: Array<{ id: number; scene: number; kind: string; detail: string }>;
+  usage: { tokensIn: number; tokensOut: number; calls: number; byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }> };
 }
 
 export interface BookTurn {
@@ -350,6 +351,10 @@ export const api = {
   addAnchor: (text: string, note: string) => post('/anchor', { text, note }),
   search: (q: string) => req<Entity[]>(`/search?q=${encodeURIComponent(q)}`),
   providers: () => req<ProvidersReport>('/providers'),
+  closeScene: () =>
+    post<{ closedScene: number; nowScene: number; summary: string | null; scenesSummarised: number[]; chaptersSummarised: number[] }>(
+      '/scene/close',
+    ),
 
   config: {
     get: () => req<ConfigBundle>('/config'),

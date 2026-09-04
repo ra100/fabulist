@@ -1405,6 +1405,38 @@ hr {
 /* --------------------------------------------------------------------- graph */
 /* The deliberate departure: a plate, bled to the panel edge. */
 
+.search-box { position: relative; }
+.search-results {
+  position: absolute;
+  top: calc(100% + var(--s1));
+  left: 0;
+  z-index: 5;
+  width: 320px;
+  max-height: 340px;
+  overflow: auto;
+  background: var(--surface-1);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-lg);
+  box-shadow: var(--elev-raised);
+  display: flex;
+  flex-direction: column;
+}
+.search-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--s2) var(--s3);
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  text-align: left;
+  border-radius: 0;
+  box-shadow: none;
+}
+.search-result:last-child { border-bottom: none; }
+.search-result:hover { background: var(--surface-2); }
+
 .graph-wrap {
   position: relative;
   height: calc(100vh - 132px);
@@ -1929,6 +1961,16 @@ button.rel-name:hover:not(:disabled) { background: none; color: var(--accent); }
   margin-bottom: var(--s4);
   font-size: 13px;
 }
+
+.wizard-provider-offer {
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: var(--s3);
+  margin-bottom: var(--s4);
+}
+.wizard-provider-offer p { margin: 0 0 var(--s2); }
+.wizard-provider-note { margin: 0 0 var(--s3); }
 
 button.link {
   background: none;

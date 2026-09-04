@@ -101,6 +101,7 @@ route('GET', '/api/state', (_req, res, { world }) => {
     pendingConsequences: world.consequences.pending().length,
     hiddenFired: world.consequences.hiddenFiredCount(),
     divergences: world.chronicle.divergences(),
+    usage: world.chronicle.usageTotals(),
   });
 });
 
@@ -385,6 +386,26 @@ route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
   }
   const result = await compactor.backfill(world.session.get().scene);
   send(res, 200, result);
+});
+
+/**
+ * Closes the current scene by hand, the UI's equivalent of the CLI's `/scene`.
+ * Without this, scene stays 1 forever unless the extractor happens to set
+ * `sceneAdvance`, and hierarchical compaction never runs.
+ */
+route('POST', '/api/scene/close', async (_req, res, { world, engine }) => {
+  const before = world.session.get();
+  const result = await engine.compaction().onSceneClosed(before.scene);
+  world.session.set({ scene: before.scene + 1, turn: 0 });
+  world.chronicle.upsertScene(before.scene + 1, { chapter: engine.compaction().chapterOf(before.scene + 1) });
+  const summary = world.chronicle.scenes().find((s) => s.scene === before.scene)?.summary ?? null;
+  send(res, 200, {
+    closedScene: before.scene,
+    nowScene: before.scene + 1,
+    summary,
+    scenesSummarised: result.scenesSummarised,
+    chaptersSummarised: result.chaptersSummarised,
+  });
 });
 
 /**

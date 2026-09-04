@@ -21,7 +21,7 @@ Sizes are rough: **S** under an hour, **M** a few hours, **L** a day or more.
 
 Working engine, no route to it. Nothing here needs a design decision.
 
-### 1.1 The why panel does not survive a reload — **bug** · S
+### 1.1 The why panel does not survive a reload — **bug** · S · done
 
 Three turns played and it still reads *"Play a turn."* It is component state, so a
 reload or a tab switch loses it.
@@ -34,7 +34,11 @@ stop double-checking. Invisible unless you just played is close to absent.
 Read the last turn's stored `meta` on mount instead of holding it in state. The data
 is already persisted per turn; only the read is missing.
 
-### 1.2 No way to advance a scene — **compaction never runs** · S
+Fixed: `BookTab`'s `load()` now fetches the last turn's `meta` from `/api/turn/:id`
+after loading the book, instead of only setting it from a fresh `play()` response.
+Verified in the browser: play a turn, reload, the why panel still shows it.
+
+### 1.2 No way to advance a scene — **compaction never runs** · S · done
 
 Scene stays `1` forever unless the extractor happens to set `sceneAdvance`. The CLI
 has `/scene`; the UI has nothing. So hierarchical compaction, chapter roll-up and
@@ -43,6 +47,12 @@ use.
 
 A "close the scene" button in the book view calling the existing compaction path.
 Show the summary it wrote, since that is also how you notice a bad one.
+
+Fixed: `POST /api/scene/close` wraps the same `Compactor.onSceneClosed` path the CLI's
+`/scene` uses, and a "close scene" button sits next to "play" in the composer. The
+summary (or the reason there isn't one — too few turns) lands in "what followed".
+Covered by `test/api.test.ts` and verified live: closing a one-turn scene correctly
+produced no summary (below `minTurns`), closing a two-turn scene did.
 
 ### 1.3 Branching is unreachable · M
 
@@ -81,16 +91,20 @@ director pre-deepen where threads point during idle time. Needs the ingest clien
 available at play time, which is currently only constructed during setup — that is
 the actual work.
 
-### 1.7 Graph has no search · S
+### 1.7 Graph has no search · S · done
 
 `/api/search` exists and is unused by the graph view. On a 3,000-page ingest,
 filtering by type and layer is not enough to find anything.
+
+Fixed: a search box above the graph, debounced, results show name/type/layer,
+clicking one selects the entity and clears the query. The client method
+(`api.search`) already existed; only the UI was missing.
 
 ---
 
 ## Tier 2 — first run and trust
 
-### 2.1 The wizard never offers a provider · S
+### 2.1 The wizard never offers a provider · S · done
 
 Half-closed already: settings can switch profile live, but the wizard still builds a
 world silently on the mock. So a first-time user meets deliberately plain prose at
@@ -98,6 +112,12 @@ precisely the moment they are deciding whether any of this is good.
 
 Add a step, or a line on the first screen, when the probe finds something better
 than the mock. Reuse the existing probe and switch endpoints.
+
+Fixed: the wizard's first screen probes on mount, and when the live profile is
+`mock` but something else is usable, offers to switch before any world gets built —
+with a "stay on the mock" dismissal that does not touch the persisted config.
+Verified live on this machine: it correctly offered `bedrock` (real `~/.aws`
+credentials), and dismissing left `fabulist.config.json` untouched.
 
 ### 2.2 No export · M
 
@@ -115,11 +135,16 @@ restarting.
 this needs a re-open path: close the world, open another, rebuild the engine. Worth
 doing properly rather than bolting on.
 
-### 2.4 No session cost or token total · S
+### 2.4 No session cost or token total · S · done
 
 Per-turn provider calls are logged and shown; nothing accumulates. On a paid
 provider that is the number you actually want, and it is a sum over data already
 stored.
+
+Fixed: `ChronicleStore.usageTotals()` sums every turn's `providerCalls`, by role and
+in total. `/api/state` reports it; the topbar shows a running token count with a
+per-role tooltip, and a "session usage" card in settings shows the full breakdown.
+Covered by a store test (`test/store.test.ts`) and an API test.
 
 ---
 
@@ -212,9 +237,13 @@ actually bit. Wait for evidence.
 
 Grouped so each slice is independently shippable and leaves the app green.
 
-**Slice A — make what exists reachable.** 1.1, 1.2, 1.7, 2.1, 2.4.
-All small, all high-value, no design decisions. Fixes the transparency bug, makes
-compaction run, and stops the first run being narrated by the mock.
+**Slice A — make what exists reachable.** 1.1, 1.2, 1.7, 2.1, 2.4. **Done.**
+All small, all high-value, no design decisions. Fixed the transparency bug, made
+compaction run, and stopped the first run being narrated by the mock. 440 tests
+(437 + 3 new), typecheck clean, verified live in the browser: reload-persistence,
+scene close (both the no-summary and summary-produced cases), graph search and
+selection, the wizard's provider offer with a real `bedrock` probe, and the topbar
+token total after a played turn.
 
 **Slice B — the authoring surface.** 1.4, 1.5, 3.3, 3.4.
 Editing what the AI wrote: prose, sheets, knowledge, threads. This is the "inspect
@@ -237,7 +266,6 @@ you whether the engine is any good.
 
 ## What I would actually do
 
-If I were choosing: **Slice A now**, because 1.1 is a bug and 1.2 means a tested
-subsystem currently never runs. Then **4.1 before Slice B** — a real session will
-probably reorder everything below it, and there is a real risk of polishing an
-authoring surface for a game that turns out to need something else entirely.
+Slice A is done. Next: **4.1 before Slice B** — a real session will probably
+reorder everything below it, and there is a real risk of polishing an authoring
+surface for a game that turns out to need something else entirely.

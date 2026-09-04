@@ -44,7 +44,7 @@ pnpm play                 # interactive session
 ```
 
 ```bash
-pnpm test                 # 437 tests, offline
+pnpm test                 # 440 tests, offline
 pnpm typecheck
 ```
 

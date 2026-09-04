@@ -246,6 +246,41 @@ test('chapters endpoint exposes the compaction hierarchy', async () => {
   });
 });
 
+test('scene close advances the scene and summarises what closed, the UI equivalent of /scene', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    await send(base, 'POST', '/api/play', { input: 'i check the door' });
+    assert.equal(world.session.get().scene, 1);
+
+    const { status, body } = await send(base, 'POST', '/api/scene/close');
+    assert.equal(status, 200);
+    const b = body as { closedScene: number; nowScene: number; summary: string | null; scenesSummarised: number[] };
+    assert.equal(b.closedScene, 1);
+    assert.equal(b.nowScene, 2);
+    assert.deepEqual(b.scenesSummarised, [1]);
+    assert.ok(b.summary && /char:/.test(b.summary));
+    assert.equal(world.session.get().scene, 2);
+    assert.equal(world.session.get().turn, 0);
+  });
+});
+
+test('state endpoint accumulates provider usage across turns', async () => {
+  await withServer(async (base) => {
+    const before = await get(base, '/api/state');
+    assert.equal((before.body as { usage: { calls: number } }).usage.calls, 0);
+
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    await send(base, 'POST', '/api/play', { input: 'i check the door' });
+
+    const { body } = await get(base, '/api/state');
+    const usage = (body as { usage: { tokensIn: number; tokensOut: number; calls: number; byRole: Record<string, unknown> } }).usage;
+    assert.ok(usage.calls > 0, 'two turns make more than zero provider calls');
+    assert.ok(usage.tokensIn > 0);
+    assert.ok(usage.tokensOut > 0);
+    assert.ok(Object.keys(usage.byRole).length > 0);
+  });
+});
+
 test('an unknown api route is a clear 404', async () => {
   await withServer(async (base) => {
     const { status, body } = await get(base, '/api/nope');

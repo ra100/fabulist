@@ -41,6 +41,13 @@ function roman(n: number): string {
   return out;
 }
 
+/** 12,483 -> "12.5k". Full precision is in the tooltip; the topbar needs a glance. */
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(2)}m`;
+}
+
 export function App() {
   const [tab, setTab] = useState<Tab>('book');
   const [state, setState] = useState<State | null>(null);
@@ -103,6 +110,14 @@ export function App() {
                 <b>{state.hiddenFired}</b> unseen
               </span>
             ) : null}
+            {state.usage.calls > 0 ? (
+              <span
+                className="mono dimmer"
+                title={`${state.usage.calls} provider call(s) this session · ${state.usage.tokensIn.toLocaleString()} in / ${state.usage.tokensOut.toLocaleString()} out`}
+              >
+                {formatTokens(state.usage.tokensIn + state.usage.tokensOut)} tok
+              </span>
+            ) : null}
           </div>
         ) : null}
         <nav className="tabs">
@@ -132,7 +147,7 @@ export function App() {
       {tab === 'threads' ? <ThreadsTab state={state} onChanged={refresh} /> : null}
       {tab === 'causality' ? <CausalityTab /> : null}
       {tab === 'facts' ? <FactsTab /> : null}
-      {tab === 'settings' ? <SettingsTab onChanged={refresh} /> : null}
+      {tab === 'settings' ? <SettingsTab state={state} onChanged={refresh} /> : null}
     </div>
   );
 }
@@ -155,10 +170,24 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
   /** Which turn just landed, so only that one animates in. */
   const [arrivingId, setArrivingId] = useState<string | null>(null);
   const seenIds = useRef<Set<string> | null>(null);
+  const [closingScene, setClosingScene] = useState(false);
 
   const load = useCallback(async () => {
     const book = await api.book();
     setTurns(book.turns);
+    // The why panel reads the last turn's stored meta rather than holding its
+    // own copy, so a reload or a tab switch does not lose it — the meta was
+    // already persisted with the turn; only the read was missing.
+    const last = book.turns[book.turns.length - 1];
+    if (last) {
+      try {
+        setLastMeta((await api.turn(last.id)).meta);
+      } catch {
+        // A stale panel is better than a crashed book view.
+      }
+    } else {
+      setLastMeta(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -238,6 +267,28 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
     setStreaming('');
     setStage('');
     setBusy(false);
+  }
+
+  /**
+   * The CLI has had `/scene` since the start; the UI had nothing, so
+   * hierarchical compaction was built, tested, and never ran in normal use.
+   * This calls the exact same compaction path.
+   */
+  async function closeScene() {
+    if (busy || closingScene || !turns.length) return;
+    setClosingScene(true);
+    try {
+      const res = await api.closeScene();
+      const n = [`scene ${res.closedScene} closed, now scene ${res.nowScene}`];
+      if (res.summary) n.push(res.summary);
+      if (res.chaptersSummarised.length) n.push(`chapter ${res.chaptersSummarised[0]} rolled up`);
+      setNotes(n);
+      await load();
+      onChanged();
+    } catch (e) {
+      setNotes([e instanceof Error ? e.message : String(e)]);
+    }
+    setClosingScene(false);
   }
 
   return (
@@ -364,6 +415,13 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
               <span className="hint grow" style={{ marginTop: 0 }}>
                 ⌘↵ to play · shorthand is fine · leading “ooc” for a directive
               </span>
+              <button
+                title="close the current scene and summarise it"
+                disabled={busy || closingScene || !turns.length}
+                onClick={() => void closeScene()}
+              >
+                {closingScene ? 'closing…' : 'close scene'}
+              </button>
               <button className="primary" disabled={busy || !input.trim()} onClick={() => void play(input)}>
                 {busy ? 'writing…' : 'play'}
               </button>
@@ -500,6 +558,9 @@ function GraphTab() {
   const [type, setType] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<EntityDetail | null>(null);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<Entity[]>([]);
+  const [searching, setSearching] = useState(false);
 
   useEffect(() => {
     void api.graph({ layer: layer || undefined, type: type || undefined }).then(setData);
@@ -510,10 +571,55 @@ function GraphTab() {
     void api.entity(selected).then(setDetail);
   }, [selected]);
 
+  // A 3,000-page ingest is not something type/layer filters alone can find
+  // anything in — /api/search already existed, just unused by this view.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setResults([]);
+      return;
+    }
+    setSearching(true);
+    const h = window.setTimeout(() => {
+      void api.search(q).then(setResults).finally(() => setSearching(false));
+    }, 200);
+    return () => window.clearTimeout(h);
+  }, [query]);
+
   return (
     <div className="main">
       <div className="pane">
         <div className="row" style={{ marginBottom: 11 }}>
+          <div className="search-box">
+            <input
+              value={query}
+              placeholder="search entities…"
+              style={{ width: 200 }}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query.trim() ? (
+              <div className="search-results">
+                {searching ? <div className="dimmer small" style={{ padding: 'var(--s2)' }}>searching…</div> : null}
+                {!searching && results.length === 0 ? (
+                  <div className="dimmer small" style={{ padding: 'var(--s2)' }}>nothing found</div>
+                ) : null}
+                {results.map((e) => (
+                  <button
+                    key={e.id}
+                    className="search-result"
+                    onClick={() => {
+                      setSelected(e.id);
+                      setQuery('');
+                      setResults([]);
+                    }}
+                  >
+                    <b>{e.name}</b>
+                    <span className="dimmer small">{e.type} · {e.layer}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <select value={layer} onChange={(e) => setLayer(e.target.value)} style={{ width: 170 }}>
             <option value="">both layers</option>
             <option value="canon">canon only</option>
@@ -1164,7 +1270,7 @@ function PalettePicker() {
 
 // ------------------------------------------------------------------ settings
 
-function SettingsTab({ onChanged }: { onChanged: () => void }) {
+function SettingsTab({ state, onChanged }: { state: State | null; onChanged: () => void }) {
   const [style, setStyle] = useState<State['session']['style'] | null>(null);
   const [knobs, setKnobs] = useState<State['session']['knobs'] | null>(null);
   const [anchors, setAnchors] = useState<Array<{ id: number; text: string; note: string }>>([]);
@@ -1233,6 +1339,7 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
         ) : null}
 
         <ProvidersPanel />
+        <UsagePanel usage={state?.usage ?? null} />
         <ConfigPanels />
 
         {anchors.length ? (
@@ -1313,6 +1420,44 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
           </div>
         ) : null}
       </aside>
+    </div>
+  );
+}
+
+/**
+ * The running total for the session: per-turn calls are logged and shown, but
+ * nothing accumulated them, and on a paid provider that is the number you
+ * actually want.
+ */
+function UsagePanel({ usage }: { usage: State['usage'] | null }) {
+  if (!usage || usage.calls === 0) {
+    return (
+      <div className="card">
+        <h3>session usage</h3>
+        <p className="empty">Nothing spent yet.</p>
+      </div>
+    );
+  }
+  const roles = Object.entries(usage.byRole).sort((a, b) => (b[1].tokensIn + b[1].tokensOut) - (a[1].tokensIn + a[1].tokensOut));
+  return (
+    <div className="card">
+      <h3>session usage</h3>
+      <dl className="kv small">
+        <dt>calls</dt><dd>{usage.calls}</dd>
+        <dt>tokens in</dt><dd>{usage.tokensIn.toLocaleString()}</dd>
+        <dt>tokens out</dt><dd>{usage.tokensOut.toLocaleString()}</dd>
+      </dl>
+      {roles.length ? (
+        <>
+          <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>by role</h3>
+          {roles.map(([role, r]) => (
+            <div key={role} className="row small">
+              <span className="grow dim">{role}</span>
+              <span className="mono dimmer">{r.calls}× {r.tokensIn.toLocaleString()}→{r.tokensOut.toLocaleString()}</span>
+            </div>
+          ))}
+        </>
+      ) : null}
     </div>
   );
 }
