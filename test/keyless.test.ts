@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, createHash } from 'node:crypto';
 import { signRequest, canonicalRequestFor, type AwsCredentials } from '../src/providers/sigv4.ts';
 import { AwsCredentialProvider, parseIni, tokenize, type AwsEnvironment } from '../src/providers/aws.ts';
 import { BedrockProvider } from '../src/providers/bedrock.ts';
@@ -260,6 +260,36 @@ test('an sso-session profile resolves through its shared session block', async (
     fetcher,
   }));
   assert.equal((await provider.resolve()).credentials.accessKeyId, 'AKIA_S');
+});
+
+test('a real aws-cli sso cache is found by its actual filename convention, not by content matching', async () => {
+  // What `aws sso login` really writes: the cache filename is sha1(sessionName)
+  // for an sso-session profile, and the JSON body never contains a
+  // `sessionName` field at all — matching by content, as this file used to,
+  // silently fails against every real CLI install. The `startUrl` in the cache
+  // can also differ cosmetically from the one in config (a trailing `/#` the
+  // console adds and the CLI does not), which content-matching also missed.
+  const { fetcher } = spy({ roleCredentials: { accessKeyId: 'AKIA_REAL', secretAccessKey: 's' } });
+  const sessionName = 'cline';
+  const filename = createHash('sha1').update(sessionName).digest('hex');
+  const provider = new AwsCredentialProvider(awsEnv({
+    env: { HOME: '/h', AWS_PROFILE: 'cline-pilot-role' },
+    files: {
+      '/h/.aws/config':
+        '[profile cline-pilot-role]\nsso_session = cline\nsso_account_id = 042875827621\nsso_role_name = cline-pilot-role\nregion = us-east-1\n\n' +
+        '[sso-session cline]\nsso_start_url = https://d-90677db8d7.awsapps.com/start/\nsso_region = us-east-1\n',
+      // No `sessionName` field, and a trailing `#` the config copy does not have —
+      // exactly what a real `~/.aws/sso/cache/<sha1>.json` looks like.
+      [`/h/.aws/sso/cache/${filename}.json`]: JSON.stringify({
+        startUrl: 'https://d-90677db8d7.awsapps.com/start/#',
+        accessToken: 'REALTOKEN',
+        expiresAt: '2099-01-01T00:00:00Z',
+      }),
+    },
+    fetcher,
+  }));
+  const resolved = await provider.resolve();
+  assert.equal(resolved.credentials.accessKeyId, 'AKIA_REAL');
 });
 
 test('assume-role chains from a source profile and signs the sts call', async () => {

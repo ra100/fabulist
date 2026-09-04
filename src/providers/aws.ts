@@ -17,6 +17,7 @@
  * ~/.aws or the network.
  */
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -304,9 +305,43 @@ export class AwsCredentialProvider {
     };
   }
 
-  /** Finds the cached SSO token matching this start URL or session name. */
+  /**
+   * Finds the cached SSO token matching this start URL or session name.
+   *
+   * The real `aws sso login` never writes a `sessionName` field into the cache
+   * JSON, and never guarantees the cached `startUrl` is byte-identical to the
+   * one in config (`.../start/` versus `.../start/#`, a trailing slash the
+   * console adds and the CLI does not). What it *does* guarantee is the
+   * filename: `sha1(sessionName)` for an `sso-session` profile, `sha1(startUrl)`
+   * for a legacy one. Try that first — it is exact and matches every real CLI
+   * install — then fall back to a normalised content scan for anything that
+   * does not follow the convention (older CLIs, hand-built fixtures).
+   */
   private ssoAccessToken(startUrl: string, sessionName?: string): string | null {
     const dir = join(this.configDir(), 'sso', 'cache');
+    const sha1 = (s: string) => createHash('sha1').update(s).digest('hex');
+    const normalize = (s: string) => s.replace(/[/#]+$/, '');
+
+    const read = (name: string): { accessToken?: string; expiresAt?: string } | null => {
+      const text = this.envs.readFile(join(dir, name));
+      if (!text) return null;
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    };
+    const valid = (parsed: { accessToken?: string; expiresAt?: string } | null): string | null => {
+      if (!parsed?.accessToken) return null;
+      if (parsed.expiresAt && new Date(parsed.expiresAt).getTime() <= this.envs.now().getTime()) return null;
+      return parsed.accessToken;
+    };
+
+    // 1. The deterministic filename the real CLI actually uses.
+    const exact = valid(read(`${sha1(sessionName ?? startUrl)}.json`));
+    if (exact) return exact;
+
+    // 2. A normalised content scan, for caches that do not follow that convention.
     for (const file of this.envs.listDir(dir)) {
       if (!file.endsWith('.json')) continue;
       const text = this.envs.readFile(join(dir, file));
@@ -319,13 +354,16 @@ export class AwsCredentialProvider {
       }
       if (!parsed.accessToken) continue;
       const matches =
-        parsed.startUrl === startUrl || (sessionName !== undefined && parsed.sessionName === sessionName);
+        parsed.startUrl === startUrl ||
+        (parsed.startUrl !== undefined && normalize(parsed.startUrl) === normalize(startUrl)) ||
+        (sessionName !== undefined && parsed.sessionName === sessionName);
       if (!matches) continue;
-      if (parsed.expiresAt && new Date(parsed.expiresAt).getTime() <= this.envs.now().getTime()) continue;
-      return parsed.accessToken;
+      const token = valid(parsed);
+      if (token) return token;
     }
     return null;
   }
+
 
   private async fromAssumeRole(profile: string, merged: Record<string, string>, seen: Set<string>): Promise<AwsCredentials> {
     const source = await this.resolve(merged.source_profile!, seen);
