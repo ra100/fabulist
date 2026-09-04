@@ -574,9 +574,13 @@ export const PRESETS: Record<string, ProviderSpec> = {
   },
   'bedrock:haiku': {
     kind: 'bedrock',
-    model: 'anthropic.claude-3-5-haiku-20241022-v1:0',
+    // Cross-region inference profile id, not the bare model id — same trap as
+    // bedrock:sonnet: on-demand invocation of this model is refused outright.
+    // The pinned model id ages out of Bedrock's catalog independently of this
+    // one; confirmed directly against the API each time, not assumed.
+    model: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
     auth: 'aws-profile',
-    capabilities: { contextWindow: 200_000, structuredOutput: 'native-schema', costTier: 'cheap', proseQuality: 0.6, steerability: 0.7 },
+    capabilities: { contextWindow: 200_000, structuredOutput: 'native-schema', costTier: 'cheap', proseQuality: 0.65, steerability: 0.75 },
   },
   'bedrock:nova-pro': {
     kind: 'bedrock',
