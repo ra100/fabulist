@@ -16,3 +16,19 @@ coverage/
 web/dist/
 
 .dsh/
+
+# The pnpm content-addressable store: ~2500 files and 69 MB of the working
+# directory. It is a cache, it is machine-specific, and pnpm rebuilds it from
+# the lockfile.
+.pnpm-store/
+
+# Design review frames. The written reviews in .design/*.md are the durable
+# artefact and stay tracked; the screenshots are regenerated on every pass and
+# were most of the repository's weight.
+.design/*.png
+.design/*.jpg
+.design/*.webp
+
+# Local run artefacts (server logs, detached-process scratch).
+.run/
+.worktrees/
