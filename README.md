@@ -29,7 +29,7 @@ pnpm serve                # http://127.0.0.1:4317
 ```
 
 ```bash
-pnpm test                 # 234 tests, offline
+pnpm test                 # 281 tests, offline
 pnpm typecheck
 ```
 
@@ -117,9 +117,22 @@ Deep is a strict superset of mid, so `--upgrade=deep` is a diff over nodes below
 Nothing is re-extracted.
 
 Pass A (infoboxes, categories, links) needs no model and produces a playable cast on its
-own. Pass B — typed relations with evidence spans, timeline, voice cards mined from prose
-— is defined as an interface with a null implementation; wire an extractor to a provider
-to enable it.
+own. Pass B adds what only prose contains — typed relations, timeline events, and voice
+cards — and runs automatically at `mid` and `deep`.
+
+Pass B refuses more than it accepts, on purpose. Every relation must carry a verbatim
+quote that is then checked against the page; predicates come from a closed vocabulary; and
+targets must be entities Pass A already created, so one bad extraction cannot seed a
+subgraph of fiction. Voice samples get the same treatment, because invented dialogue is
+worse than none. Each run reports its drop counts:
+
+```
+pass B: 12 pages, 18 relations, 17 events, 2 voice cards
+dropped: 18 unevidenced, 12 off-vocabulary, 11 unknown target
+```
+
+Watch that second line. A suspiciously low drop rate usually means the extractor is
+inventing, not that the wiki is unusually clean.
 
 ---
 
@@ -228,6 +241,29 @@ prose differs.
 
 ---
 
+## Long sessions and second chances
+
+Only the current scene stays verbatim. `/scene` closes a scene and summarises it,
+chapters roll up automatically at the boundary, and `/compact` catches up anything that
+closed unsummarised. Summaries deliberately keep entity ids (`char:brother-anselm`), which
+looks ugly and is the point: it keeps the graph reachable from the summary, so the Referee
+can still check things that happened twenty scenes ago.
+
+`/branch <scene> <file>` forks the save and leaves the current one untouched:
+
+```
+/branch 12 data/what-if.db
+branched at scene 12 -> data/what-if.db
+  discarded 6 turn(s), 14 event(s), 9 consequence(s); restored 2 relation(s)
+  this session is untouched
+```
+
+Two things the branch undoes that are easy to forget. A relation that *ended* during the
+discarded scenes is restored, because it was still live at the fork point. And a vow broken
+in the discarded future is unbroken, so the integrity gate defends it again.
+
+---
+
 ## Layout
 
 ```
@@ -236,10 +272,10 @@ src/db/           schema.sql and the connection
 src/store/        canon/chronicle overlay, cast, chronicle, threads, consequences
 src/providers/    adapter interface, capability matrix, mock + http providers
 src/frame/        tokenizer and budgeted per-role frame assembly
-src/loop/         roles, three-tier validator, commit, engine
+src/loop/         roles, three-tier validator, commit, engine, compaction, branching
 src/consequence/  propagation queue, rumours, world tick
 src/lint/         rule engine, two profiles, the prose gate
-src/ingest/       mediawiki client, parsers, scope, pass A, depth modes
+src/ingest/       mediawiki client, parsers, scope, pass A, pass B, depth modes
 src/seed/         hand-authored canon for Saint Verrow
 src/cli/          play, seed, serve, ingest, script, lintprose
 src/server/       http api
@@ -254,16 +290,16 @@ Node 24 runs TypeScript directly, so there is no backend build step. That rules 
 
 ## Known gaps
 
-- **Pass B is an interface with a null implementation.** Depth orchestration is complete
-  and tested; the LLM extraction it would call is not written.
 - **No vector store.** The Scene Frame uses graph traversal and fixed slots, which is the
   meal; embeddings were always the garnish and are not wired up.
-- **Retcon is not implemented.** Directives steer the future. Changing the past means
-  branching from a scene, and the downstream recompute is not built.
-- **Hierarchical compaction is partial.** Scene summaries exist as a table and are read
-  into frames, but nothing writes them automatically yet, so very long sessions will lean
-  harder on salience decay than intended.
+- **In-place retcon is not implemented, by choice.** Directives steer the future; changing
+  the past means branching. Rewriting history in place would require recomputing every
+  downstream consequence, and the design argues branching gets most of that value for a
+  fraction of the cost.
 - **The tokenizer is a calibrated heuristic**, not real BPE. It over-estimates on purpose;
   the interface is pluggable if that stops being good enough.
 - **Inbound link counts come only from crawled pages**, so ingest ranking under-counts a
   genuinely wiki-famous entity. A hub penalty compensates for index pages.
+- **Pass B has never met a real wiki.** It is tested hard against fixtures and against
+  adversarial model output, but predicate quality on live Fandom prose is unmeasured. The
+  drop counters exist so you can judge a first real run rather than trust it.
