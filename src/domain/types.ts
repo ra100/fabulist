@@ -478,6 +478,12 @@ export interface RecalcDiff {
 
 // ----------------------------------------------------------------- session
 
+/**
+ * The play-relevant fields, unchanged by the multi-story migration — this is
+ * what the turn loop, frame builders and every existing call site already
+ * destructure. `Story` adds identity and lineage on top; the split exists so
+ * "give me the current scene/turn/style" call sites do not need to change.
+ */
 export interface SessionState {
   scene: number;
   turn: number;
@@ -487,10 +493,25 @@ export interface SessionState {
   knobs: Knobs;
 }
 
+export type StoryId = string;
+
+/** One playthrough of a world. Replaces the old single-row `session` table. */
+export interface Story extends SessionState {
+  id: StoryId;
+  title: string;
+  /** The story this one was forked from, or null if it started fresh against canon. */
+  forkedFrom: StoryId | null;
+  /** The scene the fork happened at, meaningful only when `forkedFrom` is set. */
+  forkedAtScene: number | null;
+  createdAt: string;
+  lastPlayedAt: string;
+}
+
 export interface Knobs {
   canonFidelity: 'strict' | 'flexible' | 'au';
   characterStrictness: 'permissive' | 'coaching' | 'strict' | 'iron';
   pacing: number;
+
   danger: number;
   npcAgency: number;
   propagationDepth: number;

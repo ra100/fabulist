@@ -162,7 +162,7 @@ export function seedWorld(world: World, opts: SeedOptions = {}): void {
     condition: { ...emptyCondition(), locationId: 'loc:the-scriptorium', mood: 'guarded', inventory: ["Anselm's knife", 'a half-copied quire'], intent: 'get through the inspection without the cells being opened' },
     locks: [],
     isPlayer: true,
-  });
+  }, 'canon');
 
   world.cast.put({
     entityId: 'char:captain-sered',
@@ -190,7 +190,7 @@ export function seedWorld(world: World, opts: SeedOptions = {}): void {
     condition: { ...emptyCondition(), locationId: 'loc:the-garrison-yard', mood: 'tired', intent: 'inspect the lower cells today' },
     locks: [],
     isPlayer: false,
-  });
+  }, 'canon');
 
   const supporting: Array<[string, string, string[], string, string]> = [
     ['char:sister-oria', 'Practical, warm, unsentimental about death.', ['keep everyone through the winter'], 'loc:the-scriptorium', 'busy'],
@@ -211,7 +211,7 @@ export function seedWorld(world: World, opts: SeedOptions = {}): void {
       condition: { ...emptyCondition(), locationId, mood },
       locks: [],
       isPlayer: false,
-    });
+    }, 'canon');
   }
 
   // --- Relationships. Asymmetry is the point: Sered respects Anselm and is

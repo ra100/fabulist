@@ -19,13 +19,6 @@ export function rows<T>(rs: unknown[]): T[] {
 export function openDb(path = ':memory:'): Db {
   const db = new DatabaseSync(path);
   db.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
-  const existing = db.prepare('SELECT id FROM session WHERE id = 1').get();
-  if (!existing) {
-    db.prepare(
-      `INSERT INTO session (id, scene, turn, player_character_id, style, knobs)
-       VALUES (1, 1, 0, '', '{}', '{}')`,
-    ).run();
-  }
   return db;
 }
 

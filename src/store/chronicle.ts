@@ -2,6 +2,10 @@
  * Chronicle store: events, turns, scenes, facts, and the divergence ledger.
  * Epistemic state lives here because "who knows what" is chronicle-scoped.
  * See DESIGN.md §2 and §6.3.
+ *
+ * Everything here is story-scoped except `meta`, which is world-level
+ * (shared across every story in this file) — `worldTitle` and similar
+ * identity keys describe the file, not any one playthrough of it.
  */
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/db.ts';
@@ -14,6 +18,7 @@ import type {
   FactKnowledge,
   KnowledgeLevel,
   StoryEvent,
+  StoryId,
   Turn,
   TurnMeta,
   Visibility,
@@ -82,9 +87,11 @@ function toTurn(r: TurnRow): Turn {
 
 export class ChronicleStore {
   private db: Db;
+  private storyId: StoryId;
 
-  constructor(db: Db) {
+  constructor(db: Db, storyId: StoryId) {
     this.db = db;
+    this.storyId = storyId;
   }
 
   // --------------------------------------------------------------- events
@@ -93,11 +100,12 @@ export class ChronicleStore {
     const id = e.id ?? `ev:${randomUUID()}`;
     this.db
       .prepare(
-        `INSERT INTO events (id, scene, turn, text, participants, location_id, significance, visibility, from_consequence_id)
-         VALUES (?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO events (id, story_id, scene, turn, text, participants, location_id, significance, visibility, from_consequence_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
+        this.storyId,
         e.scene,
         e.turn,
         e.text,
@@ -111,8 +119,8 @@ export class ChronicleStore {
   }
 
   events(opts: { limit?: number; sinceScene?: number; visibility?: Visibility[] } = {}): StoryEvent[] {
-    const where: string[] = [];
-    const args: unknown[] = [];
+    const where: string[] = ['story_id = ?'];
+    const args: unknown[] = [this.storyId];
     if (opts.sinceScene !== undefined) {
       where.push('scene >= ?');
       args.push(opts.sinceScene);
@@ -121,10 +129,9 @@ export class ChronicleStore {
       where.push(`visibility IN (${opts.visibility.map(() => '?').join(',')})`);
       args.push(...opts.visibility);
     }
-    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     args.push(opts.limit ?? 100);
     return rows<EventRow>(
-      this.db.prepare(`SELECT * FROM events ${clause} ORDER BY scene, turn LIMIT ?`).all(...(args as never[])),
+      this.db.prepare(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY scene, turn LIMIT ?`).all(...(args as never[])),
     ).map(toEvent);
   }
 
@@ -134,10 +141,10 @@ export class ChronicleStore {
       this.db
         .prepare(
           `SELECT * FROM events
-           WHERE visibility = 'onscreen' AND participants LIKE ?
+           WHERE story_id = ? AND visibility = 'onscreen' AND participants LIKE ?
            ORDER BY scene DESC, turn DESC LIMIT ?`,
         )
-        .all(`%${playerId}%`, limit),
+        .all(this.storyId, `%${playerId}%`, limit),
     )
       .map(toEvent)
       .reverse();
@@ -150,11 +157,12 @@ export class ChronicleStore {
     const createdAt = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO turns (id, scene, turn, raw_input, intent, delta, book_prose, pinned, meta, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO turns (id, story_id, scene, turn, raw_input, intent, delta, book_prose, pinned, meta, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
+        this.storyId,
         t.scene,
         t.turn,
         t.rawInput,
@@ -171,24 +179,24 @@ export class ChronicleStore {
   turns(opts: { scene?: number; limit?: number } = {}): Turn[] {
     if (opts.scene !== undefined) {
       return rows<TurnRow>(
-        this.db.prepare(`SELECT * FROM turns WHERE scene = ? ORDER BY turn`).all(opts.scene),
+        this.db.prepare(`SELECT * FROM turns WHERE story_id = ? AND scene = ? ORDER BY turn`).all(this.storyId, opts.scene),
       ).map(toTurn);
     }
     return rows<TurnRow>(
-      this.db.prepare(`SELECT * FROM turns ORDER BY scene, turn LIMIT ?`).all(opts.limit ?? 500),
+      this.db.prepare(`SELECT * FROM turns WHERE story_id = ? ORDER BY scene, turn LIMIT ?`).all(this.storyId, opts.limit ?? 500),
     ).map(toTurn);
   }
 
   recentTurns(n: number): Turn[] {
     return rows<TurnRow>(
-      this.db.prepare(`SELECT * FROM turns ORDER BY scene DESC, turn DESC LIMIT ?`).all(n),
+      this.db.prepare(`SELECT * FROM turns WHERE story_id = ? ORDER BY scene DESC, turn DESC LIMIT ?`).all(this.storyId, n),
     )
       .map(toTurn)
       .reverse();
   }
 
   getTurn(id: string): Turn | undefined {
-    const r = row<TurnRow>(this.db.prepare(`SELECT * FROM turns WHERE id = ?`).get(id));
+    const r = row<TurnRow>(this.db.prepare(`SELECT * FROM turns WHERE id = ? AND story_id = ?`).get(id, this.storyId));
     return r ? toTurn(r) : undefined;
   }
 
@@ -206,7 +214,7 @@ export class ChronicleStore {
   } {
     const total = { tokensIn: 0, tokensOut: 0, calls: 0 };
     const byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }> = {};
-    const metas = rows<{ meta: string }>(this.db.prepare(`SELECT meta FROM turns`).all());
+    const metas = rows<{ meta: string }>(this.db.prepare(`SELECT meta FROM turns WHERE story_id = ?`).all(this.storyId));
     for (const row_ of metas) {
       const meta = jsonGet<TurnMeta | null>(row_.meta, null);
       for (const c of meta?.providerCalls ?? []) {
@@ -224,11 +232,11 @@ export class ChronicleStore {
 
   /** Re-render changes how it is told, never what happened (DESIGN §7.2). */
   setProse(id: string, prose: string): void {
-    this.db.prepare(`UPDATE turns SET book_prose = ? WHERE id = ? AND pinned = 0`).run(prose, id);
+    this.db.prepare(`UPDATE turns SET book_prose = ? WHERE id = ? AND story_id = ? AND pinned = 0`).run(prose, id, this.storyId);
   }
 
   setPinned(id: string, pinned: boolean): void {
-    this.db.prepare(`UPDATE turns SET pinned = ? WHERE id = ?`).run(pinned ? 1 : 0, id);
+    this.db.prepare(`UPDATE turns SET pinned = ? WHERE id = ? AND story_id = ?`).run(pinned ? 1 : 0, id, this.storyId);
   }
 
   // --------------------------------------------------------------- scenes
@@ -236,19 +244,19 @@ export class ChronicleStore {
   upsertScene(scene: number, patch: { title?: string; summary?: string; locationId?: string | null; chapter?: number }): void {
     this.db
       .prepare(
-        `INSERT INTO scenes (scene, title, summary, location_id, chapter) VALUES (?,?,?,?,?)
-         ON CONFLICT(scene) DO UPDATE SET
+        `INSERT INTO scenes (story_id, scene, title, summary, location_id, chapter) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(story_id, scene) DO UPDATE SET
            title = COALESCE(NULLIF(excluded.title,''), scenes.title),
            summary = COALESCE(NULLIF(excluded.summary,''), scenes.summary),
            location_id = COALESCE(excluded.location_id, scenes.location_id),
            chapter = excluded.chapter`,
       )
-      .run(scene, patch.title ?? '', patch.summary ?? '', patch.locationId ?? null, patch.chapter ?? 1);
+      .run(this.storyId, scene, patch.title ?? '', patch.summary ?? '', patch.locationId ?? null, patch.chapter ?? 1);
   }
 
   scenes(): Array<{ scene: number; title: string; summary: string; locationId: string | null; chapter: number }> {
     return rows<{ scene: number; title: string; summary: string; location_id: string | null; chapter: number }>(
-      this.db.prepare(`SELECT * FROM scenes ORDER BY scene`).all(),
+      this.db.prepare(`SELECT * FROM scenes WHERE story_id = ? ORDER BY scene`).all(this.storyId),
     ).map((r) => ({
       scene: r.scene,
       title: r.title,
@@ -261,23 +269,25 @@ export class ChronicleStore {
   upsertChapter(chapter: number, patch: { title?: string; summary?: string }): void {
     this.db
       .prepare(
-        `INSERT INTO chapters (chapter, title, summary) VALUES (?,?,?)
-         ON CONFLICT(chapter) DO UPDATE SET
+        `INSERT INTO chapters (story_id, chapter, title, summary) VALUES (?,?,?,?)
+         ON CONFLICT(story_id, chapter) DO UPDATE SET
            title = COALESCE(NULLIF(excluded.title,''), chapters.title),
            summary = COALESCE(NULLIF(excluded.summary,''), chapters.summary)`,
       )
-      .run(chapter, patch.title ?? '', patch.summary ?? '');
+      .run(this.storyId, chapter, patch.title ?? '', patch.summary ?? '');
   }
 
   chapter(chapter: number): { chapter: number; title: string; summary: string } | undefined {
-    return row(this.db.prepare(`SELECT * FROM chapters WHERE chapter = ?`).get(chapter));
+    return row(this.db.prepare(`SELECT chapter, title, summary FROM chapters WHERE story_id = ? AND chapter = ?`).get(this.storyId, chapter));
   }
 
   chapters(): Array<{ chapter: number; title: string; summary: string }> {
-    return rows(this.db.prepare(`SELECT * FROM chapters ORDER BY chapter`).all());
+    return rows(this.db.prepare(`SELECT chapter, title, summary FROM chapters WHERE story_id = ? ORDER BY chapter`).all(this.storyId));
   }
 
   // ----------------------------------------------------------------- meta
+  // World-level, unscoped by design: describes the file (e.g. worldTitle),
+  // not any one story built on top of it.
 
   setMeta(key: string, value: string): void {
     this.db
@@ -293,17 +303,22 @@ export class ChronicleStore {
 
   addFact(text: string, scene: number): Fact {
     const id = `fact:${randomUUID()}`;
-    this.db.prepare(`INSERT INTO facts (id, text, scene, layer) VALUES (?,?,?,'chronicle')`).run(id, text, scene);
+    this.db.prepare(`INSERT INTO facts (id, story_id, text, scene) VALUES (?,?,?,?)`).run(id, this.storyId, text, scene);
     return { id, text, scene, layer: 'chronicle' };
   }
 
   facts(limit = 200): Fact[] {
-    return rows<Fact>(this.db.prepare(`SELECT * FROM facts ORDER BY scene DESC LIMIT ?`).all(limit));
+    return rows<{ id: string; text: string; scene: number }>(
+      this.db.prepare(`SELECT id, text, scene FROM facts WHERE story_id = ? ORDER BY scene DESC LIMIT ?`).all(this.storyId, limit),
+    ).map((r) => ({ ...r, layer: 'chronicle' as const }));
   }
 
   /**
    * Records that an entity knows, suspects, or holds a distorted version of a
-   * fact. Distortion rises with transmission hops (DESIGN §6.3).
+   * fact. Distortion rises with transmission hops (DESIGN §6.3). Not scoped
+   * by story_id directly — it inherits scope through `fact_id`, which is
+   * already story-scoped via `facts`, and every call site resolves the fact
+   * through this store first.
    */
   setKnowledge(
     factId: FactId,
@@ -335,10 +350,10 @@ export class ChronicleStore {
       this.db
         .prepare(
           `SELECT k.*, f.text FROM fact_knowledge k
-           JOIN facts f ON f.id = k.fact_id WHERE k.entity_id = ?
+           JOIN facts f ON f.id = k.fact_id WHERE f.story_id = ? AND k.entity_id = ?
            ORDER BY k.since_scene DESC`,
         )
-        .all(entityId),
+        .all(this.storyId, entityId),
     ).map((r) => ({
       factId: r.fact_id,
       entityId: r.entity_id,
@@ -373,36 +388,42 @@ export class ChronicleStore {
    * irony rather than NPCs reacting to information they cannot possess.
    */
   factsUnknownTo(entityId: EntityId, limit = 20): Fact[] {
-    return rows<Fact>(
+    return rows<{ id: string; text: string; scene: number }>(
       this.db
         .prepare(
-          `SELECT f.* FROM facts f
-           WHERE NOT EXISTS (
+          `SELECT f.id, f.text, f.scene FROM facts f
+           WHERE f.story_id = ? AND NOT EXISTS (
              SELECT 1 FROM fact_knowledge k
              WHERE k.fact_id = f.id AND k.entity_id = ? AND k.level = 'knows')
            ORDER BY f.scene DESC LIMIT ?`,
         )
-        .all(entityId, limit),
-    );
+        .all(this.storyId, entityId, limit),
+    ).map((r) => ({ ...r, layer: 'chronicle' as const }));
   }
 
   // ----------------------------------------------------------- divergences
 
   addDivergence(scene: number, kind: string, detail: string, canon = ''): void {
-    this.db.prepare(`INSERT INTO divergences (scene, kind, detail, canon) VALUES (?,?,?,?)`).run(scene, kind, detail, canon);
+    this.db
+      .prepare(`INSERT INTO divergences (story_id, scene, kind, detail, canon) VALUES (?,?,?,?,?)`)
+      .run(this.storyId, scene, kind, detail, canon);
   }
 
   divergences(): Array<{ id: number; scene: number; kind: string; detail: string; canon: string }> {
-    return rows(this.db.prepare(`SELECT * FROM divergences ORDER BY scene`).all());
+    return rows(
+      this.db.prepare(`SELECT id, scene, kind, detail, canon FROM divergences WHERE story_id = ? ORDER BY scene`).all(this.storyId),
+    );
   }
 
   // --------------------------------------------------------- style anchors
 
   addAnchor(text: string, note = '', scene = 0): void {
-    this.db.prepare(`INSERT INTO style_anchors (text, note, scene) VALUES (?,?,?)`).run(text, note, scene);
+    this.db.prepare(`INSERT INTO style_anchors (story_id, text, note, scene) VALUES (?,?,?,?)`).run(this.storyId, text, note, scene);
   }
 
   anchors(limit = 5): Array<{ id: number; text: string; note: string; scene: number }> {
-    return rows(this.db.prepare(`SELECT * FROM style_anchors ORDER BY id DESC LIMIT ?`).all(limit));
+    return rows(
+      this.db.prepare(`SELECT id, text, note, scene FROM style_anchors WHERE story_id = ? ORDER BY id DESC LIMIT ?`).all(this.storyId, limit),
+    );
   }
 }

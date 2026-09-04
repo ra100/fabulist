@@ -207,7 +207,7 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
       condition,
       locks: existing?.locks ?? [],
       isPlayer: existing?.isPlayer ?? false,
-    });
+    }, 'canon');
     result.sheets++;
 
     // Status from the infobox is what lets the validator catch acting on the dead.

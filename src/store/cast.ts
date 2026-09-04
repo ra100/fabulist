@@ -1,6 +1,17 @@
 /**
  * Cast store: character sheets, contracts, and directional relationships.
  * See DESIGN.md §2.
+ *
+ * Sheets get the same canon/chronicle overlay as entities/edges: ingest (or
+ * custom-world authoring) writes a canon baseline sheet once — identity,
+ * voice samples, base condition, all pulled from the source material — and
+ * every story in this world reads that baseline until its own play mutates
+ * it. Play-time mutation (a vow breaking, condition changing, a lock toggled,
+ * who is the player) copies the sheet forward into a chronicle row scoped to
+ * that story, mirroring `graph.upsert`.
+ *
+ * Relationships have no canon layer — they are only ever written at play
+ * time — so they are story-scoped outright, with no overlay to resolve.
  */
 import type { Db } from '../db/db.ts';
 import { jsonGet, row, rows } from '../db/db.ts';
@@ -10,13 +21,17 @@ import type {
   Contract,
   EntityId,
   Identity,
+  Layer,
   Relationship,
+  StoryId,
   VoiceCard,
   Vow,
 } from '../domain/types.ts';
 
 interface SheetRow {
   entity_id: string;
+  layer: Layer;
+  story_id: string | null;
   identity: string;
   contract: string;
   voice: string;
@@ -52,13 +67,31 @@ function toSheet(r: SheetRow): CharacterSheet {
 
 export class CastStore {
   private db: Db;
+  private storyId: StoryId;
 
-  constructor(db: Db) {
+  constructor(db: Db, storyId: StoryId) {
     this.db = db;
+    this.storyId = storyId;
   }
 
+  /** Overlay read: this story's chronicle sheet wins over the canon baseline. */
   get(entityId: EntityId): CharacterSheet | undefined {
-    const r = row<SheetRow>(this.db.prepare(`SELECT * FROM sheets WHERE entity_id = ?`).get(entityId));
+    const r = row<SheetRow>(
+      this.db
+        .prepare(
+          `SELECT * FROM sheets WHERE entity_id = ? AND (story_id = ? OR layer = 'canon')
+           ORDER BY CASE layer WHEN 'chronicle' THEN 0 ELSE 1 END LIMIT 1`,
+        )
+        .get(entityId, this.storyId),
+    );
+    return r ? toSheet(r) : undefined;
+  }
+
+  /** The canon baseline, ignoring every story's playthrough. */
+  getCanon(entityId: EntityId): CharacterSheet | undefined {
+    const r = row<SheetRow>(
+      this.db.prepare(`SELECT * FROM sheets WHERE entity_id = ? AND layer = 'canon'`).get(entityId),
+    );
     return r ? toSheet(r) : undefined;
   }
 
@@ -77,18 +110,28 @@ export class CastStore {
     );
   }
 
-  put(sheet: CharacterSheet): void {
+  /**
+   * `layer` defaults to `'chronicle'` (this story's copy-on-write). Ingest and
+   * custom-world authoring pass `'canon'` explicitly, exactly like
+   * `graph.upsert`. Same expression-index upsert target as entities, for the
+   * same reason: a composite key on the nullable story_id column would not
+   * enforce "one canon sheet per entity" — checked directly, not assumed.
+   */
+  put(sheet: CharacterSheet, layer: Layer = 'chronicle'): void {
+    const storyId = layer === 'canon' ? null : this.storyId;
     this.db
       .prepare(
-        `INSERT INTO sheets (entity_id, identity, contract, voice, condition, locks, is_player)
-         VALUES (?,?,?,?,?,?,?)
-         ON CONFLICT(entity_id) DO UPDATE SET
+        `INSERT INTO sheets (entity_id, layer, story_id, identity, contract, voice, condition, locks, is_player)
+         VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(entity_id, layer, COALESCE(story_id, '')) DO UPDATE SET
            identity = excluded.identity, contract = excluded.contract,
            voice = excluded.voice, condition = excluded.condition,
            locks = excluded.locks, is_player = excluded.is_player`,
       )
       .run(
         sheet.entityId,
+        layer,
+        storyId,
         JSON.stringify(sheet.identity),
         JSON.stringify(sheet.contract),
         JSON.stringify(sheet.voice),
@@ -98,13 +141,26 @@ export class CastStore {
       );
   }
 
+  /**
+   * See `GraphStore.overlayCte` for why this is a window function rather
+   * than `GROUP BY ... HAVING`: confirmed directly against node:sqlite that
+   * the latter can silently return the wrong layer's row.
+   */
   list(): CharacterSheet[] {
-    return rows<SheetRow>(this.db.prepare(`SELECT * FROM sheets`).all()).map(toSheet);
+    const sql = `
+      WITH ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY entity_id ORDER BY CASE layer WHEN 'chronicle' THEN 0 ELSE 1 END
+        ) AS rnk
+        FROM sheets WHERE story_id = ? OR layer = 'canon'
+      )
+      SELECT * FROM ranked WHERE rnk = 1`;
+    return rows<SheetRow>(this.db.prepare(sql).all(this.storyId)).map(toSheet);
   }
 
+  /** This story's protagonist. Every story has exactly one. */
   player(): CharacterSheet | undefined {
-    const r = row<SheetRow>(this.db.prepare(`SELECT * FROM sheets WHERE is_player = 1 LIMIT 1`).get());
-    return r ? toSheet(r) : undefined;
+    return this.list().find((s) => s.isPlayer);
   }
 
   /**
@@ -148,10 +204,12 @@ export class CastStore {
   }
 
   // ------------------------------------------------------- relationships
+  // No canon layer to overlay: only ever written at play time, so plain
+  // story scoping is all that is needed.
 
   relationship(fromId: EntityId, toId: EntityId): Relationship {
     const r = row<{ from_id: string; to_id: string; trust: number; affection: number; respect: number; note: string }>(
-      this.db.prepare(`SELECT * FROM relationships WHERE from_id = ? AND to_id = ?`).get(fromId, toId),
+      this.db.prepare(`SELECT * FROM relationships WHERE story_id = ? AND from_id = ? AND to_id = ?`).get(this.storyId, fromId, toId),
     );
     return r
       ? { fromId: r.from_id, toId: r.to_id, trust: r.trust, affection: r.affection, respect: r.respect, note: r.note }
@@ -160,7 +218,7 @@ export class CastStore {
 
   relationshipsOf(fromId: EntityId): Relationship[] {
     return rows<{ from_id: string; to_id: string; trust: number; affection: number; respect: number; note: string }>(
-      this.db.prepare(`SELECT * FROM relationships WHERE from_id = ?`).all(fromId),
+      this.db.prepare(`SELECT * FROM relationships WHERE story_id = ? AND from_id = ?`).all(this.storyId, fromId),
     ).map((r) => ({
       fromId: r.from_id,
       toId: r.to_id,
@@ -174,7 +232,7 @@ export class CastStore {
   /** Anyone who holds a strong feeling about this entity: the propagation frontier. */
   relationshipsToward(toId: EntityId): Relationship[] {
     return rows<{ from_id: string; to_id: string; trust: number; affection: number; respect: number; note: string }>(
-      this.db.prepare(`SELECT * FROM relationships WHERE to_id = ?`).all(toId),
+      this.db.prepare(`SELECT * FROM relationships WHERE story_id = ? AND to_id = ?`).all(this.storyId, toId),
     ).map((r) => ({
       fromId: r.from_id,
       toId: r.to_id,
@@ -202,13 +260,13 @@ export class CastStore {
     };
     this.db
       .prepare(
-        `INSERT INTO relationships (from_id, to_id, trust, affection, respect, note)
-         VALUES (?,?,?,?,?,?)
-         ON CONFLICT(from_id, to_id) DO UPDATE SET
+        `INSERT INTO relationships (story_id, from_id, to_id, trust, affection, respect, note)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(story_id, from_id, to_id) DO UPDATE SET
            trust = excluded.trust, affection = excluded.affection,
            respect = excluded.respect, note = excluded.note`,
       )
-      .run(fromId, toId, next.trust, next.affection, next.respect, next.note);
+      .run(this.storyId, fromId, toId, next.trust, next.affection, next.respect, next.note);
     return next;
   }
 }

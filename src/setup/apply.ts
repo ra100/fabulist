@@ -110,7 +110,7 @@ export function applyCustomWorld(world: World, raw: Record<string, unknown>): Ap
       condition: { ...emptyCondition(), locationId },
       locks: [],
       isPlayer: entityId === result.playerCharacterId,
-    });
+    }, 'canon');
     result.sheets++;
   }
 
@@ -125,7 +125,7 @@ export function applyCustomWorld(world: World, raw: Record<string, unknown>): Ap
       condition: emptyCondition(),
       locks: [],
       isPlayer: true,
-    });
+    }, 'canon');
     result.sheets++;
     warnings.push('player character had no sheet; created a blank one');
   }

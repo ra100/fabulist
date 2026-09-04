@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { World } from '../src/store/index.ts';
+import { createStory, resolveDefaultStory } from '../src/store/world.ts';
 
 function w() {
   return World.open(':memory:');
@@ -101,11 +102,25 @@ test('salience decays but bumped entities stay hot', () => {
   world.graph.upsert({ id: 'char:cold', type: 'Character', name: 'Cold', salience: 0.5 }, 'canon');
 
   world.graph.bumpSalience(['char:hot'], 0.4);
-  for (let i = 0; i < 5; i++) world.graph.decaySalience(0.1);
+  for (let i = 0; i < 2; i++) world.graph.decaySalience(0.1);
 
   const hot = world.graph.get('char:hot')!.salience;
   const cold = world.graph.get('char:cold')!.salience;
   assert.ok(hot > cold, `touched entity stays hotter (${hot} > ${cold})`);
+  world.close();
+});
+
+test('an entity no story has ever touched sits at its canon baseline forever, not decaying toward the floor', () => {
+  // Decay used to run unconditionally over every entity, including canon's
+  // shared row directly — which would have been a cross-story leak once
+  // canon became shared across stories: one story's turns cooling the
+  // baseline every other story reads. Decay now only touches a story's own
+  // chronicle rows; an entity that story has never bumped stays exactly at
+  // whatever canon (or another story's untouched view of it) says.
+  const world = w();
+  world.graph.upsert({ id: 'char:untouched', type: 'Character', name: 'Untouched', salience: 0.5 }, 'canon');
+  for (let i = 0; i < 20; i++) world.graph.decaySalience(0.1);
+  assert.equal(world.graph.get('char:untouched')!.salience, 0.5, 'no chronicle row was ever created for it, so nothing decayed');
   world.close();
 });
 
@@ -228,3 +243,123 @@ test('usage totals sum provider calls across every turn and by role', () => {
   world.close();
 });
 
+// ------------------------------------------------------------- multi-story
+
+test('two stories in the same world file share canon but never see each other\'s chronicle', () => {
+  const world = w();
+  world.chronicle.setMeta('worldTitle', 'The Shared World');
+  world.graph.upsert({ id: 'char:hero', type: 'Character', name: 'Hero', summary: 'canon summary' }, 'canon');
+  world.cast.put({
+    entityId: 'char:hero',
+    identity: emptyStoryIdentity(),
+    contract: { vows: [{ id: 'v1', text: 'never lie', rank: 1, broken: false, brokenScene: null }], drives: [], breakingPoint: '', costOfBreak: '' },
+    voice: { diction: '', tics: [], samples: [], never: [] },
+    condition: { locationId: null, mood: '', injuries: [], inventory: [], intent: '', presentWith: [] },
+    locks: [],
+    isPlayer: false,
+  }, 'canon');
+
+  const storyA = world.storyId;
+  const storyB = createStory(world.db, { title: 'Story B' }).id;
+  const b = world.withStory(storyB);
+
+  // Both stories start out seeing the exact same canon.
+  assert.equal(world.graph.get('char:hero')?.summary, 'canon summary');
+  assert.equal(b.graph.get('char:hero')?.summary, 'canon summary');
+  assert.equal(world.cast.get('char:hero')?.contract.vows[0]?.text, 'never lie');
+  assert.equal(b.cast.get('char:hero')?.contract.vows[0]?.text, 'never lie');
+
+  // Story A diverges: overwrites the summary and breaks the vow.
+  world.graph.upsert({ id: 'char:hero', type: 'Character', name: 'Hero', summary: 'A says something happened' }, 'chronicle');
+  world.cast.breakVow('char:hero', 'v1', 3);
+
+  // Story A sees its own divergence.
+  assert.equal(world.graph.get('char:hero')?.summary, 'A says something happened');
+  assert.equal(world.cast.get('char:hero')?.contract.vows[0]?.broken, true);
+
+  // Story B is completely unaffected — same canon, no leak.
+  assert.equal(b.graph.get('char:hero')?.summary, 'canon summary');
+  assert.equal(b.cast.get('char:hero')?.contract.vows[0]?.broken, false);
+
+  // Canon itself, read directly, was never touched.
+  assert.equal(world.graph.getCanon('char:hero')?.summary, 'canon summary');
+  assert.equal(storyA !== storyB, true, 'the two stories really are different ids');
+  world.close();
+});
+
+test('two stories can each retire the same canon edge independently', () => {
+  const world = w();
+  world.graph.upsert({ id: 'char:a', type: 'Character', name: 'A' }, 'canon');
+  world.graph.upsert({ id: 'char:b', type: 'Character', name: 'B' }, 'canon');
+  world.graph.assertEdge({ subject: 'char:a', predicate: 'TRUSTS', object: 'char:b' }, 0, 'canon');
+
+  const b = world.withStory(createStory(world.db, { title: 'B' }).id);
+
+  assert.ok(world.graph.edgesFrom('char:a').some((e) => e.predicate === 'TRUSTS'));
+  assert.ok(b.graph.edgesFrom('char:a').some((e) => e.predicate === 'TRUSTS'));
+
+  world.graph.retireEdge('char:a', 'TRUSTS', 'char:b', 5);
+
+  assert.ok(!world.graph.edgesFrom('char:a').some((e) => e.predicate === 'TRUSTS'), 'story A retired it');
+  assert.ok(b.graph.edgesFrom('char:a').some((e) => e.predicate === 'TRUSTS'), 'story B never touched it, still sees canon live');
+  world.close();
+});
+
+test('threads, turns, and facts never cross between two stories in the same file', () => {
+  const world = w();
+  const b = world.withStory(createStory(world.db, { title: 'B' }).id);
+
+  world.threads.create({ title: 'A thread', stakes: '', tension: 0.5, parties: [], resolutions: ['x', 'y'], status: 'open', createdScene: 1 });
+  world.chronicle.addTurn({ scene: 1, turn: 1, rawInput: 'a input', intent: null, delta: null, bookProse: 'a prose', pinned: false, meta: blankMeta() });
+  const fact = world.chronicle.addFact('a fact', 1);
+  world.chronicle.setKnowledge(fact.id, 'char:a', 'knows', 1);
+
+  assert.equal(world.threads.open().length, 1);
+  assert.equal(b.threads.open().length, 0);
+
+  assert.equal(world.chronicle.turns().length, 1);
+  assert.equal(b.chronicle.turns().length, 0);
+
+  assert.equal(world.chronicle.facts().length, 1);
+  assert.equal(b.chronicle.facts().length, 0);
+  world.close();
+});
+
+test('a story with no chronicle salience yet reads canon\'s baseline; another story\'s bump does not leak into it', () => {
+  const world = w();
+  world.graph.upsert({ id: 'char:x', type: 'Character', name: 'X', salience: 0.3 }, 'canon');
+  const b = world.withStory(createStory(world.db, { title: 'B' }).id);
+
+  world.graph.bumpSalience(['char:x'], 0.5);
+  assert.equal(world.graph.get('char:x')?.salience, 0.8);
+  assert.equal(b.graph.get('char:x')?.salience, 0.3, 'story B never touched it, unaffected by story A\'s bump');
+  world.close();
+});
+
+test('World.open on a multi-story file without an explicit storyId refuses rather than guessing', () => {
+  const world = w();
+  createStory(world.db, { title: 'second' });
+  const path = world.db;
+  assert.throws(() => resolveDefaultStory(path), /2 stories/);
+  world.close();
+});
+
+test('createStory records lineage when forked, and leaves it null for a fresh story', () => {
+  const world = w();
+  const fresh = createStory(world.db, { title: 'fresh' });
+  assert.equal(fresh.forkedFrom, null);
+  assert.equal(fresh.forkedAtScene, null);
+
+  const forked = createStory(world.db, { title: 'forked', forkedFrom: world.storyId, forkedAtScene: 4 });
+  assert.equal(forked.forkedFrom, world.storyId);
+  assert.equal(forked.forkedAtScene, 4);
+  world.close();
+});
+
+function emptyStoryIdentity() {
+  return { goals: [], wounds: [], fears: [], allegiances: [], competencies: [], secrets: [], arc: '' };
+}
+
+function blankMeta() {
+  return { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] };
+}

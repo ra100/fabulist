@@ -1,9 +1,13 @@
 /**
- * Threads, consequences, directives, and session state.
+ * Threads, consequences, directives, and story state.
  *
  * Threads exist instead of a plot: a plot breaks when the player deviates, a
  * thread just gets re-aimed (DESIGN §2). Consequences are a propagation queue
  * rather than a world simulation (DESIGN §6.1).
+ *
+ * Every table here is story-scoped: two stories in the same world never share
+ * a thread, a consequence, a directive, or session state, even when they
+ * diverge from the same canon.
  */
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/db.ts';
@@ -18,6 +22,8 @@ import {
   type Knobs,
   type Maturity,
   type SessionState,
+  type Story,
+  type StoryId,
   type StyleContract,
   type Thread,
   type ThreadId,
@@ -52,36 +58,42 @@ function toThread(r: ThreadRow): Thread {
 
 export class ThreadStore {
   private db: Db;
+  private storyId: StoryId;
 
-  constructor(db: Db) {
+  constructor(db: Db, storyId: StoryId) {
     this.db = db;
+    this.storyId = storyId;
   }
 
   create(t: Omit<Thread, 'id'> & { id?: ThreadId }): Thread {
     const id = t.id ?? `thread:${randomUUID()}`;
     this.db
       .prepare(
-        `INSERT INTO threads (id, title, stakes, tension, parties, resolutions, status, created_scene)
-         VALUES (?,?,?,?,?,?,?,?)`,
+        `INSERT INTO threads (id, story_id, title, stakes, tension, parties, resolutions, status, created_scene)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
       )
-      .run(id, t.title, t.stakes, t.tension, JSON.stringify(t.parties), JSON.stringify(t.resolutions), t.status, t.createdScene);
+      .run(id, this.storyId, t.title, t.stakes, t.tension, JSON.stringify(t.parties), JSON.stringify(t.resolutions), t.status, t.createdScene);
     return { ...t, id };
   }
 
   get(id: ThreadId): Thread | undefined {
-    const r = row<ThreadRow>(this.db.prepare(`SELECT * FROM threads WHERE id = ?`).get(id));
+    const r = row<ThreadRow>(this.db.prepare(`SELECT * FROM threads WHERE id = ? AND story_id = ?`).get(id, this.storyId));
     return r ? toThread(r) : undefined;
   }
 
   /** Open threads ranked by tension: the Director's menu. */
   open(limit = 12): Thread[] {
     return rows<ThreadRow>(
-      this.db.prepare(`SELECT * FROM threads WHERE status = 'open' ORDER BY tension DESC LIMIT ?`).all(limit),
+      this.db
+        .prepare(`SELECT * FROM threads WHERE story_id = ? AND status = 'open' ORDER BY tension DESC LIMIT ?`)
+        .all(this.storyId, limit),
     ).map(toThread);
   }
 
   all(): Thread[] {
-    return rows<ThreadRow>(this.db.prepare(`SELECT * FROM threads ORDER BY tension DESC`).all()).map(toThread);
+    return rows<ThreadRow>(
+      this.db.prepare(`SELECT * FROM threads WHERE story_id = ? ORDER BY tension DESC`).all(this.storyId),
+    ).map(toThread);
   }
 
   update(id: ThreadId, patch: Partial<Omit<Thread, 'id'>>): void {
@@ -90,7 +102,7 @@ export class ThreadStore {
     const next = { ...cur, ...patch };
     this.db
       .prepare(
-        `UPDATE threads SET title=?, stakes=?, tension=?, parties=?, resolutions=?, status=? WHERE id=?`,
+        `UPDATE threads SET title=?, stakes=?, tension=?, parties=?, resolutions=?, status=? WHERE id=? AND story_id=?`,
       )
       .run(
         next.title,
@@ -100,6 +112,7 @@ export class ThreadStore {
         JSON.stringify(next.resolutions),
         next.status,
         id,
+        this.storyId,
       );
   }
 
@@ -146,9 +159,11 @@ function toConsequence(r: ConsequenceRow): Consequence {
 
 export class ConsequenceStore {
   private db: Db;
+  private storyId: StoryId;
 
-  constructor(db: Db) {
+  constructor(db: Db, storyId: StoryId) {
     this.db = db;
+    this.storyId = storyId;
   }
 
   enqueue(c: Omit<Consequence, 'id' | 'firedScene' | 'supersededBy'> & { id?: string }): Consequence {
@@ -156,11 +171,12 @@ export class ConsequenceStore {
     this.db
       .prepare(
         `INSERT INTO consequences
-           (id, cause_event_id, trigger, actor_id, action, visibility, maturity, depth, significance, created_scene, fired_scene, superseded_by)
-         VALUES (?,?,?,?,?,?,?,?,?,?,NULL,NULL)`,
+           (id, story_id, cause_event_id, trigger, actor_id, action, visibility, maturity, depth, significance, created_scene, fired_scene, superseded_by)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)`,
       )
       .run(
         id,
+        this.storyId,
         c.causeEventId,
         JSON.stringify(c.trigger),
         c.actorId,
@@ -175,46 +191,54 @@ export class ConsequenceStore {
   }
 
   get(id: ConsequenceId): Consequence | undefined {
-    const r = row<ConsequenceRow>(this.db.prepare(`SELECT * FROM consequences WHERE id = ?`).get(id));
+    const r = row<ConsequenceRow>(
+      this.db.prepare(`SELECT * FROM consequences WHERE id = ? AND story_id = ?`).get(id, this.storyId),
+    );
     return r ? toConsequence(r) : undefined;
   }
 
   pending(): Consequence[] {
     return rows<ConsequenceRow>(
       this.db
-        .prepare(`SELECT * FROM consequences WHERE maturity IN ('pending','ripening') ORDER BY created_scene`)
-        .all(),
+        .prepare(`SELECT * FROM consequences WHERE story_id = ? AND maturity IN ('pending','ripening') ORDER BY created_scene`)
+        .all(this.storyId),
     ).map(toConsequence);
   }
 
   all(limit = 500): Consequence[] {
     return rows<ConsequenceRow>(
-      this.db.prepare(`SELECT * FROM consequences ORDER BY created_scene DESC LIMIT ?`).all(limit),
+      this.db
+        .prepare(`SELECT * FROM consequences WHERE story_id = ? ORDER BY created_scene DESC LIMIT ?`)
+        .all(this.storyId, limit),
     ).map(toConsequence);
   }
 
   byCause(eventId: string): Consequence[] {
     return rows<ConsequenceRow>(
-      this.db.prepare(`SELECT * FROM consequences WHERE cause_event_id = ?`).all(eventId),
+      this.db.prepare(`SELECT * FROM consequences WHERE cause_event_id = ? AND story_id = ?`).all(eventId, this.storyId),
     ).map(toConsequence);
   }
 
   setMaturity(id: ConsequenceId, maturity: Maturity, scene?: number): void {
     if (maturity === 'fired') {
-      this.db.prepare(`UPDATE consequences SET maturity = ?, fired_scene = ? WHERE id = ?`).run(maturity, scene ?? null, id);
+      this.db
+        .prepare(`UPDATE consequences SET maturity = ?, fired_scene = ? WHERE id = ? AND story_id = ?`)
+        .run(maturity, scene ?? null, id, this.storyId);
     } else {
-      this.db.prepare(`UPDATE consequences SET maturity = ? WHERE id = ?`).run(maturity, id);
+      this.db.prepare(`UPDATE consequences SET maturity = ? WHERE id = ? AND story_id = ?`).run(maturity, id, this.storyId);
     }
   }
 
   supersede(id: ConsequenceId, by: string): void {
     this.db
-      .prepare(`UPDATE consequences SET maturity = 'superseded', superseded_by = ? WHERE id = ?`)
-      .run(by, id);
+      .prepare(`UPDATE consequences SET maturity = 'superseded', superseded_by = ? WHERE id = ? AND story_id = ?`)
+      .run(by, id, this.storyId);
   }
 
   retime(id: ConsequenceId, trigger: Trigger): void {
-    this.db.prepare(`UPDATE consequences SET trigger = ? WHERE id = ?`).run(JSON.stringify(trigger), id);
+    this.db
+      .prepare(`UPDATE consequences SET trigger = ? WHERE id = ? AND story_id = ?`)
+      .run(JSON.stringify(trigger), id, this.storyId);
   }
 
   /** How much has matured unseen; drives the ignorance budget (DESIGN §6.5). */
@@ -222,8 +246,8 @@ export class ConsequenceStore {
     return Number(
       row<{ n: number }>(
         this.db
-          .prepare(`SELECT COUNT(*) n FROM consequences WHERE maturity = 'fired' AND visibility != 'onscreen'`)
-          .get(),
+          .prepare(`SELECT COUNT(*) n FROM consequences WHERE story_id = ? AND maturity = 'fired' AND visibility != 'onscreen'`)
+          .get(this.storyId),
       )?.n ?? 0,
     );
   }
@@ -233,19 +257,21 @@ export class ConsequenceStore {
 
 export class DirectiveStore {
   private db: Db;
+  private storyId: StoryId;
 
-  constructor(db: Db) {
+  constructor(db: Db, storyId: StoryId) {
     this.db = db;
+    this.storyId = storyId;
   }
 
   create(d: Omit<Directive, 'id'> & { id?: string }): Directive {
     const id = d.id ?? `dir:${randomUUID()}`;
     this.db
       .prepare(
-        `INSERT INTO directives (id, text, scope, strength, lifetime_scenes, status, created_scene)
-         VALUES (?,?,?,?,?,?,?)`,
+        `INSERT INTO directives (id, story_id, text, scope, strength, lifetime_scenes, status, created_scene)
+         VALUES (?,?,?,?,?,?,?,?)`,
       )
-      .run(id, d.text, d.scope, d.strength, d.lifetimeScenes, d.status, d.createdScene);
+      .run(id, this.storyId, d.text, d.scope, d.strength, d.lifetimeScenes, d.status, d.createdScene);
     return { ...d, id };
   }
 
@@ -258,7 +284,11 @@ export class DirectiveStore {
       lifetime_scenes: number | null;
       status: Directive['status'];
       created_scene: number;
-    }>(this.db.prepare(`SELECT * FROM directives WHERE status = 'active' ORDER BY created_scene DESC`).all()).map((r) => ({
+    }>(
+      this.db
+        .prepare(`SELECT * FROM directives WHERE story_id = ? AND status = 'active' ORDER BY created_scene DESC`)
+        .all(this.storyId),
+    ).map((r) => ({
       id: r.id,
       text: r.text,
       scope: r.scope,
@@ -270,7 +300,7 @@ export class DirectiveStore {
   }
 
   setStatus(id: string, status: Directive['status']): void {
-    this.db.prepare(`UPDATE directives SET status = ? WHERE id = ?`).run(status, id);
+    this.db.prepare(`UPDATE directives SET status = ? WHERE id = ? AND story_id = ?`).run(status, id, this.storyId);
   }
 
   /** Expire directives whose lifetime has run out, so stale steering decays. */
@@ -278,42 +308,131 @@ export class DirectiveStore {
     const stale = rows<{ id: string }>(
       this.db
         .prepare(
-          `SELECT id FROM directives WHERE status='active' AND lifetime_scenes IS NOT NULL
+          `SELECT id FROM directives WHERE story_id = ? AND status='active' AND lifetime_scenes IS NOT NULL
              AND created_scene + lifetime_scenes <= ?`,
         )
-        .all(scene),
+        .all(this.storyId, scene),
     ).map((r) => r.id);
     for (const id of stale) this.setStatus(id, 'retired');
     return stale;
   }
 }
 
-// ----------------------------------------------------------------- session
+// ------------------------------------------------------------------ stories
+//
+// Replaces the old `session` table, which had exactly one row because a file
+// held exactly one story. `StoryStore` is bound to one story (mirroring every
+// other store here) and exposes the play-relevant subset (`SessionState`) for
+// every existing call site that only ever wanted scene/turn/style/knobs.
+// `listStories`/`createStory`/`getStoryMeta` are module-level rather than
+// methods on a bound store, because they operate *across* stories — creating
+// or listing stories is inherently not scoped to the one this instance is
+// bound to.
 
-export class SessionStore {
+interface StoryRow {
+  id: string;
+  title: string;
+  scene: number;
+  turn: number;
+  player_character_id: string;
+  current_location_id: string | null;
+  style: string;
+  knobs: string;
+  forked_from: string | null;
+  forked_at_scene: number | null;
+  created_at: string;
+  last_played_at: string;
+}
+
+function toStory(r: StoryRow): Story {
+  return {
+    id: r.id,
+    title: r.title,
+    scene: r.scene,
+    turn: r.turn,
+    playerCharacterId: r.player_character_id,
+    currentLocationId: r.current_location_id,
+    style: { ...defaultStyleContract(), ...jsonGet<Partial<StyleContract>>(r.style, {}) },
+    knobs: { ...defaultKnobs(), ...jsonGet<Partial<Knobs>>(r.knobs, {}) },
+    forkedFrom: r.forked_from,
+    forkedAtScene: r.forked_at_scene,
+    createdAt: r.created_at,
+    lastPlayedAt: r.last_played_at,
+  };
+}
+
+/** Every story in this file, most recently played first. Used by the save browser. */
+export function listStories(db: Db): Story[] {
+  return rows<StoryRow>(db.prepare(`SELECT * FROM stories ORDER BY last_played_at DESC, created_at DESC`).all()).map(
+    toStory,
+  );
+}
+
+export function getStory(db: Db, id: StoryId): Story | undefined {
+  const r = row<StoryRow>(db.prepare(`SELECT * FROM stories WHERE id = ?`).get(id));
+  return r ? toStory(r) : undefined;
+}
+
+/**
+ * Creates a fresh story against this file's canon — the "non-overlapping new
+ * story in an existing world" case. No chronicle is copied; the story starts
+ * exactly like a brand-new ingest would, minus re-ingesting.
+ */
+export function createStory(db: Db, opts: { title?: string; forkedFrom?: StoryId; forkedAtScene?: number } = {}): Story {
+  const id = `story:${randomUUID()}`;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO stories
+       (id, title, scene, turn, player_character_id, current_location_id, style, knobs,
+        forked_from, forked_at_scene, created_at, last_played_at)
+     VALUES (?,?,1,0,'',NULL,'{}','{}',?,?,?,?)`,
+  ).run(id, opts.title ?? '', opts.forkedFrom ?? null, opts.forkedAtScene ?? null, now, now);
+  return getStory(db, id)!;
+}
+
+/**
+ * The one-story auto-resolve `World.open` relies on: a fresh file gets its
+ * first story created automatically, a file with exactly one story binds to
+ * it without the caller needing to know a story concept exists, and a file
+ * with more than one refuses to guess — every ~75 existing call sites built
+ * before this migration keep working unchanged as long as they only ever
+ * touch one-story files, which is every one of them today.
+ */
+export function resolveDefaultStory(db: Db): StoryId {
+  const existing = listStories(db);
+  if (existing.length === 1) return existing[0]!.id;
+  if (existing.length === 0) return createStory(db, { title: '' }).id;
+  throw new Error(
+    `this world has ${existing.length} stories; World.open needs an explicit storyId (see listStories)`,
+  );
+}
+
+export class StoryStore {
   private db: Db;
+  private storyId: StoryId;
 
-  constructor(db: Db) {
+  constructor(db: Db, storyId: StoryId) {
     this.db = db;
+    this.storyId = storyId;
+  }
+
+  id(): StoryId {
+    return this.storyId;
+  }
+
+  private row(): StoryRow {
+    const r = row<StoryRow>(this.db.prepare(`SELECT * FROM stories WHERE id = ?`).get(this.storyId));
+    if (!r) throw new Error(`story ${this.storyId} does not exist`);
+    return r;
   }
 
   get(): SessionState {
-    const r = row<{
-      scene: number;
-      turn: number;
-      player_character_id: string;
-      current_location_id: string | null;
-      style: string;
-      knobs: string;
-    }>(this.db.prepare(`SELECT * FROM session WHERE id = 1`).get());
-    return {
-      scene: r?.scene ?? 1,
-      turn: r?.turn ?? 0,
-      playerCharacterId: r?.player_character_id ?? '',
-      currentLocationId: r?.current_location_id ?? null,
-      style: { ...defaultStyleContract(), ...jsonGet<Partial<StyleContract>>(r?.style, {}) },
-      knobs: { ...defaultKnobs(), ...jsonGet<Partial<Knobs>>(r?.knobs, {}) },
-    };
+    return toStory(this.row());
+  }
+
+  /** Full record, including identity and lineage — what the save browser wants. */
+  info(): Story {
+    return toStory(this.row());
   }
 
   set(patch: Partial<SessionState>): SessionState {
@@ -321,7 +440,8 @@ export class SessionStore {
     const next = { ...cur, ...patch };
     this.db
       .prepare(
-        `UPDATE session SET scene=?, turn=?, player_character_id=?, current_location_id=?, style=?, knobs=? WHERE id=1`,
+        `UPDATE stories SET scene=?, turn=?, player_character_id=?, current_location_id=?, style=?, knobs=?,
+           last_played_at=? WHERE id=?`,
       )
       .run(
         next.scene,
@@ -330,7 +450,14 @@ export class SessionStore {
         next.currentLocationId,
         JSON.stringify(next.style),
         JSON.stringify(next.knobs),
+        new Date().toISOString(),
+        this.storyId,
       );
     return next;
   }
+
+  rename(title: string): void {
+    this.db.prepare(`UPDATE stories SET title = ? WHERE id = ?`).run(title, this.storyId);
+  }
 }
+

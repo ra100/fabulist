@@ -184,7 +184,7 @@ export async function runPassB(
         samples: [...new Set([...sheet.voice.samples, ...(v.samples ?? [])])].slice(0, 8),
         never: [...new Set([...sheet.voice.never, ...(v.never ?? [])])],
       };
-      world.cast.put(sheet);
+      world.cast.put(sheet, 'canon');
       out.voiceCards++;
     }
 
