@@ -1,5 +1,8 @@
 # Tokens and colour presets
 
+> Preset frames (`p-*.png`, `g-*.png`) are regenerated per pass and are not
+> tracked; `.gitignore` covers `.design/*.png`.
+
 The token layer is three tiers. **Components read tier 2 only.** They never
 reference a raw value, and never name a colour — which is the whole reason a
 preset can move any hue without a single component changing.

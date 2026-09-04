@@ -1,7 +1,11 @@
 # Fabulist — full design review
 
 Judged from rendered screenshots at 1440×900, seeded world, four turns played.
-Screens: `01`–`08` in this folder.
+
+> **On the frame references.** Screens are cited by number throughout (`01`–`08`,
+> `10`–`29`, `p-*`, `g-*`, `s-*`, `m-*`). The images themselves are **not tracked** —
+> they were most of the repository's weight and are regenerated on every design
+> pass. The numbers remain as a record of what was examined.
 
 **Summary.** This is not a blank generated interface. It has real instincts: a warm
 dark ground, an amber accent, and a three-register type split (serif = prose,
