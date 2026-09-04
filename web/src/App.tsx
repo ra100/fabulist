@@ -9,6 +9,7 @@ import {
   type Fact,
   type Interrupt,
   type Sheet,
+  type ProvidersReport,
   type State,
   type Thread,
   type TurnMeta,
@@ -882,6 +883,8 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
           </div>
         ) : null}
 
+        <ProvidersPanel />
+
         {anchors.length ? (
           <div className="card">
             <h3>style anchors</h3>
@@ -944,6 +947,72 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
           </div>
         ) : null}
       </aside>
+    </div>
+  );
+}
+
+/**
+ * Which models are usable here, and the one-line fix for the ones that are not.
+ * Probing touches local ports and credential helpers, so it is on demand.
+ */
+function ProvidersPanel() {
+  const [report, setReport] = useState<ProvidersReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const probe = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setReport(await api.providers());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  const badge = (status: string) =>
+    status === 'ready' ? <span className="ok">ready</span> : status === 'unknown' ? <span className="dimmer">?</span> : <span className="warn">--</span>;
+
+  return (
+    <div className="card">
+      <div className="row">
+        <h3 className="grow" style={{ margin: 0 }}>models available here</h3>
+        <button disabled={busy} onClick={() => void probe()}>
+          {busy ? 'checking…' : report ? 'recheck' : 'check'}
+        </button>
+      </div>
+
+      {error ? <p className="small warn">{error}</p> : null}
+
+      {!report && !busy ? (
+        <p className="small dimmer" style={{ marginTop: 8 }}>
+          Checks local servers, AWS profiles, gcloud logins and API keys. Nothing is sent anywhere.
+        </p>
+      ) : null}
+
+      {report ? (
+        <>
+          <p className="small dim" style={{ marginTop: 8 }}>
+            profile <b>{report.profile}</b>
+            {report.usableProfiles.length ? ` · usable now: ${report.usableProfiles.join(', ')}` : ' · nothing but the mock is usable'}
+          </p>
+          {report.results.map((r) => (
+            <div key={r.key} style={{ marginBottom: 7 }}>
+              <div className="row small">
+                <span style={{ width: 46 }}>{badge(r.status)}</span>
+                <span className="grow mono">{r.key}</span>
+                <span className="dimmer">{r.auth}</span>
+              </div>
+              {r.detail ? <div className="small dimmer" style={{ paddingLeft: 46 }}>{r.detail}</div> : null}
+              {r.fix ? <div className="small warn" style={{ paddingLeft: 46 }}>→ {r.fix}</div> : null}
+            </div>
+          ))}
+          <p className="small dimmer">
+            Switching profile is a config change (story.config.json), so the engine reloads it on restart.
+          </p>
+        </>
+      ) : null}
     </div>
   );
 }

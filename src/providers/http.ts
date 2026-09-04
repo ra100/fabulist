@@ -8,14 +8,13 @@
  * Keys come from the environment. Nothing here is imported by the engine tests,
  * so the suite stays offline.
  */
-import type {
-  CompletionRequest,
-  CompletionResult,
-  Provider,
-  ProviderCapabilities,
-} from './provider.ts';
+import { adaptRequest, type CompletionRequest, type CompletionResult, type Provider, type ProviderCapabilities } from './provider.ts';
+import { BedrockProvider } from './bedrock.ts';
+import { VertexProvider } from './google.ts';
+import { CopilotProvider } from './copilot.ts';
 
 interface HttpOptions {
+  /** Empty for local servers, which have nothing to authenticate against. */
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -55,6 +54,13 @@ async function postJson(
 // Covers OpenAI, Groq, Together, DeepSeek, OpenRouter, LM Studio, and anything
 // else speaking /chat/completions, which is most of the field.
 
+/**
+ * Dialect differences between servers that all claim to be OpenAI-compatible.
+ * They agree on the chat shape and disagree on constrained decoding, which is
+ * exactly the part that matters for delta extraction.
+ */
+export type OpenAIDialect = 'openai' | 'vllm' | 'llamacpp';
+
 export class OpenAICompatProvider implements Provider {
   readonly id: string;
   readonly model: string;
@@ -63,8 +69,9 @@ export class OpenAICompatProvider implements Provider {
   private baseUrl: string;
   private fetcher: typeof fetch;
   private timeoutMs: number;
+  private dialect: OpenAIDialect;
 
-  constructor(id: string, opts: HttpOptions) {
+  constructor(id: string, opts: HttpOptions & { dialect?: OpenAIDialect }) {
     this.id = id;
     this.model = opts.model;
     this.capabilities = opts.capabilities;
@@ -72,6 +79,7 @@ export class OpenAICompatProvider implements Provider {
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');
     this.fetcher = opts.fetcher ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? 120_000;
+    this.dialect = opts.dialect ?? 'openai';
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
@@ -87,10 +95,20 @@ export class OpenAICompatProvider implements Provider {
     // requesting json_schema from an endpoint that ignores it yields prose.
     if (req.schema) {
       if (this.capabilities.structuredOutput === 'native-schema') {
-        body.response_format = {
-          type: 'json_schema',
-          json_schema: { name: req.schema.name, schema: req.schema.schema, strict: false },
-        };
+        if (this.dialect === 'vllm') {
+          // vLLM constrains generation through guided_json rather than
+          // response_format, and silently ignores the latter.
+          body.guided_json = req.schema.schema;
+        } else if (this.dialect === 'llamacpp') {
+          // llama-server takes a bare schema under json_schema.
+          body.response_format = { type: 'json_object' };
+          body.json_schema = req.schema.schema;
+        } else {
+          body.response_format = {
+            type: 'json_schema',
+            json_schema: { name: req.schema.name, schema: req.schema.schema, strict: false },
+          };
+        }
       } else if (this.capabilities.structuredOutput === 'json-mode') {
         body.response_format = { type: 'json_object' };
       }
@@ -98,7 +116,7 @@ export class OpenAICompatProvider implements Provider {
 
     const json = (await postJson(
       `${this.baseUrl}/chat/completions`,
-      { authorization: `Bearer ${this.apiKey}` },
+      this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {},
       body,
       this.fetcher,
       this.timeoutMs,
@@ -249,12 +267,58 @@ function caps(over: Partial<ProviderCapabilities> = {}): ProviderCapabilities {
   };
 }
 
+export type ProviderKind =
+  | 'openai-compat'
+  | 'anthropic'
+  | 'ollama'
+  | 'bedrock'
+  | 'google'
+  | 'copilot'
+  | 'mock';
+
+/**
+ * How a provider authenticates. Naming this explicitly matters because the
+ * interesting cases are the keyless ones: a work laptop has an AWS profile or a
+ * gcloud login, not an exported API key.
+ */
+export type AuthMode = 'none' | 'api-key' | 'aws-profile' | 'google-oauth' | 'copilot-oauth';
+
 export interface ProviderSpec {
-  kind: 'openai-compat' | 'anthropic' | 'ollama' | 'mock';
+  kind: ProviderKind;
   model: string;
   baseUrl?: string;
+  /** Only meaningful for auth 'api-key'. */
   apiKeyEnv?: string;
+  auth?: AuthMode;
   capabilities?: Partial<ProviderCapabilities>;
+  dialect?: OpenAIDialect;
+  /** AWS: overrides AWS_PROFILE and the resolved region. */
+  profile?: string;
+  region?: string;
+  /** Google: project and location, both discoverable but overridable. */
+  project?: string;
+  location?: string;
+  /** Copilot: required acknowledgement that the endpoint is unofficial. */
+  allowUnofficial?: boolean;
+  /** Human note shown by the provider doctor. */
+  note?: string;
+}
+
+/** Which auth a kind uses when the spec does not say. */
+export function defaultAuth(kind: ProviderKind): AuthMode {
+  switch (kind) {
+    case 'ollama':
+    case 'mock':
+      return 'none';
+    case 'bedrock':
+      return 'aws-profile';
+    case 'google':
+      return 'google-oauth';
+    case 'copilot':
+      return 'copilot-oauth';
+    default:
+      return 'api-key';
+  }
 }
 
 /**
@@ -302,14 +366,95 @@ export const PRESETS: Record<string, ProviderSpec> = {
     baseUrl: 'http://127.0.0.1:11434',
     capabilities: { contextWindow: 64_000, structuredOutput: 'native-schema', costTier: 'free', proseQuality: 0.5, steerability: 0.55 },
   },
+
+  // --- local OpenAI-compatible servers. No key: there is nothing to
+  // authenticate against, and sending a bogus bearer makes some of them 401.
+
+  'vllm:local': {
+    kind: 'openai-compat',
+    model: 'default',
+    baseUrl: 'http://127.0.0.1:8000/v1',
+    auth: 'none',
+    dialect: 'vllm',
+    note: 'set model to the id vLLM was launched with (see GET /v1/models)',
+    capabilities: { contextWindow: 64_000, structuredOutput: 'native-schema', costTier: 'free', proseQuality: 0.55, steerability: 0.6 },
+  },
+  'llamacpp:local': {
+    kind: 'openai-compat',
+    model: 'local',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    auth: 'none',
+    dialect: 'llamacpp',
+    note: 'llama-server; start it with --ctx-size 65536 or larger',
+    capabilities: { contextWindow: 64_000, structuredOutput: 'native-schema', costTier: 'free', proseQuality: 0.45, steerability: 0.5 },
+  },
+  'unsloth:local': {
+    kind: 'openai-compat',
+    model: 'unsloth',
+    baseUrl: 'http://127.0.0.1:8000/v1',
+    auth: 'none',
+    dialect: 'vllm',
+    note: 'Unsloth models served through vLLM; same endpoint, same dialect',
+    capabilities: { contextWindow: 64_000, structuredOutput: 'native-schema', costTier: 'free', proseQuality: 0.5, steerability: 0.55 },
+  },
+  'lmstudio:local': {
+    kind: 'openai-compat',
+    model: 'local-model',
+    baseUrl: 'http://127.0.0.1:1234/v1',
+    auth: 'none',
+    capabilities: { contextWindow: 64_000, structuredOutput: 'json-mode', costTier: 'free', proseQuality: 0.45, steerability: 0.5 },
+  },
+
+  // --- keyless cloud.
+
+  'bedrock:sonnet': {
+    kind: 'bedrock',
+    model: 'anthropic.claude-sonnet-4-20250514-v1:0',
+    auth: 'aws-profile',
+    note: 'needs model access enabled in the Bedrock console for your region',
+    capabilities: { contextWindow: 200_000, structuredOutput: 'native-schema', costTier: 'premium', proseQuality: 0.9, steerability: 0.9 },
+  },
+  'bedrock:haiku': {
+    kind: 'bedrock',
+    model: 'anthropic.claude-3-5-haiku-20241022-v1:0',
+    auth: 'aws-profile',
+    capabilities: { contextWindow: 200_000, structuredOutput: 'native-schema', costTier: 'cheap', proseQuality: 0.6, steerability: 0.7 },
+  },
+  'bedrock:nova-pro': {
+    kind: 'bedrock',
+    model: 'amazon.nova-pro-v1:0',
+    auth: 'aws-profile',
+    capabilities: { contextWindow: 300_000, structuredOutput: 'native-schema', costTier: 'mid', proseQuality: 0.6, steerability: 0.65 },
+  },
+  'google:gemini-pro': {
+    kind: 'google',
+    model: 'gemini-2.5-pro',
+    auth: 'google-oauth',
+    note: 'gcloud auth application-default login',
+    capabilities: { contextWindow: 1_000_000, structuredOutput: 'native-schema', costTier: 'premium', proseQuality: 0.8, steerability: 0.8 },
+  },
+  'google:gemini-flash': {
+    kind: 'google',
+    model: 'gemini-2.5-flash',
+    auth: 'google-oauth',
+    capabilities: { contextWindow: 1_000_000, structuredOutput: 'native-schema', costTier: 'cheap', proseQuality: 0.6, steerability: 0.7 },
+  },
+  'copilot:gpt-4o': {
+    kind: 'copilot',
+    model: 'gpt-4o',
+    auth: 'copilot-oauth',
+    note: 'UNOFFICIAL: undocumented endpoint, likely outside the Copilot terms of service',
+    capabilities: { contextWindow: 128_000, structuredOutput: 'none', costTier: 'free', proseQuality: 0.7, steerability: 0.75 },
+  },
 };
 
 export function buildProvider(spec: ProviderSpec, env: Record<string, string | undefined> = process.env): Provider {
   const capabilities = caps(spec.capabilities);
-  const apiKey = spec.apiKeyEnv ? (env[spec.apiKeyEnv] ?? '') : '';
+  const auth = spec.auth ?? defaultAuth(spec.kind);
+  const apiKey = auth === 'api-key' && spec.apiKeyEnv ? (env[spec.apiKeyEnv] ?? '') : '';
 
-  if (spec.kind !== 'ollama' && spec.kind !== 'mock' && !apiKey) {
-    throw new Error(`missing ${spec.apiKeyEnv} for model ${spec.model}`);
+  if (auth === 'api-key' && !apiKey) {
+    throw new Error(`missing ${spec.apiKeyEnv ?? 'API key'} for model ${spec.model}`);
   }
 
   switch (spec.kind) {
@@ -317,12 +462,33 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
       return new AnthropicProvider({ apiKey, baseUrl: spec.baseUrl ?? 'https://api.anthropic.com', model: spec.model, capabilities });
     case 'ollama':
       return new OllamaProvider({ baseUrl: spec.baseUrl ?? 'http://127.0.0.1:11434', model: spec.model, capabilities });
+    case 'bedrock':
+      return new BedrockProvider({
+        modelId: spec.model,
+        capabilities,
+        ...(spec.profile ? { profile: spec.profile } : {}),
+        ...(spec.region ? { region: spec.region } : {}),
+      });
+    case 'google':
+      return new VertexProvider({
+        model: spec.model,
+        capabilities,
+        ...(spec.project ? { project: spec.project } : {}),
+        ...(spec.location ? { location: spec.location } : {}),
+      });
+    case 'copilot':
+      return new CopilotProvider({
+        model: spec.model,
+        capabilities,
+        allowUnofficial: spec.allowUnofficial === true,
+      });
     case 'openai-compat':
       return new OpenAICompatProvider(spec.model.split(':')[0] ?? 'openai', {
         apiKey,
         baseUrl: spec.baseUrl ?? 'https://api.openai.com/v1',
         model: spec.model,
         capabilities,
+        ...(spec.dialect ? { dialect: spec.dialect } : {}),
       });
     default:
       throw new Error(`unsupported provider kind: ${spec.kind}`);
@@ -339,9 +505,15 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
  */
 export const PROFILES: Record<string, { narrate: string; mechanics: string; extract: string }> = {
   local: { narrate: 'ollama:qwen2.5', mechanics: 'ollama:llama3.1', extract: 'ollama:qwen2.5' },
+  vllm: { narrate: 'vllm:local', mechanics: 'vllm:local', extract: 'vllm:local' },
+  llamacpp: { narrate: 'llamacpp:local', mechanics: 'llamacpp:local', extract: 'llamacpp:local' },
   balanced: { narrate: 'anthropic:sonnet', mechanics: 'openai:gpt-4o-mini', extract: 'openai:gpt-4o-mini' },
   premium: { narrate: 'anthropic:sonnet', mechanics: 'openai:gpt-4o', extract: 'openai:gpt-4o' },
   cheap: { narrate: 'deepseek:chat', mechanics: 'deepseek:chat', extract: 'deepseek:chat' },
+  // Keyless: an AWS profile or a gcloud login is all these need.
+  bedrock: { narrate: 'bedrock:sonnet', mechanics: 'bedrock:haiku', extract: 'bedrock:haiku' },
+  google: { narrate: 'google:gemini-pro', mechanics: 'google:gemini-flash', extract: 'google:gemini-flash' },
+  copilot: { narrate: 'copilot:gpt-4o', mechanics: 'copilot:gpt-4o', extract: 'copilot:gpt-4o' },
 };
 
-export const MECHANIC_ROLES = ['classify', 'integrity', 'referee', 'director', 'humanize', 'summarize'] as const;
+export const MECHANIC_ROLES = ['classify', 'integrity', 'referee', 'director', 'humanize', 'summarize', 'setup'] as const;

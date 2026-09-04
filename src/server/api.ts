@@ -396,6 +396,27 @@ route('POST', '/api/branch', (_req, res, { world, body }) => {
   }
 });
 
+/**
+ * What is usable on this machine. Read-only and slightly slow (it touches local
+ * servers and credential helpers), so the UI fetches it on demand rather than
+ * with the rest of the state.
+ */
+route('GET', '/api/providers', async (_req, res) => {
+  const [{ probeAll, usableProfiles }, { PROFILES }, { loadConfig }] = await Promise.all([
+    import('../providers/probe.ts'),
+    import('../providers/http.ts'),
+    import('../config/config.ts'),
+  ]);
+  const cfg = loadConfig();
+  const results = await probeAll(cfg.providers, {});
+  send(res, 200, {
+    profile: cfg.profile,
+    results,
+    usableProfiles: usableProfiles(results, PROFILES),
+    profiles: Object.keys(PROFILES),
+  });
+});
+
 route('GET', '/api/search', (_req, res, { world, url }) => {
   const q = url.searchParams.get('q') ?? '';
   send(res, 200, q ? world.graph.search(q, 30) : []);

@@ -42,7 +42,7 @@ pnpm play                 # interactive session
 ```
 
 ```bash
-pnpm test                 # 319 tests, offline
+pnpm test                 # 378 tests, offline
 pnpm typecheck
 ```
 
@@ -153,23 +153,104 @@ inventing, not that the wiki is unusually clean.
 
 ## Providers
 
-Edit `story.config.json`:
+Start here:
 
-```json
-{ "profile": "balanced", "dbPath": "data/story.db", "proseLintThreshold": 6, "blocklist": [] }
+```bash
+pnpm providers        # what is usable on this machine, and the fix for what is not
 ```
 
-| profile | narrator | mechanics | extractor |
-|---|---|---|---|
-| `mock` | deterministic, offline | — | — |
-| `local` | ollama qwen2.5 | ollama llama3.1 | ollama qwen2.5 |
-| `cheap` | deepseek | deepseek | deepseek |
-| `balanced` | anthropic sonnet | gpt-4o-mini | gpt-4o-mini |
-| `premium` | anthropic sonnet | gpt-4o | gpt-4o |
+It probes local ports, AWS profiles, gcloud logins and API keys, then prints a one-line
+remedy for anything unavailable. The same report is in the UI under **settings → models
+available here**. Worth running first, because every one of these fails differently and
+most of them fail hours into a session rather than at startup.
 
-Keys come from the environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`).
-An unset key falls back to the mock with a note rather than failing — an unconfigured key
-should not stop you playing.
+Then set a profile in `story.config.json`:
+
+```json
+{ "profile": "bedrock", "dbPath": "data/story.db", "proseLintThreshold": 6, "blocklist": [] }
+```
+
+| profile | auth | narrator | mechanics + extractor |
+|---|---|---|---|
+| `mock` | none | deterministic, offline | — |
+| `local` | none | ollama qwen2.5 | ollama llama3.1 |
+| `vllm` | none | vLLM | vLLM |
+| `llamacpp` | none | llama-server | llama-server |
+| `bedrock` | AWS profile | claude sonnet | claude haiku |
+| `google` | gcloud OAuth | gemini pro | gemini flash |
+| `copilot` | Copilot OAuth | gpt-4o | gpt-4o |
+| `cheap` | API key | deepseek | deepseek |
+| `balanced` | API key | anthropic sonnet | gpt-4o-mini |
+| `premium` | API key | anthropic sonnet | gpt-4o |
+
+An unavailable profile falls back to the mock with a note rather than failing — an
+unconfigured provider should not stop you playing.
+
+### Running without API keys
+
+**Local servers** need no key at all, and no `Authorization` header is sent (vLLM and
+llama.cpp reject a bogus bearer; Ollama has no concept of one). They agree on the chat
+format and disagree on constrained decoding, which is the part that matters for delta
+extraction, so each has its own dialect:
+
+```bash
+vllm serve Qwen/Qwen2.5-14B-Instruct --port 8000 --max-model-len 65536
+llama-server -m model.gguf --port 8080 --ctx-size 65536
+ollama serve
+```
+
+Unsloth models are served through vLLM, so `unsloth:local` is the same endpoint and dialect
+with a different label. Set `model` to whatever id the server was launched with.
+
+**AWS Bedrock** uses `AWS_PROFILE`, not a key. SigV4 is signed here rather than pulled from
+the AWS SDK, and it is checked against AWS's own published test vector. The credential
+chain is the one a work laptop actually needs, first hit wins:
+
+1. environment variables
+2. static keys in `~/.aws/credentials`
+3. `credential_process` — covers aws-vault, saml2aws, and most enterprise tooling
+4. IAM Identity Center via the cached SSO token
+5. `role_arn` + `source_profile`, assumed through STS
+
+```bash
+export AWS_PROFILE=work
+pnpm providers          # confirms which profile resolved, and how
+```
+
+Credentials resolving is not the same as model entitlement: Bedrock access is granted per
+model per region, so a 403 here points you at the Bedrock console rather than at IAM.
+Requests go through the **Converse** API, which is one body shape for every model family,
+and structured output uses a forced tool call since Bedrock has no `response_format`.
+
+**Google Gemini** uses OAuth via Vertex AI:
+
+```bash
+gcloud auth application-default login
+export GOOGLE_CLOUD_PROJECT=your-project-id
+```
+
+That writes an `authorized_user` record which is exchanged for access tokens directly, so
+gcloud is not needed at run time. A service account key works too
+(`GOOGLE_APPLICATION_CREDENTIALS`), signed as a JWT assertion. `gcloud auth
+print-access-token` is the fallback for impersonation and external account types.
+
+Gemini's `responseSchema` is OpenAPI-flavoured rather than JSON Schema — it rejects
+`additionalProperties` and union types like `["string","null"]`, both of which the engine's
+schemas use — so schemas are translated on the way out.
+
+**GitHub Copilot** reuses the OAuth token your editor already stored, and is **off by
+default**:
+
+```json
+{ "providers": { "copilot:gpt-4o": { "kind": "copilot", "model": "gpt-4o", "allowUnofficial": true } } }
+```
+
+Read that flag as what it says. Copilot's chat endpoint is an internal API for GitHub's own
+editor extensions: undocumented, unversioned, and using it from a third-party client is
+very likely outside the Copilot terms of service. It can break without notice and in
+principle could put your GitHub account at risk. It is implemented because it is your
+credential on your machine, but nothing reaches it unless you opt in explicitly. If you
+want a supported keyless option, Bedrock and Vertex are both first-class here.
 
 The engine assumes a **64k floor**. That is what makes the role split load-bearing rather
 than merely tidy: no single call needs the whole picture, so each frame is assembled to a
@@ -288,7 +369,8 @@ in the discarded future is unbroken, so the integrity gate defends it again.
 src/domain/       types; the delta contract lives here
 src/db/           schema.sql and the connection
 src/store/        canon/chronicle overlay, cast, chronicle, threads, consequences
-src/providers/    adapter interface, capability matrix, mock + http providers
+src/providers/    adapter interface, capability matrix, mock, http, bedrock,
+                  google, copilot, sigv4, aws credential chain, probe
 src/frame/        tokenizer and budgeted per-role frame assembly
 src/loop/         roles, three-tier validator, commit, engine, compaction, branching
 src/consequence/  propagation queue, rumours, world tick

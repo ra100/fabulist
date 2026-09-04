@@ -229,6 +229,24 @@ export interface SetupStatus {
   hasPlayer: boolean;
 }
 
+export interface ProbeResult {
+  key: string;
+  kind: string;
+  model: string;
+  auth: string;
+  status: 'ready' | 'unavailable' | 'unknown';
+  detail: string;
+  fix: string;
+  note?: string;
+}
+
+export interface ProvidersReport {
+  profile: string;
+  results: ProbeResult[];
+  usableProfiles: string[];
+  profiles: string[];
+}
+
 export interface CandidateCharacter {
   id: string;
   name: string;
@@ -286,6 +304,7 @@ export const api = {
   anchors: () => req<Array<{ id: number; text: string; note: string }>>('/anchors'),
   addAnchor: (text: string, note: string) => post('/anchor', { text, note }),
   search: (q: string) => req<Entity[]>(`/search?q=${encodeURIComponent(q)}`),
+  providers: () => req<ProvidersReport>('/providers'),
 
   setup: {
     status: () => req<SetupStatus>('/setup/status'),
