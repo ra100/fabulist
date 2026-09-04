@@ -35,6 +35,9 @@ ${BOLD}commands${RESET}
   /pin                  keep the last passage from being re-rendered
   /anchor <text>        add a style anchor
   /tick                 advance the offscreen world a step
+  /scene                close the current scene and summarise it
+  /compact              summarise any scene that closed unsummarised
+  /branch <n> <file>    fork the save at scene n, leaving this one intact
   /save                 flush to disk
   /quit
 Anything else is played as your character.
@@ -288,6 +291,45 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
       if (!arg) return true;
       world.chronicle.addAnchor(arg, 'manual', world.session.get().scene);
       console.log(`${DIM}anchor added${RESET}`);
+      return true;
+    }
+    case 'scene': {
+      const s = world.session.get();
+      const res = await engine.compaction().onSceneClosed(s.scene);
+      world.session.set({ scene: s.scene + 1, turn: 0 });
+      world.chronicle.upsertScene(s.scene + 1, { chapter: engine.compaction().chapterOf(s.scene + 1) });
+      console.log(`${DIM}scene ${s.scene} closed${res.scenesSummarised.length ? ' and summarised' : ''}${res.chaptersSummarised.length ? `, chapter ${res.chaptersSummarised[0]} rolled up` : ''}. now scene ${s.scene + 1}.${RESET}`);
+      const summary = world.chronicle.scenes().find((x) => x.scene === s.scene)?.summary;
+      if (summary) console.log(`  ${DIM}${summary}${RESET}`);
+      return true;
+    }
+    case 'compact': {
+      const res = await engine.compaction().backfill(world.session.get().scene);
+      console.log(`${DIM}summarised ${res.scenesSummarised.length} scene(s), ${res.chaptersSummarised.length} chapter(s)${RESET}`);
+      return true;
+    }
+    case 'branch': {
+      const [sceneArg, ...rest] = arg.split(/\s+/);
+      const atScene = Number(sceneArg);
+      const toPath = rest.join(' ');
+      if (!atScene || !toPath) {
+        console.log(`${DIM}usage: /branch <scene> <file>${RESET}`);
+        return true;
+      }
+      const { branchSave } = await import('../loop/branch.ts');
+      const row = world.db.prepare(`PRAGMA database_list`).get() as { file?: string } | undefined;
+      if (!row?.file) {
+        console.log(`${YELLOW}cannot branch an in-memory session${RESET}`);
+        return true;
+      }
+      try {
+        const res = branchSave({ fromPath: row.file, toPath, atScene });
+        console.log(`${DIM}branched at scene ${atScene} -> ${res.path}${RESET}`);
+        console.log(`  ${DIM}discarded ${res.removed.turns} turn(s), ${res.removed.events} event(s), ${res.removed.consequences} consequence(s); restored ${res.removed.retiredEdgesRestored} relation(s)${RESET}`);
+        console.log(`  ${DIM}this session is untouched${RESET}`);
+      } catch (err) {
+        console.log(`${YELLOW}${err instanceof Error ? err.message : String(err)}${RESET}`);
+      }
       return true;
     }
     case 'tick': {

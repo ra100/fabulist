@@ -206,6 +206,46 @@ test('search finds entities by loose name', async () => {
   });
 });
 
+test('compaction can be triggered and reports what it summarised', async () => {
+  await withServer(async (base, world) => {
+    // Two turns in scene 1, then move on so scene 1 counts as closed.
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    await send(base, 'POST', '/api/play', { input: 'i check the door' });
+    world.session.set({ scene: 2, turn: 0 });
+
+    const { status, body } = await send(base, 'POST', '/api/compact', {});
+    assert.equal(status, 200);
+    assert.deepEqual((body as { scenesSummarised: number[] }).scenesSummarised, [1]);
+    const summary = world.chronicle.scenes().find((s) => s.scene === 1)?.summary;
+    assert.ok(summary && /char:/.test(summary), 'the summary keeps ids so the graph stays walkable');
+  });
+});
+
+test('branching an in-memory save is refused rather than silently doing nothing', async () => {
+  await withServer(async (base) => {
+    const { status, body } = await send(base, 'POST', '/api/branch', { atScene: 2, toPath: '/tmp/nope.db' });
+    assert.equal(status, 400);
+    assert.match((body as { error: string }).error, /in-memory/);
+  });
+});
+
+test('branch requires both a scene and a destination', async () => {
+  await withServer(async (base) => {
+    const { status } = await send(base, 'POST', '/api/branch', { atScene: 2 });
+    assert.equal(status, 400);
+  });
+});
+
+test('chapters endpoint exposes the compaction hierarchy', async () => {
+  await withServer(async (base) => {
+    const { status, body } = await get(base, '/api/chapters');
+    assert.equal(status, 200);
+    const b = body as { chapters: unknown[]; scenes: unknown[] };
+    assert.ok(Array.isArray(b.chapters));
+    assert.ok((b.scenes as unknown[]).length > 0);
+  });
+});
+
 test('an unknown api route is a clear 404', async () => {
   await withServer(async (base) => {
     const { status, body } = await get(base, '/api/nope');

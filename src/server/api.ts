@@ -17,6 +17,7 @@ import {
   worldTick,
 } from '../consequence/propagate.ts';
 import type { Condition, Directive, Knobs, StyleContract } from '../domain/types.ts';
+import { branchSave } from '../loop/branch.ts';
 
 export interface ServerOptions {
   world: World;
@@ -353,6 +354,41 @@ route('POST', '/api/tick', (_req, res, { world }) => {
   const tick = tickConsequences(world);
   const notes = worldTick(world);
   send(res, 200, { tick, notes });
+});
+
+route('GET', '/api/chapters', (_req, res, { world }) => {
+  send(res, 200, { chapters: world.chronicle.chapters(), scenes: world.chronicle.scenes() });
+});
+
+/** Summarise a closed scene on demand, or catch up everything that closed unsummarised. */
+route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
+  const { scene, force } = (body ?? {}) as { scene?: number; force?: boolean };
+  const compactor = engine.compaction();
+  if (typeof scene === 'number') {
+    const summary = await compactor.summariseScene(scene, force === true);
+    return send(res, 200, { scene, summary });
+  }
+  const result = await compactor.backfill(world.session.get().scene);
+  send(res, 200, result);
+});
+
+/**
+ * Fork the save at a scene. Full retcon would mean recomputing every downstream
+ * consequence; branching gets most of the value for almost none of the cost, and
+ * leaves the original playthrough intact.
+ */
+route('POST', '/api/branch', (_req, res, { world, body }) => {
+  const { atScene, toPath, overwrite } = (body ?? {}) as { atScene?: number; toPath?: string; overwrite?: boolean };
+  if (typeof atScene !== 'number' || !toPath) return send(res, 400, { error: 'atScene and toPath are required' });
+
+  const fromPath = world.db.prepare(`PRAGMA database_list`).get() as { file?: string } | undefined;
+  if (!fromPath?.file) return send(res, 400, { error: 'cannot branch an in-memory save' });
+
+  try {
+    send(res, 200, branchSave({ fromPath: fromPath.file, toPath, atScene, overwrite: overwrite === true }));
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 route('GET', '/api/search', (_req, res, { world, url }) => {

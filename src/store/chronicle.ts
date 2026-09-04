@@ -228,6 +228,25 @@ export class ChronicleStore {
     }));
   }
 
+  upsertChapter(chapter: number, patch: { title?: string; summary?: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO chapters (chapter, title, summary) VALUES (?,?,?)
+         ON CONFLICT(chapter) DO UPDATE SET
+           title = COALESCE(NULLIF(excluded.title,''), chapters.title),
+           summary = COALESCE(NULLIF(excluded.summary,''), chapters.summary)`,
+      )
+      .run(chapter, patch.title ?? '', patch.summary ?? '');
+  }
+
+  chapter(chapter: number): { chapter: number; title: string; summary: string } | undefined {
+    return row(this.db.prepare(`SELECT * FROM chapters WHERE chapter = ?`).get(chapter));
+  }
+
+  chapters(): Array<{ chapter: number; title: string; summary: string }> {
+    return rows(this.db.prepare(`SELECT * FROM chapters ORDER BY chapter`).all());
+  }
+
   // ---------------------------------------------------------------- facts
 
   addFact(text: string, scene: number): Fact {

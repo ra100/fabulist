@@ -24,6 +24,7 @@ import { tokenizerFor } from '../frame/tokenizer.ts';
 import type { Provider, Registry } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
 import { commitDelta, type CommitResult } from './commit.ts';
+import { Compactor } from './compact.ts';
 import { classify, direct, extract, integrity, narrate, referee, type RoleDeps } from './roles.ts';
 import type { ValidationResult } from './validate.ts';
 
@@ -49,6 +50,10 @@ export interface EngineOptions {
   proseGate?: ProseGate;
   /** Called when the integrity gate stops the turn, before anything is committed. */
   onInterrupt?: (interrupt: Interrupt) => void;
+  /** Scenes per chapter for automatic compaction. */
+  chapterSize?: number;
+  /** Disable automatic compaction on scene advance. */
+  autoCompact?: boolean;
 }
 
 export type TurnOutcome =
@@ -69,6 +74,8 @@ export class Engine {
   private providers: Registry;
   private proseGate: ProseGate | undefined;
   private onInterrupt: ((i: Interrupt) => void) | undefined;
+  private compactor: Compactor;
+  private autoCompact: boolean;
   /** Frames from the last turn, for the "why?" panel. */
   lastFrames: Record<string, Frame> = {};
 
@@ -77,6 +84,17 @@ export class Engine {
     this.providers = opts.providers;
     this.proseGate = opts.proseGate;
     this.onInterrupt = opts.onInterrupt;
+    this.autoCompact = opts.autoCompact !== false;
+    this.compactor = new Compactor({
+      world: opts.world,
+      provider: opts.providers.get('summarize'),
+      ...(opts.chapterSize === undefined ? {} : { chapterSize: opts.chapterSize }),
+    });
+  }
+
+  /** Exposed so the CLI and API can compact on demand. */
+  compaction(): Compactor {
+    return this.compactor;
   }
 
   private deps(calls: TurnMeta['providerCalls']): RoleDeps {
@@ -216,6 +234,12 @@ export class Engine {
 
     // 9. COMMIT
     const commit = commitDelta(world, delta);
+
+    // Compaction runs after the commit, on the scene that just closed: only the
+    // current scene stays verbatim, everything above it becomes a summary.
+    if (this.autoCompact && delta.sceneAdvance) {
+      await this.compactor.onSceneClosed(session.scene);
+    }
 
     const meta: TurnMeta = {
       integrity: integrityVerdict,

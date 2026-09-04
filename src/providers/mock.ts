@@ -294,7 +294,11 @@ export class MockProvider implements Provider {
 
   /** Scene summary. Keeps entity ids intact so summaries stay graph-walkable. */
   private summarize(prompt: string): string {
-    const ids = [...prompt.matchAll(/\b((?:char|loc|fac|item|concept|event):[a-z0-9-]+)/g)].map((m) => m[1]!);
+    // Read ids only from the supplied roster. Scanning the whole prompt would
+    // also pick up the example ids in the system instructions, which would let a
+    // genuine id-loss bug pass unnoticed.
+    const roster = prompt.match(/<entities>([\s\S]*?)<\/entities>/)?.[1] ?? '';
+    const ids = [...roster.matchAll(/\b((?:char|loc|fac|item|concept|event):[a-z0-9-]+)/g)].map((m) => m[1]!);
     const unique = [...new Set(ids)].slice(0, 6);
     const body = prompt.match(/<prose>([\s\S]*?)<\/prose>/)?.[1] ?? '';
     const first = body.split(/(?<=[.!?])\s+/).find((s) => s.trim().length > 20)?.trim() ?? 'Little was resolved.';
