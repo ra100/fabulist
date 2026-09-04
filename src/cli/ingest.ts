@@ -13,7 +13,9 @@ import { World } from '../store/index.ts';
 import { loadConfig } from '../config/config.ts';
 import { WikiClient } from '../ingest/client.ts';
 import { crawl, discover, prune } from '../ingest/scope.ts';
-import { ingest, MODES, upgradeDepth, type DepthMode } from '../ingest/depth.ts';
+import { ingest, MODES, upgradeDepth, type DepthMode, type PassBExtractor } from '../ingest/depth.ts';
+import { LlmPassBExtractor } from '../ingest/passB.ts';
+import { buildRegistry } from '../config/config.ts';
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.find((a) => a.startsWith(`--${name}=`))?.split('=').slice(1).join('=');
@@ -92,10 +94,30 @@ if (!commit) {
   process.exit(0);
 }
 
-const res = await ingest({ world, client, seeds, mode, wiki: hostOf(wikiUrl), exclude });
+// Pass B needs a provider. On the mock profile it still runs and is still
+// useful as a dry run, since the validation gate is what does the real work.
+let extractor: PassBExtractor | undefined;
+if (spec.passB !== 'none') {
+  const { registry, notes } = buildRegistry(cfg);
+  for (const n of notes) console.log(n);
+  extractor = new LlmPassBExtractor({
+    provider: registry.get('passb'),
+    world,
+    onError: (title, err) => console.log(`  pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
+  });
+}
+
+const res = await ingest({ world, client, seeds, mode, wiki: hostOf(wikiUrl), exclude, extractor });
 console.log(`\ncommitted: ${res.passA?.entities} entities, ${res.passA?.edges} typed edges, ${res.passA?.mentions} mentions, ${res.passA?.sheets} sheets`);
 if (res.passA?.skipped.length) console.log(`skipped ${res.passA.skipped.length} page(s): ${res.passA.skipped.slice(0, 5).join(', ')}`);
-console.log(`\nnote: pass B (typed relations, timeline, voice cards) needs an extractor wired to a provider.`);
+
+if (res.passB && extractor instanceof LlmPassBExtractor) {
+  const st = extractor.stats;
+  console.log(`\npass B: ${res.passB.pages} pages, ${res.passB.edges} relations, ${res.passB.events} events, ${res.passB.voiceCards} voice cards`);
+  // The drop rate is the number worth watching: a low one usually means the
+  // extractor is inventing rather than that the wiki is unusually clean.
+  console.log(`dropped: ${st.droppedNoEvidence} unevidenced, ${st.droppedBadPredicate} off-vocabulary, ${st.droppedUnknownObject} unknown target`);
+}
 world.close();
 
 function hostOf(url: string): string {

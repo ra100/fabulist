@@ -91,8 +91,13 @@ export function buildRegistry(cfg: Config, env = process.env): { registry: Provi
   const registry = new ProviderRegistry(narrator);
   if (mechanic) for (const role of MECHANIC_ROLES) registry.route(role, mechanic);
   // Pinned independently: swapping the model that writes the graph mid-campaign
-  // is how a world drifts out of consistency with no obvious cause.
-  if (extractor) registry.route('extract', extractor);
+  // is how a world drifts out of consistency with no obvious cause. Pass B is
+  // routed with it rather than with the cheap mechanics, because it also writes
+  // canon and extraction quality caps everything downstream.
+  if (extractor) {
+    registry.route('extract', extractor);
+    registry.route('passb', extractor);
+  }
 
   for (const [role, key] of Object.entries(cfg.routes)) {
     const p = resolve(key);

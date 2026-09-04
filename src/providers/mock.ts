@@ -92,8 +92,10 @@ export class MockProvider implements Provider {
         return this.extract(input, prompt);
       case 'humanize':
         return this.humanize(prompt);
+      case 'passb':
+        return this.passB(prompt);
       case 'summarize':
-        return JSON.stringify({ summary: 'They spoke, and something shifted.' });
+        return this.summarize(prompt);
       default:
         return JSON.stringify({ ok: true });
     }
@@ -231,5 +233,74 @@ export class MockProvider implements Provider {
       .replace(/\bit'?s not just ([^,;.]+)[,;] it'?s\b/gi, '$1 is')
       .replace(/\b(let out|released) a breath (he|she|they) didn'?t know (he|she|they) w(as|ere) holding\b/gi, 'exhaled')
       .trim();
+  }
+
+  /**
+   * Pass B. Quotes real sentences out of the supplied page so the evidence
+   * verifier passes on the honest relations, and deliberately emits three bad
+   * ones — an unquotable evidence span, an off-vocabulary predicate, and an
+   * object that does not exist — so every rejection path is exercised.
+   */
+  private passB(prompt: string): string {
+    const page = prompt.match(/<page>([\s\S]*?)<\/page>/)?.[1] ?? '';
+    const subject = prompt.match(/<subject>([^<(]+)/)?.[1]?.trim() ?? '';
+    const known = (prompt.match(/<known-entities>([\s\S]*?)<\/known-entities>/)?.[1] ?? '')
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const sentences = page
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.replace(/\s+/g, ' ').trim())
+      .filter((s) => s.length > 25);
+
+    const relations: Array<Record<string, unknown>> = [];
+    // One well-evidenced relation per named entity actually mentioned in a
+    // sentence, which is what a competent extractor would return.
+    for (const name of known) {
+      if (relations.length >= 3) break;
+      if (name === subject) continue;
+      const hit = sentences.find((s) => s.includes(name));
+      if (!hit) continue;
+      relations.push({
+        predicate: /brother|sister|father|mother/.test(hit) ? 'KIN_OF' : 'ALLIED_WITH',
+        object: name,
+        evidence: hit.slice(0, 220),
+        weight: 0.7,
+      });
+    }
+
+    relations.push(
+      { predicate: 'ALLIED_WITH', object: known[0] ?? 'Nobody', evidence: 'a sentence that is not on the page at all', weight: 0.9 },
+      { predicate: 'FEELS_VAGUELY_ABOUT', object: known[0] ?? 'Nobody', evidence: sentences[0] ?? 'x', weight: 0.5 },
+      { predicate: 'HOSTILE_TO', object: 'An Entity That Does Not Exist', evidence: sentences[0] ?? 'x', weight: 0.8 },
+    );
+
+    const quoted = [...page.matchAll(/"([^"\n]{12,200})"/g)].map((m) => m[1]!);
+
+    return JSON.stringify({
+      relations,
+      events: sentences.slice(0, 2).map((s) => ({
+        text: s.slice(0, 200),
+        inWorldDate: /\b\d{3,4}\s*(AV|BC|AD|BBY|ABY)\b/.exec(s)?.[0] ?? null,
+        participants: [subject],
+      })),
+      voice: quoted.length
+        ? { diction: 'terse and concrete', tics: [], samples: [...quoted.slice(0, 3), 'a line never spoken on this page'], never: [] }
+        : undefined,
+      contradictions: [],
+    });
+  }
+
+  /** Scene summary. Keeps entity ids intact so summaries stay graph-walkable. */
+  private summarize(prompt: string): string {
+    const ids = [...prompt.matchAll(/\b((?:char|loc|fac|item|concept|event):[a-z0-9-]+)/g)].map((m) => m[1]!);
+    const unique = [...new Set(ids)].slice(0, 6);
+    const body = prompt.match(/<prose>([\s\S]*?)<\/prose>/)?.[1] ?? '';
+    const first = body.split(/(?<=[.!?])\s+/).find((s) => s.trim().length > 20)?.trim() ?? 'Little was resolved.';
+    return JSON.stringify({
+      summary: `${first} ${unique.length ? `Involved: ${unique.join(', ')}.` : ''}`.trim(),
+      title: first.split(/[,.]/)[0]?.slice(0, 60) ?? 'A scene',
+    });
   }
 }

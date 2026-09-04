@@ -187,6 +187,7 @@ test('a real profile routes mechanics and extraction away from the narrator', ()
   assert.equal(narrate.id, 'anthropic');
   assert.notEqual(classify.model, narrate.model, 'cheap models do the bookkeeping');
   assert.equal(registry.get('extract').model, 'gpt-4o-mini', 'the extractor is pinned separately');
+  assert.equal(registry.get('passb').model, 'gpt-4o-mini', 'pass B follows the extractor, since it also writes canon');
 });
 
 test('an unknown profile falls back to mock with a note', () => {
