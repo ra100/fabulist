@@ -188,7 +188,7 @@ inside the timeline.
 These are in the README already. Listing them so the plan is complete, with what I
 actually think.
 
-### 4.1 Pass B has never met a real wiki · needs a session, not code
+### 4.1 Pass B has never met a real wiki · **done — the session, and two real bugs it found**
 
 Tested hard against fixtures and adversarial model output. Predicate quality on live
 Fandom prose is unmeasured, and the mock cheerfully emits `ALLIED_WITH` for "is the
@@ -198,10 +198,63 @@ Warden of" — which the gate accepts, because it checks provenance, not semanti
 with a real model, and then judgement about what came back. The drop counters exist
 for exactly that.
 
+Ran it: `witcher.fandom.com`, "Kaer Morhen" arc, skim mode, real AWS Bedrock
+(`us.anthropic.claude-sonnet-4-5` narrating, `us.anthropic.claude-haiku-4-5`
+for mechanics — the presets' pinned model IDs had aged out of Bedrock's
+catalog since they were written; both needed a cross-region inference
+profile ID, set live through the config UI rather than a restart).
+
+The session found two bugs in the engine itself, both now fixed and covered by
+regression tests, neither of which any fixture-based test could have caught
+because both required the exact shape of a real provider's real wire response:
+
+- **Bedrock streaming was silently producing empty prose on every turn.**
+  `readAwsEventStream` was scanning for a different AWS service's event-stream
+  convention (`{"bytes":"<base64>"}`, which is Kinesis / S3 Select) instead of
+  Bedrock's own frame format (a length-prefixed binary prelude, then headers,
+  then the raw JSON payload — no base64, no `bytes` field). Nothing threw; the
+  turn committed normally with `bookProse: ""`. Caught only because the
+  identical prompt through the non-streaming path produced good prose
+  immediately, which made the two paths visibly disagree.
+- **The setup wizard's "you have Bedrock, use it" button (built in Slice A)
+  didn't actually reach the planner.** `SetupService` resolved
+  `providers.get('setup')` once at construction and handed `SetupPlanner` that
+  fixed `Provider`. Switching the live profile afterwards replaced what the
+  registry returns without replacing what the planner had already captured, so
+  every plan kept silently running on the profile that was live when the
+  server started. `/api/play` never had this bug — `Engine` holds the
+  `Registry` itself and calls `.get(role)` fresh every turn.
+
+What the session found about ingest quality, once both were fixed and real
+prose was flowing: Pass A's wikitext parsing leaks raw infobox markup into a
+real fraction of character summaries on template-heavy pages (confirmed on
+Lambert, Vesemir, Yennefer, Alzur — all rendered `{{Infobox Character
+|name = ...` as their entire summary), and the discovery/candidate stage
+surfaces species pages, game mechanics, and the book's real-world author
+("Human", "XP", "Andrzej Sapkowski") as playable-character candidates. Both
+are real, both are Pass A's problem (deterministic wikitext parsing and
+discovery scoring, not model judgement) and neither blocked play — they
+degraded the character-adoption list, not the turn loop. Worth a Pass A pass,
+not urgent.
+
+What the session found about play quality: real bedrock prose is
+substantially better than the mock at the things the mock cannot fake —
+specific sensory detail, an NPC with a legible tactic instead of a genre
+gesture, dialogue that carries subtext. The prose lint also correctly tripped
+on `portentous-one-liner-pattern` five times in one turn's output (short
+punchy closers: "Then stop." "Then nothing.") — a real, mild AI-tell the gate
+is right to flag, not a false positive.
+
+Also incidentally hit and fixed, unrelated to the app: this machine's Node
+`fetch` needed `NODE_EXTRA_CA_CERTS` pointed at the corporate TLS bundle for
+outbound wiki requests to work at all (`curl` respects `SSL_CERT_FILE`
+already; undici does not) — an environment note for next time, not a code fix.
+
 ### 4.2 Prose quality and the interrupt copy are unmeasured · needs a session
 
 Same shape. No test can tell you whether the integrity interrupt reads as a
-collaborator or a nag.
+collaborator or a nag. 4.1's session did not trigger an integrity interrupt —
+the trainee played cautiously — so this specific question is still open.
 
 ### 4.3 No vector retrieval · L, low value
 
@@ -212,6 +265,7 @@ build this until something concrete is failing without it.
 
 Over-estimates on purpose, and the interface is pluggable. Worth doing only if the
 frame budget starts visibly under-filling.
+
 
 ### 4.5 Streaming stops at the narrator · won't do
 
@@ -260,12 +314,25 @@ you are playing in a real ingested world — which means 4.1 should come first.
 
 **Then, not last in importance:** 4.1 and 4.2. One real session against one real
 wiki with a real model. Everything above is craft; this is the only thing that tells
-you whether the engine is any good.
+you whether the engine is any good. **4.1 is now done** — see below.
 
 ---
 
 ## What I would actually do
 
-Slice A is done. Next: **4.1 before Slice B** — a real session will probably
-reorder everything below it, and there is a real risk of polishing an authoring
-surface for a game that turns out to need something else entirely.
+Slice A and 4.1 are done. 4.1 was worth doing before anything else: it found two
+real bugs no fixture-based test could reach (Bedrock streaming decoding the
+wrong wire format; the wizard's live-provider-switch button not reaching the
+setup planner), and it did reorder the picture somewhat, though less than I
+expected — the turn loop, referee, integrity gate and consequence propagation
+all held up against real prose and a real ingest without a single change.
+What needs work is upstream of all that: Pass A's wikitext parsing (infobox
+leakage) and discovery scoring (species and real-world pages as character
+candidates), not the engine's own reasoning.
+
+Next: **Slice B**, on the strength that 4.1 didn't turn up a reason to detour
+into Pass A first — the two bugs it found are fixed, and the two ingest-quality
+issues it found degrade the character list, not play. 4.2 (interrupt copy)
+remains genuinely open: the 4.1 session never triggered one, so it needs either
+a deliberately provocative session or targeted testing, not a repeat of this one.
+

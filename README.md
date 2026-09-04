@@ -44,7 +44,7 @@ pnpm play                 # interactive session
 ```
 
 ```bash
-pnpm test                 # 440 tests, offline
+pnpm test                 # 446 tests, offline
 pnpm typecheck
 ```
 
@@ -432,3 +432,10 @@ Node 24 runs TypeScript directly, so there is no backend build step. That rules 
 - **Pass B has never met a real wiki.** It is tested hard against fixtures and against
   adversarial model output, but predicate quality on live Fandom prose is unmeasured. The
   drop counters exist so you can judge a first real run rather than trust it.
+  Update: run once, against `witcher.fandom.com` on real Bedrock. Found and fixed two real
+  bugs — Bedrock's streaming path was silently producing empty prose (it was decoding the
+  wrong AWS event-stream wire format), and the setup wizard's live provider switch never
+  reached the planner (`SetupService` captured a fixed `Provider` at construction instead of
+  a live lookup). Real prose is now flowing end to end; see `.design/GAPS.md` §4.1 for the
+  full account, including what Pass A itself still gets wrong (infobox markup leaking into
+  summaries; species and real-world pages surfacing as character candidates).
