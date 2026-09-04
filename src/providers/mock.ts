@@ -94,6 +94,8 @@ export class MockProvider implements Provider {
         return this.humanize(prompt);
       case 'passb':
         return this.passB(prompt);
+      case 'setup':
+        return this.setup(prompt);
       case 'summarize':
         return this.summarize(prompt);
       default:
@@ -289,6 +291,147 @@ export class MockProvider implements Provider {
         ? { diction: 'terse and concrete', tics: [], samples: [...quoted.slice(0, 3), 'a line never spoken on this page'], never: [] }
         : undefined,
       contradictions: [],
+    });
+  }
+
+  /**
+   * Setup planning. Two shapes share the role: an ingest plan when starting
+   * points were offered, and a whole invented world when only a description was.
+   */
+  private setup(prompt: string): string {
+    const custom = prompt.match(/<description>([\s\S]*?)<\/description>/)?.[1]?.trim();
+    if (custom) return this.customWorld(custom);
+
+    const wish = prompt.match(/<player-wish>([\s\S]*?)<\/player-wish>/)?.[1]?.trim() ?? '';
+    const offered = [...(prompt.match(/<starting-points>([\s\S]*?)<\/starting-points>/)?.[1] ?? '').matchAll(/^(?:category|page): (.+?)(?: \(\d+ pages\))?$/gm)]
+      .map((m) => m[1]!.trim());
+
+    // Prefer starting points the wish actually mentions; that is what a competent
+    // planner does, and it makes the constraint check meaningful.
+    const words = wish.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3);
+    const scored = offered
+      .map((title) => ({ title, hits: words.filter((w) => title.toLowerCase().includes(w)).length }))
+      .sort((a, b) => b.hits - a.hits);
+
+    const seeds = scored.filter((s) => s.hits > 0).slice(0, 3).map((s) => s.title);
+    const mode = /\b(months|deep|thorough|everything|complete)\b/i.test(wish)
+      ? 'deep'
+      : /\b(quick|light|just|browse|try)\b/i.test(wish)
+        ? 'skim'
+        : 'mid';
+
+    const named = /\bas ([A-Z][\w']+(?: [A-Z][\w']+)*)/.exec(wish)?.[1] ?? null;
+    const existsInOffered = named && offered.some((o) => o.toLowerCase() === named.toLowerCase());
+
+    return JSON.stringify({
+      seeds: seeds.length ? seeds : offered.slice(0, 2),
+      mode,
+      reasoning: seeds.length
+        ? `The wish names ${seeds.join(' and ')}, which keeps the scope tight.`
+        : 'Nothing in the wish matched a starting point, so the largest were taken.',
+      excludeCategories: [],
+      character: {
+        existing: existsInOffered ? named : null,
+        name: named ?? 'Wren Ashby',
+        role: 'a minor figure with more access than standing',
+        goals: ['stay useful to people who matter', 'find out what happened before'],
+        vows: [
+          { text: 'never inform on someone who trusted you', rank: 1 },
+          { text: 'do not draw first', rank: 2 },
+        ],
+      },
+      style: {
+        pov: /\bfirst person\b/i.test(wish) ? 'first' : 'third-limited',
+        tense: /\bpresent tense\b/i.test(wish) ? 'present' : 'past',
+        register: /\b(noir|hardboiled|grim)\b/i.test(wish) ? 'clipped' : 'plain',
+        density: 'balanced',
+        genreLens: /\bnoir\b/i.test(wish) ? 'noir' : /\bgrimdark\b/i.test(wish) ? 'grimdark' : 'literary',
+        humor: 'dry',
+        pacing: 'steady',
+        comparables: [],
+      },
+      opening: 'Somewhere with a decision already waiting.',
+    });
+  }
+
+  /** A small invented world, structurally valid so the applier can be tested. */
+  private customWorld(description: string): string {
+    const theme = description.toLowerCase();
+    const grim = /\b(grim|dark|war|plague|siege)\b/.test(theme);
+    return JSON.stringify({
+      title: 'The Long Silence',
+      entities: [
+        { id: 'loc:the-hollow-market', type: 'Location', name: 'The Hollow Market', summary: 'Trade happens here, and so does everything trade requires.' },
+        { id: 'loc:the-upper-terraces', type: 'Location', name: 'The Upper Terraces', summary: 'Where the people who decide things live.' },
+        { id: 'loc:the-cistern', type: 'Location', name: 'The Cistern', summary: 'Dry for a generation. People meet there who should not.' },
+        { id: 'fac:the-assay', type: 'Faction', name: 'The Assay', summary: 'Weighs, measures, and quietly decides what is permitted.' },
+        { id: 'fac:the-quiet-hands', type: 'Faction', name: 'The Quiet Hands', summary: 'Moves what the Assay will not weigh.' },
+        { id: 'char:sera-vayne', type: 'Character', name: 'Sera Vayne', summary: 'An assayer who has started reading the ledgers too closely.' },
+        { id: 'char:oland-mear', type: 'Character', name: 'Oland Mear', summary: 'Runs the Quiet Hands and would rather not have to.' },
+        { id: 'char:little-fen', type: 'Character', name: 'Little Fen', summary: 'Twelve, fast, knows every roof in the market.' },
+        { id: 'char:assayer-crole', type: 'Character', name: 'Assayer Crole', summary: "Sera's superior, and the reason the ledgers do not add up." },
+        { id: 'char:the-widow-tass', type: 'Character', name: 'The Widow Tass', summary: 'Sells tea and information at the same counter.' },
+        { id: 'concept:the-weighing', type: 'Concept', name: 'The Weighing', summary: 'The monthly audit. Nobody has failed it and stayed.' },
+        { id: 'item:the-short-ledger', type: 'Item', name: 'The Short Ledger', summary: 'The second set of books. Its existence is the whole problem.' },
+      ],
+      edges: [
+        { subject: 'char:sera-vayne', predicate: 'MEMBER_OF', object: 'fac:the-assay', weight: 0.9 },
+        { subject: 'char:assayer-crole', predicate: 'LEADS', object: 'fac:the-assay', weight: 0.9 },
+        { subject: 'char:oland-mear', predicate: 'LEADS', object: 'fac:the-quiet-hands', weight: 0.9 },
+        { subject: 'char:little-fen', predicate: 'MEMBER_OF', object: 'fac:the-quiet-hands', weight: 0.5 },
+        { subject: 'fac:the-assay', predicate: 'HOSTILE_TO', object: 'fac:the-quiet-hands', weight: 0.8 },
+        { subject: 'char:assayer-crole', predicate: 'KEEPS', object: 'item:the-short-ledger', weight: 0.8 },
+        { subject: 'char:the-widow-tass', predicate: 'INFORMS', object: 'char:oland-mear', weight: 0.6 },
+        { subject: 'char:sera-vayne', predicate: 'MENTORS', object: 'char:little-fen', weight: 0.5 },
+        { subject: 'loc:the-cistern', predicate: 'PART_OF', object: 'loc:the-hollow-market', weight: 0.7 },
+      ],
+      playerCharacterId: 'char:sera-vayne',
+      sheets: [
+        {
+          entityId: 'char:sera-vayne',
+          goals: ['find out what Crole is hiding', 'keep Fen out of it'],
+          fears: ['becoming the person who signs it anyway'],
+          secrets: ['she has already copied two pages of the short ledger'],
+          diction: 'precise, understated, counts things when nervous',
+          locationId: 'loc:the-hollow-market',
+          vows: [
+            { text: 'never sign a false weight', rank: 1 },
+            { text: 'do not inform on the Quiet Hands', rank: 2 },
+          ],
+        },
+        { entityId: 'char:oland-mear', goals: ['keep the routes open'], diction: 'blunt, tired', locationId: 'loc:the-cistern', vows: [] },
+        { entityId: 'char:little-fen', goals: ['be given something real to do'], diction: 'fast, too many words', locationId: 'loc:the-hollow-market', vows: [] },
+        { entityId: 'char:assayer-crole', goals: ['pass the Weighing one more time'], diction: 'formal, passive voice for anything difficult', locationId: 'loc:the-upper-terraces', vows: [] },
+      ],
+      relationships: [
+        { fromId: 'char:sera-vayne', toId: 'char:assayer-crole', trust: -0.4, affection: -0.2, respect: 0.5, note: 'she still expects him to be better than this' },
+        { fromId: 'char:assayer-crole', toId: 'char:sera-vayne', trust: 0.3, affection: 0.1, respect: 0.6, note: 'his best clerk, and his exposure' },
+        { fromId: 'char:little-fen', toId: 'char:sera-vayne', trust: 0.9, affection: 0.8, respect: 0.7, note: 'would do anything she asked, which is the danger' },
+        { fromId: 'char:oland-mear', toId: 'char:sera-vayne', trust: 0.2, affection: 0, respect: 0.4, note: 'a useful assayer, if she can be turned' },
+      ],
+      threads: [
+        {
+          title: 'The Weighing is in nine days',
+          stakes: 'whether Crole survives it, and who he takes down',
+          tension: 0.8,
+          parties: ['char:sera-vayne', 'char:assayer-crole'],
+          resolutions: ['she signs it', 'she exposes him', 'the ledger disappears', 'someone else is blamed'],
+        },
+        {
+          title: 'Fen wants to be trusted with something real',
+          stakes: 'whether Sera makes him complicit or useless',
+          tension: 0.5,
+          parties: ['char:little-fen', 'char:sera-vayne'],
+          resolutions: ['he is told everything', 'he finds out badly', 'he is sent away'],
+        },
+      ],
+      facts: [
+        { text: 'the short ledger records weights that were never taken', knownBy: ['char:assayer-crole'], suspectedBy: ['char:sera-vayne'] },
+        { text: 'Sera has copied two pages of it', knownBy: ['char:sera-vayne'], suspectedBy: [] },
+      ],
+      opening: grim
+        ? 'The Weighing is nine days out and the ledgers do not agree. Crole has just asked you to sign.'
+        : 'Crole has just handed you the month\'s figures and asked you to sign them without reading.',
     });
   }
 

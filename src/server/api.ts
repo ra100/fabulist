@@ -18,6 +18,7 @@ import {
 } from '../consequence/propagate.ts';
 import type { Condition, Directive, Knobs, StyleContract } from '../domain/types.ts';
 import { branchSave } from '../loop/branch.ts';
+import type { SetupService } from '../setup/service.ts';
 
 export interface ServerOptions {
   world: World;
@@ -25,6 +26,8 @@ export interface ServerOptions {
   port?: number;
   /** Directory of built UI assets; when absent the API runs alone. */
   webRoot?: string;
+  /** Enables the setup wizard routes. */
+  setup?: SetupService;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -32,6 +35,7 @@ type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) =>
 interface RouteContext {
   world: World;
   engine: Engine;
+  setup: SetupService | undefined;
   url: URL;
   body: unknown;
   params: Record<string, string>;
@@ -396,6 +400,150 @@ route('GET', '/api/search', (_req, res, { world, url }) => {
   send(res, 200, q ? world.graph.search(q, 30) : []);
 });
 
+// -------------------------------------------------------------------- setup
+// The wizard exists so a player never has to know what a seed page is. Each
+// route is one question answered, and nothing commits until a preview has been
+// seen.
+
+function requireSetup(res: ServerResponse, setup: SetupService | undefined): SetupService | null {
+  if (!setup) {
+    send(res, 503, { error: 'setup is not enabled on this server' });
+    return null;
+  }
+  return setup;
+}
+
+route('GET', '/api/setup/status', (_req, res, { setup, world }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const session = world.session.get();
+  send(res, 200, {
+    fresh: svc.isFresh(),
+    counts: world.graph.counts(),
+    playerCharacterId: session.playerCharacterId,
+    hasPlayer: !!world.cast.player(),
+  });
+});
+
+/** "the witcher" becomes a list of real, verified wikis. */
+route('POST', '/api/setup/resolve', async (_req, res, { setup, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const { query } = (body ?? {}) as { query?: string };
+  if (!query?.trim()) return send(res, 400, { error: 'query is required' });
+  send(res, 200, { candidates: await svc.resolveWiki(query.trim()) });
+});
+
+/** Free text plus a chosen wiki becomes an editable plan. */
+route('POST', '/api/setup/plan', async (_req, res, { setup, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const { wish, wiki } = (body ?? {}) as { wish?: string; wiki?: { name: string; baseUrl: string; articles: number; language: string; via: string; confidence: number } };
+  if (!wish?.trim() || !wiki?.baseUrl) return send(res, 400, { error: 'wish and wiki are required' });
+  send(res, 200, await svc.plan(wish.trim(), wiki as never));
+});
+
+/** What it would cost, before anything is spent. */
+route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const { baseUrl, seeds, mode, excludeCategories } = (body ?? {}) as {
+    baseUrl?: string; seeds?: string[]; mode?: 'skim' | 'mid' | 'deep'; excludeCategories?: string[];
+  };
+  if (!baseUrl || !seeds?.length) return send(res, 400, { error: 'baseUrl and seeds are required' });
+  send(res, 200, await svc.preview(baseUrl, seeds, mode ?? 'mid', excludeCategories ?? []));
+});
+
+/** Commits a previewed scope. Returns a job to poll. */
+route('POST', '/api/setup/ingest', (_req, res, { setup, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const { previewKey, character, style, opening } = (body ?? {}) as {
+    previewKey?: string; character?: never; style?: never; opening?: string;
+  };
+  if (!previewKey) return send(res, 400, { error: 'previewKey is required; preview before committing' });
+  try {
+    const job = svc.startIngest(previewKey, {
+      character: character ?? { existing: null, name: '', role: '', goals: [], vows: [] },
+      style: style ?? {},
+      opening: opening ?? '',
+    });
+    send(res, 200, job);
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+route('POST', '/api/setup/custom', (_req, res, { setup, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const { description, style } = (body ?? {}) as { description?: string; style?: never };
+  if (!description?.trim()) return send(res, 400, { error: 'description is required' });
+  send(res, 200, svc.startCustomWorld(description.trim(), style));
+});
+
+route('POST', '/api/setup/sample', (_req, res, { setup }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  send(res, 200, svc.useSample());
+});
+
+route('GET', '/api/setup/job/:id', (_req, res, { setup, params }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const job = svc.jobs.get(decodeURIComponent(params.id ?? ''));
+  if (!job) return send(res, 404, { error: 'no such job' });
+  send(res, 200, job);
+});
+
+route('POST', '/api/setup/job/:id/cancel', (_req, res, { setup, params }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  send(res, 200, { cancelled: svc.jobs.cancel(decodeURIComponent(params.id ?? '')) });
+});
+
+/** Candidate protagonists, so the player can pick from what was actually ingested. */
+route('GET', '/api/setup/characters', (_req, res, { world }) => {
+  const characters = world.graph
+    .list({ type: 'Character', limit: 60 })
+    .map((e) => {
+      const sheet = world.cast.get(e.id);
+      return {
+        id: e.id,
+        name: e.name,
+        summary: e.summary,
+        salience: e.salience,
+        hasVows: (sheet?.contract.vows.length ?? 0) > 0,
+        connections: world.graph.neighbours(e.id).length,
+      };
+    })
+    .sort((a, b) => b.connections - a.connections);
+  send(res, 200, characters);
+});
+
+/** Sets or replaces the protagonist after an ingest. */
+route('POST', '/api/setup/player', async (_req, res, { setup, world, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const sketch = (body ?? {}) as { existing?: string | null; name?: string; role?: string; goals?: string[]; vows?: Array<{ text: string; rank: number }> };
+  const { assignPlayerCharacter, proposeOpening } = await import('../setup/apply.ts');
+  const assigned = assignPlayerCharacter(world, {
+    existing: sketch.existing ?? null,
+    name: sketch.name ?? '',
+    role: sketch.role ?? '',
+    goals: sketch.goals ?? [],
+    vows: sketch.vows ?? [],
+  });
+  send(res, 200, { ...assigned, opening: proposeOpening(world) });
+});
+
+route('POST', '/api/setup/reset', (_req, res, { setup }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  svc.reset();
+  send(res, 200, { ok: true });
+});
+
 // ------------------------------------------------------------------- server
 
 function serveStatic(res: ServerResponse, webRoot: string, pathname: string): boolean {
@@ -413,7 +561,7 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
 }
 
 export function createApiServer(opts: ServerOptions) {
-  const { world, engine, webRoot } = opts;
+  const { world, engine, webRoot, setup } = opts;
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -432,7 +580,7 @@ export function createApiServer(opts: ServerOptions) {
       const params = url.pathname.match(match.pattern)?.groups ?? {};
       try {
         const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
-        await match.handler(req, res, { world, engine, url, body, params });
+        await match.handler(req, res, { world, engine, setup, url, body, params });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.

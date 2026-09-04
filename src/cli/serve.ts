@@ -8,6 +8,7 @@ import { Engine } from '../loop/engine.ts';
 import { createApiServer } from '../server/api.ts';
 import { buildRegistry, loadConfig } from '../config/config.ts';
 import { makeProseGate } from '../lint/gate.ts';
+import { SetupService } from '../setup/service.ts';
 
 const cfg = loadConfig();
 const args = process.argv.slice(2);
@@ -18,9 +19,9 @@ const dbPath = inMemory ? ':memory:' : cfg.dbPath;
 
 if (!inMemory) mkdirSync(dirname(dbPath), { recursive: true });
 const world = World.open(dbPath);
-if (args.includes('--fresh') || world.graph.counts().entities === 0) {
+if (args.includes('--sample')) {
   seedWorld(world);
-  console.log('seeded Saint Verrow');
+  console.log('seeded the Saint Verrow sample');
 }
 
 const { registry, notes } = buildRegistry(cfg);
@@ -35,7 +36,10 @@ const engine = new Engine({
 const webRoot = existsSync('web/dist') ? 'web/dist' : undefined;
 if (!webRoot) console.log('web/dist not built; serving the API only (pnpm build:web)');
 
-const server = createApiServer({ world, engine, webRoot });
+const setup = new SetupService({ world, providers: registry });
+if (setup.isFresh()) console.log('no world yet - the UI will open the setup wizard');
+
+const server = createApiServer({ world, engine, webRoot, setup });
 server.listen(port, '127.0.0.1', () => {
   console.log(`story engine on http://127.0.0.1:${port}`);
 });
