@@ -33,6 +33,15 @@ export interface MockOptions {
   capabilities?: Partial<ProviderCapabilities>;
   /** Force a specific coherence distance, for tests that need one branch. */
   forceDistance?: string;
+  /**
+   * Delay between streamed fragments, in milliseconds.
+   *
+   * Zero by default so tests stay fast. Set it to see streaming actually render:
+   * without a pause the mock emits every fragment inside one microtask, which is
+   * faster than the browser can paint, so the incremental view never appears and
+   * looks broken when it is not.
+   */
+  tokenDelayMs?: number;
 }
 
 export class MockProvider implements Provider {
@@ -40,17 +49,19 @@ export class MockProvider implements Provider {
   readonly model = 'mock-1';
   readonly capabilities: ProviderCapabilities;
   private forceDistance: string | undefined;
+  private tokenDelayMs: number;
   /** Call log, so tests can assert which roles ran and with what budget. */
   readonly calls: Array<{ role: string; chars: number }> = [];
 
   constructor(opts: MockOptions = {}) {
     this.id = opts.id ?? 'mock';
     this.forceDistance = opts.forceDistance;
+    this.tokenDelayMs = opts.tokenDelayMs ?? 0;
     this.capabilities = {
       contextWindow: 64_000,
       structuredOutput: 'native-schema',
       systemRole: true,
-      streaming: false,
+      streaming: true,
       costTier: 'free',
       charsPerToken: 4,
       proseQuality: 0.5,
@@ -66,6 +77,14 @@ export class MockProvider implements Provider {
     // The player's raw input is fenced in the prompt by the roles that need it.
     const input = prompt.match(/<player-input>([\s\S]*?)<\/player-input>/)?.[1]?.trim() ?? '';
     const text = this.respond(req.role, input, prompt);
+
+    // Emit in fragments when asked, so the streaming path is exercised offline.
+    if (req.onToken && this.capabilities.streaming && !req.schema) {
+      for (const piece of text.match(/\S+\s*/g) ?? [text]) {
+        req.onToken(piece);
+        if (this.tokenDelayMs > 0) await new Promise((r) => setTimeout(r, this.tokenDelayMs));
+      }
+    }
 
     return {
       text,

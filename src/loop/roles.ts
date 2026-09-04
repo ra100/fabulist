@@ -357,6 +357,7 @@ export async function narrate(
   rawInput: string,
   agreedBeat: string,
   verbatim: boolean,
+  onToken?: (chunk: string) => void,
 ): Promise<string> {
   const ctx = deps.ctx('narrate', { rawInput, agreedBeat });
   const frame = buildNarratorFrame(ctx);
@@ -372,6 +373,7 @@ export async function narrate(
       role: 'narrate',
       maxTokens: Math.max(512, Math.ceil(style.sceneTarget * 2)),
       temperature: 0.8,
+      ...(onToken ? { onToken } : {}),
     },
     provider.capabilities,
   );

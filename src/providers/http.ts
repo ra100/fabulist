@@ -9,6 +9,7 @@
  * so the suite stays offline.
  */
 import { adaptRequest, type CompletionRequest, type CompletionResult, type Provider, type ProviderCapabilities } from './provider.ts';
+import { readNdjson, readSse, parseJsonSafe } from './stream.ts';
 import { BedrockProvider } from './bedrock.ts';
 import { VertexProvider } from './google.ts';
 import { CopilotProvider } from './copilot.ts';
@@ -114,9 +115,18 @@ export class OpenAICompatProvider implements Provider {
       }
     }
 
+    const headers: Record<string, string> = this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {};
+
+    // Streaming is only for prose. A half-arrived JSON object is worthless.
+    if (req.onToken && this.capabilities.streaming && !req.schema) {
+      body.stream = true;
+      body.stream_options = { include_usage: true };
+      return this.stream(headers, body, req.onToken);
+    }
+
     const json = (await postJson(
       `${this.baseUrl}/chat/completions`,
-      this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {},
+      headers,
       body,
       this.fetcher,
       this.timeoutMs,
@@ -132,6 +142,49 @@ export class OpenAICompatProvider implements Provider {
       model: this.model,
       schemaEnforced: !!req.schema && this.capabilities.structuredOutput === 'native-schema',
     };
+  }
+
+  private async stream(
+    headers: Record<string, string>,
+    body: Record<string, unknown>,
+    onToken: (chunk: string) => void,
+  ): Promise<CompletionResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`${this.baseUrl} returned ${res.status}: ${text.slice(0, 300)}`);
+      }
+
+      let text = '';
+      let tokensIn = 0;
+      let tokensOut = 0;
+      for await (const payload of readSse(res.body)) {
+        const event = parseJsonSafe(payload);
+        if (!event) continue;
+        const choices = event.choices as Array<{ delta?: { content?: string } }> | undefined;
+        const chunk = choices?.[0]?.delta?.content;
+        if (chunk) {
+          text += chunk;
+          onToken(chunk);
+        }
+        const usage = event.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
+        if (usage) {
+          tokensIn = usage.prompt_tokens ?? tokensIn;
+          tokensOut = usage.completion_tokens ?? tokensOut;
+        }
+      }
+      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -176,9 +229,15 @@ export class AnthropicProvider implements Provider {
       body.messages = [...(body.messages as unknown[]), { role: 'assistant', content: '{' }];
     }
 
+    const authHeaders = { 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01' };
+
+    if (req.onToken && this.capabilities.streaming && !req.schema) {
+      return this.stream(authHeaders, { ...body, stream: true }, req.onToken);
+    }
+
     const json = (await postJson(
       `${this.baseUrl}/v1/messages`,
-      { 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01' },
+      authHeaders,
       body,
       this.fetcher,
       this.timeoutMs,
@@ -198,6 +257,54 @@ export class AnthropicProvider implements Provider {
       model: this.model,
       schemaEnforced: false,
     };
+  }
+
+  private async stream(
+    headers: Record<string, string>,
+    body: Record<string, unknown>,
+    onToken: (chunk: string) => void,
+  ): Promise<CompletionResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`anthropic ${res.status}: ${text.slice(0, 300)}`);
+      }
+
+      let text = '';
+      let tokensIn = 0;
+      let tokensOut = 0;
+      for await (const payload of readSse(res.body)) {
+        const event = parseJsonSafe(payload);
+        if (!event) continue;
+        // Anthropic names its events; content arrives as content_block_delta.
+        if (event.type === 'content_block_delta') {
+          const chunk = (event.delta as { text?: string } | undefined)?.text;
+          if (chunk) {
+            text += chunk;
+            onToken(chunk);
+          }
+        }
+        if (event.type === 'message_start') {
+          const usage = (event.message as { usage?: { input_tokens?: number } } | undefined)?.usage;
+          tokensIn = usage?.input_tokens ?? tokensIn;
+        }
+        if (event.type === 'message_delta') {
+          const usage = event.usage as { output_tokens?: number } | undefined;
+          tokensOut = usage?.output_tokens ?? tokensOut;
+        }
+      }
+      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -235,6 +342,10 @@ export class OllamaProvider implements Provider {
     };
     if (req.schema) body.format = req.schema.schema;
 
+    if (req.onToken && this.capabilities.streaming && !req.schema) {
+      return this.stream({ ...body, stream: true }, req.onToken);
+    }
+
     const json = (await postJson(`${this.baseUrl}/api/chat`, {}, body, this.fetcher, this.timeoutMs)) as {
       message?: { content?: string };
       prompt_eval_count?: number;
@@ -249,6 +360,39 @@ export class OllamaProvider implements Provider {
       schemaEnforced: !!req.schema,
     };
   }
+
+  private async stream(body: Record<string, unknown>, onToken: (chunk: string) => void): Promise<CompletionResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`ollama ${res.status}`);
+
+      let text = '';
+      let tokensIn = 0;
+      let tokensOut = 0;
+      // Ollama streams newline-delimited JSON rather than SSE.
+      for await (const line of readNdjson(res.body)) {
+        const event = parseJsonSafe(line);
+        if (!event) continue;
+        const chunk = (event.message as { content?: string } | undefined)?.content;
+        if (chunk) {
+          text += chunk;
+          onToken(chunk);
+        }
+        if (typeof event.prompt_eval_count === 'number') tokensIn = event.prompt_eval_count;
+        if (typeof event.eval_count === 'number') tokensOut = event.eval_count;
+      }
+      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 // -------------------------------------------------------------- presets
@@ -258,7 +402,7 @@ function caps(over: Partial<ProviderCapabilities> = {}): ProviderCapabilities {
     contextWindow: 64_000,
     structuredOutput: 'json-mode',
     systemRole: true,
-    streaming: false,
+    streaming: true,
     costTier: 'mid',
     charsPerToken: 4,
     proseQuality: 0.6,

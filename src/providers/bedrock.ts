@@ -11,6 +11,7 @@
  * schema — which is the same guarantee, reached differently.
  */
 import { signRequest } from './sigv4.ts';
+import { readAwsEventStream, parseJsonSafe } from './stream.ts';
 import { AwsCredentialProvider, type AwsEnvironment } from './aws.ts';
 import type { CompletionRequest, CompletionResult, Provider, ProviderCapabilities } from './provider.ts';
 
@@ -94,8 +95,12 @@ export class BedrockProvider implements Provider {
       };
     }
 
+    // Streaming is prose-only: a forced tool call has nothing useful to emit
+    // incrementally, and a partial arguments object cannot be validated.
+    const wantsStream = !!req.onToken && this.capabilities.streaming && !req.schema;
     const payload = JSON.stringify(body);
-    const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(this.model)}/converse`;
+    const operation = wantsStream ? 'converse-stream' : 'converse';
+    const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(this.model)}/${operation}`;
 
     const signed = signRequest({
       method: 'POST',
@@ -117,6 +122,9 @@ export class BedrockProvider implements Provider {
         body: signed.body,
         signal: controller.signal,
       });
+      if (res.ok && wantsStream) {
+        return await this.consumeStream(res, req.onToken!);
+      }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         // 403 here is nearly always model access rather than bad credentials, and
@@ -145,6 +153,32 @@ export class BedrockProvider implements Provider {
       model: this.model,
       schemaEnforced: !!toolUse,
     };
+  }
+
+  /**
+   * Reads a ConverseStream response. AWS frames these as a binary event stream
+   * rather than SSE, so the payloads are extracted and then interpreted here.
+   */
+  private async consumeStream(res: Response, onToken: (chunk: string) => void): Promise<CompletionResult> {
+    let text = '';
+    let tokensIn = 0;
+    let tokensOut = 0;
+
+    for await (const payload of readAwsEventStream(res.body)) {
+      const event = parseJsonSafe(payload);
+      if (!event) continue;
+      const delta = event.delta as { text?: string } | undefined;
+      if (delta?.text) {
+        text += delta.text;
+        onToken(delta.text);
+      }
+      const usage = event.usage as { inputTokens?: number; outputTokens?: number } | undefined;
+      if (usage) {
+        tokensIn = usage.inputTokens ?? tokensIn;
+        tokensOut = usage.outputTokens ?? tokensOut;
+      }
+    }
+    return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
   }
 
   /** Reports which identity would be used, for the provider doctor. */

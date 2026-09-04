@@ -9,6 +9,7 @@ import {
   type Fact,
   type Interrupt,
   type Sheet,
+  type PlayResponse,
   type ProvidersReport,
   type State,
   type Thread,
@@ -144,6 +145,9 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
   const [interrupt, setInterrupt] = useState<{ interrupt: Interrupt; input: string } | null>(null);
   const [lastMeta, setLastMeta] = useState<TurnMeta | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
+  // Prose as it arrives, plus which gate the turn is currently passing through.
+  const [streaming, setStreaming] = useState('');
+  const [stage, setStage] = useState('');
   const bottom = useRef<HTMLDivElement>(null);
   /** The words already committed, waiting for their prose. */
   const [awaiting, setAwaiting] = useState<string | null>(null);
@@ -182,15 +186,17 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
     if (!text.trim() || busy) return;
     setBusy(true);
     setNotes([]);
-    // Under ~150ms the page would only flash, so the ruling waits that long.
+    setStreaming('');
+    setStage('');
+    // The ruling waits ~150ms: under that it would only flash. It covers the
+    // stretch where the gates run and no prose exists yet.
     const revealAwaiting = window.setTimeout(() => setAwaiting(text), 150);
-    try {
-      const res = await api.play(text, override);
+
+    const finish = async (res: PlayResponse) => {
       const o = res.outcome;
 
       if (o.kind === 'interrupted') {
         setInterrupt({ interrupt: o.interrupt, input: text });
-        setBusy(false);
         return;
       }
 
@@ -213,11 +219,23 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
       } else if (o.kind === 'blocked') {
         setNotes([`the world model refused that: ${o.reason}`, ...o.validation.issues.filter((i) => !i.repaired).map((i) => `${i.tier}: ${i.message}`)]);
       }
+    };
+
+    try {
+      await api.playStream(text, override, {
+        onStage: setStage,
+        onToken: (chunk) => setStreaming((prev) => prev + chunk),
+        onDone: (res) => void finish(res),
+        onError: (message) => setNotes([message]),
+      });
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
     }
+    // The committed turn is now in the book, so the provisional copy can go.
     window.clearTimeout(revealAwaiting);
     setAwaiting(null);
+    setStreaming('');
+    setStage('');
     setBusy(false);
   }
 
@@ -266,16 +284,32 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
               </Fragment>
               );
             })}
-            {/* The words are committed; the ink has not arrived yet. */}
-            {awaiting ? (
-              <div className="turn awaiting" aria-live="polite">
+            {/*
+              One provisional turn, two phases. Before the first token there is
+              nothing honest to render as prose, so it is the ruling of a page
+              waiting for ink, labelled with the gate actually running. The moment
+              tokens arrive the ruling gives way to them. Either way the folio and
+              the author's own words are already real and already in place.
+
+              The gate name lives here rather than in the composer hint, because
+              it describes this prose and belongs beside it.
+            */}
+            {awaiting || streaming ? (
+              <div className={`turn awaiting${streaming ? ' streaming' : ''}`} aria-live="polite">
                 <span className="folio">
                   {state ? `${state.session.scene}·${state.session.turn + 1}` : '·'}
                 </span>
-                <div className="raw">{awaiting}</div>
-                <div className="ruled" aria-hidden="true"><i /><i /><i /></div>
+                <div className="raw">{awaiting ?? input}</div>
+                {streaming ? (
+                  <p className="prose">
+                    {streaming}
+                    <span className="caret" />
+                  </p>
+                ) : (
+                  <div className="ruled" aria-hidden="true"><i /><i /><i /></div>
+                )}
                 <div className="turn-tools">
-                  <span className="status ripening">writing</span>
+                  <span className="stage">{stage || 'writing'}</span>
                 </div>
               </div>
             ) : null}
@@ -1333,9 +1367,39 @@ function ProvidersPanel() {
               {r.fix ? <span className="provider-fix">→ {r.fix}</span> : null}
             </div>
           ))}
-          <p className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
-            Switching profile is a config change (fabulist.config.json), so the engine reloads it on restart.
-          </p>
+          {report.usableProfiles.length ? (
+            <>
+              <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>switch profile</h3>
+              <div className="row wrap">
+                {(report.usableProfiles.includes('mock') ? report.usableProfiles : [...report.usableProfiles, 'mock']).map((name) => (
+                  <button
+                    key={name}
+                    className={name === report.profile ? 'primary' : ''}
+                    aria-pressed={name === report.profile}
+                    disabled={busy || name === report.profile}
+                    onClick={() =>
+                      void (async () => {
+                        setBusy(true);
+                        setError(null);
+                        try {
+                          await api.setProfile(name);
+                          setReport(await api.providers());
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : String(e));
+                        }
+                        setBusy(false);
+                      })()
+                    }
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+              <p className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
+                Takes effect on the next turn. No restart.
+              </p>
+            </>
+          ) : null}
         </>
       ) : null}
     </div>

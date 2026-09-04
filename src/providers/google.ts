@@ -18,6 +18,7 @@ import { createSign } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { readSse, parseJsonSafe } from './stream.ts';
 import type { CompletionRequest, CompletionResult, Provider, ProviderCapabilities } from './provider.ts';
 
 export interface GoogleEnvironment {
@@ -264,9 +265,11 @@ export class VertexProvider implements Provider {
     };
     if (systemText) body.systemInstruction = { parts: [{ text: systemText }] };
 
+    const wantsStream = !!req.onToken && this.capabilities.streaming && !req.schema;
+    const method = wantsStream ? 'streamGenerateContent?alt=sse' : 'generateContent';
     const url =
       `https://${this.location}-aiplatform.googleapis.com/v1/projects/${project}` +
-      `/locations/${this.location}/publishers/google/models/${this.model}:generateContent`;
+      `/locations/${this.location}/publishers/google/models/${this.model}:${method}`;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -278,6 +281,9 @@ export class VertexProvider implements Provider {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+      if (res.ok && wantsStream) {
+        return await this.consumeStream(res, req.onToken!);
+      }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new Error(`vertex ${res.status}: ${text.slice(0, 300)}`);
@@ -295,6 +301,27 @@ export class VertexProvider implements Provider {
       model: this.model,
       schemaEnforced: !!req.schema,
     };
+  }
+
+  private async consumeStream(res: Response, onToken: (chunk: string) => void): Promise<CompletionResult> {
+    let text = '';
+    let tokensIn = 0;
+    let tokensOut = 0;
+
+    for await (const payload of readSse(res.body)) {
+      const event = parseJsonSafe(payload) as GenerateResponse | null;
+      if (!event) continue;
+      const chunk = (event.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('');
+      if (chunk) {
+        text += chunk;
+        onToken(chunk);
+      }
+      if (event.usageMetadata) {
+        tokensIn = event.usageMetadata.promptTokenCount ?? tokensIn;
+        tokensOut = event.usageMetadata.candidatesTokenCount ?? tokensOut;
+      }
+    }
+    return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
   }
 
   async whoami(): Promise<{ source: string; project: string | null; location: string }> {

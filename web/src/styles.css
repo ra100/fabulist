@@ -2088,6 +2088,13 @@ button.link:hover { background: none; color: var(--ink); }
   .turn.arriving .turn-tools {
     animation: none !important;
   }
+  /* The caret says "prose is arriving", so it must not disappear — but a blink is
+     exactly the motion to drop. Held steady instead: state kept, movement gone.
+     Without this the global one-iteration cap would end it on opacity 0. */
+  .caret {
+    animation: none !important;
+    opacity: 1 !important;
+  }
 }
 
 .log { margin-top: var(--s3); }
@@ -2153,3 +2160,37 @@ button.link:hover { background: none; color: var(--ink); }
   .meta { display: none; }
   .tabs button { padding: 7px 8px; }
 }
+
+/* ---- prose arriving, token by token ------------------------------------- */
+/* The provisional turn keeps its folio and the author's raw words; only the body
+   swaps from ruling to real prose. It sits a shade back from committed prose, so
+   the difference between "arriving" and "written" is visible without a label.
+   `.opening` is not redeclared here — it is already set with the display tokens. */
+
+.turn.awaiting { border-bottom-color: var(--rule-soft); }
+
+/* The gate the turn is passing through. The engine phrases these as sentences
+   ("deciding what happens"), and a sentence in tracked capitals is unreadable —
+   so this is a whispered marginal note instead. */
+.turn.awaiting .stage {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 13.5px;
+  letter-spacing: 0;
+  color: var(--ink-3);
+}
+.turn.awaiting.streaming .prose { color: var(--ink-2); }
+
+/* A block caret in the accent, because the accent means "live" everywhere else
+   in this app too. */
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 0.95em;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  border-radius: var(--r-hair);
+  background: var(--accent);
+  animation: blink 1.05s step-end infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }

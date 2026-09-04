@@ -67,6 +67,13 @@ export interface TakeTurnOptions {
   overrideIntegrity?: boolean;
   /** Force the acting character; defaults to the player character. */
   actorId?: EntityId;
+  /**
+   * Receives narration as it arrives. Only the narrator streams; the mechanical
+   * roles return structured output, where a partial result is worthless.
+   */
+  onToken?: (chunk: string) => void;
+  /** Called once the gates have passed, so the UI can stop saying "thinking". */
+  onStage?: (stage: string) => void;
 }
 
 export class Engine {
@@ -138,6 +145,7 @@ export class Engine {
     const actorId = opts.actorId ?? session.playerCharacterId;
 
     // 1. CLASSIFY
+    opts.onStage?.('reading your input');
     const intent = await classify(deps, rawInput, actorId);
 
     if (intent.class === 'meta-query') {
@@ -147,6 +155,7 @@ export class Engine {
     // 2-3. INTEGRITY. Cheapest gate, so it runs first and fails fast.
     let integrityVerdict = null;
     if (intent.class === 'action' || intent.class === 'dialogue') {
+      opts.onStage?.('checking it against your character');
       integrityVerdict = await integrity(deps, rawInput, actorId);
       if (integrityVerdict.interrupt && !opts.overrideIntegrity) {
         this.onInterrupt?.(integrityVerdict.interrupt);
@@ -160,6 +169,7 @@ export class Engine {
     }
 
     // 4. REFEREE
+    opts.onStage?.('checking it against the world');
     const refereeVerdict = await referee(deps, rawInput);
     for (const s of refereeVerdict.spawn) {
       const id = `${typePrefix(s.type)}:${slug(s.name)}`;
@@ -180,6 +190,7 @@ export class Engine {
     }
 
     // 5. DIRECT
+    opts.onStage?.('deciding what happens');
     const plan = await direct(deps, rawInput);
 
     // The agreed beat is the boundary: everything below this line renders, it
@@ -202,7 +213,8 @@ export class Engine {
       .join('\n');
 
     // 6. NARRATE
-    let prose = await narrate(deps, rawInput, agreedBeat, intent.verbatim);
+    opts.onStage?.('writing');
+    let prose = await narrate(deps, rawInput, agreedBeat, intent.verbatim, opts.onToken);
 
     // 6b. PROSE GATE. Deterministic lint first; the model only runs if it trips.
     let lint: LintReport | null = null;
@@ -215,6 +227,7 @@ export class Engine {
     }
 
     // 7-8. EXTRACT + VALIDATE
+    opts.onStage?.('recording what changed');
     const { delta, validation } = await extract(deps, prose, rawInput);
     if (!validation.ok) {
       // Surfaced, not silently dropped: a discarded delta is how the graph and
