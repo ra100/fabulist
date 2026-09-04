@@ -45,7 +45,7 @@ export interface ProseGate {
 }
 
 export interface EngineOptions {
-  world: World;
+  world: World | (() => World);
   providers: Registry;
   proseGate?: ProseGate;
   /** Called when the integrity gate stops the turn, before anything is committed. */
@@ -77,7 +77,17 @@ export interface TakeTurnOptions {
 }
 
 export class Engine {
-  private world: World;
+  /**
+   * A getter, not a resolved `World`. `serve.ts` holds one `Engine` for the
+   * process lifetime, but which story is "current" can change under it — a
+   * save switch, a story switch — without a restart. Capturing a `World` once
+   * here would mean every later turn silently keeps playing whichever story
+   * was current when the server started; this mirrors the fix already
+   * applied to `SetupPlanner` for exactly the same reason, one level up.
+   * Resolved once per `takeTurn` call (not per internal step) so a single
+   * turn is never split across two different stories mid-flight.
+   */
+  private getWorld: () => World;
   private providers: Registry;
   private proseGate: ProseGate | undefined;
   private onInterrupt: ((i: Interrupt) => void) | undefined;
@@ -87,13 +97,13 @@ export class Engine {
   lastFrames: Record<string, Frame> = {};
 
   constructor(opts: EngineOptions) {
-    this.world = opts.world;
+    this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
     this.providers = opts.providers;
     this.proseGate = opts.proseGate;
     this.onInterrupt = opts.onInterrupt;
     this.autoCompact = opts.autoCompact !== false;
     this.compactor = new Compactor({
-      world: opts.world,
+      world: this.getWorld,
       provider: opts.providers.get('summarize'),
       ...(opts.chapterSize === undefined ? {} : { chapterSize: opts.chapterSize }),
     });
@@ -104,25 +114,27 @@ export class Engine {
     return this.compactor;
   }
 
-  private deps(calls: TurnMeta['providerCalls']): RoleDeps {
-    const world = this.world;
+  /** True mid-turn: a save or story switch should wait rather than race a commit. */
+  busy = false;
+
+  private deps(world: World, calls: TurnMeta['providerCalls']): RoleDeps {
     const providers = this.providers;
     return {
       world,
       provider: (role) => providers.get(role),
-      ctx: (role, extra) => this.frameContext(role, providers.get(role), extra),
+      ctx: (role, extra) => this.frameContext(world, role, providers.get(role), extra),
       log: (role, provider, model, tokensIn, tokensOut) => {
         calls.push({ role, provider, model, tokensIn, tokensOut });
       },
     };
   }
 
-  private frameContext(role: string, provider: Provider, extra?: Partial<FrameContext>): FrameContext {
+  private frameContext(world: World, role: string, provider: Provider, extra?: Partial<FrameContext>): FrameContext {
     const caps = provider.capabilities;
     const reserve = OUTPUT_RESERVE[role] ?? 512;
     return {
-      world: this.world,
-      session: this.world.session.get(),
+      world,
+      session: world.session.get(),
       tokenizer: tokenizerFor(caps.charsPerToken),
       budget: inputBudget(caps.contextWindow, reserve),
       ...extra,
@@ -130,17 +142,29 @@ export class Engine {
   }
 
   session(): SessionState {
-    return this.world.session.get();
+    return this.getWorld().session.get();
   }
 
   /**
    * One player turn. Returns without committing anything when the integrity gate
    * interrupts, so the player's answer decides what happens.
+   *
+   * Resolves `world` exactly once, before the first gate, and passes that same
+   * reference through every step — a switch requested mid-turn is expected to
+   * see `busy` and wait, not race a commit against a story that changed underneath it.
    */
   async takeTurn(rawInput: string, opts: TakeTurnOptions = {}): Promise<TurnOutcome> {
-    const world = this.world;
+    this.busy = true;
+    try {
+      return await this.takeTurnOn(this.getWorld(), rawInput, opts);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async takeTurnOn(world: World, rawInput: string, opts: TakeTurnOptions): Promise<TurnOutcome> {
     const calls: TurnMeta['providerCalls'] = [];
-    const deps = this.deps(calls);
+    const deps = this.deps(world, calls);
     const session = world.session.get();
     const actorId = opts.actorId ?? session.playerCharacterId;
 
@@ -149,7 +173,7 @@ export class Engine {
     const intent = await classify(deps, rawInput, actorId);
 
     if (intent.class === 'meta-query') {
-      return { kind: 'answered', text: this.answerMetaQuery(rawInput) };
+      return { kind: 'answered', text: this.answerMetaQuery(world, rawInput) };
     }
 
     // 2-3. INTEGRITY. Cheapest gate, so it runs first and fails fast.
@@ -282,8 +306,7 @@ export class Engine {
   }
 
   /** Answers a world question from state without advancing the story. */
-  private answerMetaQuery(q: string): string {
-    const world = this.world;
+  private answerMetaQuery(world: World, q: string): string {
     const session = world.session.get();
     const words = q.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter((w) => w.length > 3);
     const hits = words.flatMap((w) => world.graph.search(w, 3));

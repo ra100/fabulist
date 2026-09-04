@@ -46,7 +46,7 @@ threads are still open. Preserve entity ids exactly as supplied. Five sentences
 at most. Reply with JSON only.`;
 
 export interface CompactorOptions {
-  world: World;
+  world: World | (() => World);
   provider: Provider;
   /** Scenes per chapter. */
   chapterSize?: number;
@@ -61,14 +61,23 @@ export interface CompactionResult {
 }
 
 export class Compactor {
-  private world: World;
+  /**
+   * A getter, not a resolved `World`. Same reasoning as `SetupPlanner`'s
+   * provider getter: `Engine` holds this `Compactor` for the process
+   * lifetime, but which story is "current" can change under it (a save
+   * switch, a story switch) without a restart. Capturing a `World` once at
+   * construction would mean every later compaction call silently keeps
+   * writing to whichever story was current when the server started —
+   * exactly the bug shape the SetupPlanner fix caught, one level up.
+   */
+  private getWorld: () => World;
   private provider: Provider;
   private chapterSize: number;
   private minTurns: number;
   private onError: ((scope: string, err: unknown) => void) | undefined;
 
   constructor(opts: CompactorOptions) {
-    this.world = opts.world;
+    this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
     this.provider = opts.provider;
     this.chapterSize = opts.chapterSize ?? 8;
     this.minTurns = opts.minTurns ?? 2;
@@ -81,10 +90,11 @@ export class Compactor {
    * on every scene advance.
    */
   async summariseScene(scene: number, force = false): Promise<string | null> {
-    const existing = this.world.chronicle.scenes().find((s) => s.scene === scene);
+    const world = this.getWorld();
+    const existing = world.chronicle.scenes().find((s) => s.scene === scene);
     if (existing?.summary && !force) return existing.summary;
 
-    const turns = this.world.chronicle.turns({ scene });
+    const turns = world.chronicle.turns({ scene });
     if (turns.length < this.minTurns) return null;
 
     const prose = turns.map((t) => t.bookProse).filter(Boolean).join('\n\n');
@@ -101,10 +111,10 @@ export class Compactor {
       for (const c of turn.delta?.conditionUpdates ?? []) ids.add(c.entityId);
     }
     const roster = [...ids]
-      .map((id) => `${id} = ${this.world.graph.get(id)?.name ?? id}`)
+      .map((id) => `${id} = ${world.graph.get(id)?.name ?? id}`)
       .join('\n');
 
-    const events = this.world.chronicle
+    const events = world.chronicle
       .events({ sinceScene: scene })
       .filter((e) => e.scene === scene)
       .map((e) => `- ${e.text}`)
@@ -124,7 +134,7 @@ export class Compactor {
     const summary = this.keepIds(String(parsed.summary ?? '').trim(), [...ids]);
     if (!summary) return null;
 
-    this.world.chronicle.upsertScene(scene, {
+    world.chronicle.upsertScene(scene, {
       summary,
       title: typeof parsed.title === 'string' ? parsed.title.slice(0, 90) : '',
       chapter: this.chapterOf(scene),
@@ -134,10 +144,11 @@ export class Compactor {
 
   /** Rolls completed scene summaries into a chapter summary. */
   async summariseChapter(chapter: number, force = false): Promise<string | null> {
-    const existing = this.world.chronicle.chapter(chapter);
+    const world = this.getWorld();
+    const existing = world.chronicle.chapter(chapter);
     if (existing?.summary && !force) return existing.summary;
 
-    const scenes = this.world.chronicle.scenes().filter((s) => s.chapter === chapter && s.summary);
+    const scenes = world.chronicle.scenes().filter((s) => s.chapter === chapter && s.summary);
     if (scenes.length < 2) return null;
 
     const user = scenes.map((s) => `scene ${s.scene}${s.title ? ` (${s.title})` : ''}: ${s.summary}`).join('\n');
@@ -146,7 +157,7 @@ export class Compactor {
 
     const summary = String(parsed.summary ?? '').trim();
     if (!summary) return null;
-    this.world.chronicle.upsertChapter(chapter, {
+    world.chronicle.upsertChapter(chapter, {
       summary,
       title: typeof parsed.title === 'string' ? parsed.title.slice(0, 90) : '',
     });
@@ -173,10 +184,11 @@ export class Compactor {
 
   /** Catches up any scene that closed without being summarised. */
   async backfill(currentScene: number): Promise<CompactionResult> {
+    const world = this.getWorld();
     const result: CompactionResult = { scenesSummarised: [], chaptersSummarised: [] };
-    const have = new Map(this.world.chronicle.scenes().map((s) => [s.scene, s.summary]));
+    const have = new Map(world.chronicle.scenes().map((s) => [s.scene, s.summary]));
 
-    const scenesWithTurns = new Set(this.world.chronicle.turns({ limit: 5000 }).map((t) => t.scene));
+    const scenesWithTurns = new Set(world.chronicle.turns({ limit: 5000 }).map((t) => t.scene));
     for (const scene of [...scenesWithTurns].sort((a, b) => a - b)) {
       if (scene >= currentScene) continue; // the current scene stays verbatim
       if (have.get(scene)) continue;

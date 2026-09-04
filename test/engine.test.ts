@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { World } from '../src/store/index.ts';
+import { createStory } from '../src/store/world.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
@@ -376,5 +377,77 @@ test('a twenty-turn session stays consistent and records every turn', async () =
   assert.equal(world.chronicle.turns().length, 20);
   assert.equal(world.session.get().turn, 20);
   assert.ok(world.chronicle.events().length >= 20);
+  world.close();
+});
+
+// ---------------------------------------------------------- multi-story live
+
+test('an engine built with a story getter follows a live story switch, not the one live at construction', async () => {
+  // The exact bug shape the SetupPlanner fix caught last session, one level
+  // up: Engine used to capture a World field at construction. Under
+  // multi-story, "which story is current" can change without a restart
+  // (world.withStory is a same-file operation, not a close/reopen) — a
+  // captured World would mean every later turn silently kept playing
+  // whichever story was current when the server started.
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const storyB = createStory(world.db, { title: 'B' }).id;
+
+  let current = world;
+  const engine = new Engine({ world: () => current, providers: new ProviderRegistry(new MockProvider()) });
+
+  const first = await engine.takeTurn('i warm the ink');
+  if (first.kind !== 'narrated') throw new Error('expected narration');
+  assert.equal(world.chronicle.turns().length, 1, 'story A recorded the turn');
+
+  current = world.withStory(storyB);
+  const second = await engine.takeTurn('i check the door');
+  if (second.kind !== 'narrated') throw new Error('expected narration');
+
+  assert.equal(world.chronicle.turns().length, 1, 'story A is unaffected by the switch');
+  assert.equal(current.chronicle.turns().length, 1, 'story B got the second turn, no restart needed');
+  world.close();
+});
+
+test('engine.busy is true only while a turn is actually in flight', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const engine = new Engine({ world, providers: new ProviderRegistry(new MockProvider()) });
+
+  assert.equal(engine.busy, false);
+  const turn = engine.takeTurn('i warm the ink');
+  assert.equal(engine.busy, true, 'set synchronously, before the first await resolves');
+  await turn;
+  assert.equal(engine.busy, false, 'cleared once the turn settles, success or not');
+  world.close();
+});
+
+test('compaction follows the same live story switch as the engine it belongs to', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const storyB = createStory(world.db, { title: 'B' }).id;
+  let current = world;
+  const engine = new Engine({ world: () => current, providers: new ProviderRegistry(new MockProvider()), autoCompact: false });
+
+  await engine.takeTurn('i warm the ink');
+  await engine.takeTurn('i check the door');
+
+  current = world.withStory(storyB);
+  // A fresh story has no player assigned yet — same overlay every real story
+  // has after assignPlayerCharacter, since the canon sheet's isPlayer flag is
+  // shared and each story's own choice of protagonist is a chronicle overlay.
+  current.session.set({ playerCharacterId: 'char:brother-anselm' });
+  // Same two inputs as story A: what is under test is which story's scene 1
+  // gets summarised, not the mock's per-input extraction behaviour.
+  await engine.takeTurn('i warm the ink');
+  await engine.takeTurn('i check the door');
+
+  // Compacting scene 1 must only ever touch whichever story is current right
+  // now (B, two turns in), not story A (also scene 1, also two turns) — a
+  // captured World in Compactor would silently summarise the wrong one.
+  const res = await engine.compaction().summariseScene(1);
+  assert.ok(res && /char:/.test(res));
+  assert.ok(current.chronicle.scenes().find((s) => s.scene === 1)?.summary, 'story B got the summary');
+  assert.equal(world.chronicle.scenes().find((s) => s.scene === 1)?.summary, '', 'story A was never touched');
   world.close();
 });

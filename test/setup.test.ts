@@ -491,6 +491,34 @@ test('reset clears everything so the wizard can run again', async () => {
   world.close();
 });
 
+test('a SetupService built with a world getter follows a live switch, not the world live at construction', () => {
+  // Same shape as the Engine/Compactor fix: SetupService is held for the
+  // process lifetime, and useSample/reset/isFresh must all operate on
+  // whichever world is current *right now*, not whichever was current when
+  // the service was constructed.
+  const worldA = World.open(':memory:');
+  const worldB = World.open(':memory:');
+  let current: World = worldA;
+  const svc = new SetupService({
+    world: () => current,
+    providers: new ProviderRegistry(new MockProvider()),
+    directoryOptions: { fetcher: directoryFixture(FIXTURE), delayMs: 0 },
+    wikiFetcher: fixtureFetcher(WIKI),
+  });
+
+  svc.useSample();
+  assert.ok(worldA.graph.counts().entities > 15, 'world A got the sample');
+  assert.equal(worldB.graph.counts().entities, 0, 'world B is untouched');
+
+  current = worldB;
+  assert.ok(svc.isFresh(), 'isFresh now reads world B, which has no canon yet');
+  svc.reset(); // a no-op on an already-empty world, but must target B, not A
+  assert.equal(worldA.graph.counts().entities > 15, true, 'world A is unaffected by anything done while B was current');
+
+  worldA.close();
+  worldB.close();
+});
+
 // --------------------------------------------------------------------- jobs
 
 test('a job reports stages and settles as done', async () => {

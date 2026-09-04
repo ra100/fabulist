@@ -22,7 +22,7 @@ import { seedWorld } from '../seed/verrow.ts';
 export type WorldSource = 'fandom' | 'custom' | 'sample';
 
 export interface SetupServiceOptions {
-  world: World;
+  world: World | (() => World);
   providers: Registry;
   /** Injected for tests: fetchers for the directory and for wiki content. */
   directoryOptions?: DirectoryOptions;
@@ -49,7 +49,15 @@ export interface IngestJobResult {
 }
 
 export class SetupService {
-  private world: World;
+  /**
+   * A getter, not a resolved `World`. Same reasoning as `Engine`/`Compactor`:
+   * this service is held for the process lifetime, but which world/story is
+   * "current" can change under it. `startIngest`/`startCustomWorld` in
+   * particular capture this synchronously and use it later inside an async
+   * job closure — exactly the shape that goes stale silently if it is a
+   * resolved reference instead of a live one.
+   */
+  private getWorld: () => World;
   private providers: Registry;
   private directory: WikiDirectory;
   private planner: SetupPlanner;
@@ -59,7 +67,7 @@ export class SetupService {
   private crawls = new Map<string, { crawl: CrawlResult; baseUrl: string; mode: DepthMode; title: string }>();
 
   constructor(opts: SetupServiceOptions) {
-    this.world = opts.world;
+    this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
     this.providers = opts.providers;
     this.directory = new WikiDirectory(opts.directoryOptions ?? {});
     // A getter, not a resolved provider: a live profile switch replaces what
@@ -72,7 +80,7 @@ export class SetupService {
 
   /** True when this save has no canon yet, which is what the UI gates the wizard on. */
   isFresh(): boolean {
-    return this.world.graph.counts().entities === 0;
+    return this.getWorld().graph.counts().entities === 0;
   }
 
   async resolveWiki(query: string): Promise<WikiCandidate[]> {
@@ -136,11 +144,16 @@ export class SetupService {
 
     const { crawl: scoped, baseUrl, mode, title } = cached;
     const spec = MODES[mode];
-    const world = this.world;
     const wikiName = new URL(baseUrl).hostname.split('.')[0] ?? 'wiki';
-    world.chronicle.setMeta('worldTitle', title || wikiName);
 
     return this.jobs.start<IngestJobResult>('ingest', async (handle) => {
+      // Resolved once, when the job actually starts running, not when it was
+      // scheduled — and held for the job's whole lifetime rather than
+      // re-resolved per step: an ingest is one continuous act of writing canon,
+      // and letting the target world change mid-write would split the ingest
+      // across two stories/worlds, which is a real corruption, not a stale-read.
+      const world = this.getWorld();
+      world.chronicle.setMeta('worldTitle', title || wikiName);
       const warnings: string[] = [];
       const pages = [...scoped.pages.values()];
 
@@ -244,13 +257,16 @@ export class SetupService {
 
   /** Builds an authored world from a description. No wiki involved. */
   startCustomWorld(description: string, style?: Partial<IngestPlan['style']>): Job<ApplyCustomResult> {
-    const world = this.world;
     const planner = this.planner;
 
     return this.jobs.start<ApplyCustomResult>('custom-world', async (handle) => {
       handle.stage('inventing the world', 'locations, factions, cast');
       const raw = await planner.customWorld(description);
 
+      // Resolved after the (only) await in this job, same reasoning as
+      // startIngest: one continuous act of authoring canon, held for its
+      // whole lifetime rather than re-resolved mid-write.
+      const world = this.getWorld();
       handle.stage('writing it down');
       const result = applyCustomWorld(world, raw);
       handle.log(`${result.entities} entities, ${result.edges} relations, ${result.threads} threads`);
@@ -266,22 +282,32 @@ export class SetupService {
 
   /** The built-in example, for trying the engine without any setup at all. */
   useSample(): { playerCharacterId: string; opening: string } {
-    seedWorld(this.world);
-    this.world.chronicle.setMeta('worldTitle', 'Saint Verrow');
+    const world = this.getWorld();
+    seedWorld(world);
+    world.chronicle.setMeta('worldTitle', 'Saint Verrow');
     return {
-      playerCharacterId: this.world.session.get().playerCharacterId,
-      opening: proposeOpening(this.world),
+      playerCharacterId: world.session.get().playerCharacterId,
+      opening: proposeOpening(world),
     };
   }
 
-  /** Wipes a save so the wizard can be run again. Canon included: this is a reset. */
+  /**
+   * Wipes a save so the wizard can be run again. Canon included: this is a
+   * reset of the whole file, not of one story — under multi-story that is a
+   * meaningfully different (and more destructive) operation than "delete this
+   * story", which the save browser (Slice 3/4) needs to offer as a separate,
+   * less destructive action. Left as a whole-file wipe here deliberately,
+   * matching what the "new world" button in the topbar has always done;
+   * revisit when that button's semantics are actually redesigned.
+   */
   reset(): void {
+    const world = this.getWorld();
     const tables = [
       'turns', 'events', 'consequences', 'fact_knowledge', 'facts', 'threads',
       'directives', 'divergences', 'style_anchors', 'relationships', 'sheets',
       'edges', 'entities', 'scenes', 'chapters', 'ingest_pages',
     ];
-    for (const t of tables) this.world.db.prepare(`DELETE FROM ${t}`).run();
-    this.world.session.set({ scene: 1, turn: 0, playerCharacterId: '', currentLocationId: null });
+    for (const t of tables) world.db.prepare(`DELETE FROM ${t}`).run();
+    world.session.set({ scene: 1, turn: 0, playerCharacterId: '', currentLocationId: null });
   }
 }
