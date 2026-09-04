@@ -16,6 +16,7 @@ import {
 } from './api.ts';
 import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
+import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 
 type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'settings';
 
@@ -1041,6 +1042,45 @@ function FactsTab() {
   );
 }
 
+/**
+ * Each swatch carries its own `data-palette`, so it renders in the preset it
+ * offers rather than in the active one. No colour is duplicated in JS.
+ */
+function PalettePicker() {
+  const [current, setCurrent] = useState(resolvePalette);
+  return (
+    <div className="card">
+      <h3>appearance</h3>
+      <p className="lede" style={{ margin: '0 0 var(--s3)' }}>
+        Each preset is derived from a source rather than picked from a wheel. All six are
+        contrast-verified; the light one follows your system by default.
+      </p>
+      <div className="palettes">
+        {PRESETS.map((p) => (
+          <button
+            key={p.key}
+            className={`palette-choice${current === p.key ? ' selected' : ''}`}
+            aria-pressed={current === p.key}
+            onClick={() => {
+              savePalette(p.key);
+              setCurrent(p.key);
+            }}
+          >
+            <span className="swatch" data-palette={p.key} aria-hidden="true" />
+            <span className="palette-text">
+              <b>
+                {p.label}
+                {p.mode === 'light' ? <span className="tag">light</span> : null}
+              </b>
+              <span>{p.source}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ settings
 
 function SettingsTab({ onChanged }: { onChanged: () => void }) {
@@ -1067,6 +1107,7 @@ function SettingsTab({ onChanged }: { onChanged: () => void }) {
     <div className="main">
       <div className="pane">
         <div className="measure-tool">
+        <PalettePicker />
         {style ? (
           <div className="card">
             <h3>style contract</h3>

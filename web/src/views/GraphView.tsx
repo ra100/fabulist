@@ -20,17 +20,17 @@ interface Node {
 }
 
 /**
- * Derived inside the palette: warm, low chroma, and separated by *lightness* as
- * well as hue so the type encoding survives greyscale and colour-vision deficiency.
- * Values verified in .design/contrast.mjs.
+ * Read from the active preset rather than hard-coded, so switching palettes
+ * re-themes the graph too. Each preset separates these by *lightness* as well as
+ * hue, so the type encoding survives greyscale; .design/palettes.mjs enforces it.
  */
 const TYPE_COLOR: Record<string, string> = {
-  Character: '#e9b452',
-  Location: '#6898c0',
-  Faction: '#bb584a',
-  Item: '#8fb98f',
-  Concept: '#8e7ab5',
-  Event: '#dfd5ac',
+  Character: 'var(--type-character)',
+  Location: 'var(--type-location)',
+  Faction: 'var(--type-faction)',
+  Item: 'var(--type-item)',
+  Concept: 'var(--type-concept)',
+  Event: 'var(--type-event)',
 };
 
 export function GraphView({
@@ -253,14 +253,14 @@ export function GraphView({
             const mx = (a.x + b.x) / 2;
             const my = (a.y + b.y) / 2;
             return (
-              <g key={e.id} opacity={active ? 1 : 0.16}>
+              <g key={e.id} className={active ? undefined : 'dim-edge'}>
                 <line
                   x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                  stroke={e.layer === 'canon' ? '#3b4a5a' : '#5a3d36'}
+                  stroke={e.layer === 'canon' ? 'var(--edge-canon)' : 'var(--edge-chronicle)'}
                   strokeWidth={0.6 + e.weight * 1.5}
                 />
                 {active && selectedId ? (
-                  <text x={mx} y={my - 3} fill="#8c857c" fontSize="7.5" textAnchor="middle" fontFamily="ui-monospace, monospace" stroke="#0c0a07" strokeWidth={2.2} strokeLinejoin="round" paintOrder="stroke">
+                  <text x={mx} y={my - 3} fill="var(--ink-3)" fontSize="7.5" textAnchor="middle" fontFamily="ui-monospace, monospace" stroke="var(--ground)" strokeWidth={2.2} strokeLinejoin="round" paintOrder="stroke">
                     {e.predicate.toLowerCase().replace(/_/g, ' ')}
                   </text>
                 ) : null}
@@ -275,7 +275,7 @@ export function GraphView({
             return (
               <g
                 key={n.id}
-                opacity={related ? 1 : 0.22}
+                className={related ? undefined : 'dim-node'}
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   onPointerDown(e, n.id);
@@ -288,19 +288,19 @@ export function GraphView({
               >
                 <circle
                   cx={n.x} cy={n.y} r={r}
-                  fill={TYPE_COLOR[n.type] ?? '#8c857c'}
-                  stroke={selected ? '#ede7de' : n.emergent ? '#d6715e' : 'none'}
+                  fill={TYPE_COLOR[n.type] ?? 'var(--ink-3)'}
+                  stroke={selected ? 'var(--ink)' : n.emergent ? 'var(--divergent)' : 'none'}
                   strokeWidth={selected ? 2 : n.emergent ? 1.4 : 0}
                   strokeDasharray={n.emergent && !selected ? '2 1.5' : undefined}
                 />
                 {/* A halo in the ground colour, so labels stay legible over edges. */}
                 <text
                   x={n.x} y={n.y - r - 4}
-                  fill={selected ? '#ede7de' : '#b0aaa0'}
+                  fill={selected ? 'var(--ink)' : 'var(--ink-2)'}
                   fontSize={selected ? 10.5 : 9}
                   fontWeight={selected ? 600 : 400}
                   textAnchor="middle"
-                  stroke="#0c0a07"
+                  stroke="var(--ground)"
                   strokeWidth={2.6}
                   strokeLinejoin="round"
                   paintOrder="stroke"
@@ -321,7 +321,7 @@ export function GraphView({
           </span>
         ))}
         <span>
-          <i style={{ border: '1.4px dashed #d6715e', background: 'none' }} />
+          <i style={{ border: '1.4px dashed var(--divergent)', background: 'none' }} />
           emergent
         </span>
       </div>    </div>
