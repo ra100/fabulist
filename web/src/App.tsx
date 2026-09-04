@@ -1052,8 +1052,8 @@ function PalettePicker() {
     <div className="card">
       <h3>appearance</h3>
       <p className="lede" style={{ margin: '0 0 var(--s3)' }}>
-        Each preset is derived from a source rather than picked from a wheel. All six are
-        contrast-verified; the light one follows your system by default.
+        One preset per genre, each derived from a specific source rather than picked from a
+        wheel. All nine are contrast-verified; the light ones follow your system by default.
       </p>
       <div className="palettes">
         {PRESETS.map((p) => (
@@ -1061,6 +1061,7 @@ function PalettePicker() {
             key={p.key}
             className={`palette-choice${current === p.key ? ' selected' : ''}`}
             aria-pressed={current === p.key}
+            title={p.source}
             onClick={() => {
               savePalette(p.key);
               setCurrent(p.key);
@@ -1072,6 +1073,7 @@ function PalettePicker() {
                 {p.label}
                 {p.mode === 'light' ? <span className="tag">light</span> : null}
               </b>
+              <span className="palette-genre">{p.genre}</span>
               <span>{p.source}</span>
             </span>
           </button>

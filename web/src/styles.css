@@ -49,9 +49,9 @@
    Every pair below is verified against WCAG AA by that script.
    ======================================================================== */
 
-/* Iron gall (dark) — An iron-gall manuscript on vellum: ink oxidised from blue-black to warm brown, gold leaf on the initials, red-oxide rubric in the margin. */
+/* Chronicle (dark) — An iron-gall manuscript on vellum: ink oxidised from blue-black to warm brown, gold leaf on the initials, red-oxide rubric in the margin. */
 :root,
-[data-palette='iron-gall'] {
+[data-palette='chronicle'] {
   color-scheme: dark;
   --palette-mode: dark;
 
@@ -120,52 +120,472 @@
   --edge-chronicle: oklch(0.34 0.05 30);
 }
 
-/* Foxed paper (light) — An aged, foxed book page in daylight: warm rag paper, brown-black iron-gall text, rust-coloured foxing blooms in the margin. */
-[data-palette='foxed'] {
+/* Starship (dark) — Apollo command-module panels and the white interiors of 2001: cold instrument black, one cyan data trace, caution orange. */
+[data-palette='starship'] {
+  color-scheme: dark;
+  --palette-mode: dark;
+
+  /* surfaces */
+  --ground: oklch(0.145 0.01 230);
+  --surface-1: oklch(0.188 0.012 232);
+  --surface-2: oklch(0.232 0.013 234);
+  --surface-3: oklch(0.276 0.014 236);
+  --rule: oklch(0.32 0.015 232);
+  --rule-strong: oklch(0.4 0.017 234);
+  --rule-soft: oklch(0.32 0.015 232 / 0.5);
+
+  /* ink */
+  --ink: oklch(0.945 0.008 220);
+  --ink-2: oklch(0.765 0.012 222);
+  --ink-3: oklch(0.672 0.014 225);
+  --ink-4: oklch(0.48 0.014 228);
+
+  /* accent — the one indicator lamp */
+  --accent: oklch(0.82 0.115 200);
+  --accent-hover: oklch(0.87 0.1 202);
+  --accent-muted: oklch(0.72 0.095 198);
+  --on-accent: oklch(0.17 0.03 205);
+  --accent-veil: oklch(0.82 0.115 200 / 0.16);
+  --accent-select: oklch(0.82 0.115 200 / 0.25);
+  --accent-line: oklch(0.82 0.115 200 / 0.5);
+
+  /* domain roles */
+  --canon: oklch(0.75 0.09 262);
+  --canon-line: oklch(0.75 0.09 262 / 0.5);
+  --canon-underline: oklch(0.75 0.09 262 / 0.4);
+  --divergent: oklch(0.76 0.135 55);
+  --divergent-line: oklch(0.76 0.135 55 / 0.5);
+
+  /* status */
+  --ok: oklch(0.76 0.105 160);
+  --warn: oklch(0.81 0.125 70);
+  --danger: oklch(0.7 0.155 25);
+  --warn-surface: oklch(0.23 0.03 65);
+  --warn-ink: oklch(0.93 0.03 72);
+  --warn-line: oklch(0.81 0.125 70 / 0.5);
+  --danger-surface: oklch(0.22 0.035 25);
+  --danger-ink: oklch(0.92 0.03 32);
+  --danger-line: oklch(0.7 0.155 25 / 0.5);
+
+  /* material: dark themes raise with light, light themes with shadow */
+  --edge-light: oklch(1 0 0 / 0.045);
+  --edge-light-strong: oklch(1 0 0 / 0.28);
+  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
+  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
+  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
+  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
+  --hatch: oklch(0.48 0.014 228 / 0.55);
+  --overlay-veil: oklch(0.232 0.013 234 / 0.9);
+  --graph-dim: 0.22;
+  --graph-edge-dim: 0.16;
+
+  /* graph: separated by lightness so the encoding survives greyscale */
+  --type-character: oklch(0.82 0.115 200);
+  --type-location: oklch(0.66 0.085 262);
+  --type-faction: oklch(0.6 0.145 25);
+  --type-item: oklch(0.76 0.1 160);
+  --type-concept: oklch(0.64 0.1 295);
+  --type-event: oklch(0.93 0.04 210);
+  --edge-canon: oklch(0.34 0.04 258);
+  --edge-chronicle: oklch(0.35 0.05 45);
+}
+
+/* Neon (dark) — Rain-lit signage over Kowloon and Syd Mead’s cityscapes. The ground is deep indigo rather than black, and only the magenta is hot — cyan is held back for canon. */
+[data-palette='neon'] {
+  color-scheme: dark;
+  --palette-mode: dark;
+
+  /* surfaces */
+  --ground: oklch(0.155 0.026 305);
+  --surface-1: oklch(0.2 0.03 302);
+  --surface-2: oklch(0.245 0.032 300);
+  --surface-3: oklch(0.29 0.034 298);
+  --rule: oklch(0.34 0.036 302);
+  --rule-strong: oklch(0.42 0.038 300);
+  --rule-soft: oklch(0.34 0.036 302 / 0.5);
+
+  /* ink */
+  --ink: oklch(0.94 0.014 310);
+  --ink-2: oklch(0.775 0.02 308);
+  --ink-3: oklch(0.685 0.024 306);
+  --ink-4: oklch(0.49 0.026 304);
+
+  /* accent — the one indicator lamp */
+  --accent: oklch(0.72 0.17 345);
+  --accent-hover: oklch(0.78 0.155 347);
+  --accent-muted: oklch(0.755 0.1 338);
+  --on-accent: oklch(0.16 0.03 340);
+  --accent-veil: oklch(0.72 0.17 345 / 0.16);
+  --accent-select: oklch(0.72 0.17 345 / 0.25);
+  --accent-line: oklch(0.72 0.17 345 / 0.5);
+
+  /* domain roles */
+  --canon: oklch(0.81 0.1 205);
+  --canon-line: oklch(0.81 0.1 205 / 0.5);
+  --canon-underline: oklch(0.81 0.1 205 / 0.4);
+  --divergent: oklch(0.82 0.13 78);
+  --divergent-line: oklch(0.82 0.13 78 / 0.5);
+
+  /* status */
+  --ok: oklch(0.78 0.115 165);
+  --warn: oklch(0.84 0.125 82);
+  --danger: oklch(0.71 0.16 30);
+  --warn-surface: oklch(0.25 0.035 76);
+  --warn-ink: oklch(0.94 0.03 82);
+  --warn-line: oklch(0.84 0.125 82 / 0.5);
+  --danger-surface: oklch(0.24 0.04 28);
+  --danger-ink: oklch(0.93 0.03 36);
+  --danger-line: oklch(0.71 0.16 30 / 0.5);
+
+  /* material: dark themes raise with light, light themes with shadow */
+  --edge-light: oklch(1 0 0 / 0.045);
+  --edge-light-strong: oklch(1 0 0 / 0.28);
+  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
+  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
+  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
+  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
+  --hatch: oklch(0.49 0.026 304 / 0.55);
+  --overlay-veil: oklch(0.245 0.032 300 / 0.9);
+  --graph-dim: 0.22;
+  --graph-edge-dim: 0.16;
+
+  /* graph: separated by lightness so the encoding survives greyscale */
+  --type-character: oklch(0.72 0.17 345);
+  --type-location: oklch(0.81 0.1 205);
+  --type-faction: oklch(0.62 0.16 22);
+  --type-item: oklch(0.78 0.115 165);
+  --type-concept: oklch(0.66 0.13 285);
+  --type-event: oklch(0.94 0.035 320);
+  --edge-canon: oklch(0.38 0.05 210);
+  --edge-chronicle: oklch(0.39 0.07 340);
+}
+
+/* Grimoire (dark) — A tooled leather grimoire, verdigris on bronze, and Rackham’s muted watercolour: deep ink-green board, antique gold, oxblood. */
+[data-palette='grimoire'] {
+  color-scheme: dark;
+  --palette-mode: dark;
+
+  /* surfaces */
+  --ground: oklch(0.148 0.018 190);
+  --surface-1: oklch(0.192 0.02 188);
+  --surface-2: oklch(0.236 0.022 186);
+  --surface-3: oklch(0.28 0.024 184);
+  --rule: oklch(0.325 0.026 188);
+  --rule-strong: oklch(0.405 0.028 186);
+  --rule-soft: oklch(0.325 0.026 188 / 0.5);
+
+  /* ink */
+  --ink: oklch(0.935 0.014 85);
+  --ink-2: oklch(0.755 0.016 80);
+  --ink-3: oklch(0.668 0.018 76);
+  --ink-4: oklch(0.475 0.018 72);
+
+  /* accent — the one indicator lamp */
+  --accent: oklch(0.79 0.125 88);
+  --accent-hover: oklch(0.84 0.12 90);
+  --accent-muted: oklch(0.71 0.1 86);
+  --on-accent: oklch(0.18 0.03 85);
+  --accent-veil: oklch(0.79 0.125 88 / 0.16);
+  --accent-select: oklch(0.79 0.125 88 / 0.25);
+  --accent-line: oklch(0.79 0.125 88 / 0.5);
+
+  /* domain roles */
+  --canon: oklch(0.77 0.09 215);
+  --canon-line: oklch(0.77 0.09 215 / 0.5);
+  --canon-underline: oklch(0.77 0.09 215 / 0.4);
+  --divergent: oklch(0.68 0.145 22);
+  --divergent-line: oklch(0.68 0.145 22 / 0.5);
+
+  /* status */
+  --ok: oklch(0.75 0.1 155);
+  --warn: oklch(0.82 0.12 65);
+  --danger: oklch(0.695 0.155 24);
+  --warn-surface: oklch(0.24 0.032 68);
+  --warn-ink: oklch(0.93 0.03 76);
+  --warn-line: oklch(0.82 0.12 65 / 0.5);
+  --danger-surface: oklch(0.23 0.038 24);
+  --danger-ink: oklch(0.92 0.03 34);
+  --danger-line: oklch(0.695 0.155 24 / 0.5);
+
+  /* material: dark themes raise with light, light themes with shadow */
+  --edge-light: oklch(1 0 0 / 0.045);
+  --edge-light-strong: oklch(1 0 0 / 0.28);
+  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
+  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
+  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
+  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
+  --hatch: oklch(0.475 0.018 72 / 0.55);
+  --overlay-veil: oklch(0.236 0.022 186 / 0.9);
+  --graph-dim: 0.22;
+  --graph-edge-dim: 0.16;
+
+  /* graph: separated by lightness so the encoding survives greyscale */
+  --type-character: oklch(0.79 0.125 88);
+  --type-location: oklch(0.68 0.09 215);
+  --type-faction: oklch(0.62 0.145 22);
+  --type-item: oklch(0.755 0.1 155);
+  --type-concept: oklch(0.645 0.11 295);
+  --type-event: oklch(0.92 0.05 100);
+  --edge-canon: oklch(0.35 0.04 212);
+  --edge-chronicle: oklch(0.36 0.06 26);
+}
+
+/* Ember (dark) — Forge scale and Beksiński’s ash palettes: warm grey-brown ash under cold bone-white light, with one ember at the centre. */
+[data-palette='ember'] {
+  color-scheme: dark;
+  --palette-mode: dark;
+
+  /* surfaces */
+  --ground: oklch(0.14 0.008 40);
+  --surface-1: oklch(0.183 0.009 42);
+  --surface-2: oklch(0.226 0.01 44);
+  --surface-3: oklch(0.268 0.011 46);
+  --rule: oklch(0.315 0.012 42);
+  --rule-strong: oklch(0.395 0.013 44);
+  --rule-soft: oklch(0.315 0.012 42 / 0.5);
+
+  /* ink */
+  --ink: oklch(0.92 0.008 250);
+  --ink-2: oklch(0.745 0.01 250);
+  --ink-3: oklch(0.66 0.011 250);
+  --ink-4: oklch(0.47 0.01 250);
+
+  /* accent — the one indicator lamp */
+  --accent: oklch(0.72 0.16 48);
+  --accent-hover: oklch(0.77 0.15 50);
+  --accent-muted: oklch(0.745 0.1 52);
+  --on-accent: oklch(0.16 0.03 45);
+  --accent-veil: oklch(0.72 0.16 48 / 0.16);
+  --accent-select: oklch(0.72 0.16 48 / 0.25);
+  --accent-line: oklch(0.72 0.16 48 / 0.5);
+
+  /* domain roles */
+  --canon: oklch(0.72 0.075 245);
+  --canon-line: oklch(0.72 0.075 245 / 0.5);
+  --canon-underline: oklch(0.72 0.075 245 / 0.4);
+  --divergent: oklch(0.77 0.09 172);
+  --divergent-line: oklch(0.77 0.09 172 / 0.5);
+
+  /* status */
+  --ok: oklch(0.75 0.09 150);
+  --warn: oklch(0.83 0.115 70);
+  --danger: oklch(0.7 0.165 14);
+  --warn-surface: oklch(0.23 0.03 68);
+  --warn-ink: oklch(0.93 0.028 74);
+  --warn-line: oklch(0.83 0.115 70 / 0.5);
+  --danger-surface: oklch(0.22 0.036 16);
+  --danger-ink: oklch(0.92 0.03 26);
+  --danger-line: oklch(0.7 0.165 14 / 0.5);
+
+  /* material: dark themes raise with light, light themes with shadow */
+  --edge-light: oklch(1 0 0 / 0.045);
+  --edge-light-strong: oklch(1 0 0 / 0.28);
+  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
+  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
+  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
+  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
+  --hatch: oklch(0.47 0.01 250 / 0.55);
+  --overlay-veil: oklch(0.226 0.01 44 / 0.9);
+  --graph-dim: 0.22;
+  --graph-edge-dim: 0.16;
+
+  /* graph: separated by lightness so the encoding survives greyscale */
+  --type-character: oklch(0.72 0.16 48);
+  --type-location: oklch(0.665 0.075 245);
+  --type-faction: oklch(0.6 0.15 14);
+  --type-item: oklch(0.77 0.09 172);
+  --type-concept: oklch(0.645 0.1 300);
+  --type-event: oklch(0.92 0.04 62);
+  --edge-canon: oklch(0.33 0.035 245);
+  --edge-chronicle: oklch(0.35 0.06 45);
+}
+
+/* Nocturne (dark) — Doré engravings by candlelight and foxed mourning stationery: near-black with almost no chroma, bone ink, one candle-gold flame and oxblood beneath it. */
+[data-palette='nocturne'] {
+  color-scheme: dark;
+  --palette-mode: dark;
+
+  /* surfaces */
+  --ground: oklch(0.125 0.006 300);
+  --surface-1: oklch(0.168 0.007 300);
+  --surface-2: oklch(0.212 0.008 300);
+  --surface-3: oklch(0.255 0.009 300);
+  --rule: oklch(0.3 0.01 300);
+  --rule-strong: oklch(0.38 0.011 300);
+  --rule-soft: oklch(0.3 0.01 300 / 0.5);
+
+  /* ink */
+  --ink: oklch(0.925 0.008 70);
+  --ink-2: oklch(0.75 0.01 68);
+  --ink-3: oklch(0.655 0.011 66);
+  --ink-4: oklch(0.475 0.01 64);
+
+  /* accent — the one indicator lamp */
+  --accent: oklch(0.79 0.115 88);
+  --accent-hover: oklch(0.85 0.11 90);
+  --accent-muted: oklch(0.7 0.095 86);
+  --on-accent: oklch(0.16 0.025 85);
+  --accent-veil: oklch(0.79 0.115 88 / 0.16);
+  --accent-select: oklch(0.79 0.115 88 / 0.25);
+  --accent-line: oklch(0.79 0.115 88 / 0.5);
+
+  /* domain roles */
+  --canon: oklch(0.73 0.075 250);
+  --canon-line: oklch(0.73 0.075 250 / 0.5);
+  --canon-underline: oklch(0.73 0.075 250 / 0.4);
+  --divergent: oklch(0.655 0.16 18);
+  --divergent-line: oklch(0.655 0.16 18 / 0.5);
+
+  /* status */
+  --ok: oklch(0.74 0.085 150);
+  --warn: oklch(0.82 0.115 70);
+  --danger: oklch(0.7 0.165 28);
+  --warn-surface: oklch(0.22 0.03 70);
+  --warn-ink: oklch(0.92 0.028 76);
+  --warn-line: oklch(0.82 0.115 70 / 0.5);
+  --danger-surface: oklch(0.21 0.036 24);
+  --danger-ink: oklch(0.92 0.03 32);
+  --danger-line: oklch(0.7 0.165 28 / 0.5);
+
+  /* material: dark themes raise with light, light themes with shadow */
+  --edge-light: oklch(1 0 0 / 0.045);
+  --edge-light-strong: oklch(1 0 0 / 0.28);
+  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
+  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
+  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
+  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
+  --hatch: oklch(0.475 0.01 64 / 0.55);
+  --overlay-veil: oklch(0.212 0.008 300 / 0.9);
+  --graph-dim: 0.22;
+  --graph-edge-dim: 0.16;
+
+  /* graph: separated by lightness so the encoding survives greyscale */
+  --type-character: oklch(0.79 0.115 88);
+  --type-location: oklch(0.67 0.075 250);
+  --type-faction: oklch(0.6 0.16 18);
+  --type-item: oklch(0.755 0.085 155);
+  --type-concept: oklch(0.635 0.1 300);
+  --type-event: oklch(0.92 0.035 80);
+  --edge-canon: oklch(0.32 0.03 250);
+  --edge-chronicle: oklch(0.33 0.055 22);
+}
+
+/* Gaslight (dark) — Sodium street lamps in fog and the blue-grey of noir night stock: a lighter, hazier ground than the rest, with amber the only warm thing in it. */
+[data-palette='gaslight'] {
+  color-scheme: dark;
+  --palette-mode: dark;
+
+  /* surfaces */
+  --ground: oklch(0.17 0.014 245);
+  --surface-1: oklch(0.213 0.015 243);
+  --surface-2: oklch(0.256 0.016 241);
+  --surface-3: oklch(0.3 0.017 239);
+  --rule: oklch(0.345 0.018 243);
+  --rule-strong: oklch(0.425 0.019 241);
+  --rule-soft: oklch(0.345 0.018 243 / 0.5);
+
+  /* ink */
+  --ink: oklch(0.94 0.01 240);
+  --ink-2: oklch(0.775 0.014 240);
+  --ink-3: oklch(0.69 0.016 242);
+  --ink-4: oklch(0.5 0.016 244);
+
+  /* accent — the one indicator lamp */
+  --accent: oklch(0.8 0.13 68);
+  --accent-hover: oklch(0.85 0.105 70);
+  --accent-muted: oklch(0.735 0.105 66);
+  --on-accent: oklch(0.18 0.03 68);
+  --accent-veil: oklch(0.8 0.13 68 / 0.16);
+  --accent-select: oklch(0.8 0.13 68 / 0.25);
+  --accent-line: oklch(0.8 0.13 68 / 0.5);
+
+  /* domain roles */
+  --canon: oklch(0.8 0.09 215);
+  --canon-line: oklch(0.8 0.09 215 / 0.5);
+  --canon-underline: oklch(0.8 0.09 215 / 0.4);
+  --divergent: oklch(0.71 0.145 25);
+  --divergent-line: oklch(0.71 0.145 25 / 0.5);
+
+  /* status */
+  --ok: oklch(0.77 0.09 158);
+  --warn: oklch(0.84 0.115 76);
+  --danger: oklch(0.72 0.15 22);
+  --warn-surface: oklch(0.26 0.03 74);
+  --warn-ink: oklch(0.94 0.028 80);
+  --warn-line: oklch(0.84 0.115 76 / 0.5);
+  --danger-surface: oklch(0.25 0.036 22);
+  --danger-ink: oklch(0.93 0.03 30);
+  --danger-line: oklch(0.72 0.15 22 / 0.5);
+
+  /* material: dark themes raise with light, light themes with shadow */
+  --edge-light: oklch(1 0 0 / 0.045);
+  --edge-light-strong: oklch(1 0 0 / 0.28);
+  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
+  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
+  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
+  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
+  --hatch: oklch(0.5 0.016 244 / 0.55);
+  --overlay-veil: oklch(0.256 0.016 241 / 0.9);
+  --graph-dim: 0.22;
+  --graph-edge-dim: 0.16;
+
+  /* graph: separated by lightness so the encoding survives greyscale */
+  --type-character: oklch(0.8 0.13 68);
+  --type-location: oklch(0.71 0.09 215);
+  --type-faction: oklch(0.63 0.145 22);
+  --type-item: oklch(0.775 0.09 158);
+  --type-concept: oklch(0.655 0.1 292);
+  --type-event: oklch(0.94 0.032 230);
+  --edge-canon: oklch(0.37 0.035 215);
+  --edge-chronicle: oklch(0.38 0.055 30);
+}
+
+/* Ribbon (light) — Wedgwood jasperware, marbled endpapers and pressed flowers in a Victorian keepsake album: warm cream, dusty rose, a plum for what went wrong. */
+[data-palette='ribbon'] {
   color-scheme: light;
   --palette-mode: light;
 
   /* surfaces */
-  --ground: oklch(0.945 0.009 84);
-  --surface-1: oklch(0.985 0.006 86);
-  --surface-2: oklch(0.962 0.008 84);
-  --surface-3: oklch(0.928 0.011 82);
-  --rule: oklch(0.86 0.014 80);
-  --rule-strong: oklch(0.73 0.018 76);
-  --rule-soft: oklch(0.86 0.014 80 / 0.5);
+  --ground: oklch(0.955 0.01 60);
+  --surface-1: oklch(0.985 0.007 62);
+  --surface-2: oklch(0.965 0.009 58);
+  --surface-3: oklch(0.928 0.013 55);
+  --rule: oklch(0.865 0.016 50);
+  --rule-strong: oklch(0.74 0.02 45);
+  --rule-soft: oklch(0.865 0.016 50 / 0.5);
 
   /* ink */
-  --ink: oklch(0.27 0.018 60);
-  --ink-2: oklch(0.44 0.02 58);
-  --ink-3: oklch(0.515 0.024 55);
-  --ink-4: oklch(0.68 0.02 60);
+  --ink: oklch(0.28 0.02 30);
+  --ink-2: oklch(0.45 0.022 28);
+  --ink-3: oklch(0.5 0.024 25);
+  --ink-4: oklch(0.69 0.02 30);
 
   /* accent — the one indicator lamp */
-  --accent: oklch(0.5 0.125 48);
-  --accent-hover: oklch(0.44 0.115 46);
-  --accent-muted: oklch(0.47 0.1 52);
-  --on-accent: oklch(0.99 0.008 80);
-  --accent-veil: oklch(0.5 0.125 48 / 0.16);
-  --accent-select: oklch(0.5 0.125 48 / 0.25);
-  --accent-line: oklch(0.5 0.125 48 / 0.5);
+  --accent: oklch(0.5 0.13 8);
+  --accent-hover: oklch(0.44 0.125 6);
+  --accent-muted: oklch(0.47 0.1 14);
+  --on-accent: oklch(0.985 0.004 40);
+  --accent-veil: oklch(0.5 0.13 8 / 0.16);
+  --accent-select: oklch(0.5 0.13 8 / 0.25);
+  --accent-line: oklch(0.5 0.13 8 / 0.5);
 
   /* domain roles */
-  --canon: oklch(0.44 0.1 250);
-  --canon-line: oklch(0.44 0.1 250 / 0.5);
-  --canon-underline: oklch(0.44 0.1 250 / 0.4);
-  --divergent: oklch(0.47 0.16 26);
-  --divergent-line: oklch(0.47 0.16 26 / 0.5);
+  --canon: oklch(0.44 0.09 245);
+  --canon-line: oklch(0.44 0.09 245 / 0.5);
+  --canon-underline: oklch(0.44 0.09 245 / 0.4);
+  --divergent: oklch(0.45 0.14 330);
+  --divergent-line: oklch(0.45 0.14 330 / 0.5);
 
   /* status */
-  --ok: oklch(0.44 0.1 148);
-  --warn: oklch(0.5 0.11 62);
-  --danger: oklch(0.47 0.16 26);
-  --warn-surface: oklch(0.955 0.03 80);
-  --warn-ink: oklch(0.32 0.06 55);
-  --warn-line: oklch(0.5 0.11 62 / 0.5);
-  --danger-surface: oklch(0.955 0.022 30);
-  --danger-ink: oklch(0.34 0.09 28);
-  --danger-line: oklch(0.47 0.16 26 / 0.5);
+  --ok: oklch(0.44 0.1 150);
+  --warn: oklch(0.48 0.105 60);
+  --danger: oklch(0.46 0.15 32);
+  --warn-surface: oklch(0.96 0.026 75);
+  --warn-ink: oklch(0.33 0.055 50);
+  --warn-line: oklch(0.48 0.105 60 / 0.5);
+  --danger-surface: oklch(0.958 0.02 28);
+  --danger-ink: oklch(0.34 0.085 26);
+  --danger-line: oklch(0.46 0.15 32 / 0.5);
 
   /* material: dark themes raise with light, light themes with shadow */
   --edge-light: oklch(1 0 0 / 0.85);
@@ -174,300 +594,90 @@
   --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.85), 0 1px 2px oklch(0.45 0.03 70 / 0.09);
   --elev-well: inset 0 1px 2px oklch(0.45 0.03 70 / 0.14);
   --elev-pressed: inset 0 1px 3px oklch(0.45 0.03 70 / 0.2);
-  --hatch: oklch(0.68 0.02 60 / 0.5);
-  --overlay-veil: oklch(0.985 0.006 86 / 0.9);
+  --hatch: oklch(0.69 0.02 30 / 0.5);
+  --overlay-veil: oklch(0.985 0.007 62 / 0.9);
   --graph-dim: 0.45;
   --graph-edge-dim: 0.3;
 
   /* graph: separated by lightness so the encoding survives greyscale */
-  --type-character: oklch(0.585 0.115 62);
-  --type-location: oklch(0.44 0.11 248);
-  --type-faction: oklch(0.4 0.15 28);
-  --type-item: oklch(0.52 0.1 150);
-  --type-concept: oklch(0.36 0.12 300);
-  --type-event: oklch(0.62 0.075 88);
-  --edge-canon: oklch(0.76 0.04 250);
-  --edge-chronicle: oklch(0.76 0.06 32);
+  --type-character: oklch(0.56 0.11 20);
+  --type-location: oklch(0.44 0.1 245);
+  --type-faction: oklch(0.4 0.14 340);
+  --type-item: oklch(0.52 0.095 150);
+  --type-concept: oklch(0.37 0.11 290);
+  --type-event: oklch(0.62 0.07 70);
+  --edge-canon: oklch(0.77 0.035 245);
+  --edge-chronicle: oklch(0.77 0.05 340);
 }
 
-/* Cyanotype (dark) — Anna Atkins' cyanotype algae prints: Prussian blue ground, paper-white forms, and the rust of a print that failed as the one warm note. */
-[data-palette='cyanotype'] {
-  color-scheme: dark;
-  --palette-mode: dark;
+/* Meadow (light) — Beatrix Potter’s watercolour washes over Japanese picture-book offset: linen paper with a faint green cast, soft sage, muted clay. */
+[data-palette='meadow'] {
+  color-scheme: light;
+  --palette-mode: light;
 
   /* surfaces */
-  --ground: oklch(0.155 0.028 252);
-  --surface-1: oklch(0.2 0.03 250);
-  --surface-2: oklch(0.245 0.032 248);
-  --surface-3: oklch(0.29 0.034 246);
-  --rule: oklch(0.34 0.036 250);
-  --rule-strong: oklch(0.42 0.038 248);
-  --rule-soft: oklch(0.34 0.036 250 / 0.5);
+  --ground: oklch(0.95 0.008 130);
+  --surface-1: oklch(0.982 0.006 132);
+  --surface-2: oklch(0.962 0.008 128);
+  --surface-3: oklch(0.925 0.011 126);
+  --rule: oklch(0.862 0.014 130);
+  --rule-strong: oklch(0.735 0.018 128);
+  --rule-soft: oklch(0.862 0.014 130 / 0.5);
 
   /* ink */
-  --ink: oklch(0.94 0.012 240);
-  --ink-2: oklch(0.76 0.02 240);
-  --ink-3: oklch(0.662 0.024 242);
-  --ink-4: oklch(0.48 0.026 245);
+  --ink: oklch(0.3 0.016 150);
+  --ink-2: oklch(0.46 0.018 148);
+  --ink-3: oklch(0.505 0.02 145);
+  --ink-4: oklch(0.69 0.016 145);
 
   /* accent — the one indicator lamp */
-  --accent: oklch(0.74 0.13 48);
-  --accent-hover: oklch(0.79 0.115 50);
-  --accent-muted: oklch(0.69 0.1 46);
-  --on-accent: oklch(0.19 0.03 45);
-  --accent-veil: oklch(0.74 0.13 48 / 0.16);
-  --accent-select: oklch(0.74 0.13 48 / 0.25);
-  --accent-line: oklch(0.74 0.13 48 / 0.5);
+  --accent: oklch(0.47 0.1 145);
+  --accent-hover: oklch(0.41 0.095 143);
+  --accent-muted: oklch(0.48 0.075 150);
+  --on-accent: oklch(0.99 0.005 140);
+  --accent-veil: oklch(0.47 0.1 145 / 0.16);
+  --accent-select: oklch(0.47 0.1 145 / 0.25);
+  --accent-line: oklch(0.47 0.1 145 / 0.5);
 
   /* domain roles */
-  --canon: oklch(0.79 0.09 212);
-  --canon-line: oklch(0.79 0.09 212 / 0.5);
-  --canon-underline: oklch(0.79 0.09 212 / 0.4);
-  --divergent: oklch(0.69 0.14 22);
-  --divergent-line: oklch(0.69 0.14 22 / 0.5);
+  --canon: oklch(0.44 0.09 245);
+  --canon-line: oklch(0.44 0.09 245 / 0.5);
+  --canon-underline: oklch(0.44 0.09 245 / 0.4);
+  --divergent: oklch(0.48 0.13 40);
+  --divergent-line: oklch(0.48 0.13 40 / 0.5);
 
   /* status */
-  --ok: oklch(0.75 0.09 168);
-  --warn: oklch(0.81 0.12 72);
-  --danger: oklch(0.69 0.15 24);
-  --warn-surface: oklch(0.26 0.04 68);
-  --warn-ink: oklch(0.94 0.03 75);
-  --warn-line: oklch(0.81 0.12 72 / 0.5);
-  --danger-surface: oklch(0.25 0.04 26);
-  --danger-ink: oklch(0.93 0.03 36);
-  --danger-line: oklch(0.69 0.15 24 / 0.5);
+  --ok: oklch(0.44 0.1 155);
+  --warn: oklch(0.48 0.11 62);
+  --danger: oklch(0.46 0.15 26);
+  --warn-surface: oklch(0.958 0.024 78);
+  --warn-ink: oklch(0.33 0.05 55);
+  --warn-line: oklch(0.48 0.11 62 / 0.5);
+  --danger-surface: oklch(0.956 0.02 28);
+  --danger-ink: oklch(0.34 0.08 26);
+  --danger-line: oklch(0.46 0.15 26 / 0.5);
 
   /* material: dark themes raise with light, light themes with shadow */
-  --edge-light: oklch(1 0 0 / 0.045);
-  --edge-light-strong: oklch(1 0 0 / 0.28);
-  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
-  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
-  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
-  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
-  --hatch: oklch(0.48 0.026 245 / 0.55);
-  --overlay-veil: oklch(0.245 0.032 248 / 0.9);
-  --graph-dim: 0.22;
-  --graph-edge-dim: 0.16;
+  --edge-light: oklch(1 0 0 / 0.85);
+  --edge-light-strong: oklch(1 0 0 / 0.5);
+  --elev-panel: 0 1px 1px oklch(0.45 0.03 70 / 0.05), 0 2px 6px oklch(0.45 0.03 70 / 0.045);
+  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.85), 0 1px 2px oklch(0.45 0.03 70 / 0.09);
+  --elev-well: inset 0 1px 2px oklch(0.45 0.03 70 / 0.14);
+  --elev-pressed: inset 0 1px 3px oklch(0.45 0.03 70 / 0.2);
+  --hatch: oklch(0.69 0.016 145 / 0.5);
+  --overlay-veil: oklch(0.982 0.006 132 / 0.9);
+  --graph-dim: 0.45;
+  --graph-edge-dim: 0.3;
 
   /* graph: separated by lightness so the encoding survives greyscale */
-  --type-character: oklch(0.76 0.13 50);
-  --type-location: oklch(0.72 0.09 214);
-  --type-faction: oklch(0.62 0.14 24);
-  --type-item: oklch(0.78 0.09 168);
-  --type-concept: oklch(0.64 0.1 296);
-  --type-event: oklch(0.9 0.05 90);
-  --edge-canon: oklch(0.38 0.05 232);
-  --edge-chronicle: oklch(0.38 0.06 40);
-}
-
-/* Phosphor (dark) — A P31 phosphor CRT behind instrument glass: near-black, green trace, one amber caution lamp. */
-[data-palette='phosphor'] {
-  color-scheme: dark;
-  --palette-mode: dark;
-
-  /* surfaces */
-  --ground: oklch(0.13 0.012 162);
-  --surface-1: oklch(0.17 0.014 160);
-  --surface-2: oklch(0.212 0.016 158);
-  --surface-3: oklch(0.255 0.018 156);
-  --rule: oklch(0.3 0.02 160);
-  --rule-strong: oklch(0.38 0.024 158);
-  --rule-soft: oklch(0.3 0.02 160 / 0.5);
-
-  /* ink */
-  --ink: oklch(0.91 0.055 155);
-  --ink-2: oklch(0.745 0.07 155);
-  --ink-3: oklch(0.625 0.078 158);
-  --ink-4: oklch(0.465 0.06 160);
-
-  /* accent — the one indicator lamp */
-  --accent: oklch(0.81 0.135 76);
-  --accent-hover: oklch(0.86 0.115 78);
-  --accent-muted: oklch(0.69 0.115 74);
-  --on-accent: oklch(0.18 0.03 70);
-  --accent-veil: oklch(0.81 0.135 76 / 0.16);
-  --accent-select: oklch(0.81 0.135 76 / 0.25);
-  --accent-line: oklch(0.81 0.135 76 / 0.5);
-
-  /* domain roles */
-  --canon: oklch(0.75 0.1 202);
-  --canon-line: oklch(0.75 0.1 202 / 0.5);
-  --canon-underline: oklch(0.75 0.1 202 / 0.4);
-  --divergent: oklch(0.69 0.15 26);
-  --divergent-line: oklch(0.69 0.15 26 / 0.5);
-
-  /* status */
-  --ok: oklch(0.79 0.13 150);
-  --warn: oklch(0.83 0.13 80);
-  --danger: oklch(0.69 0.16 26);
-  --warn-surface: oklch(0.23 0.035 74);
-  --warn-ink: oklch(0.93 0.035 82);
-  --warn-line: oklch(0.83 0.13 80 / 0.5);
-  --danger-surface: oklch(0.22 0.04 26);
-  --danger-ink: oklch(0.92 0.035 34);
-  --danger-line: oklch(0.69 0.16 26 / 0.5);
-
-  /* material: dark themes raise with light, light themes with shadow */
-  --edge-light: oklch(1 0 0 / 0.045);
-  --edge-light-strong: oklch(1 0 0 / 0.28);
-  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
-  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
-  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
-  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
-  --hatch: oklch(0.465 0.06 160 / 0.55);
-  --overlay-veil: oklch(0.212 0.016 158 / 0.9);
-  --graph-dim: 0.22;
-  --graph-edge-dim: 0.16;
-
-  /* graph: separated by lightness so the encoding survives greyscale */
-  --type-character: oklch(0.83 0.135 78);
-  --type-location: oklch(0.72 0.1 204);
-  --type-faction: oklch(0.62 0.15 26);
-  --type-item: oklch(0.8 0.13 150);
-  --type-concept: oklch(0.66 0.11 298);
-  --type-event: oklch(0.92 0.06 120);
-  --edge-canon: oklch(0.34 0.04 196);
-  --edge-chronicle: oklch(0.34 0.05 40);
-}
-
-/* Lacquer (dark) — Negoro-nuri lacquerware: black-brown urushi worn through to the vermilion beneath, bone-white ground, gold maki-e inlay. */
-[data-palette='lacquer'] {
-  color-scheme: dark;
-  --palette-mode: dark;
-
-  /* surfaces */
-  --ground: oklch(0.145 0.014 32);
-  --surface-1: oklch(0.185 0.016 30);
-  --surface-2: oklch(0.228 0.018 28);
-  --surface-3: oklch(0.27 0.02 26);
-  --rule: oklch(0.32 0.022 30);
-  --rule-strong: oklch(0.4 0.024 28);
-  --rule-soft: oklch(0.32 0.022 30 / 0.5);
-
-  /* ink */
-  --ink: oklch(0.93 0.012 72);
-  --ink-2: oklch(0.75 0.014 66);
-  --ink-3: oklch(0.655 0.016 60);
-  --ink-4: oklch(0.47 0.016 50);
-
-  /* accent — the one indicator lamp */
-  --accent: oklch(0.665 0.185 33);
-  --accent-hover: oklch(0.715 0.17 34);
-  --accent-muted: oklch(0.715 0.1 40);
-  --on-accent: oklch(0.16 0.02 40);
-  --accent-veil: oklch(0.665 0.185 33 / 0.16);
-  --accent-select: oklch(0.665 0.185 33 / 0.25);
-  --accent-line: oklch(0.665 0.185 33 / 0.5);
-
-  /* domain roles */
-  --canon: oklch(0.71 0.08 238);
-  --canon-line: oklch(0.71 0.08 238 / 0.5);
-  --canon-underline: oklch(0.71 0.08 238 / 0.4);
-  --divergent: oklch(0.78 0.12 88);
-  --divergent-line: oklch(0.78 0.12 88 / 0.5);
-
-  /* status */
-  --ok: oklch(0.73 0.085 152);
-  --warn: oklch(0.82 0.12 72);
-  --danger: oklch(0.67 0.18 12);
-  --warn-surface: oklch(0.24 0.035 66);
-  --warn-ink: oklch(0.94 0.03 74);
-  --warn-line: oklch(0.82 0.12 72 / 0.5);
-  --danger-surface: oklch(0.23 0.045 14);
-  --danger-ink: oklch(0.93 0.035 24);
-  --danger-line: oklch(0.67 0.18 12 / 0.5);
-
-  /* material: dark themes raise with light, light themes with shadow */
-  --edge-light: oklch(1 0 0 / 0.045);
-  --edge-light-strong: oklch(1 0 0 / 0.28);
-  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
-  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
-  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
-  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
-  --hatch: oklch(0.47 0.016 50 / 0.55);
-  --overlay-veil: oklch(0.228 0.018 28 / 0.9);
-  --graph-dim: 0.22;
-  --graph-edge-dim: 0.16;
-
-  /* graph: separated by lightness so the encoding survives greyscale */
-  --type-character: oklch(0.78 0.12 88);
-  --type-location: oklch(0.7 0.085 238);
-  --type-faction: oklch(0.665 0.185 33);
-  --type-item: oklch(0.75 0.085 152);
-  --type-concept: oklch(0.65 0.1 302);
-  --type-event: oklch(0.9 0.045 78);
-  --edge-canon: oklch(0.34 0.04 240);
-  --edge-chronicle: oklch(0.36 0.07 33);
-}
-
-/* Graphite (dark) — Braun product graphics: cold grey housings, screen-printed legends, one pale citron indicator and nothing else. */
-[data-palette='graphite'] {
-  color-scheme: dark;
-  --palette-mode: dark;
-
-  /* surfaces */
-  --ground: oklch(0.16 0.006 252);
-  --surface-1: oklch(0.2 0.007 250);
-  --surface-2: oklch(0.245 0.008 248);
-  --surface-3: oklch(0.29 0.009 246);
-  --rule: oklch(0.335 0.01 250);
-  --rule-strong: oklch(0.41 0.012 248);
-  --rule-soft: oklch(0.335 0.01 250 / 0.5);
-
-  /* ink */
-  --ink: oklch(0.94 0.004 250);
-  --ink-2: oklch(0.76 0.006 250);
-  --ink-3: oklch(0.66 0.008 250);
-  --ink-4: oklch(0.475 0.008 250);
-
-  /* accent — the one indicator lamp */
-  --accent: oklch(0.87 0.16 102);
-  --accent-hover: oklch(0.91 0.165 104);
-  --accent-muted: oklch(0.74 0.13 100);
-  --on-accent: oklch(0.2 0.04 100);
-  --accent-veil: oklch(0.87 0.16 102 / 0.16);
-  --accent-select: oklch(0.87 0.16 102 / 0.25);
-  --accent-line: oklch(0.87 0.16 102 / 0.5);
-
-  /* domain roles */
-  --canon: oklch(0.73 0.08 252);
-  --canon-line: oklch(0.73 0.08 252 / 0.5);
-  --canon-underline: oklch(0.73 0.08 252 / 0.4);
-  --divergent: oklch(0.69 0.13 26);
-  --divergent-line: oklch(0.69 0.13 26 / 0.5);
-
-  /* status */
-  --ok: oklch(0.75 0.09 152);
-  --warn: oklch(0.83 0.12 76);
-  --danger: oklch(0.68 0.15 26);
-  --warn-surface: oklch(0.24 0.03 74);
-  --warn-ink: oklch(0.94 0.028 80);
-  --warn-line: oklch(0.83 0.12 76 / 0.5);
-  --danger-surface: oklch(0.23 0.035 26);
-  --danger-ink: oklch(0.93 0.03 34);
-  --danger-line: oklch(0.68 0.15 26 / 0.5);
-
-  /* material: dark themes raise with light, light themes with shadow */
-  --edge-light: oklch(1 0 0 / 0.045);
-  --edge-light-strong: oklch(1 0 0 / 0.28);
-  --elev-panel: inset 0 1px 0 oklch(1 0 0 / 0.04);
-  --elev-raised: inset 0 1px 0 oklch(1 0 0 / 0.045);
-  --elev-well: inset 0 1px 2px oklch(0 0 0 / 0.22);
-  --elev-pressed: inset 0 1px 2px oklch(0 0 0 / 0.25);
-  --hatch: oklch(0.475 0.008 250 / 0.55);
-  --overlay-veil: oklch(0.245 0.008 248 / 0.9);
-  --graph-dim: 0.22;
-  --graph-edge-dim: 0.16;
-
-  /* graph: separated by lightness so the encoding survives greyscale */
-  --type-character: oklch(0.87 0.16 102);
-  --type-location: oklch(0.71 0.08 252);
-  --type-faction: oklch(0.62 0.14 26);
-  --type-item: oklch(0.76 0.09 152);
-  --type-concept: oklch(0.65 0.1 300);
-  --type-event: oklch(0.93 0.03 250);
-  --edge-canon: oklch(0.35 0.03 252);
-  --edge-chronicle: oklch(0.35 0.05 30);
+  --type-character: oklch(0.52 0.1 145);
+  --type-location: oklch(0.44 0.09 245);
+  --type-faction: oklch(0.42 0.13 35);
+  --type-item: oklch(0.55 0.08 178);
+  --type-concept: oklch(0.38 0.11 295);
+  --type-event: oklch(0.62 0.07 95);
+  --edge-canon: oklch(0.77 0.035 245);
+  --edge-chronicle: oklch(0.77 0.05 40);
 }
 
 * {
@@ -1412,6 +1622,15 @@ tr.clickable:hover { background: var(--surface-1); }
   font-size: 11.5px;
   line-height: 1.4;
   color: var(--ink-3);
+}
+/* the genre is the reason to pick it, so it reads before the source does */
+.palette-genre {
+  font-family: var(--sans);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--accent-muted);
 }
 
 .swatch {

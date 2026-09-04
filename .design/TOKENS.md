@@ -24,7 +24,7 @@ node .design/palettes.mjs          # verify — exits non-zero on any failure
 node .design/palettes.mjs --css    # emit the token blocks
 ```
 
-It currently enforces 258 pairs across 6 presets. What it checks:
+It currently enforces 387 pairs across 9 presets. What it checks:
 
 - Every text role (`ink`, `ink-2`, `ink-3`, `accent`, `accent-muted`,
   `divergent`, `canon`, `ok`, `warn`, `danger`) against **every surface it can
@@ -62,26 +62,55 @@ avoid: the moment a preset's accent is vermilion or citron, a token called
 
 ## The presets
 
-Each is derived from a source with colour relationships someone already
-resolved, rather than picked from a wheel. The source is recorded because it is
-the tie-breaker for every later colour question.
+One per genre, because in a role-play engine the palette should match what you
+are playing.
 
-| Preset | Mode | Source | Register |
+**A genre name is a mood, and a mood forbids nothing** — "sci-fi" on its own
+permits every option still on the table, which is how you end up at blue-and-cyan
+and how romance ends up bubblegum pink. So each preset is pinned to a *specific
+artefact* inside its genre. That source is recorded, and it is the tie-breaker for
+every later colour question.
+
+| Preset | Genre | Mode | Source |
 | --- | --- | --- | --- |
-| **Iron gall** *(default)* | dark | Manuscript ink oxidised to warm brown, gold leaf, red-oxide rubric | Literary, warm, the lineage the app was built to |
-| **Foxed paper** | **light** | An aged rag page in daylight, brown-black text, rust foxing | Daylight reading; the only light preset |
-| **Cyanotype** | dark | Prussian blue sun-print, paper-white forms, the rust of a failed print | Archival; the strongest warm-on-cool contrast of the set |
-| **Phosphor** | dark | Green CRT trace behind instrument glass, one amber caution lamp | Instrument panel; the ink itself is tinted green |
-| **Lacquer** | dark | Urushi worn through to the vermilion beneath, gold maki-e inlay | The most saturated and dramatic |
-| **Graphite** | dark | Cold grey housings, screen-printed legends, one citron indicator | The most restrained; near-neutral cool |
+| **Chronicle** *(default)* | historical · literary | dark | Iron-gall ink oxidised to warm brown, gold leaf, red-oxide rubric |
+| **Starship** | science fiction · hard | dark | Apollo command-module panels and the interiors of *2001*: one cyan trace, caution orange |
+| **Neon** | science fiction · cyberpunk | dark | Rain-lit signage over Kowloon, Syd Mead |
+| **Grimoire** | fantasy · high | dark | Tooled leather, verdigris on bronze, Rackham's muted wash |
+| **Ember** | fantasy · dark | dark | Forge scale and Beksiński's ash, under cold bone light |
+| **Nocturne** | horror · gothic | dark | Doré engravings by candlelight, foxed mourning stationery |
+| **Gaslight** | mystery · noir | dark | Sodium street lamps in fog, noir night stock |
+| **Ribbon** | romance | **light** | Wedgwood jasperware, marbled endpapers, pressed flowers in a keepsake album |
+| **Meadow** | casual · slice of life | **light** | Beatrix Potter's washes over picture-book offset, on linen |
 
-Temperature and chroma strategy differ per preset, not just hue. That is the
-difference between six palettes and one palette in six colours.
+Where the discipline shows up concretely:
+
+- **Neon** is the preset most at risk of being the category average. Two rules
+  keep it out: the ground is deep indigo rather than black, and **only the magenta
+  runs hot** — cyan is held back for the canon layer, so the screen never becomes
+  the magenta-and-cyan wash that reads as stock cyberpunk.
+- **Ribbon** is light and warm rather than pink-on-white, with plum reserved for
+  divergence. Romance is the cosy register, so daylight is the correct choice, not
+  a saturated hue.
+- **Nocturne** carries almost no chroma anywhere except one candle-gold accent,
+  with oxblood underneath it for divergence. Restraint is what makes it gothic
+  rather than Halloween.
+- **Ember** and **Grimoire** are both fantasy and deliberately opposite: warm ash
+  under cold bone light versus cool ink-green under warm gold.
+
+Every preset still obeys the lineage rules: one accent on a three-appearance
+budget, a second colour reserved for divergence from canon, tinted neutrals, and
+no colour named in a component. A preset may change the hue; it may not change
+the discipline.
+
+Renaming from the earlier material-named set (`iron-gall`, `cyanotype`, …) is
+handled by a migration map in `web/src/palette.ts`, so an existing stored choice
+maps forward rather than resetting.
 
 ### What each preset must supply
 
-Adding a preset means adding an entry to `PRESETS` in `palettes.mjs` and a line
-to `PRESETS` in `web/src/palette.ts`. The script will refuse it until it passes.
+Adding a preset means adding an entry to `PRESETS` in `palettes.mjs` (with its
+`genre` and `source`) and a line to `PRESETS` in `web/src/palette.ts`. The script will refuse it until it passes.
 
 Beyond the flat roles, two things are mode-dependent and easy to get wrong:
 
@@ -99,11 +128,11 @@ Beyond the flat roles, two things are mode-dependent and easy to get wrong:
 
 Two layers, and they catch different things.
 
-1. **Static**, `node .design/palettes.mjs` — 258 pairs, gamut, greyscale spread,
+1. **Static**, `node .design/palettes.mjs` — 387 pairs, gamut, greyscale spread,
    and the `--ink-4` guard. Runs without a browser.
 2. **Rendered**, a browser sweep that walks every text node in every view under
    every preset and measures the *actual composited* colours. Latest run:
-   **3,282 style instances across 6 presets × 7 views, 0 failures.**
+   **5,067 composited text instances across 9 presets × 7 views, 0 failures.**
 
 The static pass alone is not enough — it does not know which surface a component
 actually puts text on. The rendered pass alone is not enough either; it missed

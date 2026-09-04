@@ -1,70 +1,114 @@
 /**
- * Colour presets.
+ * Colour presets, one per genre.
  *
  * The values live in CSS (one `[data-palette]` block per preset, generated and
- * contrast-verified by .design/palettes.mjs). This module only carries the
- * catalogue and the persistence, so adding a preset means adding a block there
- * and a line here — never touching a component.
+ * contrast-verified by .design/palettes.mjs). This module carries the catalogue
+ * and the persistence only, so adding a preset means adding a block there and a
+ * line here — never touching a component.
+ *
+ * A genre name on its own is a mood, and a mood forbids nothing. Each preset is
+ * therefore pinned to a specific source inside its genre, which is what keeps
+ * "science fiction" from collapsing into blue-and-cyan.
  */
 
 export interface Preset {
   key: string;
   label: string;
+  /** The genre this preset is for. Shown in the picker. */
+  genre: string;
   mode: 'dark' | 'light';
-  /** The source the palette was derived from. This is the tie-breaker for later colour questions. */
+  /** The artefact the palette was derived from. The tie-breaker for later colour questions. */
   source: string;
 }
 
 export const PRESETS: Preset[] = [
   {
-    key: 'iron-gall',
-    label: 'Iron gall',
+    key: 'chronicle',
+    label: 'Chronicle',
+    genre: 'historical · literary',
     mode: 'dark',
-    source: 'Manuscript ink oxidised to warm brown, gold leaf, red-oxide rubric.',
+    source: 'Iron-gall ink oxidised to warm brown, gold leaf, red-oxide rubric.',
   },
   {
-    key: 'foxed',
-    label: 'Foxed paper',
+    key: 'starship',
+    label: 'Starship',
+    genre: 'science fiction · hard',
+    mode: 'dark',
+    source: 'Apollo panels and the interiors of 2001: one cyan trace, caution orange.',
+  },
+  {
+    key: 'neon',
+    label: 'Neon',
+    genre: 'science fiction · cyberpunk',
+    mode: 'dark',
+    source: 'Rain-lit signage over Kowloon. Indigo ground; only the magenta runs hot.',
+  },
+  {
+    key: 'grimoire',
+    label: 'Grimoire',
+    genre: 'fantasy · high',
+    mode: 'dark',
+    source: 'Tooled leather and verdigris on bronze, with Rackham’s muted wash.',
+  },
+  {
+    key: 'ember',
+    label: 'Ember',
+    genre: 'fantasy · dark',
+    mode: 'dark',
+    source: 'Forge scale under cold bone light, with one ember at the centre.',
+  },
+  {
+    key: 'nocturne',
+    label: 'Nocturne',
+    genre: 'horror · gothic',
+    mode: 'dark',
+    source: 'Doré engravings by candlelight. Almost no chroma but the flame.',
+  },
+  {
+    key: 'gaslight',
+    label: 'Gaslight',
+    genre: 'mystery · noir',
+    mode: 'dark',
+    source: 'Sodium lamps in fog; amber is the only warm thing in the frame.',
+  },
+  {
+    key: 'ribbon',
+    label: 'Ribbon',
+    genre: 'romance',
     mode: 'light',
-    source: 'An aged rag page in daylight, brown-black text, rust foxing.',
+    source: 'Wedgwood jasperware and pressed flowers in a keepsake album.',
   },
   {
-    key: 'cyanotype',
-    label: 'Cyanotype',
-    mode: 'dark',
-    source: 'Prussian blue sun-print, paper-white forms, the rust of a failed print.',
-  },
-  {
-    key: 'phosphor',
-    label: 'Phosphor',
-    mode: 'dark',
-    source: 'Green CRT trace behind instrument glass, one amber caution lamp.',
-  },
-  {
-    key: 'lacquer',
-    label: 'Lacquer',
-    mode: 'dark',
-    source: 'Urushi worn through to the vermilion beneath, gold maki-e inlay.',
-  },
-  {
-    key: 'graphite',
-    label: 'Graphite',
-    mode: 'dark',
-    source: 'Cold grey housings, screen-printed legends, one citron indicator.',
+    key: 'meadow',
+    label: 'Meadow',
+    genre: 'casual · slice of life',
+    mode: 'light',
+    source: 'Beatrix Potter’s washes over picture-book offset, on linen paper.',
   },
 ];
 
 const STORAGE_KEY = 'fabulist.palette';
-const DEFAULT_DARK = 'iron-gall';
-const DEFAULT_LIGHT = 'foxed';
+const DEFAULT_DARK = 'chronicle';
+const DEFAULT_LIGHT = 'meadow';
 
-const isKnown = (k: string | null): k is string => !!k && PRESETS.some((p) => p.key === k);
+/** Earlier builds shipped material names. Map them rather than resetting a choice. */
+const MIGRATIONS: Record<string, string> = {
+  'iron-gall': 'chronicle',
+  foxed: 'ribbon',
+  cyanotype: 'starship',
+  phosphor: 'ember',
+  lacquer: 'grimoire',
+  graphite: 'gaslight',
+};
 
-/** Stored choice wins; otherwise follow the operating system. */
+const isKnown = (k: string | null | undefined): k is string => !!k && PRESETS.some((p) => p.key === k);
+
+/** Stored choice wins, then a migrated older choice, then the operating system. */
 export function resolvePalette(): string {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (isKnown(stored)) return stored;
+    if (stored && isKnown(MIGRATIONS[stored])) return MIGRATIONS[stored]!;
   } catch {
     // Private mode or blocked storage: fall through to the OS preference.
   }

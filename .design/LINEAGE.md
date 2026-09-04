@@ -25,12 +25,13 @@ machine that shows its work, and those are the two things it has to look like at
    neutrals at hue 68–82. One accent (gold leaf) with a budget of three appearances
    per view. Red-oxide rubric is the second colour and means divergence from canon.
 
-   *This is the default preset and the one the lineage requires.* Five
-   alternatives ship alongside it (`.design/TOKENS.md`), each derived from its own
-   named source. The rules below are what they all obey: one accent on a three-
-   appearance budget, a second colour reserved for divergence, tinted neutrals,
-   and no colour named in a component. A preset may change the hue; it may not
-   change the discipline.
+   *This is the default preset — "Chronicle" — and the one the lineage requires.*
+   Eight more ship alongside it, one per genre, because the palette should match
+   what you are playing (`.design/TOKENS.md`). Each is pinned to a specific source
+   inside its genre, since a genre name on its own is a mood and forbids nothing.
+   All nine obey the rules below: one accent on a three-appearance budget, a second
+   colour reserved for divergence, tinted neutrals, and no colour named in a
+   component. A preset may change the hue; it may not change the discipline.
 3. **Composition — the ruled column.** One measure per pane. The left edge is
    sacred: prose, composer and notes share it exactly. Folio numbers and status
    markers hang in the gutter as marginalia.
