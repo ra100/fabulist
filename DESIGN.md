@@ -1,4 +1,4 @@
-# Fandom RP Engine — design ideation
+# Fabulist — design ideation
 
 A creative-writing / role-play system where an AI game master runs a story inside an
 existing fictional universe, keeps a real world-model behind the scenes, and stays

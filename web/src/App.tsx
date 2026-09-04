@@ -65,7 +65,7 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <h1>{state?.worldTitle ?? 'Story engine'}</h1>
+        <h1>{state?.worldTitle ?? 'Fabulist'}</h1>
         {state ? (
           <div className="meta">
             <span>scene {state.session.scene}·{state.session.turn}</span>
@@ -1009,7 +1009,7 @@ function ProvidersPanel() {
             </div>
           ))}
           <p className="small dimmer">
-            Switching profile is a config change (story.config.json), so the engine reloads it on restart.
+            Switching profile is a config change (fabulist.config.json), so the engine reloads it on restart.
           </p>
         </>
       ) : null}

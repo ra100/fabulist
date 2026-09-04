@@ -1,4 +1,4 @@
--- Story engine schema. See DESIGN.md §2.
+-- Fabulist schema. See DESIGN.md §2.
 --
 -- Layering: canon rows are ingested and immutable at play time; chronicle rows
 -- overlay them copy-on-write. Reads resolve `chronicle ?? canon`, which is what

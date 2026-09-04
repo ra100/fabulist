@@ -330,7 +330,7 @@ export class AwsCredentialProvider {
   private async fromAssumeRole(profile: string, merged: Record<string, string>, seen: Set<string>): Promise<AwsCredentials> {
     const source = await this.resolve(merged.source_profile!, seen);
     const region = this.region(profile);
-    const sessionName = merged.role_session_name ?? 'story-engine';
+    const sessionName = merged.role_session_name ?? 'fabulist';
 
     const query = new URLSearchParams({
       Version: '2011-06-15',

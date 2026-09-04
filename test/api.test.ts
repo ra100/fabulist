@@ -263,7 +263,7 @@ test('a path traversal attempt cannot escape the web root', async () => {
   const { port } = server.address() as AddressInfo;
   const res = await fetch(`http://127.0.0.1:${port}/../../package.json`);
   const text = await res.text();
-  assert.ok(!text.includes('"name": "story-engine"'), 'must not serve files outside the root');
+  assert.ok(!text.includes('"name": "fabulist"'), 'must not serve files outside the root');
   await new Promise<void>((r) => server.close(() => r()));
   world.close();
 });

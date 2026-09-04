@@ -1,4 +1,4 @@
-# Story engine — full design review
+# Fabulist — full design review
 
 Judged from rendered screenshots at 1440×900, seeded world, four turns played.
 Screens: `01`–`08` in this folder.

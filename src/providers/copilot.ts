@@ -139,7 +139,7 @@ export class CopilotProvider implements Provider {
       headers: {
         authorization: `token ${oauth.token}`,
         accept: 'application/json',
-        'user-agent': 'story-engine',
+        'user-agent': 'fabulist',
       },
     });
     if (!res.ok) {

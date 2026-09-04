@@ -41,7 +41,7 @@ if (setup.isFresh()) console.log('no world yet - the UI will open the setup wiza
 
 const server = createApiServer({ world, engine, webRoot, setup });
 server.listen(port, '127.0.0.1', () => {
-  console.log(`story engine on http://127.0.0.1:${port}`);
+  console.log(`fabulist on http://127.0.0.1:${port}`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {

@@ -27,13 +27,13 @@ export function defaultConfig(): Config {
     profile: 'mock',
     routes: {},
     providers: {},
-    dbPath: 'data/story.db',
+    dbPath: 'data/fabulist.db',
     proseLintThreshold: 6,
     blocklist: [],
   };
 }
 
-export function loadConfig(path = 'story.config.json'): Config {
+export function loadConfig(path = 'fabulist.config.json'): Config {
   if (!existsSync(path)) return defaultConfig();
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<Config>;
@@ -43,7 +43,7 @@ export function loadConfig(path = 'story.config.json'): Config {
   }
 }
 
-export function saveConfig(cfg: Config, path = 'story.config.json'): void {
+export function saveConfig(cfg: Config, path = 'fabulist.config.json'): void {
   writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
 }
 

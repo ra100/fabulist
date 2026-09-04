@@ -1,4 +1,6 @@
-# Story engine
+# Fabulist
+
+*A state-first fiction engine: the prose is a view, the world is the graph underneath.*
 
 A creative-writing / role-play system where an AI game master runs a story inside an
 existing fictional universe, keeps a real world-model behind the scenes, and stays
@@ -164,10 +166,10 @@ remedy for anything unavailable. The same report is in the UI under **settings â
 available here**. Worth running first, because every one of these fails differently and
 most of them fail hours into a session rather than at startup.
 
-Then set a profile in `story.config.json`:
+Then set a profile in `fabulist.config.json`:
 
 ```json
-{ "profile": "bedrock", "dbPath": "data/story.db", "proseLintThreshold": 6, "blocklist": [] }
+{ "profile": "bedrock", "dbPath": "data/fabulist.db", "proseLintThreshold": 6, "blocklist": [] }
 ```
 
 | profile | auth | narrator | mechanics + extractor |

@@ -1,9 +1,9 @@
 {
-  "name": "story-engine",
+  "name": "fabulist",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Fandom role-play engine with a state-first world model",
+  "description": "A state-first fiction engine: the prose is a view, the world is the graph underneath",
   "engines": {
     "node": ">=24"
   },
