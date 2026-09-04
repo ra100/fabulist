@@ -247,6 +247,18 @@ export class ChronicleStore {
     return rows(this.db.prepare(`SELECT * FROM chapters ORDER BY chapter`).all());
   }
 
+  // ----------------------------------------------------------------- meta
+
+  setMeta(key: string, value: string): void {
+    this.db
+      .prepare(`INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(key, value);
+  }
+
+  getMeta(key: string, fallback = ''): string {
+    return row<{ value: string }>(this.db.prepare(`SELECT value FROM meta WHERE key = ?`).get(key))?.value ?? fallback;
+  }
+
   // ---------------------------------------------------------------- facts
 
   addFact(text: string, scene: number): Fact {

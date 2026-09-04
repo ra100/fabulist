@@ -75,6 +75,7 @@ export interface Knobs {
 }
 
 export interface State {
+  worldTitle: string;
   session: { scene: number; turn: number; playerCharacterId: string; currentLocationId: string | null; style: StyleContract; knobs: Knobs };
   counts: { entities: number; edges: number; canon: number; chronicle: number };
   scenes: Array<{ scene: number; title: string; summary: string; chapter: number }>;
@@ -154,6 +155,89 @@ export interface DirectiveResult {
   };
 }
 
+// ---------------------------------------------------------------------- setup
+
+export interface WikiCandidate {
+  name: string;
+  baseUrl: string;
+  articles: number;
+  language: string;
+  via: 'directory' | 'slug' | 'search' | 'explicit';
+  confidence: number;
+}
+
+export interface StartingPoint {
+  title: string;
+  kind: string;
+  members: number;
+}
+
+export interface CharacterSketch {
+  existing: string | null;
+  name: string;
+  role: string;
+  goals: string[];
+  vows: Array<{ text: string; rank: number }>;
+}
+
+export interface IngestPlan {
+  seeds: string[];
+  mode: 'skim' | 'mid' | 'deep';
+  reasoning: string;
+  excludeCategories: string[];
+  character: CharacterSketch;
+  style: StyleContract;
+  opening: string;
+  startingPoints: StartingPoint[];
+}
+
+export interface DiscoveryPreview {
+  candidatePages: number;
+  byHop: Record<string, number>;
+  byType: Record<string, number>;
+  topEntities: Array<{ title: string; type: string; score: number; summary: string }>;
+  characters: string[];
+  factions: string[];
+  locations: string[];
+  estimatedTokens: number;
+  estimatedCostUsd: number;
+  seedCategories: string[];
+}
+
+export interface PreviewResult {
+  preview: DiscoveryPreview;
+  mode: 'skim' | 'mid' | 'deep';
+  seeds: string[];
+  estimatedSeconds: number;
+  previewKey: string;
+}
+
+export interface Job<T = unknown> {
+  id: string;
+  kind: string;
+  status: 'running' | 'done' | 'failed' | 'cancelled';
+  progress: { stage: string; detail: string; current: number; total: number | null };
+  log: string[];
+  result: T | null;
+  error: string | null;
+}
+
+export interface SetupStatus {
+  fresh: boolean;
+  counts: { entities: number; edges: number; canon: number; chronicle: number };
+  playerCharacterId: string;
+  hasPlayer: boolean;
+}
+
+export interface CandidateCharacter {
+  id: string;
+  name: string;
+  summary: string;
+  salience: number;
+  hasVows: boolean;
+  connections: number;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -202,4 +286,21 @@ export const api = {
   anchors: () => req<Array<{ id: number; text: string; note: string }>>('/anchors'),
   addAnchor: (text: string, note: string) => post('/anchor', { text, note }),
   search: (q: string) => req<Entity[]>(`/search?q=${encodeURIComponent(q)}`),
+
+  setup: {
+    status: () => req<SetupStatus>('/setup/status'),
+    resolve: (query: string) => post<{ candidates: WikiCandidate[] }>('/setup/resolve', { query }),
+    plan: (wish: string, wiki: WikiCandidate) => post<IngestPlan>('/setup/plan', { wish, wiki }),
+    preview: (baseUrl: string, seeds: string[], mode: string, excludeCategories: string[] = [], title = '') =>
+      post<PreviewResult>('/setup/preview', { baseUrl, seeds, mode, excludeCategories, title }),
+    ingest: (previewKey: string, character: CharacterSketch, style: Partial<StyleContract>, opening: string) =>
+      post<Job>('/setup/ingest', { previewKey, character, style, opening }),
+    custom: (description: string, style?: Partial<StyleContract>) => post<Job>('/setup/custom', { description, style }),
+    sample: () => post<{ playerCharacterId: string; opening: string }>('/setup/sample'),
+    job: (id: string) => req<Job>(`/setup/job/${encodeURIComponent(id)}`),
+    cancel: (id: string) => post<{ cancelled: boolean }>(`/setup/job/${encodeURIComponent(id)}/cancel`),
+    characters: () => req<CandidateCharacter[]>('/setup/characters'),
+    setPlayer: (sketch: Partial<CharacterSketch>) => post<{ playerCharacterId: string; created: boolean; warnings: string[]; opening: string }>('/setup/player', sketch),
+    reset: () => post<{ ok: boolean }>('/setup/reset'),
+  },
 };

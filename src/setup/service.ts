@@ -56,7 +56,7 @@ export class SetupService {
   private wikiFetcher: SetupServiceOptions['wikiFetcher'];
   readonly jobs: JobRegistry;
   /** Cached crawl per preview, so committing does not re-fetch every page. */
-  private crawls = new Map<string, { crawl: CrawlResult; baseUrl: string; mode: DepthMode }>();
+  private crawls = new Map<string, { crawl: CrawlResult; baseUrl: string; mode: DepthMode; title: string }>();
 
   constructor(opts: SetupServiceOptions) {
     this.world = opts.world;
@@ -100,7 +100,7 @@ export class SetupService {
    * The crawl is cached under a key the caller passes back to `startIngest`, so
    * confirming a preview does not pay for the fetch twice.
    */
-  async preview(baseUrl: string, seeds: string[], mode: DepthMode, excludeCategories: string[] = []): Promise<PreviewResult & { previewKey: string }> {
+  async preview(baseUrl: string, seeds: string[], mode: DepthMode, excludeCategories: string[] = [], title = ''): Promise<PreviewResult & { previewKey: string }> {
     const spec = MODES[mode];
     const client = this.client(baseUrl);
     const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages });
@@ -108,7 +108,7 @@ export class SetupService {
     const preview = discover(scoped, { maxPages: spec.maxPages });
 
     const previewKey = `${baseUrl}|${seeds.join(',')}|${mode}`;
-    this.crawls.set(previewKey, { crawl: scoped, baseUrl, mode });
+    this.crawls.set(previewKey, { crawl: scoped, baseUrl, mode, title });
 
     // Pass A is fast; Pass B is one model call per page and dominates everything.
     const passBPages = spec.passB === 'all' ? preview.candidatePages : Math.floor(preview.candidatePages * 0.25);
@@ -131,10 +131,11 @@ export class SetupService {
     const cached = this.crawls.get(previewKey);
     if (!cached) throw new Error('no preview for that key; run a preview first');
 
-    const { crawl: scoped, baseUrl, mode } = cached;
+    const { crawl: scoped, baseUrl, mode, title } = cached;
     const spec = MODES[mode];
     const world = this.world;
     const wikiName = new URL(baseUrl).hostname.split('.')[0] ?? 'wiki';
+    world.chronicle.setMeta('worldTitle', title || wikiName);
 
     return this.jobs.start<IngestJobResult>('ingest', async (handle) => {
       const warnings: string[] = [];
@@ -263,6 +264,7 @@ export class SetupService {
   /** The built-in example, for trying the engine without any setup at all. */
   useSample(): { playerCharacterId: string; opening: string } {
     seedWorld(this.world);
+    this.world.chronicle.setMeta('worldTitle', 'Saint Verrow');
     return {
       playerCharacterId: this.world.session.get().playerCharacterId,
       opening: proposeOpening(this.world),

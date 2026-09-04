@@ -182,6 +182,7 @@ export function applyCustomWorld(world: World, raw: Record<string, unknown>): Ap
 
   world.session.set({ scene: 1, turn: 0, playerCharacterId: result.playerCharacterId, currentLocationId: startLocation });
   world.chronicle.upsertScene(1, { title: String(raw.title ?? ''), summary: '', locationId: startLocation, chapter: 1 });
+  if (raw.title) world.chronicle.setMeta('worldTitle', String(raw.title));
 
   return result;
 }
@@ -277,26 +278,62 @@ export function applyStyle(world: World, style: Partial<StyleContract>): StyleCo
  * Proposes where to begin, from the highest-tension thread rather than at random.
  * Starting in a scene that already has pressure is worth more than any amount of
  * scene-setting.
+ *
+ * A fresh wiki ingest usually has no threads yet — canon describes a world, not a
+ * situation — so the fallback is built from the graph instead of boilerplate. A
+ * named place and a named person the player is connected to gives the Director
+ * something to push against; "you are somewhere, something will happen" gives it
+ * nothing.
  */
 export function proposeOpening(world: World, fallback = ''): string {
+  const session = world.session.get();
+  const player = session.playerCharacterId;
   const thread = world.threads.open(1)[0];
-  if (!thread) return fallback || 'You are somewhere in this world, and something is about to require a decision.';
 
-  const player = world.session.get().playerCharacterId;
-  const others = thread.parties
-    .filter((p) => p !== player)
-    .map((p) => world.graph.get(p)?.name)
-    .filter(Boolean);
+  if (thread) {
+    const others = thread.parties
+      .filter((p) => p !== player)
+      .map((p) => world.graph.get(p)?.name)
+      .filter(Boolean);
+    const where = world.graph.get(session.currentLocationId ?? '')?.name;
+    return [
+      thread.title,
+      thread.stakes ? `At stake: ${thread.stakes}.` : '',
+      others.length ? `Present: ${others.join(', ')}.` : '',
+      where ? `You are at ${where}.` : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }
 
-  const where = world.graph.get(world.session.get().currentLocationId ?? '')?.name;
-  return [
-    thread.title,
-    thread.stakes ? `At stake: ${thread.stakes}.` : '',
-    others.length ? `Present: ${others.join(', ')}.` : '',
-    where ? `You are at ${where}.` : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
+  if (fallback) return fallback;
+
+  const where = world.graph.get(session.currentLocationId ?? '');
+  // The best-connected character who is not the player: the person most likely to
+  // matter in this corner of the world.
+  const nearby = world.graph
+    .list({ type: 'Character', limit: 40 })
+    .filter((e) => e.id !== player)
+    .map((e) => ({ entity: e, links: world.graph.neighbours(e.id).length }))
+    .sort((a, b) => b.links - a.links)[0];
+
+  const faction = world.graph.list({ type: 'Faction', limit: 1 })[0];
+  const parts: string[] = [];
+
+  if (where) parts.push(`You are at ${where.name}${where.summary ? `. ${where.summary}` : '.'}`);
+  if (nearby) {
+    parts.push(
+      `${nearby.entity.name} is here and wants something from you${nearby.entity.summary ? ` — ${lowerFirst(nearby.entity.summary)}` : '.'}`,
+    );
+  }
+  if (faction && !nearby) parts.push(`${faction.name} has taken an interest in you.`);
+  if (!parts.length) parts.push('Something is about to require a decision.');
+
+  return parts.join(' ');
+}
+
+function lowerFirst(s: string): string {
+  return s.charAt(0).toLowerCase() + s.slice(1);
 }
 
 function toVows(raw: unknown[]): Vow[] {

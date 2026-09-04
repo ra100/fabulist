@@ -83,6 +83,7 @@ route('GET', '/api/state', (_req, res, { world }) => {
   const session = world.session.get();
   send(res, 200, {
     session,
+    worldTitle: world.chronicle.getMeta('worldTitle', 'Untitled world'),
     counts: world.graph.counts(),
     scenes: world.chronicle.scenes(),
     threads: world.threads.open(20),
@@ -447,11 +448,11 @@ route('POST', '/api/setup/plan', async (_req, res, { setup, body }) => {
 route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { baseUrl, seeds, mode, excludeCategories } = (body ?? {}) as {
-    baseUrl?: string; seeds?: string[]; mode?: 'skim' | 'mid' | 'deep'; excludeCategories?: string[];
+  const { baseUrl, seeds, mode, excludeCategories, title } = (body ?? {}) as {
+    baseUrl?: string; seeds?: string[]; mode?: 'skim' | 'mid' | 'deep'; excludeCategories?: string[]; title?: string;
   };
   if (!baseUrl || !seeds?.length) return send(res, 400, { error: 'baseUrl and seeds are required' });
-  send(res, 200, await svc.preview(baseUrl, seeds, mode ?? 'mid', excludeCategories ?? []));
+  send(res, 200, await svc.preview(baseUrl, seeds, mode ?? 'mid', excludeCategories ?? [], title ?? ''));
 });
 
 /** Commits a previewed scope. Returns a job to poll. */

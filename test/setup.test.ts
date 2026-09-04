@@ -379,6 +379,39 @@ test('the opening is proposed from the highest-tension thread', async () => {
   world.close();
 });
 
+test('with no threads yet, the opening is still grounded in the actual world', async () => {
+  // A fresh wiki ingest has no threads: canon describes a world, not a situation.
+  // The fallback has to name a real place and a real person, or the Director has
+  // nothing to push against on turn one.
+  const { world, svc } = service();
+  const preview = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'skim');
+  const job = svc.startIngest(preview.previewKey, {
+    character: { existing: 'Warden Ilsa Crowe', name: '', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  await settle(svc.jobs, job.id);
+
+  assert.equal(world.threads.open().length, 0, 'precondition: no threads');
+  const opening = proposeOpening(world);
+  assert.match(opening, /Duskhollow/, 'names where you are');
+  assert.ok(!/somewhere in this world/.test(opening), 'not boilerplate');
+  world.close();
+});
+
+test('the ingest job reports each stage it passes through', async () => {
+  const { world, svc } = service();
+  const preview = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid');
+  const job = svc.startIngest(preview.previewKey, {
+    character: { existing: null, name: 'X', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  await settle(svc.jobs, job.id);
+
+  const log = svc.jobs.get(job.id)!.log.join(' | ');
+  for (const stage of ['reading pages', 'building the graph', 'reading the prose', 'placing your character']) {
+    assert.match(log, new RegExp(stage), `reported "${stage}"`);
+  }
+  world.close();
+});
+
 test('the sample world is available without any setup', () => {
   const { world, svc } = service();
   const res = svc.useSample();

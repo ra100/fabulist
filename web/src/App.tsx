@@ -14,6 +14,7 @@ import {
   type TurnMeta,
 } from './api.ts';
 import { GraphView } from './views/GraphView.tsx';
+import { SetupWizard } from './views/SetupWizard.tsx';
 
 type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'settings';
 
@@ -21,6 +22,8 @@ export function App() {
   const [tab, setTab] = useState<Tab>('book');
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // null while unknown, so the wizard does not flash before the check returns.
+  const [fresh, setFresh] = useState<boolean | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -32,13 +35,36 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void refresh();
+    void (async () => {
+      try {
+        setFresh((await api.setup.status()).fresh);
+      } catch {
+        // Setup routes disabled: assume there is a world and let the views say otherwise.
+        setFresh(false);
+      }
+      await refresh();
+    })();
   }, [refresh]);
+
+  if (fresh === null) return <div className="wizard"><div className="wizard-card dim">loading…</div></div>;
+
+  if (fresh) {
+    return (
+      <SetupWizard
+        onDone={async () => {
+          // Load the new world *before* leaving the wizard, or the app renders
+          // one frame of stale state - the previous world's name in the header.
+          await refresh();
+          setFresh(false);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="app">
       <header className="topbar">
-        <h1>Saint Verrow</h1>
+        <h1>{state?.worldTitle ?? 'Story engine'}</h1>
         {state ? (
           <div className="meta">
             <span>scene {state.session.scene}·{state.session.turn}</span>
@@ -57,6 +83,16 @@ export function App() {
               {t}
             </button>
           ))}
+          <button
+            title="discard this world and set up a new one"
+            onClick={async () => {
+              if (!window.confirm('Discard this world and everything that happened in it?')) return;
+              await api.setup.reset();
+              setFresh(true);
+            }}
+          >
+            new
+          </button>
         </nav>
       </header>
 
