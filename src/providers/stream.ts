@@ -77,43 +77,54 @@ export async function* readNdjson(body: ReadableStream<Uint8Array> | null): Asyn
 }
 
 /**
- * AWS event streams are binary framed, not SSE: each message carries a prelude,
- * headers and a payload. Only the payload JSON is wanted, and it is base64-encoded
- * inside a `bytes` field, so a tolerant scan is both simpler and more robust than
- * a full frame parser for this one use.
+ * Reads AWS's `application/vnd.amazon.eventstream` binary framing, used by
+ * Bedrock's `converse-stream`.
+ *
+ * This is not the earlier `{"bytes":"<base64>"}` shape it used to assume — that
+ * is a different AWS service's convention (Kinesis / S3 Select). Bedrock's own
+ * wire format is: a 12-byte prelude (4-byte total length, 4-byte headers
+ * length, 4-byte prelude CRC, big-endian), then that many bytes of headers,
+ * then the payload — which for Bedrock is the event JSON directly, not
+ * base64 — then a trailing 4-byte message CRC. Getting this wrong does not
+ * throw: it silently yields nothing, which is how this shipped for a while
+ * with every turn narrating as empty prose while the non-streaming path
+ * (identical model, identical prompt) worked perfectly.
+ *
+ * CRCs are read past but not verified: a corrupt frame surviving a TLS
+ * connection intact is not a failure mode worth coding a checksum for here.
  */
 export async function* readAwsEventStream(body: ReadableStream<Uint8Array> | null): AsyncGenerator<string> {
   if (!body) return;
   const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
+  let buffer = Buffer.alloc(0);
 
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      if (value) buffer = Buffer.concat([buffer, Buffer.from(value)]);
 
-      // Pull out every complete {"bytes":"..."} object seen so far.
-      const pattern = /\{"bytes":"([A-Za-z0-9+/=]+)"[^}]*\}/g;
-      let match: RegExpExecArray | null;
-      let lastIndex = 0;
-      while ((match = pattern.exec(buffer))) {
-        lastIndex = match.index + match[0].length;
-        try {
-          yield Buffer.from(match[1]!, 'base64').toString('utf8');
-        } catch {
-          // A truncated frame; the next read will complete it.
+      // A frame needs at least its 12-byte prelude to know its own length.
+      for (;;) {
+        if (buffer.length < 12) break;
+        const totalLength = buffer.readUInt32BE(0);
+        if (buffer.length < totalLength) break; // the rest of this frame has not arrived yet
+
+        const headersLength = buffer.readUInt32BE(4);
+        const payloadStart = 12 + headersLength;
+        const payloadEnd = totalLength - 4; // the trailing 4 bytes are the message CRC
+        if (payloadEnd > payloadStart) {
+          yield buffer.subarray(payloadStart, payloadEnd).toString('utf8');
         }
+        buffer = buffer.subarray(totalLength);
       }
-      if (lastIndex > 0) buffer = buffer.slice(lastIndex);
-      // Do not let an unparseable tail grow without bound.
-      if (buffer.length > 1_000_000) buffer = buffer.slice(-4096);
+
+      if (done) break;
     }
   } finally {
     reader.releaseLock();
   }
 }
+
 
 export function parseJsonSafe(text: string): Record<string, unknown> | null {
   try {

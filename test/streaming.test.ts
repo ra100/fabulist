@@ -54,6 +54,36 @@ function bodyOf(chunks: string[]): ReadableStream<Uint8Array> {
   });
 }
 
+/** Binary-safe version of `bodyOf`, for wire formats that are not valid UTF-8 text. */
+function binaryBodyOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+}
+
+/**
+ * Builds one real AWS `application/vnd.amazon.eventstream` frame: a 12-byte
+ * prelude (total length, headers length, prelude CRC — unchecked by the reader,
+ * so left as zero here), then header bytes, then the payload, then a trailing
+ * 4-byte message CRC (also unchecked, also zero). Bedrock's own payload is the
+ * event JSON directly — no base64, no `bytes` wrapper.
+ */
+function awsFrame(payload: string, headers = Buffer.alloc(0)): Buffer {
+  const payloadBuf = Buffer.from(payload, 'utf8');
+  const totalLength = 12 + headers.length + payloadBuf.length + 4;
+  const buf = Buffer.alloc(totalLength);
+  buf.writeUInt32BE(totalLength, 0);
+  buf.writeUInt32BE(headers.length, 4);
+  buf.writeUInt32BE(0, 8); // prelude crc, unchecked
+  headers.copy(buf, 12);
+  payloadBuf.copy(buf, 12 + headers.length);
+  buf.writeUInt32BE(0, totalLength - 4); // message crc, unchecked
+  return buf;
+}
+
 // ------------------------------------------------------------------- framing
 
 test('sse events split across reads are reassembled', async () => {
@@ -78,10 +108,41 @@ test('ndjson lines split across reads are reassembled', async () => {
 });
 
 test('aws binary event frames yield their decoded payloads', async () => {
-  const payload = Buffer.from(JSON.stringify({ delta: { text: 'hi' } })).toString('base64');
-  const frames = await collect(readAwsEventStream(bodyOf([`\u0000\u0000{"bytes":"${payload}","p":"x"}`])));
+  // Bedrock's real wire format, not the base64-wrapped {"bytes":...} shape
+  // this used to assume (that is a different AWS service's convention). The
+  // payload is the event JSON directly, straight after the header bytes.
+  const frame = awsFrame(JSON.stringify({ delta: { text: 'hi' } }));
+  const frames = await collect(readAwsEventStream(binaryBodyOf([frame])));
   assert.equal(frames.length, 1);
   assert.deepEqual(JSON.parse(frames[0]!), { delta: { text: 'hi' } });
+});
+
+test('a real bedrock header block does not corrupt payload extraction', async () => {
+  // Real headers carry event-type/content-type/message-type as AWS's own
+  // header encoding, which is binary and can contain byte sequences that
+  // would confuse a text-based scan — the prelude's length fields are what
+  // must be trusted, not any pattern search through the bytes.
+  const headers = Buffer.from('\x0b:event-type\x07\x00\x11contentBlockDelta\x0d:content-type\x07\x00\x10application/json', 'latin1');
+  const frame = awsFrame(JSON.stringify({ contentBlockIndex: 0, delta: { text: 'Frost clung' } }), headers);
+  const frames = await collect(readAwsEventStream(binaryBodyOf([frame])));
+  assert.equal(frames.length, 1);
+  assert.deepEqual(JSON.parse(frames[0]!), { contentBlockIndex: 0, delta: { text: 'Frost clung' } });
+});
+
+test('multiple aws frames in one chunk are all read, in order', async () => {
+  const a = awsFrame(JSON.stringify({ delta: { text: 'The ink ' } }));
+  const b = awsFrame(JSON.stringify({ delta: { text: 'had frozen.' } }));
+  const frames = await collect(readAwsEventStream(binaryBodyOf([Buffer.concat([a, b])])));
+  assert.deepEqual(frames.map((f) => JSON.parse(f).delta.text), ['The ink ', 'had frozen.']);
+});
+
+test('an aws frame split mid-prelude across reads is reassembled, not dropped', async () => {
+  const frame = awsFrame(JSON.stringify({ delta: { text: 'reassembled' } }));
+  // Split inside the 12-byte prelude itself — the tightest case, since the
+  // reader cannot even know the frame's total length from the first read.
+  const frames = await collect(readAwsEventStream(binaryBodyOf([frame.subarray(0, 3), frame.subarray(3)])));
+  assert.equal(frames.length, 1);
+  assert.deepEqual(JSON.parse(frames[0]!), { delta: { text: 'reassembled' } });
 });
 
 test('an empty body yields nothing rather than hanging', async () => {
