@@ -21,6 +21,16 @@ export interface ProviderCapabilities {
   proseQuality: number;
   /** How well it holds a style contract over many turns. */
   steerability: number;
+  /**
+   * Some newer models reject an explicit `temperature` outright rather than
+   * clamping it — Bedrock's `claude-sonnet-5` returns a 400 ("temperature is
+   * deprecated for this model") for every value except its own default of 1.0,
+   * discovered by hitting it directly rather than assumed. When true, the
+   * adapter omits the field instead of sending whatever the caller asked for,
+   * so callers that want deterministic output (`temperature: 0` for the
+   * mechanical roles) still get the closest thing the model allows.
+   */
+  fixedTemperature?: boolean;
 }
 
 export interface Message {

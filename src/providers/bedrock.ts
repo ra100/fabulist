@@ -73,7 +73,10 @@ export class BedrockProvider implements Provider {
       messages: messages.length ? messages : [{ role: 'user', content: [{ text: '...' }] }],
       inferenceConfig: {
         maxTokens: req.maxTokens ?? 2048,
-        temperature: req.temperature ?? 0.7,
+        // Some models (Bedrock's claude-sonnet-5, confirmed directly against
+        // the API) reject any explicit temperature with a 400, rather than
+        // clamping it — omitting the field is the only value that works.
+        ...(this.capabilities.fixedTemperature ? {} : { temperature: req.temperature ?? 0.7 }),
         ...(req.stop?.length ? { stopSequences: req.stop.slice(0, 4) } : {}),
       },
     };

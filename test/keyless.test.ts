@@ -384,6 +384,38 @@ test('bedrock uses the converse shape with system lifted out', async () => {
   assert.match((seen[0]!.headers as Record<string, string>).authorization!, /^AWS4-HMAC-SHA256/);
 });
 
+test('a fixed-temperature model omits temperature instead of sending it', async () => {
+  // Confirmed directly against Bedrock's claude-sonnet-5: it returns a 400
+  // ("temperature is deprecated for this model") for every value except its
+  // own default of 1.0. The only value that works from the caller's side is
+  // not sending the field at all — clamping to 1.0 would silently discard the
+  // caller's actual intent (temperature 0 for the deterministic mechanical
+  // roles) for no benefit, since 1.0 is already what omitting it gets you.
+  const { fetcher, seen } = spy({ output: { message: { content: [{ text: 'x' }] } } });
+  const provider = new BedrockProvider({
+    modelId: 'us.anthropic.claude-sonnet-5',
+    capabilities: caps({ fixedTemperature: true }),
+    fetcher,
+    awsEnvironment: awsEnv({ env: { AWS_ACCESS_KEY_ID: 'A', AWS_SECRET_ACCESS_KEY: 'S' } }),
+  });
+  await provider.complete({ role: 'classify', messages: [{ role: 'user', content: 'x' }], temperature: 0 });
+
+  const body = seen[0]!.body as { inferenceConfig: Record<string, unknown> };
+  assert.ok(!('temperature' in body.inferenceConfig), 'the field is omitted, not clamped to some value');
+});
+
+test('a model without fixedTemperature still sends the caller\'s temperature', async () => {
+  const { fetcher, seen } = spy({ output: { message: { content: [{ text: 'x' }] } } });
+  const provider = new BedrockProvider({
+    modelId: 'm', capabilities: caps(), fetcher,
+    awsEnvironment: awsEnv({ env: { AWS_ACCESS_KEY_ID: 'A', AWS_SECRET_ACCESS_KEY: 'S' } }),
+  });
+  await provider.complete({ role: 'classify', messages: [{ role: 'user', content: 'x' }], temperature: 0.3 });
+
+  const body = seen[0]!.body as { inferenceConfig: Record<string, unknown> };
+  assert.equal(body.inferenceConfig.temperature, 0.3, 'unaffected models are unaffected');
+});
+
 test('bedrock gets structured output through a forced tool call', async () => {
   const { fetcher, seen } = spy({ output: { message: { content: [{ toolUse: { input: { a: 1 } } }] } } });
   const provider = new BedrockProvider({

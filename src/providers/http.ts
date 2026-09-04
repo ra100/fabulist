@@ -553,10 +553,24 @@ export const PRESETS: Record<string, ProviderSpec> = {
 
   'bedrock:sonnet': {
     kind: 'bedrock',
-    model: 'anthropic.claude-sonnet-4-20250514-v1:0',
+    // Cross-region inference profile id, not the bare model id: on-demand
+    // invocation of this model is refused outright ("Retry your request with
+    // the ID or ARN of an inference profile that contains this model"),
+    // confirmed directly against the API rather than assumed from the docs.
+    model: 'us.anthropic.claude-sonnet-5',
     auth: 'aws-profile',
     note: 'needs model access enabled in the Bedrock console for your region',
-    capabilities: { contextWindow: 200_000, structuredOutput: 'native-schema', costTier: 'premium', proseQuality: 0.9, steerability: 0.9 },
+    capabilities: {
+      contextWindow: 200_000,
+      structuredOutput: 'native-schema',
+      costTier: 'premium',
+      proseQuality: 0.92,
+      steerability: 0.9,
+      // Confirmed directly: every temperature except the model's own default
+      // of 1.0 comes back as a 400 ("temperature is deprecated for this
+      // model"). Omitting the field is the only value that works.
+      fixedTemperature: true,
+    },
   },
   'bedrock:haiku': {
     kind: 'bedrock',
