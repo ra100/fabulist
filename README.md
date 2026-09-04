@@ -13,23 +13,36 @@ run it.
 
 ```bash
 pnpm install
-pnpm seed                 # writes data/story.db with hand-authored canon
-pnpm play                 # interactive session in the terminal
-```
-
-That runs entirely offline on a deterministic mock provider — no API keys, no network.
-The mock writes deliberately plain prose; it exists to prove the machinery, not to write
-well. Point the engine at a real model when you want prose (see **Providers**).
-
-For the inspector:
-
-```bash
 pnpm build:web
 pnpm serve                # http://127.0.0.1:4317
 ```
 
+An empty save opens a setup wizard. It asks three things — where are we playing, where and
+when in it, and who are you — and turns the answers into a world. Nothing is read or spent
+until you have seen a page count and a cost.
+
+Three routes through it:
+
+- **An existing world.** Name a franchise; it finds the wiki, proposes which corner of it
+  to read, and shows what that costs before committing.
+- **A world you describe.** No wiki. Describe a premise and it invents the places,
+  factions and cast, with a tension already under strain.
+- **The built-in example.** Saint Verrow, a monastery under a secular garrison. Fastest
+  way to see how this plays.
+
+Everything runs offline on a deterministic mock provider by default — no API keys, no
+network. The mock writes deliberately plain prose; it exists to prove the machinery, not to
+write well. Point the engine at a real model when you want prose (see **Providers**).
+
+Terminal is still there if you prefer it:
+
 ```bash
-pnpm test                 # 281 tests, offline
+pnpm seed                 # the sample world
+pnpm play                 # interactive session
+```
+
+```bash
+pnpm test                 # 319 tests, offline
 pnpm typecheck
 ```
 
@@ -94,15 +107,17 @@ quietly created and real from then on.
 
 ## Ingesting a fandom
 
-Discovery runs first and commits nothing:
+The wizard does this for you. What follows is what it is doing underneath, and the CLI is
+still the better tool for a scripted or repeated ingest:
 
 ```bash
 pnpm ingest --wiki=https://elderscrolls.fandom.com \
             --seed="Skyrim" --seed="Civil War (Skyrim)" --mode=mid
 ```
 
-It reports the page count, the cast and factions it found, the hop distribution, and the
-estimated token spend. Add `--commit` when the scope looks right.
+Discovery runs first and commits nothing. It reports the page count, the cast and factions
+it found, the hop distribution, and the estimated token spend. Add `--commit` when the
+scope looks right.
 
 Depth is **per-subgraph, not global** — you play in a small corner of a universe, so
 `skim` is a viable permanent baseline with deep pockets only where you have been:
@@ -179,6 +194,9 @@ Seven views, all of it a debugger for the world model.
 - **causality** — what your acts set in motion, indented by depth, with a spoiler curtain
 - **facts** — who knows what, who merely suspects, and who believes a distorted version
 - **settings** — style contract, knobs, style anchors
+
+Plus the setup wizard, which replaces the top bar until a world exists. `new` in the top
+bar discards the current world and reopens it.
 
 ---
 
@@ -276,6 +294,7 @@ src/loop/         roles, three-tier validator, commit, engine, compaction, branc
 src/consequence/  propagation queue, rumours, world tick
 src/lint/         rule engine, two profiles, the prose gate
 src/ingest/       mediawiki client, parsers, scope, pass A, pass B, depth modes
+src/setup/        wiki discovery, planner, jobs, world building
 src/seed/         hand-authored canon for Saint Verrow
 src/cli/          play, seed, serve, ingest, script, lintprose
 src/server/       http api
