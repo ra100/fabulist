@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { World } from '../src/store/index.ts';
-import { WikiClient, fixtureFetcher } from '../src/ingest/client.ts';
+import { DEFAULT_USER_AGENT, WikiClient, fixtureFetcher } from '../src/ingest/client.ts';
 import {
   fieldValues,
   firstParagraph,
@@ -604,4 +605,37 @@ test('an ingested world is immediately playable', async () => {
   assert.equal(out.kind, 'narrated', 'a wiki-derived world runs the loop unchanged');
   assert.ok(world.chronicle.events().length > 0);
   world.close();
+});
+
+/**
+ * The crawl leans on Fandom's `robots.txt` granting `User-agent: *` an explicit
+ * `Allow: /api.php?` while naming and blocking GPTBot/ClaudeBot/CCBot. That
+ * only holds while we identify honestly, so the header is asserted on the wire
+ * rather than trusted from the constructor.
+ */
+test('the wiki client identifies itself, and never as a browser', async () => {
+  const seen: Array<string | undefined> = [];
+  const server = createServer((req, res) => {
+    seen.push(req.headers['user-agent']);
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ query: { pages: [] } }));
+  });
+  await new Promise<void>((r) => server.listen(0, r));
+  const { port } = server.address() as { port: number };
+
+  try {
+    await new WikiClient({ baseUrl: `http://127.0.0.1:${port}`, delayMs: 0 }).fetchPages(['Anything']);
+    assert.equal(seen[0], DEFAULT_USER_AGENT, 'the default identifies the tool');
+    assert.match(seen[0]!, /https?:\/\/|mailto:/, 'and carries a contact an operator can use');
+    assert.doesNotMatch(seen[0]!, /Mozilla|Chrome|Safari|Gecko/, 'never spoofs a browser — the ToU bars forged headers');
+
+    await new WikiClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      delayMs: 0,
+      userAgent: 'Custom/9 (+mailto:me@example.com)',
+    }).fetchPages(['Anything']);
+    assert.equal(seen[1], 'Custom/9 (+mailto:me@example.com)', 'a caller can substitute their own contact details');
+  } finally {
+    server.close();
+  }
 });

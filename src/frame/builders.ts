@@ -33,16 +33,128 @@ export interface FrameContext {
 
 // --------------------------------------------------------------- renderers
 
-/** Cheap one-liner. Most of the cast never needs more than this. */
+/**
+ * Infobox fields worth spending frame tokens on, in render order.
+ *
+ * Pass A writes *every* infobox field onto `entity.props` (`ingest/passA.ts`),
+ * which for a real wiki is dozens of keys per page — image filenames, template
+ * bookkeeping, appearance counts, voice actors. Rendering all of it would spend
+ * the budget on noise and, worse, hand the Narrator real-world production
+ * trivia as if it were in-world fact.
+ *
+ * So: a whitelist, not a dump. These are the keys that answer questions the
+ * prose actually asks — who is this, whose side are they on, are they alive —
+ * and they are the ones Fandom character/location/faction infoboxes agree on
+ * most often. Deliberately excluded even though they are common: `image`,
+ * `appearances`, `voice`/`actor`, `first`/`last` (real-world publication
+ * order, not in-world time — see `.design/DBFIXES.md` C3 for why in-world
+ * dates need their own treatment rather than being smuggled in here).
+ *
+ * `props.categories` is excluded too: it is an array of wiki taxonomy that
+ * already drove `inferEntityType`, and re-rendering it tells the model how the
+ * wiki is filed rather than what is true in the world.
+ */
+const PROP_KEYS = [
+  'species',
+  'race',
+  'gender',
+  'age',
+  'born',
+  'died',
+  'status',
+  'occupation',
+  'title',
+  'titles',
+  'rank',
+  'affiliation',
+  'allegiance',
+  'faction',
+  'leader',
+  'ruler',
+  'members',
+  'headquarters',
+  'region',
+  'location',
+  'terrain',
+  'population',
+  'founded',
+  'relatives',
+  'family',
+  'spouse',
+  'allies',
+  'enemies',
+] as const;
+
+/** Per-value cap. Long infobox values are usually a leaked list or stray markup. */
+const PROP_VALUE_MAX = 120;
+
+/**
+ * The whitelisted slice of `props`, rendered deterministically.
+ *
+ * Order follows `PROP_KEYS` rather than insertion order so the same entity
+ * renders identically across turns — a frame that reshuffles between calls
+ * makes prompt-level caching useless and diffs unreadable.
+ *
+ * `maxKeys` bounds the worst case: a wiki that happens to fill every
+ * whitelisted field should not quietly cost more than a thumbnail's worth of
+ * budget when rendered for a dozen characters at once.
+ */
+export function renderProps(e: Entity, maxKeys = 8, skip: ReadonlySet<string> = new Set()): string {
+  const out: string[] = [];
+  for (const key of PROP_KEYS) {
+    if (out.length >= maxKeys) break;
+    if (skip.has(key)) continue;
+    const raw = e.props[key];
+    // Only scalars: an object or array here is either wiki bookkeeping or a
+    // structure whose stringification would be noise ("[object Object]").
+    if (typeof raw !== 'string' && typeof raw !== 'number') continue;
+    const value = String(raw).replace(/\s+/g, ' ').trim();
+    if (!value) continue;
+    const clipped = value.length > PROP_VALUE_MAX ? `${value.slice(0, PROP_VALUE_MAX - 1).trimEnd()}…` : value;
+    out.push(`${key}: ${clipped}`);
+  }
+  return out.join(' | ');
+}
+
+/**
+ * Props that `ingest/passA.ts` already copies onto the character sheet:
+ * `affiliation` → `identity.allegiances`, `occupation` → `competencies`, and
+ * the page summary → `arc`. `renderSheet` renders those sheet fields anyway, so
+ * including the props copy too prints each fact twice in the same block.
+ *
+ * Skipped on the sheet path only. A thumbnail has no sheet beside it, so there
+ * `affiliation` is the single most useful key available and must not be
+ * suppressed. Kept as an explicit list next to the renderer rather than derived
+ * at runtime: the duplication comes from a specific mapping in Pass A, and if
+ * that mapping changes this should be updated deliberately rather than silently
+ * tracking it.
+ */
+const SHEET_DUPLICATED_PROPS: ReadonlySet<string> = new Set(['affiliation', 'allegiance', 'occupation', 'role']);
+
+/**
+ * Cheap one-liner. Most of the cast never needs more than this.
+ *
+ * Gets a two-key slice of `props` rather than none: for an offstage name the
+ * difference between "id=char:x name=Sered (Character)" and the same line plus
+ * "status: dead | affiliation: the garrison" is most of what the Director needs
+ * to decide whether to reach for them at all.
+ */
 export function thumbnail(e: Entity): string {
   const s = e.summary ? ` — ${e.summary}` : '';
-  return `id=${e.id} name=${e.name} (${e.type})${s}`;
+  const p = renderProps(e, 2);
+  return `id=${e.id} name=${e.name} (${e.type})${s}${p ? ` [${p}]` : ''}`;
 }
 
 /** Full sheet, for characters actually on stage. */
 export function renderSheet(e: Entity, sheet: CharacterSheet): string {
   const L: string[] = [`id=${e.id} name=${e.name}`];
   if (e.summary) L.push(`summary: ${e.summary}`);
+  // Canon attributes before authored ones: species/status/born are what the
+  // source material asserts, and a sheet's goals and wounds read against that
+  // background rather than instead of it. Fields Pass A already mirrored onto
+  // the sheet are skipped here so each fact appears once per block.
+  const props = renderProps(e, 8, SHEET_DUPLICATED_PROPS);
+  if (props) L.push(props);
   const id = sheet.identity;
   if (id.goals.length) L.push(`goals: ${id.goals.join('; ')}`);
   if (id.wounds.length) L.push(`wounds: ${id.wounds.join('; ')}`);
@@ -193,7 +305,12 @@ function locationCard(ctx: FrameContext): string {
   if (!session.currentLocationId) return '';
   const loc = world.graph.get(session.currentLocationId);
   if (!loc) return '';
-  const lines = [thumbnail(loc)];
+  // The full whitelist here, not `thumbnail`'s two-key slice: this is the place
+  // the scene is actually happening in, so terrain, region and ruler are worth
+  // the tokens in a way they are not for a name merely mentioned in passing.
+  const lines = [`id=${loc.id} name=${loc.name} (${loc.type})${loc.summary ? ` — ${loc.summary}` : ''}`];
+  const props = renderProps(loc);
+  if (props) lines.push(`  ${props}`);
   for (const { edge, otherId } of world.graph.neighbours(loc.id, session.scene).slice(0, 12)) {
     const other = world.graph.get(otherId);
     if (other) lines.push(`  ${edge.predicate}: ${other.name}`);

@@ -10,6 +10,7 @@
  */
 import type { EntityId } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
+import { checkpoint } from '../db/db.ts';
 import { adaptRequest, extractJson, type JsonSchema, type Provider } from '../providers/provider.ts';
 
 export const summarySchema: JsonSchema = {
@@ -179,6 +180,11 @@ export class Compactor {
       const chapterSummary = await this.summariseChapter(chapter);
       if (chapterSummary) result.chaptersSummarised.push(chapter);
     }
+
+    // A scene boundary is the one moment in play that is already a pause, so
+    // it is where the WAL gets folded back in. Doing it per turn would put real
+    // I/O in front of the player while they wait for prose. See `db.ts`.
+    checkpoint(this.getWorld().db);
     return result;
   }
 

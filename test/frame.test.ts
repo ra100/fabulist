@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HeuristicTokenizer, tokenizerFor } from '../src/frame/tokenizer.ts';
 import { assembleFrame, inputBudget, Priority } from '../src/frame/budget.ts';
+import { renderProps, renderSheet, thumbnail } from '../src/frame/builders.ts';
+import type { CharacterSheet, Entity } from '../src/domain/types.ts';
 
 const tk = new HeuristicTokenizer({ charsPerToken: 4 });
 
@@ -144,4 +146,133 @@ test('a full 64k narrator budget stays inside the window', () => {
     { budget, tokenizer: t },
   );
   assert.ok(frame.log.used <= budget, `${frame.log.used} <= ${budget}`);
+});
+
+// ------------------------------------------------------------- props rendering
+// Pass A writes every infobox field onto `entity.props`, but nothing in
+// `src/frame/` read it: species, status, affiliation and the rest were
+// extracted, stored, and never shown to the model. These assert both that the
+// whitelist reaches a frame and that it stays a whitelist.
+
+function entity(props: Record<string, unknown>): Entity {
+  return {
+    id: 'char:ilsa',
+    type: 'Character',
+    layer: 'canon',
+    name: 'Ilsa Crowe',
+    summary: 'Warden of Duskhollow.',
+    provenance: 'wiki:Warden_Ilsa_Crowe',
+    confidence: 1,
+    salience: 0.8,
+    depthLevel: 2,
+    props,
+    createdScene: 0,
+  };
+}
+
+test('renderProps surfaces whitelisted infobox fields in a stable order', () => {
+  // Deliberately out of whitelist order in the source object: render order must
+  // follow the whitelist, not insertion, or the frame reshuffles between turns.
+  const out = renderProps(entity({ affiliation: 'Wardens of the Vale', species: 'Human', status: 'Alive' }));
+  assert.equal(out, 'species: Human | status: Alive | affiliation: Wardens of the Vale');
+});
+
+test('renderProps drops keys that are noise rather than world fact', () => {
+  const out = renderProps(
+    entity({
+      species: 'Human',
+      image: 'Ilsa_Crowe_portrait.png',
+      appearances: '47',
+      voice: 'Some Actor',
+      first: 'Episode 1',
+      categories: ['Characters', 'Wardens'],
+      infoboxTemplate: 'Infobox character',
+    }),
+  );
+  assert.equal(out, 'species: Human', 'only the whitelisted key survives');
+  assert.doesNotMatch(out, /png|Actor|Episode|Infobox/, 'no production trivia leaks in as in-world fact');
+});
+
+test('renderProps ignores non-scalar values instead of stringifying them', () => {
+  // `props.categories` is an array and other wikis nest objects; both would
+  // render as "[object Object]" or a comma soup if passed through blindly.
+  assert.equal(renderProps(entity({ status: { alive: true }, species: ['Human'], rank: 'Warden' })), 'rank: Warden');
+});
+
+test('renderProps clips a long value and bounds the key count', () => {
+  const long = renderProps(entity({ relatives: 'Bram the Lesser (brother); '.repeat(20) }));
+  assert.ok(long.length < 160, `one runaway field cannot eat the slot, got ${long.length}`);
+  assert.ok(long.endsWith('…'), 'the cut is marked');
+
+  const many = renderProps(
+    entity({
+      species: 'Human', gender: 'Female', age: '34', born: '412 AV', status: 'Alive',
+      occupation: 'Warden', title: 'Warden of Duskhollow', rank: 'Captain',
+      affiliation: 'Wardens', leader: 'herself', region: 'The Vale',
+    }),
+    3,
+  );
+  assert.equal(many.split(' | ').length, 3, 'maxKeys is honoured');
+});
+
+test('thumbnail carries a two-key slice, so an offstage name is still legible', () => {
+  const t = thumbnail(entity({ species: 'Human', status: 'Alive', affiliation: 'Wardens of the Vale' }));
+  assert.match(t, /^id=char:ilsa name=Ilsa Crowe \(Character\)/, 'the existing shape is unchanged');
+  assert.match(t, /\[species: Human \| status: Alive\]$/, 'plus a bounded props slice');
+  assert.doesNotMatch(t, /affiliation/, 'a thumbnail stays a thumbnail');
+});
+
+test('thumbnail is unchanged when an entity has no whitelisted props', () => {
+  const t = thumbnail(entity({}));
+  assert.equal(t, 'id=char:ilsa name=Ilsa Crowe (Character) — Warden of Duskhollow.', 'no empty brackets');
+});
+
+test('renderSheet places canon attributes above the authored sheet', () => {
+  const sheet: CharacterSheet = {
+    entityId: 'char:ilsa',
+    identity: { goals: ['keep the bridge open'], wounds: [], fears: [], allegiances: [], competencies: [], secrets: [], arc: '' },
+    contract: { vows: [], drives: [], breakingPoint: '', costOfBreak: '' },
+    voice: { diction: 'terse', tics: [], samples: [], never: [] },
+    condition: { locationId: null, mood: '', injuries: [], inventory: [], intent: '', presentWith: [] },
+    appearance: { description: '', attire: '', markers: [], referenceImagePath: null, seed: null },
+    locks: [],
+    isPlayer: false,
+  };
+  const lines = renderSheet(entity({ species: 'Human', status: 'Alive' }), sheet).split('\n');
+  assert.equal(lines[0], 'id=char:ilsa name=Ilsa Crowe');
+  assert.equal(lines[1], 'summary: Warden of Duskhollow.');
+  assert.equal(lines[2], 'species: Human | status: Alive', 'canon fact before authored goals');
+  assert.equal(lines[3], 'goals: keep the bridge open');
+});
+
+test('renderSheet does not repeat props that pass A already mirrored onto the sheet', () => {
+  // Pass A copies infobox `affiliation` into identity.allegiances and
+  // `occupation` into competencies, so rendering both prints each fact twice.
+  const sheet: CharacterSheet = {
+    entityId: 'char:ilsa',
+    identity: { goals: [], wounds: [], fears: [], allegiances: ['Wardens of the Vale'], competencies: ['Warden'], secrets: [], arc: '' },
+    contract: { vows: [], drives: [], breakingPoint: '', costOfBreak: '' },
+    voice: { diction: '', tics: [], samples: [], never: [] },
+    condition: { locationId: null, mood: '', injuries: [], inventory: [], intent: '', presentWith: [] },
+    appearance: { description: '', attire: '', markers: [], referenceImagePath: null, seed: null },
+    locks: [],
+    isPlayer: false,
+  };
+  const out = renderSheet(entity({ species: 'Human', affiliation: 'Wardens of the Vale', occupation: 'Warden' }), sheet);
+
+  // Assert on the rendered lines rather than raw substring counts: "Warden" is
+  // a substring of "Wardens of the Vale", so counting occurrences measures the
+  // regex more than the behaviour.
+  const lines = out.split('\n');
+  assert.deepEqual(lines, [
+    'id=char:ilsa name=Ilsa Crowe',
+    'summary: Warden of Duskhollow.',
+    'species: Human',
+    'allegiances: Wardens of the Vale',
+    'competencies: Warden',
+  ]);
+  assert.ok(!lines.some((l) => l.startsWith('species: Human | affiliation')), 'no props line repeating the sheet');
+
+  // But a thumbnail has no sheet beside it, so there affiliation must survive.
+  assert.match(thumbnail(entity({ affiliation: 'Wardens of the Vale' })), /affiliation/);
 });

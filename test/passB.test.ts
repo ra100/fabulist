@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { World } from '../src/store/index.ts';
 import { WikiClient, fixtureFetcher } from '../src/ingest/client.ts';
 import { runPassA } from '../src/ingest/passA.ts';
-import { LlmPassBExtractor, PASSB_PREDICATES } from '../src/ingest/passB.ts';
+import { LlmPassBExtractor, PASSB_PREDICATES, clipQuote } from '../src/ingest/passB.ts';
 import { ingest } from '../src/ingest/depth.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import type { Provider } from '../src/providers/provider.ts';
@@ -244,5 +244,89 @@ test('extraction stats make a run judgeable rather than trusted', async () => {
   const dropped = extractor.stats.droppedNoEvidence + extractor.stats.droppedBadPredicate + extractor.stats.droppedUnknownObject;
   assert.ok(dropped > 0, 'the drop rate is visible');
   assert.ok(extractor.stats.relations > 0, 'alongside what was kept');
+  world.close();
+});
+
+// --------------------------------------------------------------- quote caps
+// Stored verbatim source text is the exposure that matters legally (see
+// docs/legal-briefing-fandom-ingest.md) and it silently eats frame budget.
+// Evidence was bounded by a character `slice` that cut mid-word; voice samples
+// had no length cap at all, making them the largest verbatim surface here.
+
+/** A provider that answers with one fixed payload, for cap assertions. */
+function fixedProvider(payload: unknown): Provider {
+  return {
+    id: 'x',
+    model: 'x',
+    capabilities: { contextWindow: 64_000, structuredOutput: 'native-schema', systemRole: true, streaming: false, costTier: 'free', charsPerToken: 4, proseQuality: 0, steerability: 0 },
+    async complete() {
+      return { text: JSON.stringify(payload), tokensIn: 1, tokensOut: 1, model: 'x', schemaEnforced: true };
+    },
+  };
+}
+
+test('clipQuote trims on a word boundary and marks the cut', () => {
+  assert.equal(clipQuote('one two three', 5), 'one two three', 'under the cap is untouched');
+  assert.equal(clipQuote('one two three four five six', 3), 'one two three…');
+  assert.equal(clipQuote('  collapses   inner\n\nwhitespace  ', 9), 'collapses inner whitespace');
+  assert.equal(clipQuote('', 5), '');
+  assert.equal(clipQuote('exactly three words', 3), 'exactly three words', 'the boundary is inclusive');
+});
+
+test('a long evidence span is stored clipped, but verified in full first', async () => {
+  const { world, c } = await seeded();
+  // A genuine span from the fixture page: verification must pass against the
+  // model's full quote, while only the trimmed version is stored.
+  const long =
+    'Ilsa Crowe is the Warden of Duskhollow and the ranking officer of the Wardens of the Vale.';
+  const provider = fixedProvider({
+    relations: [{ predicate: 'LEADS', object: 'Wardens of the Vale', evidence: long, weight: 0.8 }],
+    events: [],
+  });
+  const extractor = new LlmPassBExtractor({ provider, world, maxQuoteWords: 10 });
+  const out = await extractor.extract(
+    (await c.fetchPage('Warden Ilsa Crowe'))!,
+    world.graph.resolveName('Warden Ilsa Crowe')!,
+  );
+
+  assert.equal(out.edges.length, 1, 'the relation survived — clipping is not dropping');
+  const evidence = out.edges[0]!.evidence!;
+  assert.ok(evidence.endsWith('…'), 'the cut is marked');
+  assert.equal(evidence.replace('…', '').trim().split(' ').length, 10, 'exactly the cap');
+  assert.ok(long.startsWith(evidence.replace('…', '')), 'still a true prefix of the source sentence');
+  assert.equal(extractor.stats.clippedQuotes, 1, 'clipping is counted, not silent');
+  world.close();
+});
+
+test('voice samples are capped too, after being verified against the page', async () => {
+  const { world, c } = await seeded();
+  const provider = fixedProvider({
+    relations: [],
+    events: [],
+    voice: { diction: 'terse', samples: ['I have buried better people than you for less.'], tics: [], never: [] },
+  });
+  const extractor = new LlmPassBExtractor({ provider, world, maxQuoteWords: 4 });
+  const out = await extractor.extract(
+    (await c.fetchPage('Warden Ilsa Crowe'))!,
+    world.graph.resolveName('Warden Ilsa Crowe')!,
+  );
+
+  assert.equal(out.voiceCard!.samples![0], 'I have buried better…');
+  world.close();
+});
+
+test('a sample that is not on the page is dropped, not merely shortened', async () => {
+  const { world, c } = await seeded();
+  const provider = fixedProvider({
+    relations: [],
+    events: [],
+    voice: { diction: 'terse', samples: ['A line she never said anywhere on this page.'], tics: [], never: [] },
+  });
+  const extractor = new LlmPassBExtractor({ provider, world, maxQuoteWords: 4 });
+  const out = await extractor.extract(
+    (await c.fetchPage('Warden Ilsa Crowe'))!,
+    world.graph.resolveName('Warden Ilsa Crowe')!,
+  );
+  assert.deepEqual(out.voiceCard?.samples ?? [], [], 'hallucinated dialogue does not survive being shortened');
   world.close();
 });

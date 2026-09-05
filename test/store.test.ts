@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { World } from '../src/store/index.ts';
+import { checkpoint, openDb } from '../src/db/db.ts';
 import { createStory, resolveDefaultStory } from '../src/store/world.ts';
 
 function w() {
@@ -390,6 +394,110 @@ test('createStory records lineage when forked, and leaves it null for a fresh st
   const forked = createStory(world.db, { title: 'forked', forkedFrom: world.storyId, forkedAtScene: 4 });
   assert.equal(forked.forkedFrom, world.storyId);
   assert.equal(forked.forkedAtScene, 4);
+  world.close();
+});
+
+/**
+ * Regression: `witnessedEvents` used `participants LIKE '%id%'`, a substring
+ * match against the serialised JSON array, so any id the target was a prefix
+ * of matched too. Ids are name-derived slugs, so related characters routinely
+ * share stems and this fires in normal play rather than only in theory.
+ */
+test('witnessedEvents matches participants exactly, not as a substring', () => {
+  const world = w();
+  world.chronicle.addEvent({
+    scene: 1,
+    turn: 1,
+    text: 'the elder speaks alone',
+    participants: ['char:tem-the-elder'],
+    locationId: null,
+    significance: 0.5,
+    visibility: 'onscreen',
+    fromConsequenceId: null,
+  });
+
+  assert.equal(
+    world.chronicle.witnessedEvents('char:tem').length,
+    0,
+    'char:tem did not witness an event whose only participant was char:tem-the-elder',
+  );
+  assert.equal(world.chronicle.witnessedEvents('char:tem-the-elder').length, 1, 'the actual participant still matches');
+  world.close();
+});
+
+test('witnessedEvents finds a participant anywhere in the array, and respects visibility', () => {
+  const world = w();
+  const base = { locationId: null, significance: 0.5, fromConsequenceId: null } as const;
+  world.chronicle.addEvent({
+    ...base,
+    scene: 1,
+    turn: 1,
+    text: 'three in the room',
+    participants: ['char:a', 'char:tem', 'char:c'],
+    visibility: 'onscreen',
+  });
+  world.chronicle.addEvent({
+    ...base,
+    scene: 2,
+    turn: 1,
+    text: 'plotted where nobody could see',
+    participants: ['char:tem'],
+    visibility: 'offscreen-hidden',
+  });
+
+  const seen = world.chronicle.witnessedEvents('char:tem');
+  assert.equal(seen.length, 1, 'the hidden event is not witnessed');
+  assert.equal(seen[0]?.text, 'three in the room', 'found mid-array, not only at the head');
+  world.close();
+});
+
+/**
+ * The WAL grows by appended page images per commit, so a long session rewrites
+ * the same hot pages thousands of times and the sidecar can end up larger than
+ * the database it fronts. `journal_size_limit` is what lets the space come back
+ * after a checkpoint; the default of -1 reuses the file in place forever.
+ */
+test('the WAL stays bounded across many commits and truncates on checkpoint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'story-wal-'));
+  const path = join(dir, 'w.db');
+  try {
+    const db = openDb(path);
+    const limit = db.prepare('PRAGMA journal_size_limit').get() as { journal_size_limit: number };
+    assert.equal(limit.journal_size_limit, 4194304, 'a limit is set, not left at -1');
+
+    db.exec('CREATE TABLE wal_probe (x TEXT)');
+    const insert = db.prepare('INSERT INTO wal_probe VALUES (?)');
+    // Each run is its own implicit transaction, which is the shape that grows
+    // the WAL fastest — one page image appended per commit.
+    for (let i = 0; i < 3000; i++) insert.run('x'.repeat(400));
+
+    const walSize = () => {
+      try {
+        return statSync(`${path}-wal`).size;
+      } catch {
+        return 0;
+      }
+    };
+    assert.ok(
+      walSize() <= 6 * 1024 * 1024,
+      `wal should stay near the 4MB autocheckpoint threshold, was ${walSize()}`,
+    );
+
+    checkpoint(db);
+    assert.equal(walSize(), 0, 'checkpoint(TRUNCATE) gives the space back');
+
+    // The data survived the checkpoint — it was folded in, not discarded.
+    const n = db.prepare('SELECT COUNT(*) n FROM wal_probe').get() as { n: number };
+    assert.equal(n.n, 3000);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkpoint is a no-op rather than a throw on an in-memory database', () => {
+  const world = w();
+  assert.doesNotThrow(() => checkpoint(world.db), 'never in WAL mode, must not throw');
   world.close();
 });
 

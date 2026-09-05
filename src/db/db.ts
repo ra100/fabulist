@@ -19,8 +19,54 @@ export function rows<T>(rs: unknown[]): T[] {
 export function openDb(path = ':memory:'): Db {
   const db = new DatabaseSync(path);
   db.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
+  configure(db);
   migrate(db);
   return db;
+}
+
+/**
+ * Connection-scoped pragmas. `schema.sql` sets `journal_mode`/`foreign_keys`
+ * because they belong with the schema; these belong with the connection.
+ *
+ * `journal_size_limit` is the one that matters. WAL grows by appended page
+ * images per commit, not by logical data size, so a long play session rewrites
+ * the same hot pages thousands of times: a 320 KB world file was observed with
+ * a 4.6 MB sidecar. That is not a leak — it is exactly `wal_autocheckpoint`'s
+ * 1000-page default (1000 × 4096 = 4.1 MB), confirmed by pragma rather than
+ * guessed — but the default limit of -1 means the file is reused in place and
+ * never shrinks, so the high-water mark is permanent. A limit tells SQLite to
+ * truncate back down after each checkpoint.
+ *
+ * Left alone deliberately: `synchronous`. The default (FULL) is what makes a
+ * save survive a power cut, and this is somebody's novel.
+ */
+function configure(db: Db): void {
+  // 4 MB, matching the autocheckpoint threshold: the WAL is allowed to reach
+  // its natural checkpoint size, then gives the space back.
+  db.exec('PRAGMA journal_size_limit = 4194304');
+}
+
+/**
+ * Folds the WAL back into the main database and truncates the sidecar.
+ *
+ * Call at a natural pause — scene close — rather than per turn: a checkpoint
+ * is real I/O, and mid-scene is exactly when the player is waiting on prose.
+ * Also the right thing to call before handing a world file to anyone, since a
+ * WAL-mode database is really three files while open (`-wal`, `-shm`) and only
+ * the main file is meaningful once checkpointed.
+ *
+ * A checkpoint can legitimately fail to complete when another connection holds
+ * a read lock, and that is not an error worth propagating into a scene
+ * transition — the next one will catch up. `TRUNCATE` is the aggressive mode
+ * (block for writers, then zero the file) precisely because the caller has
+ * chosen a moment where blocking is acceptable.
+ */
+export function checkpoint(db: Db): void {
+  try {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  } catch {
+    // Busy, or not in WAL mode (`:memory:` never is). Nothing to recover from.
+  }
 }
 
 /**

@@ -33,7 +33,7 @@ import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { World } from '../store/index.ts';
-import { rows, tx } from '../db/db.ts';
+import { checkpoint, rows, tx } from '../db/db.ts';
 import { createStory, getStory } from '../store/world.ts';
 import type { Story, StoryId } from '../domain/types.ts';
 
@@ -363,11 +363,12 @@ export function branchSave(opts: BranchOptions): BranchResult {
   mkdirSync(dirname(toPath), { recursive: true });
 
   // WAL means recent writes may live in a sidecar file, so checkpoint the source
-  // into the main database before copying it.
+  // into the main database before copying it. `checkpoint` is the same pragma
+  // this open-coded, shared with the scene-close path (see `db.ts`).
   const source = World.open(fromPath, opts.storyId);
   const storyId = source.storyId;
   try {
-    source.db.exec(`PRAGMA wal_checkpoint(TRUNCATE)`);
+    checkpoint(source.db);
   } finally {
     source.close();
   }

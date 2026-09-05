@@ -135,16 +135,32 @@ export class ChronicleStore {
     ).map(toEvent);
   }
 
-  /** Events the player character actually witnessed, for POV-safe recall. */
+  /**
+   * Events the player character actually witnessed, for POV-safe recall.
+   *
+   * `participants` is a JSON array, so membership is tested with `json_each`
+   * rather than `LIKE '%id%'`. The `LIKE` form was a substring match on the
+   * serialised array, which matched any id the target was a *prefix* of:
+   * searching `char:tem` also returned events whose only participant was
+   * `char:tem-the-elder`. Reproduced directly against node:sqlite before this
+   * was rewritten, not inferred from reading the SQL.
+   *
+   * That mattered more than a wrong row count: this is the POV mask, so a
+   * false positive hands the Narrator an event the player character never saw
+   * — exactly the immersion break the epistemic layer exists to prevent. Ids
+   * being slugs derived from names (`slugId`) makes prefix collisions likely
+   * rather than theoretical, since related characters share name stems.
+   */
   witnessedEvents(playerId: EntityId, limit = 40): StoryEvent[] {
     return rows<EventRow>(
       this.db
         .prepare(
           `SELECT * FROM events
-           WHERE story_id = ? AND visibility = 'onscreen' AND participants LIKE ?
+           WHERE story_id = ? AND visibility = 'onscreen'
+             AND EXISTS (SELECT 1 FROM json_each(events.participants) WHERE value = ?)
            ORDER BY scene DESC, turn DESC LIMIT ?`,
         )
-        .all(this.storyId, `%${playerId}%`, limit),
+        .all(this.storyId, playerId, limit),
     )
       .map(toEvent)
       .reverse();

@@ -151,6 +151,19 @@ dropped: 18 unevidenced, 12 off-vocabulary, 11 unknown target
 Watch that second line. A suspiciously low drop rate usually means the extractor is
 inventing, not that the wiki is unusually clean.
 
+Stored quotes are capped at ~25 words (`maxQuoteWords`). The page check runs against the
+model's full quote and only the trimmed span is kept, so shortening never turns a real
+citation into an apparent hallucination. A sentence supports the same traceability claim as
+a paragraph at a fraction of the stored-text exposure, which matters if a world is ever
+shared — see `docs/legal-briefing-fandom-ingest.md`.
+
+The crawl identifies itself. Fandom's `robots.txt` grants `User-agent: *` an explicit
+`Allow: /api.php?` while blocking GPTBot, ClaudeBot and CCBot by name, so that generic
+allowance is the permission this relies on — and it holds only while the client is honestly
+generic. Set `userAgent` to something with your own contact details for a large crawl; an
+operator who can reach you sends mail before blocking a range. Never a browser-spoofing
+string: the Terms bar forged headers separately from the crawl rules.
+
 ---
 
 ## Providers
@@ -466,8 +479,12 @@ Node 24 runs TypeScript directly, so there is no backend build step. That rules 
 - **Streaming stops at the narrator.** The mechanical roles are not streamed and should not
   be, but that means a turn still has a silent stretch before prose starts.
 
-- **No vector store.** The Scene Frame uses graph traversal and fixed slots, which is the
-  meal; embeddings were always the garnish and are not wired up.
+- **No vector store, and no full-text search yet.** The Scene Frame uses graph traversal and
+  fixed slots, which is the meal; embeddings were always the garnish and are not wired up.
+  Measured since: 1–2 hop temporal traversal over 200k edges runs in 0.01–0.03 ms, so scale
+  is not the argument for adding one. FTS5 *is* already compiled into `node:sqlite` and is
+  the cheaper next step, but nothing persists section text for it to index yet. See
+  `.design/DBFIXES.md` and `docs/research/sqlite-search-vector-graph-briefing.md`.
 - **In-place retcon is not implemented, by choice.** Directives steer the future; changing
   the past means branching. Rewriting history in place would require recomputing every
   downstream consequence, and the design argues branching gets most of that value for a

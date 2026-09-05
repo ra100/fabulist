@@ -145,9 +145,23 @@ Then a two-pass extraction, cheap before expensive:
 "non-canon". Keep contradictions as *competing* edges with sources rather than picking a
 winner, and let the fidelity dial decide at play time.
 
-Practical notes: Fandom text is CC-BY-SA (fine personally, attribute if you share),
-crawl politely with caching, and store the page revision id so you can re-ingest
-incrementally.
+Practical notes: crawl politely with caching, identify the crawler honestly, and store the
+page revision id so you can re-ingest incrementally.
+
+On licensing, the original note here ("Fandom text is CC-BY-SA — fine personally, attribute
+if you share") was right in spirit and wrong on the details that decide anything. Checked
+against primary sources: it is **CC BY-SA 3.0 Unported, not 4.0** — 3.0 grants no sui
+generis database right and has no cure period — some wikis are BY-NC variants, and Fandom's
+commercial-use waiver runs only to Fandom, not to you. The Terms separately bar automated
+access "for any purpose" without permission *and* using content "for the development of any
+software program", while `robots.txt` explicitly allows `/api.php?` to generic agents. That
+tension is unresolved and is why honest identification matters.
+
+The bigger risk is not the CC layer at all: the fictional universes are third-party IP, and
+*Warner Bros. & Rowling v. RDR Books* (S.D.N.Y. 2008) held a for-profit structured reference
+work derived from a free fan wiki **not fair use**, on the volume of verbatim quotation.
+"Fine personally" holds; sharing or selling worlds does not follow from it. See
+`docs/legal-briefing-fandom-ingest.md`.
 
 ### 3.1 Depth modes
 
@@ -802,12 +816,22 @@ Bias: embedded and file-based, so one playthrough is one portable artifact and t
 no infrastructure to babysit.
 
 - **Graph:** plain SQLite node/edge tables to start — genuinely enough, and it removes a
-  dependency. Kùzu (embedded, Cypher, no server) is the natural upgrade once multi-hop
-  temporal queries get gnarly, but **check its maintenance status before adopting it**; I
-  have an unverified recollection that the company behind it wound down in 2025, and I
-  could not confirm either way in this session. Neo4j is the boring, safe fallback if you
-  decide you want real Cypher.
-- **Vectors:** sqlite-vec or LanceDB. Same file-based logic.
+  dependency. **Update: "to start" turned out to be "full stop."** Measured on 200k edges /
+  40k entities with an index on `(subject, valid_from, valid_to)`: 1-hop 0.01 ms, 2-hop
+  join 0.03 ms, depth-5 recursive CTE 0.01 ms. Multi-hop temporal queries never got gnarly
+  enough to need an engine change.
+  **Kùzu: do not adopt.** The recollection was right — `kuzudb/kuzu` is archived
+  (`archived: true`, and the README says so), final release v0.11.3 in October 2025, and the
+  extension server older versions download from has been retired, so even old installs
+  break. Neo4j embedded is not viable for Node either; the boring fallbacks if you ever do
+  want Cypher are a Neo4j *server* or DuckDB with recursive CTEs.
+- **Vectors:** deferred, not chosen. FTS5 is already compiled into `node:sqlite` (verified)
+  and is the cheaper first move — BM25 beats embeddings on rare proper nouns, which is most
+  of a fandom. If vectors are ever needed, `sqlite-vec` is a 162 KB extension and the only
+  option that keeps the one-portable-file property; LanceDB unpacks to 232 MB and DuckDB to
+  117 MB. Brute-force cosine in TS is fine below ~20k vectors and unusable at 200k (412 ms,
+  1.17 GB) — and `DatabaseSync` being synchronous means such a scan blocks the event loop
+  outright. See `docs/research/sqlite-search-vector-graph-briefing.md`.
 - **Structured output:** strict JSON schema with validation and repair-retry on the
   delta step. Non-negotiable; this is the load-bearing part.
 - **Orchestration:** a plain typed state machine. Resist agent frameworks here — the

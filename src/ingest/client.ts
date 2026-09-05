@@ -19,6 +19,24 @@ export interface FetchLike {
   (url: string): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 }
 
+/**
+ * Identifies the crawler honestly, which is load-bearing rather than polite.
+ *
+ * Fandom's `robots.txt` grants `User-agent: *` an explicit `Allow: /api.php?`
+ * while `Disallow: /`-ing GPTBot, ClaudeBot and CCBot by name. That generic
+ * allowance is the permission this ingest actually relies on, and relying on it
+ * only holds while we are honestly a generic client rather than a named one in
+ * disguise. Sending nothing (the previous behaviour — bare undici) is not
+ * dishonest, but it also gives an operator no way to identify or contact the
+ * source of the traffic, which is the first thing they look for.
+ *
+ * Deliberately never a browser-spoofing string: Fandom's Terms separately bar
+ * forging headers to disguise automated access, so a fake Mozilla UA would turn
+ * a defensible position into an indefensible one. See
+ * `docs/legal-briefing-fandom-ingest.md`.
+ */
+export const DEFAULT_USER_AGENT = 'Fabulist/0.1 (+https://github.com/fabulist/fabulist; local worldbuilding tool)';
+
 export interface ClientOptions {
   baseUrl: string;
   fetcher?: FetchLike;
@@ -26,6 +44,12 @@ export interface ClientOptions {
   delayMs?: number;
   /** Max titles per query; MediaWiki allows 50 for anonymous callers. */
   batchSize?: number;
+  /**
+   * Overrides `DEFAULT_USER_AGENT`. Worth setting to something with your own
+   * contact details for a large crawl — an operator who can reach you sends
+   * mail before blocking a range.
+   */
+  userAgent?: string;
 }
 
 interface QueryPage {
@@ -41,6 +65,7 @@ const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, m
 
 export class WikiClient {
   readonly baseUrl: string;
+  readonly userAgent: string;
   private fetcher: FetchLike;
   private delayMs: number;
   private batchSize: number;
@@ -50,7 +75,13 @@ export class WikiClient {
 
   constructor(opts: ClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');
-    this.fetcher = opts.fetcher ?? ((url: string) => fetch(url));
+    this.userAgent = opts.userAgent ?? DEFAULT_USER_AGENT;
+    // The header goes on the default fetcher rather than into `FetchLike`'s
+    // signature: an injected fetcher is a test fixture or a caller's own
+    // transport, and widening the interface would force every one of them to
+    // thread a header they do not use. A caller supplying real transport sets
+    // its own headers.
+    this.fetcher = opts.fetcher ?? ((url: string) => fetch(url, { headers: { 'User-Agent': this.userAgent } }));
     this.delayMs = opts.delayMs ?? 250;
     this.batchSize = Math.min(50, Math.max(1, opts.batchSize ?? 20));
   }

@@ -142,7 +142,40 @@ export interface LlmPassBOptions {
   minEvidence?: number;
   /** Verify the evidence quote actually occurs on the page. */
   verifyEvidence?: boolean;
+  /**
+   * Word ceiling for any single stored verbatim quote — evidence spans and
+   * voice samples alike. See `clipQuote`.
+   */
+  maxQuoteWords?: number;
   onError?: (title: string, err: unknown) => void;
+}
+
+/**
+ * Trims a verbatim quote to a word count, on a word boundary.
+ *
+ * Three reasons this is a hard cap rather than a suggestion:
+ *
+ * 1. **Legal.** Stored source text is the exposure that matters. `Warner Bros.
+ *    & Rowling v. RDR Books` (S.D.N.Y. 2008) turned on the *volume* of verbatim
+ *    quotation in a structured reference work derived from a fan wiki — the
+ *    closest decided analogue to what an ingest produces. A sentence-length
+ *    span supports the same traceability claim as a paragraph at a fraction of
+ *    the exposure. See `docs/legal-briefing-fandom-ingest.md`.
+ * 2. **Budget.** Evidence and samples are rendered into frames, so a runaway
+ *    quote spends tokens that present cast and location should have had.
+ * 3. **Quality.** A model that returns a whole section as "evidence" has not
+ *    located the claim. Clipping keeps the sentence that carries it.
+ *
+ * Word-based, not character-based: the previous `slice(0, 300)` cut mid-word
+ * and mid-sentence, which reads as corruption in the inspector and teaches the
+ * Narrator that broken text is normal.
+ */
+export function clipQuote(text: string, maxWords: number): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  const words = clean.split(' ');
+  if (words.length <= maxWords) return clean;
+  return `${words.slice(0, maxWords).join(' ')}…`;
 }
 
 export class LlmPassBExtractor implements PassBExtractor {
@@ -151,9 +184,10 @@ export class LlmPassBExtractor implements PassBExtractor {
   private pageBudget: number;
   private minEvidence: number;
   private verifyEvidence: boolean;
+  private maxQuoteWords: number;
   private onError: ((title: string, err: unknown) => void) | undefined;
   /** Counters, so a run can be judged rather than trusted. */
-  readonly stats = { pages: 0, relations: 0, droppedNoEvidence: 0, droppedUnknownObject: 0, droppedBadPredicate: 0, events: 0, voice: 0 };
+  readonly stats = { pages: 0, relations: 0, droppedNoEvidence: 0, droppedUnknownObject: 0, droppedBadPredicate: 0, events: 0, voice: 0, clippedQuotes: 0 };
 
   constructor(opts: LlmPassBOptions) {
     this.provider = opts.provider;
@@ -161,6 +195,10 @@ export class LlmPassBExtractor implements PassBExtractor {
     this.pageBudget = opts.pageBudget ?? 6000;
     this.minEvidence = opts.minEvidence ?? 12;
     this.verifyEvidence = opts.verifyEvidence ?? true;
+    // 25 words is about one full sentence of encyclopedia prose — enough to
+    // carry a claim and locate it on the page, short enough to stay clearly
+    // within quotation rather than reproduction.
+    this.maxQuoteWords = opts.maxQuoteWords ?? 25;
     this.onError = opts.onError;
   }
 
@@ -266,6 +304,13 @@ export class LlmPassBExtractor implements PassBExtractor {
     return lines.join('\n');
   }
 
+  /** Clips a stored quote and counts it, so a noisy extractor is visible in stats. */
+  private clip(text: string): string {
+    const out = clipQuote(text, this.maxQuoteWords);
+    if (out.endsWith('…')) this.stats.clippedQuotes++;
+    return out;
+  }
+
   /**
    * The gate between the model and the graph. Everything dropped here is counted,
    * because a silent drop rate is how you end up trusting a bad extractor.
@@ -306,7 +351,10 @@ export class LlmPassBExtractor implements PassBExtractor {
         predicate,
         objectName: target.name,
         weight: clamp(typeof rel.weight === 'number' ? rel.weight : 0.6),
-        evidence: evidence.slice(0, 300),
+        // Clipped *after* the page-verification above, not before: the check
+        // needs the model's full quote to confirm it occurs on the page, while
+        // only the trimmed span is stored.
+        evidence: this.clip(evidence),
       });
       this.stats.relations++;
     }
@@ -316,7 +364,10 @@ export class LlmPassBExtractor implements PassBExtractor {
       const text = String(ev.text ?? '').trim();
       if (text.length < 8) continue;
       out.events.push({
-        text: text.slice(0, 300),
+        // An event summary is the model's own paraphrase rather than a quote,
+        // so it is bounded generously — but still bounded, because a whole
+        // section pasted into `text` is a malformed event either way.
+        text: clipQuote(text, this.maxQuoteWords * 2),
         ...(typeof ev.inWorldDate === 'string' && ev.inWorldDate ? { inWorldDate: ev.inWorldDate } : {}),
         participants: asArray(ev.participants).map((p) => String(p)),
       });
@@ -328,7 +379,12 @@ export class LlmPassBExtractor implements PassBExtractor {
       const v = o.voice as Record<string, unknown>;
       const samples = asArray(v.samples)
         .map((s) => String(s).trim())
-        .filter((s) => s.length > 6 && (!this.verifyEvidence || haystack.includes(normalise(s))));
+        // Verify first, then clip — same ordering as evidence above. Samples had
+        // no length cap at all before this: `slice` bounded evidence but voice
+        // samples were stored at whatever length the model returned, which made
+        // them the largest verbatim surface in the schema.
+        .filter((s) => s.length > 6 && (!this.verifyEvidence || haystack.includes(normalise(s))))
+        .map((s) => this.clip(s));
       const card = {
         ...(typeof v.diction === 'string' && v.diction ? { diction: v.diction.slice(0, 240) } : {}),
         tics: asArray(v.tics).map((t) => String(t)).slice(0, 6),
