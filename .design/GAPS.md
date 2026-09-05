@@ -125,7 +125,7 @@ There is no way to get the book out — not text, not markdown, not anything. Fo
 writing tool that is a strange hole. Markdown and plain text cover it; scene and
 chapter headings come from the compaction work.
 
-### 2.3 No save management · M
+### 2.3 No save management · M · backend done, API/UI pending
 
 One `dbPath`, no way to list, open, name or delete a world. Branching writes files
 that then cannot be opened. Ingesting a second fandom means editing config and
@@ -134,6 +134,40 @@ restarting.
 `dbPath` is deliberately not runtime-patchable because the world is already open, so
 this needs a re-open path: close the world, open another, rebuild the engine. Worth
 doing properly rather than bolting on.
+
+**Multi-story migration (backend complete):** the deeper version of this gap is one
+level below file management — the app never supported more than one *story* per
+world file at all, so trying two independent playthroughs of the same fandom meant
+two separate server processes. That is fixed at the storage layer:
+
+- Schema: a `stories` table replaces the old `session` singleton. Canon
+  (`layer='canon'`) is unscoped and shared by every story in a world file; every
+  mutable table (entities/edges at `layer='chronicle'`, sheets, relationships,
+  facts/fact_knowledge, threads, events, consequences, turns, scenes, chapters,
+  directives, divergences, style_anchors, illustrations) carries `story_id` and is
+  isolated per story. `meta`, `ingest_pages` stay world-level.
+- Every store class takes a `storyId` and filters by it. `World.open()` auto-resolves
+  for the ~75 existing call sites that never think about multiple stories (a file
+  with exactly one story just binds to it); `World.withStory()` switches stories in
+  an already-open file with no reopen.
+- `Engine`/`Compactor`/`SetupService` resolve `World` live per call rather than
+  holding a captured reference — the same bug shape the SetupPlanner fix caught for
+  providers, one level up, since which story is "current" can now change under a
+  long-lived server process without a restart.
+- `forkStory(world, { fromStoryId, atScene? })`: the same-file fork primitive. Omit
+  `atScene` for a fresh, non-overlapping story sharing only canon ("start a new
+  story in this world"); pass it to copy that story's chronicle up to the scene
+  boundary first ("branch from here" / "continue from an earlier point"). Every
+  copied row gets a fresh id with cross-references remapped — a real bug (copying
+  with the original id, which collided with the still-live source row) was found
+  and fixed with real regression tests, not assumed correct from the design.
+  `branchSave` (cross-*file* fork, for handing off a save) sits on the same
+  primitives.
+
+**Still open:** none of this is reachable yet. `src/server/api.ts` has no
+story-list/create/switch/rename/delete routes, and the web client has no save/story
+browser — the topbar's "new" button is still the single, destructive, whole-file
+reset it always was. That is the remaining work for this gap: routes, then UI.
 
 ### 2.4 No session cost or token total · S · done
 
