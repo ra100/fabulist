@@ -10,7 +10,7 @@
  */
 import type { EntityType } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
-import { emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
+import { emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
 
 interface SeedEntity {
   id: string;
@@ -160,6 +160,12 @@ export function seedWorld(world: World, opts: SeedOptions = {}): void {
       never: ['raises his voice', 'threatens anyone', 'speaks of the last prior'],
     },
     condition: { ...emptyCondition(), locationId: 'loc:the-scriptorium', mood: 'guarded', inventory: ["Anselm's knife", 'a half-copied quire'], intent: 'get through the inspection without the cells being opened' },
+    appearance: {
+      ...emptyAppearance(),
+      description: 'A lean man of fifty-four, close-cropped grey hair, ink permanently under the nails of his right hand. Stands very still when listening.',
+      attire: 'The undyed wool habit of the Order of Verrow, rope-belted, sleeves pushed back for the desk.',
+      markers: ['a burn scar across the left forearm, always kept covered', 'reading spectacles worn low on the nose'],
+    },
     locks: [],
     isPlayer: true,
   }, 'canon');
@@ -188,27 +194,34 @@ export function seedWorld(world: World, opts: SeedOptions = {}): void {
       never: ['shouts', 'enjoys it'],
     },
     condition: { ...emptyCondition(), locationId: 'loc:the-garrison-yard', mood: 'tired', intent: 'inspect the lower cells today' },
+    appearance: {
+      ...emptyAppearance(),
+      description: 'Mid-forties, weathered, the build of a soldier gone slightly soft behind a desk. Pale grey eyes, deliberate posture.',
+      attire: 'Garrison officer\'s coat, crown-blue over grey, always buttoned to the collar regardless of weather.',
+      markers: ['a healed break in the nose, slightly off-centre'],
+    },
     locks: [],
     isPlayer: false,
   }, 'canon');
 
-  const supporting: Array<[string, string, string[], string, string]> = [
-    ['char:sister-oria', 'Practical, warm, unsentimental about death.', ['keep everyone through the winter'], 'loc:the-scriptorium', 'busy'],
-    ['char:novice-tem', 'Eager, too fast, quotes things he half understands.', ['be trusted with something real'], 'loc:the-scriptorium', 'restless'],
-    ['char:hela-vask', 'Blunt, transactional, funny when it costs her nothing.', ['get paid', 'not get caught'], 'loc:the-drowned-mill', 'wary'],
-    ['char:sergeant-doff', 'Flat, cheerful, faintly hungry.', ['catch the Order at it'], 'loc:the-garrison-yard', 'keen'],
-    ['char:prior-galt', 'Formal, tired, speaks in the passive voice about anything difficult.', ['keep the Accommodation'], 'loc:saint-verrow', 'anxious'],
-    ['char:the-widow-marn', 'Chatty, shrewd, never quite lies.', ['stay on everyone\'s good side'], 'loc:the-north-gate', 'watchful'],
-    ['char:dural-vask', 'Few words, all of them concrete. Talks about weather and footing.', ['keep his sister out of the cells'], 'loc:the-north-gate', 'uneasy'],
+  const supporting: Array<[string, string, string[], string, string, string]> = [
+    ['char:sister-oria', 'Practical, warm, unsentimental about death.', ['keep everyone through the winter'], 'loc:the-scriptorium', 'busy', 'Stout, sixty, hands stained green-brown from the herb store. Moves fast for her age.'],
+    ['char:novice-tem', 'Eager, too fast, quotes things he half understands.', ['be trusted with something real'], 'loc:the-scriptorium', 'restless', 'Seventeen, gangly, ink-spotted novice habit, hair that will not stay cut short.'],
+    ['char:hela-vask', 'Blunt, transactional, funny when it costs her nothing.', ['get paid', 'not get caught'], 'loc:the-drowned-mill', 'wary', 'Thirty, weathered from mountain weather, a mountaineer\'s coat over trail leathers, rope coiled at the hip.'],
+    ['char:sergeant-doff', 'Flat, cheerful, faintly hungry.', ['catch the Order at it'], 'loc:the-garrison-yard', 'keen', 'Thick-necked, garrison sergeant\'s coat, a grin that does not reach the eyes.'],
+    ['char:prior-galt', 'Formal, tired, speaks in the passive voice about anything difficult.', ['keep the Accommodation'], 'loc:saint-verrow', 'anxious', 'Elderly, stooped, the Order\'s good ceremonial habit worn slightly too large for him now.'],
+    ['char:the-widow-marn', 'Chatty, shrewd, never quite lies.', ['stay on everyone\'s good side'], 'loc:the-north-gate', 'watchful', 'Fifties, sharp-eyed, an innkeeper\'s apron over good wool, rings on every finger.'],
+    ['char:dural-vask', 'Few words, all of them concrete. Talks about weather and footing.', ['keep his sister out of the cells'], 'loc:the-north-gate', 'uneasy', 'Twenties, rangy, sun-cracked skin, the same mountaineer\'s coat as his sister in a smaller size.'],
   ];
 
-  for (const [id, diction, goals, locationId, mood] of supporting) {
+  for (const [id, diction, goals, locationId, mood, description] of supporting) {
     world.cast.put({
       entityId: id,
       identity: { ...emptyIdentity(), goals },
       contract: emptyContract(),
       voice: { ...emptyVoice(), diction },
       condition: { ...emptyCondition(), locationId, mood },
+      appearance: { ...emptyAppearance(), description },
       locks: [],
       isPlayer: false,
     }, 'canon');

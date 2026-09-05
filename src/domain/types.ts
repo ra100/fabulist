@@ -126,12 +126,38 @@ export interface Condition {
   presentWith: EntityId[];
 }
 
+/**
+ * Visual identity, slow like `Identity` and `VoiceCard` — it describes what
+ * stays true across every illustration of this entity, not what changed this
+ * scene. This is the character-consistency anchor (§ illustration): every
+ * generation prompt is built by appending scene-specific detail to this text,
+ * never by replacing it, and by conditioning on `referenceImagePath` when the
+ * active image provider supports image input. See `.design/ILLUSTRATIONS.md`.
+ */
+export interface Appearance {
+  /** Durable visual description: build, face, colouring, bearing. Not clothing-of-the-day. */
+  description: string;
+  /** What they wear by default. A `conditionUpdates` change to inventory does not touch this. */
+  attire: string;
+  /** Distinguishing marks — scars, tattoos, a missing hand — that must recur in every image. */
+  markers: string[];
+  /** First image generated for this entity. Every later prompt is conditioned on it when the provider allows. */
+  referenceImagePath: string | null;
+  /** The seed used for the reference image. Reusing it is the cheapest consistency lever a seed-based model offers. */
+  seed: number | null;
+}
+
+export function emptyAppearance(): Appearance {
+  return { description: '', attire: '', markers: [], referenceImagePath: null, seed: null };
+}
+
 export interface CharacterSheet {
   entityId: EntityId;
   identity: Identity;
   contract: Contract;
   voice: VoiceCard;
   condition: Condition;
+  appearance: Appearance;
   /** Dot-paths the player locked; the AI must treat these as ground truth. */
   locks: string[];
   isPlayer: boolean;
@@ -212,6 +238,38 @@ export interface Consequence {
   firedScene: number | null;
   /** Set when a directive supersedes it (DESIGN §7.3). */
   supersededBy: string | null;
+}
+
+// -------------------------------------------------------------- illustration
+
+export type IllustrationId = string;
+export type IllustrationSubject =
+  | { kind: 'scene'; turnId: string; locationId: EntityId | null }
+  | { kind: 'portrait'; entityId: EntityId };
+
+export type IllustrationStatus = 'pending' | 'done' | 'failed';
+
+/**
+ * One generated image. The scene/portrait split matters because the two are
+ * conditioned differently: a portrait is conditioned on the entity's own
+ * `Appearance` and reused as a reference forever after; a scene is conditioned
+ * on the location card plus every present character's appearance, and is not
+ * itself reused as a reference — it is disposable in a way a portrait is not.
+ */
+export interface Illustration {
+  id: IllustrationId;
+  subject: IllustrationSubject;
+  visualStyle: VisualStyle;
+  prompt: string;
+  negativePrompt: string;
+  seed: number | null;
+  provider: string;
+  status: IllustrationStatus;
+  /** Relative path under the world's image store, or null while pending/failed. */
+  path: string | null;
+  error: string | null;
+  createdScene: number;
+  createdAt: string;
 }
 
 // -------------------------------------------------------------------- events
@@ -379,6 +437,18 @@ export interface RefereeVerdict {
 
 // ------------------------------------------------------------- style / lint
 
+/**
+ * The rendering treatment for illustration, independent of the prose register.
+ * Kept on the style contract because both answer "how is this told", and both
+ * are meant to be changed mid-campaign without touching what happened — the
+ * same regenerable-projection argument as §7.2, extended to images. The five
+ * options are deliberately the ones asked for directly — realistic, drawing,
+ * sketch, draft, animation — rather than a longer taste-driven list; each
+ * maps to a concrete prompt fragment and negative-prompt pairing in
+ * `illustration/composer.ts`, not just an adjective.
+ */
+export type VisualStyle = 'realistic' | 'drawing' | 'sketch' | 'draft' | 'animation';
+
 export interface StyleContract {
   pov: 'first' | 'third-limited' | 'third-omniscient' | 'second';
   tense: 'past' | 'present';
@@ -393,6 +463,9 @@ export interface StyleContract {
   comparables: string[];
   forbidden: string[];
   contentBounds: string[];
+  visualStyle: VisualStyle;
+  /** Master world-visual anchor, appended to every scene and portrait prompt (see illustration §consistency). */
+  visualAnchor: string;
 }
 
 export function defaultStyleContract(): StyleContract {
@@ -409,6 +482,8 @@ export function defaultStyleContract(): StyleContract {
     comparables: [],
     forbidden: [],
     contentBounds: [],
+    visualStyle: 'drawing',
+    visualAnchor: '',
   };
 }
 

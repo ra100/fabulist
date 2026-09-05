@@ -34,6 +34,14 @@ export interface Vow {
   brokenScene: number | null;
 }
 
+export interface Appearance {
+  description: string;
+  attire: string;
+  markers: string[];
+  referenceImagePath: string | null;
+  seed: number | null;
+}
+
 export interface Sheet {
   entityId: string;
   identity: {
@@ -46,6 +54,7 @@ export interface Sheet {
     locationId: string | null; mood: string; injuries: string[];
     inventory: string[]; intent: string; presentWith: string[];
   };
+  appearance: Appearance;
   locks: string[];
   isPlayer: boolean;
 }
@@ -63,10 +72,20 @@ export interface Consequence {
   trigger: { kind: string; scenes?: number };
 }
 
+export type VisualStyle = 'realistic' | 'drawing' | 'sketch' | 'draft' | 'animation';
+export const VISUAL_STYLES: Array<{ key: VisualStyle; label: string }> = [
+  { key: 'realistic', label: 'realistic' },
+  { key: 'drawing', label: 'drawing' },
+  { key: 'sketch', label: 'sketch' },
+  { key: 'draft', label: 'draft' },
+  { key: 'animation', label: 'animation' },
+];
+
 export interface StyleContract {
   pov: string; tense: string; register: string; density: string; dialogueRatio: number;
   genreLens: string; humor: string; pacing: string; sceneTarget: number;
   comparables: string[]; forbidden: string[]; contentBounds: string[];
+  visualStyle: VisualStyle; visualAnchor: string;
 }
 
 export interface Knobs {
@@ -241,6 +260,46 @@ export interface ProbeResult {
   note?: string;
 }
 
+// ------------------------------------------------------------- illustration
+
+export interface ComposedPrompt {
+  prompt: string;
+  negativePrompt: string;
+}
+
+export type IllustrationSubject =
+  | { kind: 'scene'; turnId: string; locationId: string | null }
+  | { kind: 'portrait'; entityId: string };
+
+export interface Illustration {
+  id: string;
+  subject: IllustrationSubject;
+  visualStyle: VisualStyle;
+  prompt: string;
+  negativePrompt: string;
+  seed: number | null;
+  provider: string;
+  status: 'pending' | 'done' | 'failed';
+  path: string | null;
+  error: string | null;
+  createdScene: number;
+  createdAt: string;
+}
+
+export interface ImageProbeResult {
+  key: string;
+  kind: string;
+  model: string;
+  status: 'ready' | 'unavailable' | 'unknown';
+  detail: string;
+  fix: string;
+}
+
+export interface ImageProvidersReport {
+  profile: string;
+  results: ImageProbeResult[];
+}
+
 export interface ProvidersReport {
   profile: string;
   results: ProbeResult[];
@@ -331,6 +390,9 @@ export const api = {
   play: (input: string, overrideIntegrity = false) => post<PlayResponse>('/play', { input, overrideIntegrity }),
   turn: (id: string) => req<{ id: string; meta: TurnMeta; delta: unknown }>(`/turn/${encodeURIComponent(id)}`),
   pin: (id: string, pinned: boolean) => post(`/turn/${encodeURIComponent(id)}/pin`, { pinned }),
+  /** Re-renders a turn's prose from its stored delta; what happened never changes. */
+  regenerate: (id: string, note?: string) =>
+    post<{ id: string; bookProse: string; pinned: boolean }>(`/turn/${encodeURIComponent(id)}/regenerate`, note ? { note } : {}),
   threads: () => req<Thread[]>('/threads'),
   updateThread: (id: string, patch: Partial<Thread>) => put<Thread>(`/thread/${encodeURIComponent(id)}`, patch),
   consequences: () => req<Consequence[]>('/consequences'),
@@ -367,6 +429,27 @@ export const api = {
     unblock: (phrase: string) => post<PatchResult>('/config/blocklist', { phrase, remove: true }),
   },
   setProfile: (profile: string) => post<{ profile: string; ok: boolean; notes: string[] }>('/providers/profile', { profile }),
+
+  illustrate: {
+    portrait: (entityId: string, visualStyle?: VisualStyle) =>
+      post<Illustration>(`/illustrate/portrait/${encodeURIComponent(entityId)}`, visualStyle ? { visualStyle } : {}),
+    scene: (turnId: string, visualStyle?: VisualStyle) =>
+      post<Illustration>(`/illustrate/scene/${encodeURIComponent(turnId)}`, visualStyle ? { visualStyle } : {}),
+    /** The prompt alone, no provider required — the copy-paste fallback when no vision model is configured. */
+    portraitPrompt: (entityId: string, visualStyle?: VisualStyle) =>
+      req<ComposedPrompt>(`/illustrate/portrait/${encodeURIComponent(entityId)}/prompt${visualStyle ? `?visualStyle=${visualStyle}` : ''}`),
+    scenePrompt: (turnId: string, visualStyle?: VisualStyle) =>
+      req<ComposedPrompt>(`/illustrate/scene/${encodeURIComponent(turnId)}/prompt${visualStyle ? `?visualStyle=${visualStyle}` : ''}`),
+    forTurn: (turnId: string) => req<Illustration[]>(`/illustrations/turn/${encodeURIComponent(turnId)}`),
+    forEntity: (entityId: string) => req<Illustration[]>(`/illustrations/entity/${encodeURIComponent(entityId)}`),
+    remove: (id: string) => req(`/illustration/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    /** The bytes live behind this URL; components hand it straight to an `<img src>`. */
+    imageUrl: (id: string) => `/api/illustration/${encodeURIComponent(id)}/image`,
+  },
+  images: {
+    providers: () => req<ImageProvidersReport>('/images/providers'),
+    setProfile: (profile: string | null) => post<{ profile: string; ok: boolean; notes: string[] }>('/images/profile', { profile }),
+  },
 
   /**
    * Streams a turn. Narration arrives as it is written, which for a writing tool

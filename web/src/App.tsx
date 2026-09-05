@@ -7,6 +7,7 @@ import {
   type Entity,
   type EntityDetail,
   type Fact,
+  type ImageProvidersReport,
   type Interrupt,
   type Sheet,
   type PlayResponse,
@@ -18,6 +19,7 @@ import {
 import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
 import { ConfigPanels } from './views/ConfigPanels.tsx';
+import { AppearanceEditor, PortraitPanel, SceneIllustration, StylePicker } from './views/Illustration.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 
@@ -171,6 +173,11 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
   const [arrivingId, setArrivingId] = useState<string | null>(null);
   const seenIds = useRef<Set<string> | null>(null);
   const [closingScene, setClosingScene] = useState(false);
+  /** Which turn's reroll note field is open, if any — one at a time. */
+  const [rerollOpenId, setRerollOpenId] = useState<string | null>(null);
+  const [rerollNote, setRerollNote] = useState('');
+  /** Which turn is mid-reroll, so its button can say so and nothing else races it. */
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const book = await api.book();
@@ -291,6 +298,26 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
     setClosingScene(false);
   }
 
+  /**
+   * Re-renders one turn's prose in place. Different sentences, same events —
+   * the delta already committed never moves, only `bookProse` does (DESIGN
+   * §7.2). `note` is an optional steering hint for the common case of "reroll,
+   * but fix this one thing" rather than a blind retry.
+   */
+  async function regenerate(id: string, note: string) {
+    if (regeneratingId) return;
+    setRegeneratingId(id);
+    try {
+      await api.regenerate(id, note.trim() || undefined);
+      setRerollOpenId(null);
+      setRerollNote('');
+      await load();
+    } catch (e) {
+      setNotes([e instanceof Error ? e.message : String(e)]);
+    }
+    setRegeneratingId(null);
+  }
+
   return (
     <div className="main">
       <div className="pane" style={{ display: 'flex', flexDirection: 'column', padding: 0 }}>
@@ -317,11 +344,44 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
                 <span className="folio">{t.scene}·{t.turn}</span>
                 <div className="raw">{t.rawInput}</div>
                 <p className="prose">{t.bookProse}</p>
+                <SceneIllustration turnId={t.id} defaultStyle={state?.session.style.visualStyle ?? 'drawing'} />
+                {rerollOpenId === t.id ? (
+                  <div className="row" style={{ margin: '4px 0 6px', gap: 'var(--s2)' }}>
+                    <input
+                      autoFocus
+                      value={rerollNote}
+                      placeholder="steer it, or leave blank for a plain reroll"
+                      onChange={(e) => setRerollNote(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void regenerate(t.id, rerollNote);
+                        if (e.key === 'Escape') { setRerollOpenId(null); setRerollNote(''); }
+                      }}
+                    />
+                    <button
+                      className="primary"
+                      disabled={regeneratingId === t.id}
+                      onClick={() => regenerate(t.id, rerollNote)}
+                    >
+                      {regeneratingId === t.id ? 'rerolling…' : 'reroll'}
+                    </button>
+                    <button onClick={() => { setRerollOpenId(null); setRerollNote(''); }}>cancel</button>
+                  </div>
+                ) : null}
                 <div className="turn-tools">
                   {t.move ? <span className="move" title="gm move">{t.move}</span> : null}
                   {t.integrity && t.integrity !== 'in-character' ? <span className="status ripening">{t.integrity}</span> : null}
                   {t.lintScore != null && t.lintScore > 0 ? <span className="mono">lint {t.lintScore}</span> : null}
                   <span className="grow" />
+                  <button
+                    title={t.pinned ? 'pinned passages are never rewritten' : 'different sentences, same events — what happened does not change'}
+                    disabled={t.pinned || regeneratingId === t.id}
+                    onClick={() => {
+                      if (rerollOpenId === t.id) { setRerollOpenId(null); setRerollNote(''); }
+                      else { setRerollOpenId(t.id); setRerollNote(''); }
+                    }}
+                  >
+                    reroll
+                  </button>
                   <button
                     onClick={async () => {
                       await api.pin(t.id, !t.pinned);
@@ -797,11 +857,19 @@ function EntityPanel({
 function CastTab() {
   const [cast, setCast] = useState<Array<{ sheet: Sheet; entity: Entity | null }>>([]);
   const [openId, setOpenId] = useState<string | null>(null);
+  // Same canon/chronicle distinction the graph tab filters on: canon is the
+  // ingested source material, chronicle is what this playthrough has changed
+  // or invented. Without it, ingest noise (a mistyped index page, a stray
+  // navigation entity) sits in the same list as the cast actually being
+  // played, with nothing to separate them.
+  const [layer, setLayer] = useState('');
 
   const load = useCallback(async () => setCast(await api.cast()), []);
   useEffect(() => {
     void load();
   }, [load]);
+
+  const visible = layer ? cast.filter(({ entity }) => entity?.layer === layer) : cast;
 
   // Location ids are slugs in the model; the reader wants the name.
   const placeName = (id: string | null | undefined) =>
@@ -810,8 +878,16 @@ function CastTab() {
   return (
     <div className="main">
       <div className="pane">
+        <div className="row" style={{ marginBottom: 11 }}>
+          <select value={layer} onChange={(e) => setLayer(e.target.value)} style={{ width: 170 }}>
+            <option value="">both layers</option>
+            <option value="canon">canon only</option>
+            <option value="chronicle">chronicle only</option>
+          </select>
+          <span className="dimmer small grow">{visible.length} of {cast.length} shown</span>
+        </div>
         <div className="cast-grid">
-          {cast.map(({ sheet, entity }) => {
+          {visible.map(({ sheet, entity }) => {
             const open = openId === sheet.entityId;
             return (
             <div key={sheet.entityId} className={`card${open ? ' span' : ''}`}>
@@ -819,6 +895,7 @@ function CastTab() {
                 <h2 className="name grow">
                   {entity?.name ?? sheet.entityId}{' '}
                   {sheet.isPlayer ? <span className="tag locked">player</span> : null}
+                  {entity ? <span className={`tag ${entity.layer}`}>{entity.layer}</span> : null}
                 </h2>
                 <button onClick={() => setOpenId(open ? null : sheet.entityId)}>
                   {open ? 'less' : 'more'}
@@ -883,6 +960,10 @@ function CastTab() {
                       ) : null}
                     </>
                   ) : null}
+
+                  <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>appearance</h3>
+                  <PortraitPanel sheet={sheet} onChanged={load} />
+                  <AppearanceEditor sheet={sheet} onSaved={load} />
 
                   <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>identity</h3>
                   <dl className="kv">
@@ -1335,9 +1416,23 @@ function SettingsTab({ state, onChanged }: { state: State | null; onChanged: () 
                 onBlur={(e) => void saveStyle({ sceneTarget: Number(e.target.value) })}
               />
             </label>
+            <label className="field-row">
+              <span>illustration style</span>
+              <StylePicker value={style.visualStyle} onChange={(v) => void saveStyle({ visualStyle: v })} />
+            </label>
+            <label className="field-row block">
+              <span>visual anchor</span>
+              <textarea
+                rows={2}
+                defaultValue={style.visualAnchor}
+                placeholder="what stays true in every image of this world — architecture, dress, light, palette"
+                onBlur={(e) => void saveStyle({ visualAnchor: e.target.value })}
+              />
+            </label>
           </div>
         ) : null}
 
+        <ImageProvidersPanel />
         <ProvidersPanel />
         <UsagePanel usage={state?.usage ?? null} />
         <ConfigPanels />
@@ -1456,6 +1551,112 @@ function UsagePanel({ usage }: { usage: State['usage'] | null }) {
               <span className="mono dimmer">{r.calls}× {r.tokensIn.toLocaleString()}→{r.tokensOut.toLocaleString()}</span>
             </div>
           ))}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Which image providers are usable here. Same probe-on-demand shape as
+ * `ProvidersPanel`, with one deliberate difference: "off" is always offered
+ * and is the honest default, because unlike text narration — which always
+ * needs *some* provider — illustration is optional, and a fresh install
+ * should not silently start writing image files nobody asked for.
+ */
+function ImageProvidersPanel() {
+  const [report, setReport] = useState<ImageProvidersReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const probe = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setReport(await api.images.providers());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  const badge = (status: string) =>
+    status === 'ready' ? (
+      <span className="status fired">ready</span>
+    ) : status === 'unknown' ? (
+      <span className="status pending">unknown</span>
+    ) : (
+      <span className="status pending">not set</span>
+    );
+
+  const setProfile = (name: string | null) =>
+    void (async () => {
+      setBusy(true);
+      setError(null);
+      try {
+        await api.images.setProfile(name);
+        setReport(await api.images.providers());
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+      setBusy(false);
+    })();
+
+  return (
+    <div className="card">
+      <div className="row">
+        <h3 className="grow" style={{ margin: 0 }}>illustration</h3>
+        <button disabled={busy} onClick={() => void probe()}>
+          {busy ? 'checking…' : report ? 'recheck' : 'check'}
+        </button>
+      </div>
+
+      {error ? <p className="small warn">{error}</p> : null}
+
+      {!report && !busy ? (
+        <p className="small dimmer" style={{ marginTop: 8 }}>
+          Checks a local ComfyUI server and shares the bedrock text providers' AWS credentials for the
+          image models. Off by default — nothing generates until a provider is chosen.
+        </p>
+      ) : null}
+
+      {report ? (
+        <>
+          <p className="small dim" style={{ marginTop: 8 }}>current: <b>{report.profile}</b></p>
+          {report.results.map((r) => (
+            <div key={r.key} className="provider">
+              <span className="provider-status">{badge(r.status)}</span>
+              <span className="mono">{r.key}</span>
+              <span className="provider-auth">{r.kind}</span>
+              {r.detail ? <span className="provider-detail">{r.detail}</span> : null}
+              {r.fix ? <span className="provider-fix">→ {r.fix}</span> : null}
+            </div>
+          ))}
+          <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>switch provider</h3>
+          <div className="row wrap">
+            <button
+              className={report.profile === 'none' ? 'primary' : ''}
+              aria-pressed={report.profile === 'none'}
+              disabled={busy || report.profile === 'none'}
+              onClick={() => setProfile(null)}
+            >
+              off
+            </button>
+            {report.results.map((r) => (
+              <button
+                key={r.key}
+                className={r.key === report.profile ? 'primary' : ''}
+                aria-pressed={r.key === report.profile}
+                disabled={busy || r.key === report.profile}
+                onClick={() => setProfile(r.key)}
+              >
+                {r.key}
+              </button>
+            ))}
+          </div>
+          <p className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
+            Takes effect on the next generation. No restart.
+          </p>
         </>
       ) : null}
     </div>

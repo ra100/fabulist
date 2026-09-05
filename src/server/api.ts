@@ -16,13 +16,17 @@ import {
   tickConsequences,
   worldTick,
 } from '../consequence/propagate.ts';
-import type { Condition, Directive, Knobs, StyleContract } from '../domain/types.ts';
+import type { Condition, Directive, Entity, Knobs, StyleContract, VisualStyle } from '../domain/types.ts';
 import { branchSave } from '../loop/branch.ts';
 import type { SetupService } from '../setup/service.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
-import { switchProfile } from '../config/config.ts';
+import type { SwappableImageRegistry } from '../providers/image.ts';
+import { switchImageProfile, switchProfile } from '../config/config.ts';
+import { probeImageProviders } from '../providers/imageConfig.ts';
 import { ROUTABLE_ROLES, validateSpec, type ConfigService } from '../config/service.ts';
 import { seedConsequences as seedCons, tickConsequences as tickCons, worldTick as wTick } from '../consequence/propagate.ts';
+import { IllustrationService, NoImageProviderError } from '../illustration/service.ts';
+import { composePortraitPrompt, composeScenePrompt } from '../illustration/composer.ts';
 
 export interface ServerOptions {
   world: World;
@@ -36,6 +40,10 @@ export interface ServerOptions {
   registry?: SwappableRegistry;
   /** Enables the configuration routes. */
   config?: ConfigService;
+  /** Enables the illustration routes. */
+  illustrations?: IllustrationService;
+  /** Enables live image-provider profile switching. */
+  imageRegistry?: SwappableImageRegistry;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -46,6 +54,8 @@ interface RouteContext {
   setup: SetupService | undefined;
   registry: SwappableRegistry | undefined;
   config: ConfigService | undefined;
+  illustrations: IllustrationService | undefined;
+  imageRegistry: SwappableImageRegistry | undefined;
   url: URL;
   body: unknown;
   params: Record<string, string>;
@@ -159,6 +169,15 @@ route('PUT', '/api/sheet/:id', (_req, res, { world, params, body }) => {
     contract: (patch.contract as typeof existing.contract) ?? existing.contract,
     voice: (patch.voice as typeof existing.voice) ?? existing.voice,
     condition: (patch.condition as Condition) ?? existing.condition,
+    // A patch's `appearance` never touches `referenceImagePath`/`seed` — those
+    // two fields are written exactly once, by `IllustrationService` on a
+    // successful portrait generation, not through this general-purpose sheet
+    // editor. Explicitly stripped rather than merged-over, so an edit to the
+    // description text cannot accidentally clear a reference that took a real
+    // provider call to produce.
+    appearance: patch.appearance
+      ? { ...existing.appearance, ...(patch.appearance as Record<string, unknown>), referenceImagePath: existing.appearance.referenceImagePath, seed: existing.appearance.seed }
+      : existing.appearance,
     locks: (patch.locks as string[]) ?? existing.locks,
   });
   send(res, 200, world.cast.get(id));
@@ -372,6 +391,128 @@ route('GET', '/api/frames', (_req, res, { engine }) => {
   const out: Record<string, unknown> = {};
   for (const [role, frame] of Object.entries(engine.lastFrames)) out[role] = frame.log;
   send(res, 200, out);
+});
+
+// -------------------------------------------------------------- illustration
+
+function requireIllustrations(res: ServerResponse, illustrations: IllustrationService | undefined): IllustrationService | null {
+  if (!illustrations) {
+    send(res, 503, { error: 'illustration is not enabled on this server' });
+    return null;
+  }
+  return illustrations;
+}
+
+const VISUAL_STYLES: VisualStyle[] = ['realistic', 'drawing', 'sketch', 'draft', 'animation'];
+function parseVisualStyle(v: unknown): VisualStyle | undefined {
+  return typeof v === 'string' && (VISUAL_STYLES as string[]).includes(v) ? (v as VisualStyle) : undefined;
+}
+
+/** Which image providers are usable here, mirroring `/api/providers` for text. */
+route('GET', '/api/images/providers', async (_req, res, { imageRegistry }) => {
+  const results = await probeImageProviders();
+  send(res, 200, { profile: imageRegistry?.profile() ?? 'none', results });
+});
+
+/** Same refuse-and-explain contract as `/api/providers/profile`. `profile: null` (or omitted) turns illustration off. */
+route('POST', '/api/images/profile', (_req, res, { imageRegistry, body }) => {
+  if (!imageRegistry) return send(res, 503, { error: 'no swappable image registry on this server' });
+  const { profile } = (body ?? {}) as { profile?: string | null };
+  const result = switchImageProfile(imageRegistry, profile ?? null);
+  if (!result.ok) return send(res, 400, { error: `"${profile}" is not usable`, notes: result.notes });
+  send(res, 200, result);
+});
+
+/**
+ * The composed prompt alone, with no provider call — the explicit fallback
+ * for "no vision model available here". Needs only `world`, not the
+ * illustration service, so it works even on a server that never wired one up.
+ */
+route('GET', '/api/illustrate/portrait/:id/prompt', (_req, res, { world, params, url }) => {
+  const entityId = decodeURIComponent(params.id ?? '');
+  const entity = world.graph.get(entityId);
+  if (!entity) return send(res, 404, { error: 'no such entity' });
+  const style = parseVisualStyle(url.searchParams.get('visualStyle'));
+  send(res, 200, composePortraitPrompt(entity, world.cast.getOrBlank(entityId), style ? { ...world.session.get().style, visualStyle: style } : world.session.get().style));
+});
+
+route('GET', '/api/illustrate/scene/:turnId/prompt', (_req, res, { world, params, url }) => {
+  const turnId = decodeURIComponent(params.turnId ?? '');
+  const turn = world.chronicle.getTurn(turnId);
+  if (!turn) return send(res, 404, { error: 'no such turn' });
+  const style = parseVisualStyle(url.searchParams.get('visualStyle'));
+  const firstEvent = turn.delta?.events[0];
+  const locationId = firstEvent?.locationId ?? world.session.get().currentLocationId ?? null;
+  const location = locationId ? world.graph.get(locationId) : undefined;
+  const present = (firstEvent?.participants ?? [])
+    .map((id) => world.graph.get(id))
+    .filter((e): e is Entity => !!e)
+    .map((entity) => ({ entity, sheet: world.cast.get(entity.id) }));
+  const styleContract = style ? { ...world.session.get().style, visualStyle: style } : world.session.get().style;
+  send(res, 200, composeScenePrompt(location, present, styleContract, turn.bookProse.slice(0, 400)));
+});
+
+/** Generates or regenerates a character's portrait. Sets `appearance.referenceImagePath` on success (see `IllustrationService`). */
+route('POST', '/api/illustrate/portrait/:id', async (_req, res, { illustrations, params, body }) => {
+  const svc = requireIllustrations(res, illustrations);
+  if (!svc) return;
+  const entityId = decodeURIComponent(params.id ?? '');
+  const style = parseVisualStyle((body as { visualStyle?: unknown } | undefined)?.visualStyle);
+  try {
+    send(res, 200, await svc.illustratePortrait(entityId, style));
+  } catch (err) {
+    send(res, err instanceof NoImageProviderError ? 400 : 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Generates a scene image for an already-committed turn. */
+route('POST', '/api/illustrate/scene/:turnId', async (_req, res, { world, illustrations, params, body }) => {
+  const svc = requireIllustrations(res, illustrations);
+  if (!svc) return;
+  const turnId = decodeURIComponent(params.turnId ?? '');
+  const turn = world.chronicle.getTurn(turnId);
+  if (!turn) return send(res, 404, { error: 'no such turn' });
+  const style = parseVisualStyle((body as { visualStyle?: unknown } | undefined)?.visualStyle);
+
+  // Present cast and location come from the delta the turn already committed,
+  // not from a fresh player-supplied list — the illustration must depict what
+  // actually happened, and the delta is the one place that is recorded.
+  const firstEvent = turn.delta?.events[0];
+  const locationId = firstEvent?.locationId ?? world.session.get().currentLocationId ?? null;
+  const presentIds = firstEvent?.participants ?? [];
+
+  try {
+    send(res, 200, await svc.illustrateScene(turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style));
+  } catch (err) {
+    send(res, err instanceof NoImageProviderError ? 400 : 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+route('GET', '/api/illustrations/turn/:turnId', (_req, res, { world, params }) => {
+  send(res, 200, world.illustrations.forTurn(decodeURIComponent(params.turnId ?? '')));
+});
+
+route('GET', '/api/illustrations/entity/:id', (_req, res, { world, params }) => {
+  send(res, 200, world.illustrations.forEntity(decodeURIComponent(params.id ?? '')));
+});
+
+route('DELETE', '/api/illustration/:id', (_req, res, { world, params }) => {
+  world.illustrations.delete(decodeURIComponent(params.id ?? ''));
+  send(res, 200, { ok: true });
+});
+
+/**
+ * Serves generated image bytes. A separate path from `serveStatic`'s
+ * `webRoot`, because the images directory lives beside the database
+ * (`store/illustration.ts`), not inside the built UI bundle, and can be
+ * anywhere the operator's `dbPath` puts it.
+ */
+route('GET', '/api/illustration/:id/image', (_req, res, { world, params }) => {
+  const illus = world.illustrations.get(decodeURIComponent(params.id ?? ''));
+  const abs = illus ? world.illustrations.absolutePath(illus) : null;
+  if (!abs || !existsSync(abs)) return send(res, 404, { error: 'no image' });
+  res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' });
+  res.end(readFileSync(abs));
 });
 
 route('GET', '/api/anchors', (_req, res, { world }) => {
@@ -759,7 +900,7 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
 }
 
 export function createApiServer(opts: ServerOptions) {
-  const { world, engine, webRoot, setup, registry, config } = opts;
+  const { world, engine, webRoot, setup, registry, config, illustrations, imageRegistry } = opts;
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -778,7 +919,7 @@ export function createApiServer(opts: ServerOptions) {
       const params = url.pathname.match(match.pattern)?.groups ?? {};
       try {
         const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
-        await match.handler(req, res, { world, engine, setup, registry, config, url, body, params });
+        await match.handler(req, res, { world, engine, setup, registry, config, illustrations, imageRegistry, url, body, params });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.

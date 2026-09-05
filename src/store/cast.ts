@@ -16,6 +16,7 @@
 import type { Db } from '../db/db.ts';
 import { jsonGet, row, rows } from '../db/db.ts';
 import type {
+  Appearance,
   CharacterSheet,
   Condition,
   Contract,
@@ -36,6 +37,7 @@ interface SheetRow {
   contract: string;
   voice: string;
   condition: string;
+  appearance: string;
   locks: string;
   is_player: number;
 }
@@ -52,6 +54,9 @@ export function emptyVoice(): VoiceCard {
 export function emptyCondition(): Condition {
   return { locationId: null, mood: '', injuries: [], inventory: [], intent: '', presentWith: [] };
 }
+export function emptyAppearance(): Appearance {
+  return { description: '', attire: '', markers: [], referenceImagePath: null, seed: null };
+}
 
 function toSheet(r: SheetRow): CharacterSheet {
   return {
@@ -60,6 +65,7 @@ function toSheet(r: SheetRow): CharacterSheet {
     contract: { ...emptyContract(), ...jsonGet<Partial<Contract>>(r.contract, {}) },
     voice: { ...emptyVoice(), ...jsonGet<Partial<VoiceCard>>(r.voice, {}) },
     condition: { ...emptyCondition(), ...jsonGet<Partial<Condition>>(r.condition, {}) },
+    appearance: { ...emptyAppearance(), ...jsonGet<Partial<Appearance>>(r.appearance, {}) },
     locks: jsonGet<string[]>(r.locks, []),
     isPlayer: r.is_player === 1,
   };
@@ -104,6 +110,7 @@ export class CastStore {
         contract: emptyContract(),
         voice: emptyVoice(),
         condition: emptyCondition(),
+        appearance: emptyAppearance(),
         locks: [],
         isPlayer: false,
       }
@@ -121,12 +128,12 @@ export class CastStore {
     const storyId = layer === 'canon' ? null : this.storyId;
     this.db
       .prepare(
-        `INSERT INTO sheets (entity_id, layer, story_id, identity, contract, voice, condition, locks, is_player)
-         VALUES (?,?,?,?,?,?,?,?,?)
+        `INSERT INTO sheets (entity_id, layer, story_id, identity, contract, voice, condition, appearance, locks, is_player)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(entity_id, layer, COALESCE(story_id, '')) DO UPDATE SET
            identity = excluded.identity, contract = excluded.contract,
            voice = excluded.voice, condition = excluded.condition,
-           locks = excluded.locks, is_player = excluded.is_player`,
+           appearance = excluded.appearance, locks = excluded.locks, is_player = excluded.is_player`,
       )
       .run(
         sheet.entityId,
@@ -136,6 +143,7 @@ export class CastStore {
         JSON.stringify(sheet.contract),
         JSON.stringify(sheet.voice),
         JSON.stringify(sheet.condition),
+        JSON.stringify(sheet.appearance),
         JSON.stringify(sheet.locks),
         sheet.isPlayer ? 1 : 0,
       );

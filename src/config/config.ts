@@ -8,6 +8,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { MockProvider } from '../providers/mock.ts';
 import { ProviderRegistry, SwappableRegistry, type Provider } from '../providers/provider.ts';
 import { buildProvider, MECHANIC_ROLES, PRESETS, PROFILES, type ProviderSpec } from '../providers/http.ts';
+import { buildImageProvider, IMAGE_PRESETS, type ImageProviderSpec } from '../providers/imageConfig.ts';
+import { SwappableImageRegistry } from '../providers/image.ts';
 
 export interface Config {
   /** Named profile, or 'mock' to run entirely offline. */
@@ -25,6 +27,16 @@ export interface Config {
    * useful for seeing the streaming view render without a real model attached.
    */
   mockTokenDelayMs?: number;
+  /**
+   * Named image-provider preset key, or absent for "no illustration". Unlike
+   * `profile`, there is no non-empty default — a fresh install has
+   * illustration off, not pointed at the mock, because turning image
+   * generation on is a choice with a cost (even the mock writes files to
+   * disk) that a text-only session should never pay without asking.
+   */
+  imageProfile?: string;
+  /** Extra image-provider specs beyond `IMAGE_PRESETS`, same override shape as `providers`. */
+  imageProviders?: Record<string, ImageProviderSpec>;
 }
 
 export function defaultConfig(): Config {
@@ -35,6 +47,7 @@ export function defaultConfig(): Config {
     dbPath: 'data/fabulist.db',
     proseLintThreshold: 6,
     blocklist: [],
+    imageProviders: {},
   };
 }
 
@@ -151,4 +164,52 @@ export function switchProfile(
   registry.swap(next, profile);
   saveConfig(cfg, configPath);
   return { profile, ok: true, notes };
+}
+
+// ------------------------------------------------------------------- images
+
+/**
+ * Builds an image registry from config. No fallback-to-mock here, unlike
+ * text: absent or unknown `imageProfile` means "illustration is off" is the
+ * correct, silent, expected outcome, not a degraded state worth a console note.
+ */
+export function buildImageRegistry(cfg: Config, env = process.env): { registry: SwappableImageRegistry; notes: string[] } {
+  const notes: string[] = [];
+  if (!cfg.imageProfile) return { registry: new SwappableImageRegistry(null, 'none'), notes };
+
+  const specs = { ...IMAGE_PRESETS, ...cfg.imageProviders };
+  const spec = specs[cfg.imageProfile];
+  if (!spec) {
+    notes.push(`unknown image provider key "${cfg.imageProfile}", illustration stays off`);
+    return { registry: new SwappableImageRegistry(null, 'none'), notes };
+  }
+  try {
+    return { registry: new SwappableImageRegistry(buildImageProvider(spec, env), cfg.imageProfile), notes };
+  } catch (err) {
+    notes.push(`image provider "${cfg.imageProfile}" failed to build: ${err instanceof Error ? err.message : String(err)}`);
+    return { registry: new SwappableImageRegistry(null, 'none'), notes };
+  }
+}
+
+export interface ImageSwitchResult {
+  profile: string;
+  ok: boolean;
+  notes: string[];
+}
+
+/** Same refuse-rather-than-degrade discipline as `switchProfile`, minus the mock-fallback special case: "off" (`profile: null`) is always a valid, explicit target here. */
+export function switchImageProfile(
+  registry: SwappableImageRegistry,
+  profile: string | null,
+  configPath = 'fabulist.config.json',
+  env = process.env,
+): ImageSwitchResult {
+  const cfg = { ...loadConfig(configPath), imageProfile: profile ?? undefined };
+  const { registry: next, notes } = buildImageRegistry(cfg, env);
+
+  if (profile && !next.get()) return { profile: registry.profile(), ok: false, notes };
+
+  registry.swap(next.get(), profile ?? 'none');
+  saveConfig(cfg, configPath);
+  return { profile: profile ?? 'none', ok: true, notes };
 }

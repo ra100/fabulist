@@ -291,6 +291,7 @@ test('two stories in the same world file share canon but never see each other\'s
     contract: { vows: [{ id: 'v1', text: 'never lie', rank: 1, broken: false, brokenScene: null }], drives: [], breakingPoint: '', costOfBreak: '' },
     voice: { diction: '', tics: [], samples: [], never: [] },
     condition: { locationId: null, mood: '', injuries: [], inventory: [], intent: '', presentWith: [] },
+    appearance: { description: '', attire: '', markers: [], referenceImagePath: null, seed: null },
     locks: [],
     isPlayer: false,
   }, 'canon');

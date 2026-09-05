@@ -7,7 +7,7 @@
  */
 import type { Entity, EntityType, StyleContract, Vow } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
-import { emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
+import { emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
 import { slugify } from '../ingest/parse.ts';
 import type { CharacterSketch } from './planner.ts';
 
@@ -108,6 +108,7 @@ export function applyCustomWorld(world: World, raw: Record<string, unknown>): Ap
       contract: { ...emptyContract(), vows: toVows(asArray(s.vows)) },
       voice: { ...emptyVoice(), diction: String(s.diction ?? '') },
       condition: { ...emptyCondition(), locationId },
+      appearance: emptyAppearance(),
       locks: [],
       isPlayer: entityId === result.playerCharacterId,
     }, 'canon');
@@ -123,6 +124,7 @@ export function applyCustomWorld(world: World, raw: Record<string, unknown>): Ap
       contract: emptyContract(),
       voice: emptyVoice(),
       condition: emptyCondition(),
+      appearance: emptyAppearance(),
       locks: [],
       isPlayer: true,
     }, 'canon');
@@ -253,6 +255,7 @@ export function assignPlayerCharacter(
     },
     voice: existing?.voice ?? emptyVoice(),
     condition: { ...(existing?.condition ?? emptyCondition()), locationId: start },
+    appearance: existing?.appearance ?? emptyAppearance(),
     locks: existing?.locks ?? [],
     isPlayer: true,
   });

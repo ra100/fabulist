@@ -16,6 +16,7 @@ import type { StoryId } from '../domain/types.ts';
 import { GraphStore } from './graph.ts';
 import { CastStore } from './cast.ts';
 import { ChronicleStore } from './chronicle.ts';
+import { IllustrationStore } from './illustration.ts';
 import {
   ConsequenceStore,
   DirectiveStore,
@@ -32,11 +33,12 @@ export class World {
   readonly consequences: ConsequenceStore;
   readonly directives: DirectiveStore;
   readonly session: StoryStore;
+  readonly illustrations: IllustrationStore;
 
   readonly db: Db;
   readonly storyId: StoryId;
 
-  constructor(db: Db, storyId: StoryId) {
+  constructor(db: Db, storyId: StoryId, imagesDir?: string) {
     this.db = db;
     this.storyId = storyId;
     this.graph = new GraphStore(db, storyId);
@@ -46,6 +48,13 @@ export class World {
     this.consequences = new ConsequenceStore(db, storyId);
     this.directives = new DirectiveStore(db, storyId);
     this.session = new StoryStore(db, storyId);
+    // Not derived from `dbPath` automatically: an in-memory database
+    // (`:memory:`, what every test uses) has no directory to derive from, and
+    // guessing one would mean every test that touches illustrations writes
+    // real files onto the repository's disk unless it remembers to override
+    // this. Explicit default instead; real callers (`cli/serve.ts`) pass the
+    // directory next to their actual `dbPath`.
+    this.illustrations = new IllustrationStore(db, storyId, imagesDir ?? 'data/images');
   }
 
   /**
@@ -55,14 +64,14 @@ export class World {
    * migration relies on exactly this), and a file with more than one throws
    * rather than silently guessing which story was meant.
    */
-  static open(path = ':memory:', storyId?: StoryId): World {
+  static open(path = ':memory:', storyId?: StoryId, imagesDir?: string): World {
     const db = openDb(path);
-    return new World(db, storyId ?? resolveDefaultStory(db));
+    return new World(db, storyId ?? resolveDefaultStory(db), imagesDir);
   }
 
   /** A second story in the same open file, without a second file handle. */
   withStory(storyId: StoryId): World {
-    return new World(this.db, storyId);
+    return new World(this.db, storyId, this.illustrations.imagesDir);
   }
 
   close(): void {

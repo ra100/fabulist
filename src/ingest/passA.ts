@@ -8,7 +8,7 @@
  */
 import type { DepthLevelValue, EntityType } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
-import { emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
+import { emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
 import type { WikiPage } from './client.ts';
 import {
   fieldValues,
@@ -199,12 +199,21 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
       if (home) condition.locationId = resolve(home);
     }
 
+    // Species is the cheapest real signal an infobox carries for how a
+    // character should be *drawn*, not just who they are. It seeds only the
+    // description, never overwrites a hand-written one, and never touches
+    // `referenceImagePath` — a re-ingest must not invalidate an existing
+    // portrait that play has already conditioned images on.
+    const appearance = { ...(existing?.appearance ?? emptyAppearance()) };
+    if (!appearance.description && f.species) appearance.description = `${f.species}.`;
+
     world.cast.put({
       entityId: p.id,
       identity,
       contract: existing?.contract ?? emptyContract(),
       voice,
       condition,
+      appearance,
       locks: existing?.locks ?? [],
       isPlayer: existing?.isPlayer ?? false,
     }, 'canon');

@@ -1,1 +1,9 @@
-{"profile":"mock","routes":{},"providers":{},"dbPath":"data/fabulist.db","proseLintThreshold":6,"blocklist":[]}
+{
+  "profile": "mock",
+  "routes": {},
+  "providers": {},
+  "dbPath": "data/fabulist.db",
+  "proseLintThreshold": 6,
+  "blocklist": [],
+  "imageProviders": {}
+}

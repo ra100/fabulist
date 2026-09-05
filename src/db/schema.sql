@@ -359,3 +359,39 @@ CREATE TABLE IF NOT EXISTS ingest_pages (
   score      REAL NOT NULL DEFAULT 0,
   fetched_at TEXT NOT NULL DEFAULT ''
 );
+
+-- -------------------------------------------------------------- illustration
+-- One row per generated image. Scene and portrait subjects are distinguished
+-- by `kind` rather than split into two tables, because they share every other
+-- column and a caller almost always wants "illustrations for this turn" or
+-- "illustrations for this entity" without a UNION.
+--
+-- Portraits double as the character-consistency anchor: `sheets.appearance`
+-- (an additive column, see `db.ts`'s migration step — this table postdates the
+-- original schema and `ALTER TABLE ... ADD COLUMN` has no `IF NOT EXISTS` in
+-- this SQLite version, confirmed directly rather than assumed) stores the
+-- winning image's path once one exists, and every later prompt for that
+-- entity is conditioned on it.
+
+CREATE TABLE IF NOT EXISTS illustrations (
+  id               TEXT PRIMARY KEY,
+  story_id         TEXT NOT NULL,
+  kind             TEXT NOT NULL CHECK (kind IN ('scene','portrait')),
+  turn_id          TEXT,
+  entity_id        TEXT,
+  location_id      TEXT,
+  visual_style     TEXT NOT NULL DEFAULT 'painterly',
+  prompt           TEXT NOT NULL DEFAULT '',
+  negative_prompt  TEXT NOT NULL DEFAULT '',
+  seed             INTEGER,
+  provider         TEXT NOT NULL DEFAULT '',
+  status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed')),
+  path             TEXT,
+  error            TEXT,
+  created_scene    INTEGER NOT NULL DEFAULT 0,
+  created_at       TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_illustrations_turn   ON illustrations(story_id, turn_id);
+CREATE INDEX IF NOT EXISTS idx_illustrations_entity ON illustrations(story_id, entity_id, created_at DESC);

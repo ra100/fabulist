@@ -2241,3 +2241,126 @@ button.link:hover { background: none; color: var(--ink); }
 .lint-finding { display: flex; align-items: center; gap: 6px; }
 .lint-finding button { padding: 0 5px; font-size: 10px; opacity: 0; transition: opacity 0.12s; }
 .lint-finding:hover button { opacity: 1; }
+
+/* ------------------------------------------------------------- illustration */
+/* Portrait panel (cast tab), scene panel (book tab), and the style picker
+   both share. Drawn frames, not photo cards: a rule border and the panel
+   surface, the same discipline every other container in this app already
+   uses, rather than a card-with-shadow treatment that would read as a
+   generic "media" component bolted on rather than authored for this app. */
+
+.style-picker {
+  display: flex;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+.style-picker button {
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  padding: 3px 9px;
+}
+
+.portrait-panel {
+  display: flex;
+  gap: var(--s4);
+  align-items: flex-start;
+  margin-top: var(--s3);
+  /* Bounded, not flex:1-into-empty-space — the frame and the style row are
+     the whole of this component's content, and letting the row stretch to
+     the sheet's full 62rem measure just because nothing else claims the
+     width is an unbalanced composition, not a generous one. */
+  max-width: var(--measure-prose);
+}
+.portrait-frame {
+  flex: none;
+  width: 128px;
+  height: 128px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--rule);
+  background: var(--surface-2);
+  box-shadow: var(--elev-panel);
+  overflow: hidden;
+}
+.portrait-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* An unfilled frame reads as "no portrait yet" through absence, not through
+   a placeholder icon — the lineage's own "no emoji, ever" rule extends to
+   icon-shaped stand-ins that are functionally the same tell. */
+.portrait-empty {
+  width: 100%;
+  height: 100%;
+  background:
+    repeating-linear-gradient(135deg, var(--surface-3) 0 1px, transparent 1px 9px);
+}
+.portrait-controls { flex: 1; min-width: 0; }
+.illus-status { margin-top: var(--s2); }
+
+.appearance-editor { margin-top: var(--s3); }
+.field-row.block {
+  grid-template-columns: 1fr;
+  gap: var(--s1);
+  align-items: stretch;
+}
+.field-row.block textarea {
+  resize: vertical;
+  min-height: 3.2em;
+  font-family: var(--serif);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.scene-illustrate-toggle {
+  font-family: var(--serif);
+  font-size: 11.5px;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  padding: 2px 0;
+}
+.scene-illustration {
+  margin: var(--s3) 0 var(--s3) var(--gutter);
+  max-width: var(--measure-prose);
+}
+.scene-illustration img {
+  display: block;
+  /* Capped, not full-bleed-to-measure: the earlier full-width render put a
+     640px-tall panel under three lines of prose and made the illustration
+     the heaviest object on the page, exactly the inversion this app's own
+     design review already flagged once for the sidebar's gold bars ("the
+     prose is the product... it never wins a single screen"). An
+     illustration is a companion to the text, not a competing headline. */
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 260px;
+  object-fit: cover;
+  border-radius: var(--r-md);
+  border: 1px solid var(--rule);
+  box-shadow: var(--elev-panel);
+}
+
+.prompt-text {
+  margin-top: var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.prompt-text-block .row button {
+  padding: 1px 7px;
+  font-size: 10px;
+}
+.prompt-text-block .mono {
+  margin: var(--s1) 0 0;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  padding: var(--s2);
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+  max-height: 8em;
+  overflow-y: auto;
+}

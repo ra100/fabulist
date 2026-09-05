@@ -303,6 +303,51 @@ bar discards the current world and reopens it.
 
 ---
 
+## Illustration
+
+Optional, off by default. Turn it on in **settings → illustration** and every character
+sheet gets a portrait generator, every turn in the book gets an "illustrate this scene"
+button. Five styles — realistic, drawing, sketch, draft, animation — independent of the
+prose register, so a noir mystery can still be drawn as `drawing` rather than forced into
+`realistic` because the tone is grim.
+
+Three levers solve the consistency problem that breaks most illustrated interactive
+fiction, stacked rather than assumed alone sufficient:
+
+- **The description is restated every time.** `visualAnchor` (one paragraph describing
+  the whole world) and each character's `appearance` (build, attire, distinguishing
+  marks — a slow field on the sheet, next to voice and identity) get appended to every
+  prompt, never re-derived. A location gets the identical treatment through its own
+  summary.
+- **A portrait's seed is reused** on regeneration, when the provider supports it — the
+  cheapest lever a seed-based model offers, and not a guarantee: the same seed with a
+  changed prompt can still drift.
+- **A generated image becomes a reference** for everything after it, when the provider
+  can condition on one: a character's own portrait anchors every later portrait and every
+  scene they appear in; a location's last scene image anchors the next scene set there.
+
+None of this is a guarantee — see `.design/ILLUSTRATIONS.md` for the honest account of
+what each lever actually does and does not solve, and for which of the three built-in
+image providers were verified against a real account in this environment (mock: yes and
+extensively; ComfyUI: implemented against its documented API, not reachable to test live
+here; Bedrock Stability: implemented against Stability's documented contract, blocked by
+an AWS Marketplace entitlement before any live call could be confirmed).
+
+**No vision model available?** Nothing breaks. Every "generate" button has a "copy
+prompt" sibling that composes the identical prompt with no provider call at all — positive
+and negative, ready to paste into Midjourney, a local ComfyUI, or whatever you already
+have open. On a server with illustration entirely unconfigured, the prompt routes still
+work; only the actual generation needs a provider.
+
+**Going local:** point **settings → illustration** at a running ComfyUI
+(`python main.py`, default `127.0.0.1:8188`) the same way a local text model works —
+nothing is bundled, the wire format is documented (`src/providers/comfyui.ts`), and the
+default graph is a plain txt2img workflow. Bring your own workflow JSON (an img2img graph
+with a real IP-Adapter node, say) to upgrade past prompt-only consistency; the adapter
+fills the same named placeholders into whatever graph you supply.
+
+---
+
 ## Consequences
 
 Acting on someone ripples outward through people you are not watching. Consequences are a
@@ -393,9 +438,11 @@ in the discarded future is unbroken, so the integrity gate defends it again.
 ```
 src/domain/       types; the delta contract lives here
 src/db/           schema.sql and the connection
-src/store/        canon/chronicle overlay, cast, chronicle, threads, consequences
+src/store/        canon/chronicle overlay, cast, chronicle, threads, consequences, illustrations
 src/providers/    adapter interface, capability matrix, mock, http, bedrock,
-                  google, copilot, sigv4, aws credential chain, probe
+                  google, copilot, sigv4, aws credential chain, probe;
+                  image: mock, comfyui, bedrock stability
+src/illustration/ prompt composer, generation service (see .design/ILLUSTRATIONS.md)
 src/frame/        tokenizer and budgeted per-role frame assembly
 src/loop/         roles, three-tier validator, commit, engine, compaction, branching
 src/consequence/  propagation queue, rumours, world tick
