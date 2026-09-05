@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import { World } from '../src/store/index.ts';
+import { CurrentStory, World } from '../src/store/index.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
@@ -17,6 +17,28 @@ async function withServer(fn: (base: string, world: World) => Promise<void>) {
   const { port } = server.address() as AddressInfo;
   try {
     await fn(`http://127.0.0.1:${port}`, world);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    world.close();
+  }
+}
+
+/**
+ * Same shape, but with a real `CurrentStory` behind the server, so the
+ * story-management routes (switch, in particular) can actually be exercised
+ * end to end rather than against a server that always resolves the one
+ * `World` it was constructed with.
+ */
+async function withMultiStoryServer(fn: (base: string, world: World, currentStory: CurrentStory) => Promise<void>) {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const currentStory = new CurrentStory(world.db, world.storyId);
+  const engine = new Engine({ world: () => currentStory.world(), providers: new ProviderRegistry(new MockProvider()) });
+  const server = createApiServer({ world: () => currentStory.world(), engine, currentStory });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await fn(`http://127.0.0.1:${port}`, world, currentStory);
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
     world.close();
@@ -334,4 +356,135 @@ test('a path traversal attempt cannot escape the web root', async () => {
   assert.ok(!text.includes('"name": "fabulist"'), 'must not serve files outside the root');
   await new Promise<void>((r) => server.close(() => r()));
   world.close();
+});
+
+// ------------------------------------------------------------------ stories
+
+test('GET /api/stories lists every story in the file, most recently played first', async () => {
+  await withServer(async (base, world) => {
+    const { status, body } = await get(base, '/api/stories');
+    assert.equal(status, 200);
+    const list = body as Array<{ id: string }>;
+    assert.equal(list.length, 1);
+    assert.equal(list[0]!.id, world.storyId);
+  });
+});
+
+test('POST /api/stories creates a fresh story sharing canon, without switching to it', async () => {
+  await withServer(async (base, world) => {
+    const { status, body } = await send(base, 'POST', '/api/stories', { title: 'A second playthrough' });
+    assert.equal(status, 201);
+    const created = body as { id: string; title: string; forkedFrom: string | null };
+    assert.equal(created.title, 'A second playthrough');
+    assert.equal(created.forkedFrom, null);
+
+    const list = (await get(base, '/api/stories')).body as Array<{ id: string }>;
+    assert.equal(list.length, 2);
+
+    // The server is still looking at the original story: creating another
+    // one does not implicitly switch to it.
+    const state = (await get(base, '/api/state')).body as { session: { scene: number } };
+    assert.equal(state.session.scene, world.session.get().scene);
+  });
+});
+
+test('POST /api/stories/fork with no atScene forks the current story fresh; with atScene, continues it', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+
+    const fresh = await send(base, 'POST', '/api/stories/fork', { title: 'fresh fork' });
+    assert.equal(fresh.status, 201);
+    const freshBody = fresh.body as { story: { id: string }; copiedFrom: string | null };
+    assert.equal(freshBody.copiedFrom, null);
+    assert.equal(world.withStory(freshBody.story.id).chronicle.turns().length, 0);
+
+    const continued = await send(base, 'POST', '/api/stories/fork', { title: 'continued', atScene: 1 });
+    assert.equal(continued.status, 201);
+    const continuedBody = continued.body as { story: { id: string }; copiedFrom: string; copiedUpToScene: number };
+    assert.equal(continuedBody.copiedFrom, world.storyId);
+    assert.equal(continuedBody.copiedUpToScene, 1);
+
+    // The original story is unaffected by either fork.
+    assert.equal(world.chronicle.turns().length, 1);
+  });
+});
+
+test('story management routes 503 when the server has no CurrentStory configured', async () => {
+  await withServer(async (base) => {
+    const { status, body } = await send(base, 'POST', '/api/stories/some-id/switch', {});
+    assert.equal(status, 503);
+    assert.match((body as { error: string }).error, /not enabled/);
+  });
+});
+
+test('switching stories takes effect on the very next request, no restart', async () => {
+  await withMultiStoryServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    assert.equal(world.chronicle.turns().length, 1);
+
+    const created = (await send(base, 'POST', '/api/stories', { title: 'second' })).body as { id: string };
+
+    const switched = await send(base, 'POST', `/api/stories/${encodeURIComponent(created.id)}/switch`, {});
+    assert.equal(switched.status, 200);
+    assert.equal((switched.body as { current: string }).current, created.id);
+
+    // The server now resolves the second story on every route, immediately.
+    const state = (await get(base, '/api/state')).body as { session: { scene: number } };
+    assert.equal(state.session.scene, 1, 'the fresh story starts at scene 1');
+
+    await send(base, 'POST', '/api/play', { input: 'i check the door' });
+    assert.equal(world.withStory(created.id).chronicle.turns().length, 1, 'the turn landed on the switched-to story');
+    assert.equal(world.chronicle.turns().length, 1, 'the original story is untouched by anything played after the switch');
+  });
+});
+
+test('switching to a story that does not exist is refused with a 404, not a silent no-op', async () => {
+  await withMultiStoryServer(async (base) => {
+    const { status, body } = await send(base, 'POST', '/api/stories/story%3Adoes-not-exist/switch', {});
+    assert.equal(status, 404);
+    assert.match((body as { error: string }).error, /no story/);
+  });
+});
+
+test('PUT /api/stories/:id/title renames a story without switching to it', async () => {
+  await withServer(async (base, world) => {
+    const created = (await send(base, 'POST', '/api/stories', { title: 'old name' })).body as { id: string };
+    const { status } = await send(base, 'PUT', `/api/stories/${encodeURIComponent(created.id)}/title`, { title: 'new name' });
+    assert.equal(status, 200);
+    const list = (await get(base, '/api/stories')).body as Array<{ id: string; title: string }>;
+    assert.equal(list.find((s) => s.id === created.id)?.title, 'new name');
+    // The current story's own title is untouched.
+    assert.equal(list.find((s) => s.id === world.storyId)?.title, world.session.info().title);
+  });
+});
+
+test('DELETE /api/stories/:id removes a story and everything scoped to it, but refuses the currently open one', async () => {
+  await withServer(async (base, world) => {
+    const created = (await send(base, 'POST', '/api/stories', { title: 'to delete' })).body as { id: string };
+
+    const selfDelete = await send(base, 'DELETE', `/api/stories/${encodeURIComponent(world.storyId)}`);
+    assert.equal(selfDelete.status, 409, 'refuses to delete the story currently open');
+
+    const del = await send(base, 'DELETE', `/api/stories/${encodeURIComponent(created.id)}`);
+    assert.equal(del.status, 200);
+    const list = (await get(base, '/api/stories')).body as Array<{ id: string }>;
+    assert.ok(!list.some((s) => s.id === created.id));
+  });
+});
+
+test('DELETE /api/stories/:id refuses to delete the last story in a world', async () => {
+  await withServer(async (base, world) => {
+    const created = (await send(base, 'POST', '/api/stories', { title: 'second' })).body as { id: string };
+    // Remove the original directly at the store level, so `created` becomes
+    // the sole remaining story — the route itself refuses to delete
+    // whichever story `world` (the server's fixed, non-switching handle in
+    // this test) currently points at, so this is the only way to reach
+    // "exactly one story left" without a CurrentStory-backed server.
+    const { deleteStory } = await import('../src/store/world.ts');
+    deleteStory(world.db, world.storyId);
+
+    const del = await send(base, 'DELETE', `/api/stories/${encodeURIComponent(created.id)}`);
+    assert.equal(del.status, 400);
+    assert.match((del.body as { error: string }).error, /last story/);
+  });
 });

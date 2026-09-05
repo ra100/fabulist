@@ -2,7 +2,7 @@
 /** Serves the API and the built inspector UI. */
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { World } from '../store/index.ts';
+import { CurrentStory, World } from '../store/index.ts';
 import { seedWorld } from '../seed/verrow.ts';
 import { Engine } from '../loop/engine.ts';
 import { createApiServer } from '../server/api.ts';
@@ -25,11 +25,19 @@ const dbPath = inMemory ? ':memory:' : cfg.dbPath;
 const imagesDir = inMemory ? join('data', '.memory-images') : join(dirname(dbPath), 'images');
 
 if (!inMemory) mkdirSync(dirname(dbPath), { recursive: true });
-const world = World.open(dbPath, undefined, imagesDir);
+const bootWorld = World.open(dbPath, undefined, imagesDir);
 if (args.includes('--sample')) {
-  seedWorld(world);
+  seedWorld(bootWorld);
   console.log('seeded the Saint Verrow sample');
 }
+
+// The one thing every long-lived piece below resolves through, rather than
+// each holding its own captured `World`: a story switch (POST
+// /api/stories/:id/switch) takes effect on the very next request across all
+// of them — Engine, SetupService, IllustrationService, and every plain route
+// in api.ts — with no restart. See store/index.ts's CurrentStory for why.
+const currentStory = new CurrentStory(bootWorld.db, bootWorld.storyId, imagesDir);
+const getWorld = () => currentStory.world();
 
 const { registry, notes } = buildSwappableRegistry(cfg);
 const configService = new ConfigService({ registry });
@@ -38,10 +46,10 @@ if (cfg.profile === 'mock') console.log('tip: pnpm providers — the UI can swit
 
 const { registry: imageRegistry, notes: imageNotes } = buildImageRegistry(cfg);
 for (const n of imageNotes) console.log(n);
-const illustrations = new IllustrationService({ world, providers: imageRegistry });
+const illustrations = new IllustrationService({ world: getWorld, providers: imageRegistry });
 
 const engine = new Engine({
-  world,
+  world: getWorld,
   providers: registry,
   // Live settings, so editing the blocklist affects the very next turn.
   proseGate: makeProseGate({ live: () => configService.lintOptions() }),
@@ -50,10 +58,20 @@ const engine = new Engine({
 const webRoot = existsSync('web/dist') ? 'web/dist' : undefined;
 if (!webRoot) console.log('web/dist not built; serving the API only (pnpm build:web)');
 
-const setup = new SetupService({ world, providers: registry });
+const setup = new SetupService({ world: getWorld, providers: registry });
 if (setup.isFresh()) console.log('no world yet - the UI will open the setup wizard');
 
-const server = createApiServer({ world, engine, webRoot, setup, registry, config: configService, illustrations, imageRegistry });
+const server = createApiServer({
+  world: getWorld,
+  engine,
+  webRoot,
+  setup,
+  registry,
+  config: configService,
+  illustrations,
+  imageRegistry,
+  currentStory,
+});
 server.listen(port, '127.0.0.1', () => {
   console.log(`fabulist on http://127.0.0.1:${port}`);
 });
@@ -61,7 +79,7 @@ server.listen(port, '127.0.0.1', () => {
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
     server.close();
-    world.close();
+    bootWorld.close();
     process.exit(0);
   });
 }

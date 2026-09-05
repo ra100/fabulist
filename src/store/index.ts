@@ -22,6 +22,7 @@ import {
   DirectiveStore,
   StoryStore,
   ThreadStore,
+  getStory,
   resolveDefaultStory,
 } from './world.ts';
 
@@ -76,6 +77,40 @@ export class World {
 
   close(): void {
     this.db.close();
+  }
+}
+
+/**
+ * Server-level "which story is current". `Engine`/`Compactor`/`SetupService`/
+ * `IllustrationService` all already accept `world: World | (() => World)` —
+ * this is the thing on the other end of that getter for a real, long-lived
+ * server process, so switching stories is `currentStory.switchTo(id)` rather
+ * than tearing down and rebuilding the whole server. Mirrors
+ * `SwappableRegistry`'s shape deliberately: same problem (a long-lived
+ * server holding something that must change live), same fix.
+ */
+export class CurrentStory {
+  private db: Db;
+  private storyId: StoryId;
+  private imagesDir: string | undefined;
+
+  constructor(db: Db, storyId: StoryId, imagesDir?: string) {
+    this.db = db;
+    this.storyId = storyId;
+    this.imagesDir = imagesDir;
+  }
+
+  /** A fresh `World` bound to whichever story is current right now. */
+  world = (): World => new World(this.db, this.storyId, this.imagesDir);
+
+  id(): StoryId {
+    return this.storyId;
+  }
+
+  /** Switches which story every subsequent `world()` call resolves to. Throws if the story does not exist in this file. */
+  switchTo(storyId: StoryId): void {
+    if (!getStory(this.db, storyId)) throw new Error(`no story ${storyId} in this world`);
+    this.storyId = storyId;
   }
 }
 

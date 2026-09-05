@@ -391,6 +391,24 @@ export function createStory(db: Db, opts: { title?: string; forkedFrom?: StoryId
 }
 
 /**
+ * Deletes one story and everything scoped to it — every table's
+ * `FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE` does the
+ * actual cleanup (verified directly against node:sqlite in Slice 1, not
+ * assumed), so this is a single `DELETE FROM stories`, not a per-table sweep.
+ * Canon is never touched: it has no `story_id` to cascade from. Refuses to
+ * delete the last story in a file — a world with a save browser still needs
+ * at least one story to open into, and "delete everything, including canon"
+ * is what `SetupService.reset()` is for, a deliberately different and more
+ * destructive operation.
+ */
+export function deleteStory(db: Db, storyId: StoryId): void {
+  const existing = listStories(db);
+  if (existing.length <= 1) throw new Error('cannot delete the last story in a world; delete the world file instead');
+  if (!existing.some((s) => s.id === storyId)) throw new Error(`no story ${storyId} in this world`);
+  db.prepare(`DELETE FROM stories WHERE id = ?`).run(storyId);
+}
+
+/**
  * The one-story auto-resolve `World.open` relies on: a fresh file gets its
  * first story created automatically, a file with exactly one story binds to
  * it without the caller needing to know a story concept exists, and a file

@@ -9,7 +9,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import type { Engine } from '../loop/engine.ts';
-import type { World } from '../store/index.ts';
+import { CurrentStory, World } from '../store/index.ts';
+import { forkStory } from '../loop/branch.ts';
+import { createStory, deleteStory, listStories } from '../store/world.ts';
 import {
   applyDirectiveRecalc,
   seedConsequences,
@@ -29,7 +31,15 @@ import { IllustrationService, NoImageProviderError } from '../illustration/servi
 import { composePortraitPrompt, composeScenePrompt } from '../illustration/composer.ts';
 
 export interface ServerOptions {
-  world: World;
+  /**
+   * A getter, not a resolved `World`: every request resolves this fresh
+   * (see the dispatch loop in `createApiServer`), so a story switch
+   * (`POST /api/stories/:id/switch`) takes effect on the very next request
+   * with no restart — the same reasoning as `Engine`/`SetupService`/
+   * `IllustrationService` already accepting this shape, applied to the
+   * routes that read/write `world` directly rather than through one of those.
+   */
+  world: World | (() => World);
   engine: Engine;
   port?: number;
   /** Directory of built UI assets; when absent the API runs alone. */
@@ -44,6 +54,8 @@ export interface ServerOptions {
   illustrations?: IllustrationService;
   /** Enables live image-provider profile switching. */
   imageRegistry?: SwappableImageRegistry;
+  /** Enables the story-management routes (list/create/switch/rename/delete/fork). */
+  currentStory?: CurrentStory;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -56,6 +68,7 @@ interface RouteContext {
   config: ConfigService | undefined;
   illustrations: IllustrationService | undefined;
   imageRegistry: SwappableImageRegistry | undefined;
+  currentStory: CurrentStory | undefined;
   url: URL;
   body: unknown;
   params: Record<string, string>;
@@ -587,6 +600,96 @@ route('POST', '/api/branch', (_req, res, { world, body }) => {
   }
 });
 
+// ---------------------------------------------------------------- stories
+// A world file can hold more than one independent playthrough (Slice 1-3 of
+// the multi-story migration). These routes are what actually makes that
+// reachable — `currentStory` is optional so a server started without one
+// (every test that only needs a single fixed story, and any caller not yet
+// updated) keeps behaving exactly as before.
+
+function requireCurrentStory(res: ServerResponse, currentStory: CurrentStory | undefined): CurrentStory | null {
+  if (!currentStory) {
+    send(res, 503, { error: 'story management is not enabled on this server' });
+    return null;
+  }
+  return currentStory;
+}
+
+/** Every story in this world file, most recently played first. */
+route('GET', '/api/stories', (_req, res, { world }) => {
+  const stories = listStories(world.db).sort((a, b) => b.lastPlayedAt.localeCompare(a.lastPlayedAt));
+  send(res, 200, stories);
+});
+
+/**
+ * Starts a new, non-overlapping story sharing only canon — "start a new
+ * story in this world" from the save browser. Does not switch to it: the
+ * caller decides whether to open it immediately or leave the current story
+ * as it is.
+ */
+route('POST', '/api/stories', (_req, res, { world, body }) => {
+  const { title } = (body ?? {}) as { title?: string };
+  const story = createStory(world.db, { title: title?.trim() ?? '' });
+  send(res, 201, story);
+});
+
+/**
+ * Forks a story: omit `atScene` for a fresh copy sharing canon only, pass it
+ * to copy that story's own chronicle up to the scene boundary first — the
+ * "branch from here" / "continue from an earlier point" case. Operates on
+ * whichever story is current, not one named in the body, so this always
+ * forks the save the player is actually looking at.
+ */
+route('POST', '/api/stories/fork', (_req, res, { world, body }) => {
+  const { title, atScene } = (body ?? {}) as { title?: string; atScene?: number };
+  try {
+    send(res, 201, forkStory(world, { fromStoryId: world.storyId, title: title?.trim(), atScene }));
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Switches which story every subsequent request operates on. Takes effect immediately, no restart. */
+route('POST', '/api/stories/:id/switch', (_req, res, { currentStory, params }) => {
+  const cs = requireCurrentStory(res, currentStory);
+  if (!cs) return;
+  const id = decodeURIComponent(params.id ?? '');
+  try {
+    cs.switchTo(id);
+    send(res, 200, { current: id });
+  } catch (err) {
+    send(res, 404, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+route('PUT', '/api/stories/:id/title', (_req, res, { world, params, body }) => {
+  const id = decodeURIComponent(params.id ?? '');
+  const { title } = (body ?? {}) as { title?: string };
+  if (typeof title !== 'string') return send(res, 400, { error: 'title is required' });
+  // Renaming works on any story in the file, not only the current one — the
+  // save browser needs to rename an entry without switching to it first.
+  world.withStory(id).session.rename(title.trim());
+  send(res, 200, { id, title: title.trim() });
+});
+
+/**
+ * Deletes one story and everything scoped to it. Refuses the currently open
+ * story (switch away first, so the server is never left holding a
+ * `CurrentStory` pointing at something that no longer exists) and the last
+ * story in a file (that is `POST /api/setup/reset`'s job — a deliberately
+ * more destructive, whole-file operation).
+ */
+route('DELETE', '/api/stories/:id', (_req, res, { world, params }) => {
+  const id = decodeURIComponent(params.id ?? '');
+  if (id === world.storyId) return send(res, 409, { error: 'cannot delete the story that is currently open; switch to another one first' });
+  try {
+    deleteStory(world.db, id);
+    send(res, 200, { ok: true });
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 /**
  * What is usable on this machine. Read-only and slightly slow (it touches local
  * servers and credential helpers), so the UI fetches it on demand rather than
@@ -900,7 +1003,8 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
 }
 
 export function createApiServer(opts: ServerOptions) {
-  const { world, engine, webRoot, setup, registry, config, illustrations, imageRegistry } = opts;
+  const { engine, webRoot, setup, registry, config, illustrations, imageRegistry, currentStory } = opts;
+  const getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -919,7 +1023,12 @@ export function createApiServer(opts: ServerOptions) {
       const params = url.pathname.match(match.pattern)?.groups ?? {};
       try {
         const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
-        await match.handler(req, res, { world, engine, setup, registry, config, illustrations, imageRegistry, url, body, params });
+        // Resolved fresh per request, not once at server construction: a
+        // story switch must take effect on the very next request, not after
+        // a restart. Every route body still just reads `world` as a plain
+        // value — the getter is dereferenced exactly once, here.
+        const world = getWorld();
+        await match.handler(req, res, { world, engine, setup, registry, config, illustrations, imageRegistry, currentStory, url, body, params });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.
