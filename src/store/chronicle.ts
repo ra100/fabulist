@@ -235,6 +235,25 @@ export class ChronicleStore {
     this.db.prepare(`UPDATE turns SET book_prose = ? WHERE id = ? AND story_id = ? AND pinned = 0`).run(prose, id, this.storyId);
   }
 
+  /**
+   * Records a reroll's own provider calls and lint result onto the turn's
+   * stored meta, so the why panel reflects the render that is actually on the
+   * page rather than the original turn's now-stale one. Guarded by
+   * `pinned = 0` for the same reason `setProse` is: a pinned turn's meta is
+   * part of the passage the author chose to keep, not something a later
+   * reroll attempt (which itself will have already been refused) should touch.
+   */
+  appendRerollMeta(id: string, patch: { providerCalls: TurnMeta['providerCalls']; lint: TurnMeta['lint'] }): void {
+    const turn = this.getTurn(id);
+    if (!turn || turn.pinned) return;
+    const meta: TurnMeta = {
+      ...turn.meta,
+      providerCalls: [...turn.meta.providerCalls, ...patch.providerCalls],
+      lint: patch.lint,
+    };
+    this.db.prepare(`UPDATE turns SET meta = ? WHERE id = ? AND story_id = ? AND pinned = 0`).run(JSON.stringify(meta), id, this.storyId);
+  }
+
   setPinned(id: string, pinned: boolean): void {
     this.db.prepare(`UPDATE turns SET pinned = ? WHERE id = ? AND story_id = ?`).run(pinned ? 1 : 0, id, this.storyId);
   }

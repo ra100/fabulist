@@ -305,6 +305,67 @@ export class Engine {
     return { kind: 'narrated', turn, prose, delta, commit, validation };
   }
 
+  /**
+   * Re-renders a stored turn's prose through the *current* style contract,
+   * without touching what happened (DESIGN §7.2). The delta already committed
+   * is the boundary: this replays the narrator alone, against the same beat
+   * summary the original turn agreed on, so the graph, events and facts are
+   * completely untouched — only `bookProse` changes.
+   *
+   * Refuses a pinned turn outright rather than silently no-op-ing through
+   * `setProse`, so a caller gets a reason instead of a passage that quietly
+   * never changed.
+   *
+   * `note` is an optional steering hint ("shorter", "cut the metaphor") folded
+   * into the beat the narrator sees, for the common case of "reroll, but fix
+   * this one thing" rather than a blind retry hoping for a better roll.
+   */
+  async regenerateProse(turnId: string, opts: { note?: string; onToken?: (chunk: string) => void } = {}): Promise<Turn> {
+    const world = this.getWorld();
+    const turn = world.chronicle.getTurn(turnId);
+    if (!turn) throw new Error(`no turn ${turnId}`);
+    if (turn.pinned) throw new Error('this passage is pinned and will not be re-rendered');
+
+    const calls: TurnMeta['providerCalls'] = [];
+    const deps = this.deps(world, calls);
+
+    const agreedBeat = [
+      turn.meta.referee ? `ruling: ${turn.meta.referee.ruling}${turn.meta.referee.cost ? ` (cost: ${turn.meta.referee.cost})` : ''}` : '',
+      turn.meta.referee?.reasoning ? `referee: ${turn.meta.referee.reasoning}` : '',
+      turn.meta.move ? `gm move: ${turn.meta.move}` : '',
+      turn.delta?.events.length ? `beat: ${turn.delta.events.map((e) => e.text).join(' ')}` : 'beat: continue',
+      turn.meta.integrity?.distance === 'stretch'
+        ? `The act is a stretch for this character. Show them feeling the weight of it in the prose; do not stop them.`
+        : '',
+      turn.meta.integrity?.distance === 'off-key'
+        ? `This sits badly with who they are. Give the world or their own body some resistance, in fiction.`
+        : '',
+      opts.note ? `The author asked for this on the reroll: ${opts.note}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    // The original turn's own verbatim decision doesn't apply to a reroll:
+    // the player isn't retyping their input, so there is nothing of theirs to
+    // preserve word-for-word here.
+    const prose = await narrate(deps, turn.rawInput, agreedBeat, false, opts.onToken);
+
+    let lint: LintReport | null = turn.meta.lint;
+    let finalProse = prose;
+    if (this.proseGate) {
+      lint = this.proseGate.lint(finalProse);
+      if (lint.tripped && this.proseGate.rewrite) {
+        finalProse = await this.proseGate.rewrite(finalProse, lint);
+        lint = this.proseGate.lint(finalProse);
+      }
+    }
+
+    world.chronicle.setProse(turnId, finalProse);
+    world.chronicle.appendRerollMeta(turnId, { providerCalls: calls, lint });
+
+    return world.chronicle.getTurn(turnId)!;
+  }
+
   /** Answers a world question from state without advancing the story. */
   private answerMetaQuery(world: World, q: string): string {
     const session = world.session.get();

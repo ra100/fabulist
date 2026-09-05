@@ -213,6 +213,42 @@ test('pinned prose is never overwritten by a re-render', () => {
   world.close();
 });
 
+test('a reroll appends its provider calls and replaces the lint result', () => {
+  const world = w();
+  const t = world.chronicle.addTurn({
+    scene: 1, turn: 1, rawInput: 'x', intent: null, delta: null,
+    bookProse: 'first draft', pinned: false,
+    meta: {
+      integrity: null, referee: null, move: null, frameLog: null,
+      lint: { profile: 'fiction', score: 9, tripped: true, findings: [] },
+      providerCalls: [{ role: 'narrate', provider: 'mock', model: 'mock-1', tokensIn: 10, tokensOut: 20 }],
+    },
+  });
+  world.chronicle.appendRerollMeta(t.id, {
+    providerCalls: [{ role: 'narrate', provider: 'mock', model: 'mock-1', tokensIn: 5, tokensOut: 8 }],
+    lint: { profile: 'fiction', score: 0, tripped: false, findings: [] },
+  });
+  const after = world.chronicle.getTurn(t.id)!;
+  assert.equal(after.meta.providerCalls.length, 2, 'the original call is kept, not replaced');
+  assert.equal(after.meta.lint?.score, 0, 'lint reflects the reroll, not the original draft');
+  world.close();
+});
+
+test('a reroll never touches a pinned turn\'s meta either', () => {
+  const world = w();
+  const t = world.chronicle.addTurn({
+    scene: 1, turn: 1, rawInput: 'x', intent: null, delta: null,
+    bookProse: 'kept forever', pinned: true,
+    meta: { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] },
+  });
+  world.chronicle.appendRerollMeta(t.id, {
+    providerCalls: [{ role: 'narrate', provider: 'mock', model: 'mock-1', tokensIn: 5, tokensOut: 8 }],
+    lint: { profile: 'fiction', score: 3, tripped: true, findings: [] },
+  });
+  assert.equal(world.chronicle.getTurn(t.id)?.meta.providerCalls.length, 0);
+  world.close();
+});
+
 test('usage totals sum provider calls across every turn and by role', () => {
   const world = w();
   world.chronicle.addTurn({

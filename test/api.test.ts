@@ -166,6 +166,39 @@ test('pinned prose survives a re-render attempt', async () => {
   });
 });
 
+test('the regenerate endpoint rewrites prose without touching the committed delta', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i keep copying' });
+    const turn = world.chronicle.turns()[0]!;
+    const eventsBefore = world.chronicle.events().length;
+
+    const res = await send(base, 'POST', `/api/turn/${encodeURIComponent(turn.id)}/regenerate`, {});
+    assert.equal(res.status, 200);
+    assert.ok((res.body as { bookProse: string }).bookProse.length > 0);
+    assert.equal(world.chronicle.events().length, eventsBefore, 'no new event from a reroll');
+    assert.deepEqual(world.chronicle.getTurn(turn.id)!.delta, turn.delta, 'what happened did not change');
+  });
+});
+
+test('the regenerate endpoint refuses a pinned turn with 409, not a silent no-op', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i keep copying' });
+    const turn = world.chronicle.turns()[0]!;
+    await send(base, 'POST', `/api/turn/${encodeURIComponent(turn.id)}/pin`, { pinned: true });
+
+    const res = await send(base, 'POST', `/api/turn/${encodeURIComponent(turn.id)}/regenerate`, {});
+    assert.equal(res.status, 409);
+    assert.equal(world.chronicle.getTurn(turn.id)?.bookProse, turn.bookProse, 'prose unchanged');
+  });
+});
+
+test('the regenerate endpoint 404s on an unknown turn id', async () => {
+  await withServer(async (base) => {
+    const res = await send(base, 'POST', '/api/turn/turn%3Adoes-not-exist/regenerate', {});
+    assert.equal(res.status, 404);
+  });
+});
+
 test('the book endpoint returns both registers per turn', async () => {
   await withServer(async (base) => {
     await send(base, 'POST', '/api/play', { input: 'i tell tem to fetch water' });

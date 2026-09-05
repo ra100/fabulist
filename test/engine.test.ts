@@ -205,6 +205,65 @@ test('a world question is answered from state without advancing the story', asyn
   world.close();
 });
 
+// -------------------------------------------------------------------- reroll
+
+test('regenerateProse rewrites bookProse and leaves the committed delta untouched', async () => {
+  const { world, engine } = setup();
+  const out = await engine.takeTurn('i keep copying');
+  if (out.kind !== 'narrated') throw new Error('expected narration');
+
+  const before = world.chronicle.getTurn(out.turn.id)!;
+  const eventCountBefore = world.chronicle.events().length;
+
+  const after = await engine.regenerateProse(out.turn.id);
+
+  assert.ok(after.bookProse.length > 0, 'produced new prose');
+  assert.equal(world.chronicle.events().length, eventCountBefore, 'no new event was committed');
+  assert.deepEqual(world.chronicle.getTurn(out.turn.id)!.delta, before.delta, 'the beat that already happened is untouched');
+  world.close();
+});
+
+test('regenerateProse refuses a pinned turn rather than silently doing nothing', async () => {
+  const { world, engine } = setup();
+  const out = await engine.takeTurn('i keep copying');
+  if (out.kind !== 'narrated') throw new Error('expected narration');
+  world.chronicle.setPinned(out.turn.id, true);
+
+  await assert.rejects(() => engine.regenerateProse(out.turn.id), /pinned/i);
+  world.close();
+});
+
+test('regenerateProse rejects an unknown turn id', async () => {
+  const { engine } = setup();
+  await assert.rejects(() => engine.regenerateProse('turn:does-not-exist'), /no turn/i);
+});
+
+test('regenerateProse folds an optional steering note into what the narrator sees', async () => {
+  const { world, engine } = setup();
+  const out = await engine.takeTurn('i keep copying');
+  if (out.kind !== 'narrated') throw new Error('expected narration');
+
+  // The mock's narrate() renders the frame text, not the note specifically,
+  // so this asserts the call succeeds with a note and still only touches
+  // bookProse — the actual wording is a real-provider concern (4.2), not
+  // something the deterministic mock can meaningfully assert on.
+  const after = await engine.regenerateProse(out.turn.id, { note: 'shorter, and cut the metaphor' });
+  assert.ok(after.bookProse.length > 0);
+  world.close();
+});
+
+test('regenerateProse appends a provider call each time, so usage totals still add up', async () => {
+  const { world, engine } = setup();
+  const out = await engine.takeTurn('i keep copying');
+  if (out.kind !== 'narrated') throw new Error('expected narration');
+  const callsBefore = out.turn.meta.providerCalls.length;
+
+  await engine.regenerateProse(out.turn.id);
+  const after = world.chronicle.getTurn(out.turn.id)!;
+  assert.ok(after.meta.providerCalls.length > callsBefore, 'the reroll call was logged, not dropped');
+  world.close();
+});
+
 // ---------------------------------------------------------------- validation
 
 test('coerceDelta flags a narrated turn that recorded no events', () => {

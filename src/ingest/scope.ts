@@ -60,6 +60,24 @@ export interface CrawlResult {
  * everything and inbound to almost nothing, so concentration cannot see them.
  * They are caught instead by their outbound breadth and category incoherence.
  */
+
+/**
+ * Recognises navigation furniture by title shape: Fandom's own `Category:`
+ * namespace, and the "index of a group, not a member of it" convention a
+ * character-list page uses — either a bare group-noun title (`Characters`)
+ * or that noun as a subpage root (`Characters/Mass Effect 2`). The original
+ * `/^(list of|...)/` prefix match caught none of these: real ingest against
+ * `masseffect.fandom.com` surfaced `Characters`, `Category:Characters`, and
+ * fourteen `Characters/*` subpages as playable "characters" because their
+ * titles never start with "list of" even though they are exactly that.
+ */
+export function isIndexTitle(title: string): boolean {
+  if (/^(list of|index of|glossary|timeline of|category of)\b/i.test(title)) return true;
+  if (/^Category:/i.test(title)) return true;
+  const root = title.split('/')[0]!.trim();
+  return /^(characters?|locations?|episodes?|chapters?|factions?|organi[sz]ations?|items?|events?|timeline|gallery|images?)$/i.test(root);
+}
+
 export async function crawl(opts: CrawlOptions): Promise<CrawlResult> {
   const { client, seeds, hops, maxPages } = opts;
   const exclude = new Set((opts.exclude ?? []).map((t) => t.toLowerCase()));
@@ -140,7 +158,7 @@ export async function crawl(opts: CrawlOptions): Promise<CrawlResult> {
     // is worthless to play in and expensive to extract.
     const outDegree = linkGraph.get(title)?.length ?? 0;
     const breadth = medianDegree > 0 ? outDegree / (medianDegree * 2.5) : 0;
-    const looksLikeIndex = /^(list of|index of|glossary|timeline of|category of)\b/i.test(title);
+    const looksLikeIndex = isIndexTitle(title);
     const hubPenalty = Math.min(
       1,
       (looksLikeIndex ? 0.6 : 0) + (breadth > 1 ? Math.min(0.5, (breadth - 1) * 0.5) : 0) + (overlap === 0 && !infobox ? 0.3 : 0),

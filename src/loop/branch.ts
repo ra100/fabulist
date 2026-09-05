@@ -1,19 +1,40 @@
 /**
- * Branching. See DESIGN.md §11.
+ * Branching and forking. See DESIGN.md §11.
  *
- * Full retcon means recomputing every downstream consequence, and the design is
- * explicit that branching gets ~80% of the value at ~5% of the cost. So the past
- * is edited by forking a save at a scene rather than by rewriting history in
- * place, which also means the original playthrough is never destroyed.
+ * Full retcon means recomputing every downstream consequence, and the design
+ * is explicit that branching gets ~80% of the value at ~5% of the cost. So
+ * the past is edited by forking a story at a scene rather than by rewriting
+ * history in place, which also means the original playthrough is never
+ * destroyed.
  *
- * The copy is a straight file copy of the SQLite database followed by a truncate,
- * which is both simpler and safer than reconstructing state by replaying a delta
- * log: it cannot drift from what actually happened.
+ * Two forks, one underlying primitive:
+ * - `forkStory` — same file, new `stories` row. Omit `atScene` for a fresh,
+ *   non-overlapping story that reads the same canon and nothing else
+ *   ("start a new story in this world"); pass `atScene` to copy that story's
+ *   own chronicle up to the scene boundary first ("branch from here" /
+ *   "continue from an earlier point"). No id ever needs remapping on copy:
+ *   every row that isn't itself the `story_id` column is either a canon
+ *   reference (unscoped, untouched) or a globally-unique id (turn/event/
+ *   fact/thread/consequence ids are UUIDs) that stays identical and unique
+ *   in the new story — checked directly against the schema's own FKs before
+ *   relying on it, not assumed.
+ * - `branchSave` — a different *file*, for taking a story out of a shared
+ *   world file entirely (e.g. handing someone a save that is just their
+ *   playthrough, not the whole library). Copies the file, then keeps only
+ *   the one story being branched (every other story in the copy is
+ *   discarded) and truncates that story to the scene boundary.
+ *
+ * `truncateToScene` is the scene-boundary logic both forks and both
+ * `POST /api/branch` and `forkStory`'s continuation case share; it deletes
+ * everything at or after a scene from *one* story, never touching canon or
+ * any other story in the same file.
  */
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { World } from '../store/index.ts';
-import { tx } from '../db/db.ts';
+import { rows, tx } from '../db/db.ts';
+import { createStory, getStory } from '../store/world.ts';
+import type { Story, StoryId } from '../domain/types.ts';
 
 export interface BranchResult {
   path: string;
@@ -32,51 +53,82 @@ export interface BranchResult {
 }
 
 /**
- * Truncates an open world back to the state at the *start* of `scene`.
+ * Truncates a story back to the state at the *start* of `scene`.
  *
- * Canon is never touched — it is the source material, and a branch is a different
- * playthrough of the same material, not a different universe.
+ * Canon is never touched — it is the source material, shared by every story
+ * in the world file, and a branch is a different playthrough of it, not a
+ * different universe. Scoped to `world.storyId` throughout: reproduced
+ * directly against a real two-story world before writing this that the old,
+ * unscoped version deleted every story's turns/events/etc, not just the one
+ * being truncated — a real corruption bug the single-story-per-file model
+ * never had a chance to expose, since there was never a second story to
+ * collide with.
  */
 export function truncateToScene(world: World, scene: number): BranchResult['removed'] {
+  const storyId = world.storyId;
   return tx(world.db, () => {
     const count = (sql: string, ...args: unknown[]) =>
       Number((world.db.prepare(sql).get(...(args as never[])) as { n?: number } | undefined)?.n ?? 0);
 
     const removed = {
-      turns: count(`SELECT COUNT(*) n FROM turns WHERE scene >= ?`, scene),
-      events: count(`SELECT COUNT(*) n FROM events WHERE scene >= ?`, scene),
-      consequences: count(`SELECT COUNT(*) n FROM consequences WHERE created_scene >= ?`, scene),
-      facts: count(`SELECT COUNT(*) n FROM facts WHERE scene >= ?`, scene),
-      chronicleEntities: count(`SELECT COUNT(*) n FROM entities WHERE layer = 'chronicle' AND created_scene >= ?`, scene),
-      chronicleEdges: count(`SELECT COUNT(*) n FROM edges WHERE layer = 'chronicle' AND valid_from >= ?`, scene),
-      retiredEdgesRestored: count(`SELECT COUNT(*) n FROM edges WHERE valid_to IS NOT NULL AND valid_to >= ?`, scene),
-      threads: count(`SELECT COUNT(*) n FROM threads WHERE created_scene >= ?`, scene),
-      divergences: count(`SELECT COUNT(*) n FROM divergences WHERE scene >= ?`, scene),
+      turns: count(`SELECT COUNT(*) n FROM turns WHERE story_id = ? AND scene >= ?`, storyId, scene),
+      events: count(`SELECT COUNT(*) n FROM events WHERE story_id = ? AND scene >= ?`, storyId, scene),
+      consequences: count(`SELECT COUNT(*) n FROM consequences WHERE story_id = ? AND created_scene >= ?`, storyId, scene),
+      facts: count(`SELECT COUNT(*) n FROM facts WHERE story_id = ? AND scene >= ?`, storyId, scene),
+      chronicleEntities: count(
+        `SELECT COUNT(*) n FROM entities WHERE layer = 'chronicle' AND story_id = ? AND created_scene >= ?`,
+        storyId, scene,
+      ),
+      chronicleEdges: count(
+        `SELECT COUNT(*) n FROM edges WHERE layer = 'chronicle' AND story_id = ? AND valid_from >= ?`,
+        storyId, scene,
+      ),
+      retiredEdgesRestored: count(
+        `SELECT COUNT(*) n FROM edges WHERE (story_id = ? OR layer = 'canon') AND valid_to IS NOT NULL AND valid_to >= ?`,
+        storyId, scene,
+      ),
+      threads: count(`SELECT COUNT(*) n FROM threads WHERE story_id = ? AND created_scene >= ?`, storyId, scene),
+      divergences: count(`SELECT COUNT(*) n FROM divergences WHERE story_id = ? AND scene >= ?`, storyId, scene),
     };
 
-    world.db.prepare(`DELETE FROM turns WHERE scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM events WHERE scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM consequences WHERE created_scene >= ?`).run(scene);
-    // fact_knowledge cascades on the facts delete; knowledge acquired later about
-    // an older fact has to go separately.
-    world.db.prepare(`DELETE FROM facts WHERE scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM fact_knowledge WHERE since_scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM entities WHERE layer = 'chronicle' AND created_scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM edges WHERE layer = 'chronicle' AND valid_from >= ?`).run(scene);
+    world.db.prepare(`DELETE FROM turns WHERE story_id = ? AND scene >= ?`).run(storyId, scene);
+    world.db.prepare(`DELETE FROM events WHERE story_id = ? AND scene >= ?`).run(storyId, scene);
+    world.db.prepare(`DELETE FROM consequences WHERE story_id = ? AND created_scene >= ?`).run(storyId, scene);
+    // fact_knowledge has no story_id of its own — it inherits scope through
+    // fact_id, so deleting per dropped fact id is what stays correctly scoped.
+    const droppedFacts = rows<{ id: string }>(
+      world.db.prepare(`SELECT id FROM facts WHERE story_id = ? AND scene >= ?`).all(storyId, scene),
+    ).map((r) => r.id);
+    world.db.prepare(`DELETE FROM facts WHERE story_id = ? AND scene >= ?`).run(storyId, scene);
+    for (const factId of droppedFacts) {
+      world.db.prepare(`DELETE FROM fact_knowledge WHERE fact_id = ? AND since_scene >= ?`).run(factId, scene);
+    }
+    world.db
+      .prepare(`DELETE FROM entities WHERE layer = 'chronicle' AND story_id = ? AND created_scene >= ?`)
+      .run(storyId, scene);
+    world.db
+      .prepare(`DELETE FROM edges WHERE layer = 'chronicle' AND story_id = ? AND valid_from >= ?`)
+      .run(storyId, scene);
 
-    // An edge retired during the discarded scenes was live at the branch point,
-    // so un-expire it. Without this, the branch inherits relationships that
-    // ended because of events that no longer happened.
-    world.db.prepare(`UPDATE edges SET valid_to = NULL WHERE valid_to IS NOT NULL AND valid_to >= ?`).run(scene);
+    // An edge retired during the discarded scenes was live at the branch
+    // point, so un-expire it. Without this, the branch inherits relationships
+    // that ended because of events that no longer happened. A canon row
+    // matching "retired at scene >= the branch point" can only have gotten
+    // that valid_to via *this* story's own retireEdge (which always copies
+    // into a chronicle row rather than mutating the shared canon row), so
+    // including layer='canon' here is safe — it is never another story's edit.
+    world.db
+      .prepare(`UPDATE edges SET valid_to = NULL WHERE (story_id = ? OR layer = 'canon') AND valid_to IS NOT NULL AND valid_to >= ?`)
+      .run(storyId, scene);
 
-    world.db.prepare(`DELETE FROM threads WHERE created_scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM divergences WHERE scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM scenes WHERE scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM style_anchors WHERE scene >= ?`).run(scene);
-    world.db.prepare(`DELETE FROM directives WHERE created_scene >= ?`).run(scene);
+    world.db.prepare(`DELETE FROM threads WHERE story_id = ? AND created_scene >= ?`).run(storyId, scene);
+    world.db.prepare(`DELETE FROM divergences WHERE story_id = ? AND scene >= ?`).run(storyId, scene);
+    world.db.prepare(`DELETE FROM scenes WHERE story_id = ? AND scene >= ?`).run(storyId, scene);
+    world.db.prepare(`DELETE FROM style_anchors WHERE story_id = ? AND scene >= ?`).run(storyId, scene);
+    world.db.prepare(`DELETE FROM directives WHERE story_id = ? AND created_scene >= ?`).run(storyId, scene);
 
-    // Vows broken in the discarded future are unbroken again: the break was an
-    // event, and that event is gone.
+    // Vows broken in the discarded future are unbroken again: the break was
+    // an event, and that event is gone.
     for (const sheet of world.cast.list()) {
       const vows = sheet.contract.vows.map((v) =>
         v.broken && v.brokenScene !== null && v.brokenScene >= scene
@@ -93,20 +145,123 @@ export function truncateToScene(world: World, scene: number): BranchResult['remo
   });
 }
 
+/** Every chronicle-scoped table `forkStory`'s copy-forward touches. */
+const CHRONICLE_TABLES = [
+  { table: 'entities', sceneCol: 'created_scene', extra: `AND layer = 'chronicle'` },
+  { table: 'edges', sceneCol: 'valid_from', extra: `AND layer = 'chronicle'` },
+  { table: 'sheets', sceneCol: null, extra: `AND layer = 'chronicle'` },
+  { table: 'relationships', sceneCol: null, extra: '' },
+  { table: 'facts', sceneCol: 'scene', extra: '' },
+  { table: 'threads', sceneCol: 'created_scene', extra: '' },
+  { table: 'events', sceneCol: 'scene', extra: '' },
+  { table: 'consequences', sceneCol: 'created_scene', extra: '' },
+  { table: 'turns', sceneCol: 'scene', extra: '' },
+  { table: 'scenes', sceneCol: 'scene', extra: '' },
+  { table: 'chapters', sceneCol: null, extra: '' },
+  { table: 'directives', sceneCol: 'created_scene', extra: '' },
+  { table: 'divergences', sceneCol: 'scene', extra: '' },
+  { table: 'style_anchors', sceneCol: 'scene', extra: '' },
+] as const;
+
+export interface ForkOptions {
+  /** The story to fork from. */
+  fromStoryId: StoryId;
+  /** Title for the new story. */
+  title?: string;
+  /**
+   * Omit for a fresh, non-overlapping story: reads the same canon, no
+   * chronicle copied — exactly like starting a new ingest-free playthrough.
+   * Pass a scene to copy `fromStoryId`'s chronicle up to (not including)
+   * that scene — a continuation / "branch from here".
+   */
+  atScene?: number;
+}
+
+export interface ForkResult {
+  story: Story;
+  copiedFrom: StoryId | null;
+  copiedUpToScene: number | null;
+}
+
+/**
+ * Same-file fork: the primitive behind both "start a new story in this
+ * world" (no `atScene`) and "branch this story from an earlier point"
+ * (`atScene` given). One transaction, one new `stories` row, and — when
+ * continuing — a straight `INSERT ... SELECT` per chronicle table with
+ * `story_id` rewritten. No file copy, because switching which story is
+ * current in this file is already just a different `story_id` filter
+ * (`World.withStory`); there is nothing to close and reopen.
+ */
+export function forkStory(world: World, opts: ForkOptions): ForkResult {
+  const source = getStory(world.db, opts.fromStoryId);
+  if (!source) throw new Error(`no story ${opts.fromStoryId} in this world`);
+  if (opts.atScene !== undefined && opts.atScene < 1) throw new Error('scene must be 1 or greater');
+
+  return tx(world.db, () => {
+    const story = createStory(world.db, {
+      title: opts.title ?? (source.title ? `${source.title} (fork)` : ''),
+      forkedFrom: opts.atScene === undefined ? undefined : opts.fromStoryId,
+      forkedAtScene: opts.atScene,
+    });
+
+    if (opts.atScene === undefined) {
+      return { story, copiedFrom: null, copiedUpToScene: null };
+    }
+
+    const scene = opts.atScene;
+    for (const { table, sceneCol, extra } of CHRONICLE_TABLES) {
+      const cols = rows<{ name: string }>(world.db.prepare(`PRAGMA table_info(${table})`).all())
+        .map((r) => r.name)
+        .filter((c) => c !== 'rowid_pk');
+      const selectCols = cols.map((c) => (c === 'story_id' ? '?' : c)).join(', ');
+      const sceneClause = sceneCol ? `AND ${sceneCol} < ?` : '';
+      const args: unknown[] = [story.id, opts.fromStoryId];
+      if (sceneCol) args.push(scene);
+      world.db
+        .prepare(
+          `INSERT INTO ${table} (${cols.join(', ')})
+           SELECT ${selectCols} FROM ${table} WHERE story_id = ? ${extra} ${sceneClause}`,
+        )
+        .run(...([story.id, opts.fromStoryId, ...(sceneCol ? [scene] : [])] as never[]));
+    }
+
+    // fact_knowledge has no story_id column of its own; it is scoped through
+    // fact_id, so it is copied per fact this fork just copied, not by a
+    // top-level story_id filter.
+    const copiedFactIds = rows<{ id: string }>(
+      world.db.prepare(`SELECT id FROM facts WHERE story_id = ? AND scene < ?`).all(story.id, scene),
+    ).map((r) => r.id);
+    for (const factId of copiedFactIds) {
+      world.db
+        .prepare(`INSERT INTO fact_knowledge SELECT * FROM fact_knowledge WHERE fact_id = ? AND since_scene < ?`)
+        .run(factId, scene);
+    }
+
+    // The new story resumes exactly where the copy ends, same as truncateToScene.
+    world.withStory(story.id).session.set({ scene, turn: 0 });
+
+    return { story, copiedFrom: opts.fromStoryId, copiedUpToScene: scene };
+  });
+}
+
 export interface BranchOptions {
   /** Path of the save to branch from. Must be a real file, not :memory:. */
   fromPath: string;
   /** Path for the new save. */
   toPath: string;
+  /** Which story in the source file to branch. Defaults to the sole story if there is only one. */
+  storyId?: StoryId;
   /** The branch resumes at the start of this scene. */
   atScene: number;
   overwrite?: boolean;
 }
 
 /**
- * Forks a save at a scene. The source is left completely untouched, which is the
- * property that makes this worth using: a branch is cheap and reversible, so
- * there is no reason to be careful with it.
+ * Forks a save at a scene, into a different *file*. The source is left
+ * completely untouched. The copy keeps canon and only the one story being
+ * branched — every other story that happened to share the source file is
+ * dropped from the copy, so the result reads like the single-story save this
+ * always used to produce, not a whole library handed over by accident.
  */
 export function branchSave(opts: BranchOptions): BranchResult {
   const { fromPath, toPath, atScene } = opts;
@@ -118,7 +273,8 @@ export function branchSave(opts: BranchOptions): BranchResult {
 
   // WAL means recent writes may live in a sidecar file, so checkpoint the source
   // into the main database before copying it.
-  const source = World.open(fromPath);
+  const source = World.open(fromPath, opts.storyId);
+  const storyId = source.storyId;
   try {
     source.db.exec(`PRAGMA wal_checkpoint(TRUNCATE)`);
   } finally {
@@ -127,8 +283,15 @@ export function branchSave(opts: BranchOptions): BranchResult {
 
   copyFileSync(fromPath, toPath);
 
-  const branch = World.open(toPath);
+  const branch = World.open(toPath, storyId);
   try {
+    // Drop every other story from the copy: this file is meant to read as
+    // "the branch", not "the whole library minus nothing".
+    const others = rows<{ id: string }>(branch.db.prepare(`SELECT id FROM stories WHERE id != ?`).all(storyId)).map(
+      (r) => r.id,
+    );
+    for (const id of others) branch.db.prepare(`DELETE FROM stories WHERE id = ?`).run(id);
+
     const removed = truncateToScene(branch, atScene);
     return { path: toPath, atScene, removed };
   } finally {

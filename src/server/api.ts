@@ -204,6 +204,25 @@ route('POST', '/api/turn/:id/pin', (_req, res, { world, params, body }) => {
   send(res, 200, world.chronicle.getTurn(id));
 });
 
+/**
+ * Re-renders one turn's prose in place. The headline consequence of "prose is
+ * a view of state" (DESIGN §7.2): nothing about what happened changes, only
+ * how it reads. Refuses a pinned turn with a 409 rather than a silent no-op,
+ * so the UI has something concrete to show instead of a passage that just
+ * didn't move.
+ */
+route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, params, body }) => {
+  const id = decodeURIComponent(params.id ?? '');
+  const { note } = (body ?? {}) as { note?: string };
+  try {
+    const turn = await engine.regenerateProse(id, note?.trim() ? { note: note.trim() } : {});
+    send(res, 200, turn);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    send(res, message.includes('pinned') ? 409 : 404, { error: message });
+  }
+});
+
 route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
   const { input, overrideIntegrity } = (body ?? {}) as { input?: string; overrideIntegrity?: boolean };
   if (!input || !input.trim()) return send(res, 400, { error: 'input required' });

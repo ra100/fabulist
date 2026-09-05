@@ -15,7 +15,7 @@ import {
   slugify,
   stripMarkup,
 } from '../src/ingest/parse.ts';
-import { crawl, discover, prune } from '../src/ingest/scope.ts';
+import { crawl, discover, isIndexTitle, prune } from '../src/ingest/scope.ts';
 import { runPassA } from '../src/ingest/passA.ts';
 import {
   deepenOnDemand,
@@ -75,6 +75,45 @@ test('categories and links extract, excluding other namespaces', () => {
   assert.ok(links.includes('Duskhollow'));
   assert.ok(links.includes('Emberfall'));
   assert.ok(!links.some((l) => /File|Category/.test(l)), 'file and category links are not entities');
+});
+
+test('interlanguage links are also excluded from parsed links', () => {
+  // A real wiki index page's actual link set: mostly interlanguage tags plus
+  // one genuine category, and one real content link.
+  const text = `[[de:Personen]] [[es:Personajes]] [[fr:Catégorie:Personnages]] [[Category:Characters]] [[Duskhollow]]`;
+  const links = parseLinks(text);
+  assert.deepEqual(links, ['Duskhollow'], 'only the real content link survives');
+});
+
+test('interlanguage and category links do not leak into a summary', () => {
+  // This is the exact shape a Fandom "Characters" index page has: almost no
+  // prose, just interlanguage tags and category membership. Before the fix,
+  // firstParagraph() surfaced this markup residue as the entity's summary.
+  const text = `[[de:Personen]] [[es:Personajes]] [[fi:Hahmot]] [[fr:Catégorie:Personnages]] [[hu:Karakterek]] [[pl:Postacie]] [[nl:Personages]] [[ru:Персонажи]] [[uk:Персонажі]] [[Category:Characters]] [[Category:Gameplay]]`;
+  const plain = stripMarkup(text);
+  assert.equal(plain.trim(), '', 'nothing readable remains once interlanguage/category links are stripped');
+  assert.equal(firstParagraph(text), '', 'no garbled interlanguage residue becomes the summary');
+});
+
+test('an infobox field with an interlanguage link inside it drops the link, not the field', () => {
+  const box = parseInfobox(`{{Infobox character
+| name = Someone
+| affiliation = [[de:Etwas]] [[Some Real Faction]]
+}}`)!;
+  assert.equal(box.fields.affiliation, 'Some Real Faction');
+});
+
+test('a wiki-namespace-style title is recognised as navigation, not content, by title shape', () => {
+  // The original hub-penalty regex only matched an English "list of ..."
+  // prefix. Fandom's own convention for a character index is a bare
+  // group-noun title, or that noun as a subpage root — neither starts with
+  // "list of", so both sailed through unpenalised on a real ingest.
+  for (const title of ['Characters', 'Category:Characters', 'Characters/Mass Effect 2', 'Locations/Andromeda']) {
+    assert.ok(isIndexTitle(title), `"${title}" should be recognised as an index page`);
+  }
+  for (const title of ['Warden Ilsa Crowe', 'Characters of the Vale']) {
+    assert.ok(!isIndexTitle(title), `"${title}" should NOT be recognised as an index page`);
+  }
 });
 
 test('sections split on headings', () => {
@@ -137,6 +176,23 @@ test('the client fetches pages and records revisions', async () => {
   assert.ok(page!.categories.includes('Locations'));
 });
 
+test('the links query is scoped to the main namespace', async () => {
+  // Without plnamespace=0, MediaWiki's `links` prop includes Category:,
+  // Template:, File: etc as if they were content links — which is how
+  // Category:Characters ended up crawled and scored as a "character" on a
+  // real wiki. This asserts the request itself carries the restriction,
+  // not just that a fixture happens to come back clean.
+  let seenNamespace: string | null = null;
+  const spy = async (url: string) => {
+    const params = new URL(url, 'http://fixture').searchParams;
+    if (params.get('action') === 'query' && params.has('titles')) seenNamespace = params.get('plnamespace');
+    return fixtureFetcher(WIKI)(url);
+  };
+  const c = new WikiClient({ baseUrl: 'https://vale.fandom.com', fetcher: spy, delayMs: 0 });
+  await c.fetchPage('Duskhollow');
+  assert.equal(seenNamespace, '0', 'the links query restricts to namespace 0');
+});
+
 test('a missing page is skipped, not thrown', async () => {
   const c = client();
   const pages = await c.fetchPages(['Duskhollow', 'Does Not Exist']);
@@ -197,6 +253,30 @@ test('an index page is ranked below arc pages despite linking to everything', as
     linkCount('Index of Vale Topics') > linkCount('Warden Ilsa Crowe'),
     'the hub really does link more widely than the protagonist',
   );
+});
+
+test('a bare group-noun title is scored below real content, not just prefix-matched hubs', async () => {
+  // Reproduces the real-world shape (masseffect.fandom.com's "Characters" page):
+  // a title that is exactly the name of an entity type, linking to real pages
+  // but carrying none of the "list of ..." wording the old regex needed.
+  const extra = {
+    ...WIKI,
+    Characters: {
+      title: 'Characters',
+      pageId: '900',
+      revision: '900',
+      categories: ['Meta'],
+      wikitext: `[[de:Personen]] [[Category:Characters]] [[Warden Ilsa Crowe]] [[Bram the Lesser]] [[Vesh Auld]]`,
+      links: ['Warden Ilsa Crowe', 'Bram the Lesser', 'Vesh Auld'],
+    },
+  };
+  const fixtureClient = new WikiClient({ baseUrl: 'https://vale.fandom.com', fetcher: fixtureFetcher(extra), delayMs: 0 });
+  const result = await crawl({ client: fixtureClient, seeds: ['Characters', 'Duskhollow'], hops: 1, maxPages: 100 });
+  const index = result.candidates.find((c) => c.title === 'Characters');
+  const ilsa = result.candidates.find((c) => c.title === 'Warden Ilsa Crowe');
+  assert.ok(index, 'the index page was reachable and crawled');
+  assert.ok(ilsa, 'a real character was reachable and crawled');
+  assert.ok(index!.score < ilsa!.score, `index (${index!.score}) should score below real content (${ilsa!.score})`);
 });
 
 test('a page whose inbound links are mostly out of scope is deprioritised', async () => {

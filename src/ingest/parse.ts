@@ -17,6 +17,23 @@ function unlink(s: string): string {
 }
 
 /**
+ * Drops bracket links whose target carries no display text a reader would
+ * want at all — interlanguage links (`[[de:Personen]]`) and the housekeeping
+ * namespaces (`[[Category:...]]`, `[[File:...]]`, etc). `unlink` unwraps a
+ * normal `[[a|b]]` link to its display text, which is right for content links
+ * but wrong here: unwrapping `[[de:Personen]]` surfaces `de:Personen` as prose.
+ * On a wiki's `Characters` index page — real prose, mostly interlanguage tags
+ * and category links, near-zero actual content — that residue became the
+ * entire entity summary. Must run before `unlink`, which would otherwise
+ * unwrap these first and leave nothing distinctive left to match.
+ */
+function stripNonContentLinks(s: string): string {
+  return s
+    .replace(/\[\[[a-z]{2,3}(-[a-z0-9]+)?:[^\]]*\]\]/gi, '')
+    .replace(/\[\[(?:File|Image|Category|Template|Help|Portal|Special|Media|Talk|User)\s*:[^\]]*\]\]/gi, '');
+}
+
+/**
  * Finds the body of the first template whose name matches `namePattern`,
  * tracking brace depth so nested templates do not terminate the match early.
  * Regex alone cannot do this, and nested templates are extremely common.
@@ -146,7 +163,7 @@ export function parseInfobox(wikitext: string): Infobox | null {
     const key = param.slice(0, eq).trim().toLowerCase();
     if (!key) continue;
     const raw = param.slice(eq + 1);
-    const value = unlink(unwrapTemplates(raw))
+    const value = unlink(stripNonContentLinks(unwrapTemplates(raw)))
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<ref[^>]*>[\s\S]*?<\/ref>/gi, '')
       .replace(/<ref[^>]*\/>/gi, '')
@@ -162,6 +179,8 @@ export function parseInfobox(wikitext: string): Infobox | null {
 }
 
 const SKIP_NS = /^(File|Image|Category|Template|Help|Portal|Special|Media|Talk|User)\s*:/i;
+/** Interlanguage link prefix, e.g. `de:`, `pt-br:` — never a page in this wiki. */
+const INTERLANG = /^[a-z]{2,3}(-[a-z0-9]+)?\s*:/i;
 
 export function parseCategories(wikitext: string): string[] {
   const out = new Set<string>();
@@ -176,7 +195,7 @@ export function parseLinks(wikitext: string): string[] {
   const out = new Set<string>();
   for (const m of wikitext.matchAll(/\[\[([^\]|#]+)/g)) {
     const target = m[1]?.trim();
-    if (!target || SKIP_NS.test(target)) continue;
+    if (!target || SKIP_NS.test(target) || INTERLANG.test(target)) continue;
     out.add(target.replace(/_/g, ' '));
   }
   return [...out];
@@ -238,6 +257,7 @@ export function stripMarkup(wikitext: string): string {
     t = t.replace(/\{\{[^{}]*\}\}/g, '');
   }
   t = t.replace(/\[\[(?:File|Image):[^\]]*\]\]/gi, '');
+  t = stripNonContentLinks(t);
   t = unlink(t);
   t = t.replace(/<[^>]+>/g, '');
   t = t.replace(/'''?/g, '');

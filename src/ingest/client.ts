@@ -96,6 +96,13 @@ export class WikiClient {
           rvslots: 'main',
           cllimit: 'max',
           pllimit: 'max',
+          // Main namespace (0) only: without this, `links` includes Category:,
+          // Template:, File: and other housekeeping pages, which then get
+          // crawled and scored as if they were story content (they aren't
+          // filtered client-side, because `parseLinks`'s SKIP_NS regex only
+          // covers the wikitext-parsing fallback path, not this — the
+          // authoritative — one).
+          plnamespace: '0',
           redirects: '1',
           titles: batch.join('|'),
         });
