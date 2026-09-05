@@ -157,8 +157,18 @@ Done: `configure()` sets `journal_size_limit = 4 MB` in `openDb`, and an exporte
 (`compact.ts`) and reused by `branchSave`, which had open-coded the same pragma.
 Measured on a real file: 4,000 commits → 4,023 KB WAL, checkpoint → 0 KB, data
 intact. Two tests, including that it is a no-op rather than a throw on
-`:memory:`. `VACUUM INTO` left for C1/bundling, where a single-file handoff
-actually happens; `branch.ts` already checkpoints before its copy.
+`:memory:`.
+
+`VACUUM INTO` followed sooner than planned, and as a first-class command rather
+than a C1 detail: `store/backup.ts` + `cli/backup.ts` (`pnpm backup`). The WAL
+hazard turned out to be far worse than "the copy may be stale" — with a live
+connection open, `cp` of the `.db` alone yields a database with **no tables at
+all**, because the schema itself is still in the sidecar. Demonstrated and
+asserted in `test/backup.test.ts`, because it is too surprising to leave as a
+comment. Images are copied alongside, since illustration rows hold relative paths
+to files outside the database; destinations are stamped and never overwritten.
+Eight tests, including that a backup opens as a playable save and passes
+`checkIntegrity`.
 
 ### A4 Cap stored verbatim text · S–M · done
 
@@ -306,8 +316,10 @@ against the unfixed list.
 Incidental confirmation of A3's argument, worth recording: probing that save by
 `cp data/fabulist.db /tmp/probe.db` reported *clean*, because the 3 bad rows were
 in a 4.1 MB WAL the copy did not include. Copying a WAL-mode database by hand
-silently loses committed data — which is why `checkpoint()` exists and why
-bundling (C1) must use `VACUUM INTO` rather than a file copy.
+silently loses committed data. That happened twice in one session, which is why
+`pnpm backup` now exists (see A3) rather than the hazard being left as a README
+warning — the safe path should be the easy one. C1/bundling gets that primitive
+for free as a result.
 
 ---
 

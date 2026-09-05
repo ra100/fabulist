@@ -41,11 +41,12 @@ Terminal is still there if you prefer it:
 ```bash
 pnpm seed                 # the sample world
 pnpm play                 # interactive session
+pnpm backup               # a safe copy of a save (not cp — see below)
 pnpm integrity            # check a save for dangling references
 ```
 
 ```bash
-pnpm test                 # 551 tests, offline
+pnpm test                 # 559 tests, offline
 pnpm typecheck
 ```
 
@@ -447,7 +448,7 @@ in the discarded future is unbroken, so the integrity gate defends it again.
 
 ---
 
-## Checking a save
+## Checking and copying a save
 
 ```bash
 pnpm integrity              # or: pnpm integrity data/other-world.db
@@ -472,10 +473,33 @@ deleting the evidence removes the signal. Exit code is 1 when anything dangles, 
 also works as a gate in a script. Worth running after an ingest, a fork, a truncate, or
 any hand-editing of a save.
 
-One caveat it teaches by example: do not copy a WAL-mode save with `cp`. The first real
-run of this tool found three orphaned portraits that a `cp` of the same file reported as
-clean, because 4.1 MB of committed data was still in the `-wal` sidecar. Use
-`/branch`, or checkpoint first.
+### Copying a save
+
+```bash
+pnpm backup                          # data/backups/<stamp>.db (+ -images/)
+pnpm backup --to=data/before-ingest  # an explicit name
+pnpm backup path/to/other.db         # a save other than the configured one
+```
+
+**Do not use `cp`.** A save in WAL mode is three files while open — `.db`, `-wal`, `-shm`
+— and the main file can be arbitrarily stale. This is not a stale-by-a-few-rows problem:
+with a live connection open, copying the `.db` alone produces a database with **no tables
+at all**, because the schema itself is still in the sidecar. There is a test that asserts
+exactly that, because it is too surprising to leave as a comment.
+
+That is not hypothetical here. The first real run of `pnpm integrity` found three orphaned
+portraits in a save; probing the same save through a `cp`-made copy reported it clean,
+because 4.1 MB of committed rows — including those three — were in the `-wal`.
+
+`pnpm backup` checkpoints, then uses `VACUUM INTO`, which is transactional (a reader sees
+either no file or a complete one, never a torn one) and emits a single defragmented file
+with no sidecars. Images are copied alongside, because illustration rows store relative
+paths to files that live *outside* the database, so a database-only backup restores to rows
+pointing at nothing. Destinations are stamped and never overwritten — a backup command that
+silently replaces the previous backup is a footgun, not a safety net.
+
+The result is a save in its own right, not just bytes: `pnpm integrity` passes on it and
+`World.open` will play it.
 
 ---
 
@@ -485,7 +509,7 @@ clean, because 4.1 MB of committed data was still in the `-wal` sidecar. Use
 src/domain/       types; the delta contract lives here
 src/db/           schema.sql and the connection
 src/store/        canon/chronicle overlay, cast, chronicle, threads, consequences, illustrations,
-                  referential integrity check
+                  referential integrity check, safe backup
 src/providers/    adapter interface, capability matrix, mock, http, bedrock,
                   google, copilot, sigv4, aws credential chain, probe;
                   image: mock, comfyui, bedrock stability
@@ -497,7 +521,7 @@ src/lint/         rule engine, two profiles, the prose gate
 src/ingest/       mediawiki client, parsers, scope, pass A, pass B, depth modes
 src/setup/        wiki discovery, planner, jobs, world building
 src/seed/         hand-authored canon for Saint Verrow
-src/cli/          play, seed, serve, ingest, script, lintprose, integrity
+src/cli/          play, seed, serve, ingest, script, lintprose, integrity, backup
 src/server/       http api
 web/              vite + react inspector
 ```
