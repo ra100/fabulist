@@ -409,6 +409,31 @@ test('POST /api/stories/fork with no atScene forks the current story fresh; with
   });
 });
 
+test('POST /api/stories/fork can branch a story other than the one currently open, via an explicit fromStoryId', async () => {
+  await withMultiStoryServer(async (base, world, currentStory) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    const originalStoryId = world.storyId;
+
+    const created = (await send(base, 'POST', '/api/stories', { title: 'other' })).body as { id: string };
+    // Switch away, so `originalStoryId` is no longer the server's current story.
+    await send(base, 'POST', `/api/stories/${encodeURIComponent(created.id)}/switch`, {});
+    assert.equal(currentStory.id(), created.id, 'current story really did move');
+
+    const forked = await send(base, 'POST', '/api/stories/fork', {
+      fromStoryId: originalStoryId,
+      atScene: 2,
+      title: 'branched without switching back',
+    });
+    assert.equal(forked.status, 201);
+    const forkedBody = forked.body as { story: { id: string }; copiedFrom: string };
+    assert.equal(forkedBody.copiedFrom, originalStoryId);
+
+    // The server's current story never moved during the fork — still `created`.
+    assert.equal(currentStory.id(), created.id, 'forking a non-current story does not switch to it');
+    assert.equal(world.withStory(forkedBody.story.id).chronicle.turns().length, 1, "the fork copied the original story's turn");
+  });
+});
+
 test('story management routes 503 when the server has no CurrentStory configured', async () => {
   await withServer(async (base) => {
     const { status, body } = await send(base, 'POST', '/api/stories/some-id/switch', {});

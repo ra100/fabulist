@@ -93,6 +93,25 @@ export interface Knobs {
   npcAgency: number; propagationDepth: number; ignoranceBudget: number; proseDensity: number;
 }
 
+export interface Story {
+  id: string;
+  title: string;
+  scene: number;
+  turn: number;
+  playerCharacterId: string;
+  currentLocationId: string | null;
+  forkedFrom: string | null;
+  forkedAtScene: number | null;
+  createdAt: string;
+  lastPlayedAt: string;
+}
+
+export interface ForkResult {
+  story: Story;
+  copiedFrom: string | null;
+  copiedUpToScene: number | null;
+}
+
 export interface State {
   worldTitle: string;
   session: { scene: number; turn: number; playerCharacterId: string; currentLocationId: string | null; style: StyleContract; knobs: Knobs };
@@ -507,6 +526,17 @@ export const api = {
         newline = buffer.indexOf('\n');
       }
     }
+  },
+
+  stories: {
+    list: () => req<Story[]>('/stories'),
+    create: (title?: string) => post<Story>('/stories', title ? { title } : {}),
+    /** `fromStoryId` defaults server-side to whichever story is current; pass it explicitly to fork a story other than the one currently open, with no switch required. */
+    fork: (fromStoryId: string, title?: string, atScene?: number) =>
+      post<ForkResult>('/stories/fork', { fromStoryId, ...(title ? { title } : {}), ...(atScene !== undefined ? { atScene } : {}) }),
+    switchTo: (id: string) => post<{ current: string }>(`/stories/${encodeURIComponent(id)}/switch`),
+    rename: (id: string, title: string) => put<{ id: string; title: string }>(`/stories/${encodeURIComponent(id)}/title`, { title }),
+    remove: (id: string) => req<{ ok: boolean }>(`/stories/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   },
 
   setup: {

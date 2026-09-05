@@ -13,6 +13,7 @@ import {
   type PlayResponse,
   type ProvidersReport,
   type State,
+  type Story,
   type Thread,
   type TurnMeta,
 } from './api.ts';
@@ -23,7 +24,7 @@ import { AppearanceEditor, PortraitPanel, SceneIllustration, StylePicker } from 
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 
-type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'settings';
+type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'stories' | 'settings';
 
 /** Scene numbers read as roman, the way a book numbers its parts. */
 function roman(n: number): string {
@@ -123,21 +124,11 @@ export function App() {
           </div>
         ) : null}
         <nav className="tabs">
-          {(['book', 'graph', 'cast', 'threads', 'causality', 'facts', 'settings'] as Tab[]).map((t) => (
+          {(['book', 'graph', 'cast', 'threads', 'causality', 'facts', 'stories', 'settings'] as Tab[]).map((t) => (
             <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
               {t}
             </button>
           ))}
-          <button
-            title="discard this world and set up a new one"
-            onClick={async () => {
-              if (!window.confirm('Discard this world and everything that happened in it?')) return;
-              await api.setup.reset();
-              setFresh(true);
-            }}
-          >
-            new
-          </button>
         </nav>
       </header>
 
@@ -149,6 +140,16 @@ export function App() {
       {tab === 'threads' ? <ThreadsTab state={state} onChanged={refresh} /> : null}
       {tab === 'causality' ? <CausalityTab /> : null}
       {tab === 'facts' ? <FactsTab /> : null}
+      {tab === 'stories' ? (
+        <StoriesTab
+          currentSceneTurn={state ? `${state.session.scene}·${state.session.turn}` : '?'}
+          onSwitched={() => {
+            setTab('book');
+            void refresh();
+          }}
+          onResetToWizard={() => setFresh(true)}
+        />
+      ) : null}
       {tab === 'settings' ? <SettingsTab state={state} onChanged={refresh} /> : null}
     </div>
   );
@@ -1515,6 +1516,220 @@ function SettingsTab({ state, onChanged }: { state: State | null; onChanged: () 
           </div>
         ) : null}
       </aside>
+    </div>
+  );
+}
+
+/**
+ * The save browser: every story in this world file, and what a player can do
+ * with one. Replaces the old topbar "new" button's only option (discard
+ * everything, canon included, and re-run the wizard) with the actual range
+ * multi-story supports — switch to a different playthrough, start a fresh
+ * one sharing this world's canon, or branch/continue an existing one from an
+ * earlier scene, all without losing anything. "discard this world entirely"
+ * is still here, at the bottom, for when that really is what is wanted.
+ */
+function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
+  currentSceneTurn: string;
+  onSwitched: () => void;
+  onResetToWizard: () => void;
+}) {
+  const [stories, setStories] = useState<Story[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  const [forkFrom, setForkFrom] = useState<{ id: string; title: string } | null>(null);
+  const [forkScene, setForkScene] = useState('');
+  const [forkTitle, setForkTitle] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setStories(await api.stories.list());
+      setError(null);
+    } catch (e) {
+      // A server without story management enabled (currentStory not
+      // configured) 503s every route here — worth saying plainly rather
+      // than showing an empty, confusing list.
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => void load(), [load]);
+
+  const run = async (id: string, label: string, fn: () => Promise<void>) => {
+    setBusy(id + label);
+    try {
+      await fn();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="main">
+      <div className="pane">
+        <div className="measure-tool">
+          {error ? <div className="card warn">{error}</div> : null}
+
+          <div className="card">
+            <h3>stories in this world</h3>
+            <p className="hint">
+              Every story here shares the same canon — the wiki (or authored world) underneath — but plays out
+              independently: what one story's characters do, say, or learn never touches another's.
+            </p>
+            {!stories ? (
+              <p className="empty">loading…</p>
+            ) : stories.length === 0 ? (
+              <p className="empty">no stories yet</p>
+            ) : (
+              stories.map((s) => (
+                <div key={s.id} className="field-row" style={{ alignItems: 'flex-start' }}>
+                  <span style={{ flex: 1 }}>
+                    {renaming?.id === s.id ? (
+                      <input
+                        autoFocus
+                        value={renaming.title}
+                        onChange={(e) => setRenaming({ id: s.id, title: e.target.value })}
+                        onKeyDown={async (e) => {
+                          if (e.key !== 'Enter') return;
+                          await run(s.id, 'rename', async () => {
+                            await api.stories.rename(s.id, renaming.title);
+                            setRenaming(null);
+                            await load();
+                          });
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <b>{s.title || 'untitled story'}</b>
+                        {' — '}
+                        scene {s.scene}·{s.turn}
+                        {s.forkedFrom ? (
+                          <span className="dimmer"> · forked at scene {s.forkedAtScene}</span>
+                        ) : null}
+                      </>
+                    )}
+                  </span>
+                  <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      disabled={busy === s.id + 'switch'}
+                      onClick={() => void run(s.id, 'switch', async () => {
+                        await api.stories.switchTo(s.id);
+                        onSwitched();
+                      })}
+                    >
+                      open
+                    </button>
+                    <button
+                      disabled={renaming?.id === s.id}
+                      onClick={() => setRenaming({ id: s.id, title: s.title })}
+                    >
+                      rename
+                    </button>
+                    <button
+                      onClick={() => {
+                        setForkFrom({ id: s.id, title: s.title });
+                        setForkScene('');
+                        setForkTitle('');
+                      }}
+                    >
+                      branch…
+                    </button>
+                    <button
+                      className="warn"
+                      disabled={stories.length <= 1 || busy === s.id + 'delete'}
+                      title={stories.length <= 1 ? 'the last story in a world cannot be deleted this way' : 'delete this story only — canon and every other story are unaffected'}
+                      onClick={async () => {
+                        if (!window.confirm(`Delete "${s.title || 'untitled story'}"? This only removes this one story — canon and other stories are unaffected.`)) return;
+                        await run(s.id, 'delete', async () => {
+                          await api.stories.remove(s.id);
+                          await load();
+                        });
+                      }}
+                    >
+                      delete
+                    </button>
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="card">
+            <h3>start a new story</h3>
+            <p className="hint">
+              A fresh playthrough of the same world — same canon, no history. Currently at scene/turn {currentSceneTurn}.
+            </p>
+            <button
+              className="primary"
+              disabled={busy === 'new'}
+              onClick={() => void run('new', 'create', async () => {
+                await api.stories.create();
+                await load();
+              })}
+            >
+              new story
+            </button>
+          </div>
+
+          {forkFrom ? (
+            <div className="card">
+              <h3>branch "{forkFrom.title || 'untitled story'}"</h3>
+              <p className="hint">
+                Leave the scene blank for a fresh story sharing only canon. Give a scene number to copy that
+                story's chronicle up to (not including) that scene — a continuation from an earlier point, with
+                the original left exactly as it was.
+              </p>
+              <label className="field-row">
+                <span>title</span>
+                <input value={forkTitle} onChange={(e) => setForkTitle(e.target.value)} placeholder={`${forkFrom.title || 'untitled story'} (fork)`} />
+              </label>
+              <label className="field-row">
+                <span>continue from scene</span>
+                <input value={forkScene} onChange={(e) => setForkScene(e.target.value)} placeholder="leave blank for a fresh story" inputMode="numeric" />
+              </label>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button
+                  className="primary"
+                  disabled={busy === forkFrom.id + 'fork'}
+                  onClick={() => void run(forkFrom.id, 'fork', async () => {
+                    const scene = forkScene.trim() ? Number(forkScene.trim()) : undefined;
+                    if (scene !== undefined && (!Number.isFinite(scene) || scene < 1)) throw new Error('scene must be a number of 1 or greater');
+                    await api.stories.fork(forkFrom.id, forkTitle.trim() || undefined, scene);
+                    setForkFrom(null);
+                    await load();
+                  })}
+                >
+                  create branch
+                </button>
+                <button onClick={() => setForkFrom(null)}>cancel</button>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="card">
+            <h3>discard this world</h3>
+            <p className="hint warn">
+              Wipes every story in this file, and canon with them, so the setup wizard can run again from
+              scratch. Unlike everything above, this cannot be undone by opening another story — there will not
+              be one.
+            </p>
+            <button
+              className="warn"
+              onClick={async () => {
+                if (!window.confirm('Discard this world and everything that happened in it — every story, and canon?')) return;
+                await api.setup.reset();
+                onResetToWizard();
+              }}
+            >
+              discard world &amp; start over
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

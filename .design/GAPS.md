@@ -125,20 +125,19 @@ There is no way to get the book out — not text, not markdown, not anything. Fo
 writing tool that is a strange hole. Markdown and plain text cover it; scene and
 chapter headings come from the compaction work.
 
-### 2.3 No save management · M · backend done, API/UI pending
+### 2.3 No save management · M · multi-story done, cross-file management still open
 
 One `dbPath`, no way to list, open, name or delete a world. Branching writes files
 that then cannot be opened. Ingesting a second fandom means editing config and
 restarting.
 
 `dbPath` is deliberately not runtime-patchable because the world is already open, so
-this needs a re-open path: close the world, open another, rebuild the engine. Worth
-doing properly rather than bolting on.
-
-**Multi-story migration (backend complete):** the deeper version of this gap is one
-level below file management — the app never supported more than one *story* per
-world file at all, so trying two independent playthroughs of the same fandom meant
-two separate server processes. That is fixed at the storage layer:
+listing/opening a *different world file* (a different fandom entirely) still needs a
+re-open path — close the world, open another, rebuild the engine — and that part of
+this gap is still open. What is fixed is the part one level below file management:
+the app never supported more than one *story* per world file at all, so trying two
+independent playthroughs of the *same* fandom meant two separate server processes.
+Fixed end to end, backend through UI:
 
 - Schema: a `stories` table replaces the old `session` singleton. Canon
   (`layer='canon'`) is unscoped and shared by every story in a world file; every
@@ -150,10 +149,13 @@ two separate server processes. That is fixed at the storage layer:
   for the ~75 existing call sites that never think about multiple stories (a file
   with exactly one story just binds to it); `World.withStory()` switches stories in
   an already-open file with no reopen.
-- `Engine`/`Compactor`/`SetupService` resolve `World` live per call rather than
-  holding a captured reference — the same bug shape the SetupPlanner fix caught for
-  providers, one level up, since which story is "current" can now change under a
-  long-lived server process without a restart.
+- `Engine`/`Compactor`/`SetupService`/`IllustrationService` resolve `World` live per
+  call rather than holding a captured reference — the same bug shape the
+  SetupPlanner fix caught for providers, one level up, since which story is
+  "current" can now change under a long-lived server process without a restart.
+  `CurrentStory` (`src/store/index.ts`) is the server-level version of the same
+  pattern: `createApiServer` resolves it fresh per request, so
+  `POST /api/stories/:id/switch` takes effect on the very next request.
 - `forkStory(world, { fromStoryId, atScene? })`: the same-file fork primitive. Omit
   `atScene` for a fresh, non-overlapping story sharing only canon ("start a new
   story in this world"); pass it to copy that story's chronicle up to the scene
@@ -163,11 +165,20 @@ two separate server processes. That is fixed at the storage layer:
   and fixed with real regression tests, not assumed correct from the design.
   `branchSave` (cross-*file* fork, for handing off a save) sits on the same
   primitives.
-
-**Still open:** none of this is reachable yet. `src/server/api.ts` has no
-story-list/create/switch/rename/delete routes, and the web client has no save/story
-browser — the topbar's "new" button is still the single, destructive, whole-file
-reset it always was. That is the remaining work for this gap: routes, then UI.
+- Routes: `GET/POST /api/stories`, `POST /api/stories/fork` (accepts an explicit
+  `fromStoryId` so the save browser can branch a story other than the one
+  currently open, no switch-then-fork-then-switch-back needed), `POST
+  /api/stories/:id/switch`, `PUT /api/stories/:id/title`, `DELETE
+  /api/stories/:id` (409 on the currently-open story, 400 on the last story in a
+  file — `POST /api/setup/reset`'s job).
+- UI: a "stories" tab replaces the old topbar "new" button (which only ever
+  offered "discard everything, canon included"). Lists every story, and offers
+  open/rename/branch/delete per story, "start a new story", and — still, at the
+  bottom, clearly separated — "discard this world" for when that really is what
+  is wanted. Verified in a real browser against a live server, not only through
+  the test suite: create, rename, open (switch), play a turn, branch a
+  non-current story without switching to it, delete, and the 409 refusal on
+  deleting the currently-open story all round-tripped correctly.
 
 ### 2.4 No session cost or token total · S · done
 

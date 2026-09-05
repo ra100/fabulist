@@ -636,14 +636,17 @@ route('POST', '/api/stories', (_req, res, { world, body }) => {
 /**
  * Forks a story: omit `atScene` for a fresh copy sharing canon only, pass it
  * to copy that story's own chronicle up to the scene boundary first — the
- * "branch from here" / "continue from an earlier point" case. Operates on
- * whichever story is current, not one named in the body, so this always
- * forks the save the player is actually looking at.
+ * "branch from here" / "continue from an earlier point" case. `fromStoryId`
+ * defaults to whichever story is current, but the save browser needs to
+ * branch a story it is not currently looking at without a visible
+ * switch-then-fork-then-switch-back round trip, so an explicit id in the
+ * body is honoured too — `forkStory` only ever reads that story's own rows,
+ * never mutates it, so this is safe regardless of which story is current.
  */
 route('POST', '/api/stories/fork', (_req, res, { world, body }) => {
-  const { title, atScene } = (body ?? {}) as { title?: string; atScene?: number };
+  const { title, atScene, fromStoryId } = (body ?? {}) as { title?: string; atScene?: number; fromStoryId?: string };
   try {
-    send(res, 201, forkStory(world, { fromStoryId: world.storyId, title: title?.trim(), atScene }));
+    send(res, 201, forkStory(world, { fromStoryId: fromStoryId || world.storyId, title: title?.trim(), atScene }));
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }

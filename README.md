@@ -44,7 +44,7 @@ pnpm play                 # interactive session
 ```
 
 ```bash
-pnpm test                 # 517 tests, offline
+pnpm test                 # 527 tests, offline
 pnpm typecheck
 ```
 
@@ -486,9 +486,13 @@ Node 24 runs TypeScript directly, so there is no backend build step. That rules 
   a live lookup). Real prose is now flowing end to end; see `.design/GAPS.md` §4.1 for the
   full account, including what Pass A itself still gets wrong (infobox markup leaking into
   summaries; species and real-world pages surfacing as character candidates).
-- **Multiple stories per world: backend done, not reachable yet.** A world file can now
-  hold more than one independent playthrough (canon shared, everything else isolated per
-  `story_id`), and a same-file fork primitive (`forkStory`) exists for both a fresh new
-  story and a scene-boundary continuation of an existing one. None of it has routes or UI
-  yet — see `.design/GAPS.md` §2.3 for the full account, including a real id-collision bug
-  found and fixed in the fork's copy-forward (nothing had tested that path before).
+- **Multiple stories per world.** A world file can hold more than one independent
+  playthrough — canon shared, everything else isolated per `story_id` — with a
+  same-file fork primitive (`forkStory`) for both a fresh new story and a
+  scene-boundary continuation of an existing one, reachable end to end: a "stories"
+  tab in the UI replaces the old destructive "new" button, and `POST
+  /api/stories/:id/switch` takes effect on the very next request with no restart.
+  What is not fixed: opening a *different world file* (a different fandom entirely)
+  still means editing config and restarting. See `.design/GAPS.md` §2.3 for the full
+  account, including a real id-collision bug found and fixed in the fork's
+  copy-forward (nothing had tested that path before it shipped).
