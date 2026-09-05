@@ -29,6 +29,7 @@
  * everything at or after a scene from *one* story, never touching canon or
  * any other story in the same file.
  */
+import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { World } from '../store/index.ts';
@@ -145,22 +146,49 @@ export function truncateToScene(world: World, scene: number): BranchResult['remo
   });
 }
 
-/** Every chronicle-scoped table `forkStory`'s copy-forward touches. */
+/**
+ * Every chronicle-scoped table `forkStory`'s copy-forward touches, in
+ * dependency order (referenced-by-id tables before the tables that reference
+ * them, so a remap is available by the time it is needed).
+ *
+ * `idColumn` describes what to do with a primary key that would otherwise
+ * collide with the still-existing source row:
+ * - `null`: nothing to do. `entities`/`sheets` key on `(id, layer,
+ *   story_id)`, backed by a synthetic `rowid_pk` that is already excluded
+ *   from every copy (see the `rowid_pk` filter below) — SQLite assigns it a
+ *   fresh one automatically. `scenes`/`chapters`/`relationships` key on
+ *   `story_id` plus a natural column, which is already being rewritten.
+ * - `'text'`: a bare `TEXT PRIMARY KEY` (`facts`, `threads`, `events`,
+ *   `consequences`, `turns`, `directives`, `divergences`... — checked
+ *   directly against the schema, not assumed) gets a fresh UUID, prefixed
+ *   with its own id's existing type tag (`fact:`, `thread:`, etc).
+ * - `'integer'`: an `INTEGER PRIMARY KEY AUTOINCREMENT` (`edges`,
+ *   `divergences`, `style_anchors`) cannot hold a generated UUID string —
+ *   confirmed directly (a real "datatype mismatch" from trying) — so the
+ *   column is dropped from the copy entirely and SQLite assigns the next
+ *   integer itself, exactly like `rowid_pk`.
+ *
+ * `refs` names columns elsewhere in *this same row* that must be rewritten
+ * through an already-built remap (e.g. `events.id` must be remapped before
+ * `consequences.cause_event_id` can be rewritten, which is why `events`
+ * precedes `consequences` in this list).
+ */
 const CHRONICLE_TABLES = [
-  { table: 'entities', sceneCol: 'created_scene', extra: `AND layer = 'chronicle'` },
-  { table: 'edges', sceneCol: 'valid_from', extra: `AND layer = 'chronicle'` },
-  { table: 'sheets', sceneCol: null, extra: `AND layer = 'chronicle'` },
-  { table: 'relationships', sceneCol: null, extra: '' },
-  { table: 'facts', sceneCol: 'scene', extra: '' },
-  { table: 'threads', sceneCol: 'created_scene', extra: '' },
-  { table: 'events', sceneCol: 'scene', extra: '' },
-  { table: 'consequences', sceneCol: 'created_scene', extra: '' },
-  { table: 'turns', sceneCol: 'scene', extra: '' },
-  { table: 'scenes', sceneCol: 'scene', extra: '' },
-  { table: 'chapters', sceneCol: null, extra: '' },
-  { table: 'directives', sceneCol: 'created_scene', extra: '' },
-  { table: 'divergences', sceneCol: 'scene', extra: '' },
-  { table: 'style_anchors', sceneCol: 'scene', extra: '' },
+  { table: 'edges', sceneCol: 'valid_from', extra: `AND layer = 'chronicle'`, idColumn: 'integer' as const, refs: [] },
+  { table: 'entities', sceneCol: 'created_scene', extra: `AND layer = 'chronicle'`, idColumn: null, refs: [] },
+  { table: 'sheets', sceneCol: null, extra: `AND layer = 'chronicle'`, idColumn: null, refs: [] },
+  { table: 'relationships', sceneCol: null, extra: '', idColumn: null, refs: [] },
+  { table: 'facts', sceneCol: 'scene', extra: '', idColumn: 'text' as const, refs: [] },
+  { table: 'threads', sceneCol: 'created_scene', extra: '', idColumn: 'text' as const, refs: [] },
+  { table: 'events', sceneCol: 'scene', extra: '', idColumn: 'text' as const, refs: ['from_consequence_id'] },
+  { table: 'consequences', sceneCol: 'created_scene', extra: '', idColumn: 'text' as const, refs: ['cause_event_id'] },
+  { table: 'turns', sceneCol: 'scene', extra: '', idColumn: 'text' as const, refs: [] },
+  { table: 'scenes', sceneCol: 'scene', extra: '', idColumn: null, refs: [] },
+  { table: 'chapters', sceneCol: null, extra: '', idColumn: null, refs: [] },
+  { table: 'directives', sceneCol: 'created_scene', extra: '', idColumn: 'text' as const, refs: [] },
+  { table: 'divergences', sceneCol: 'scene', extra: '', idColumn: 'integer' as const, refs: [] },
+  { table: 'style_anchors', sceneCol: 'scene', extra: '', idColumn: 'integer' as const, refs: [] },
+  { table: 'illustrations', sceneCol: 'created_scene', extra: '', idColumn: 'text' as const, refs: ['turn_id'] },
 ] as const;
 
 export interface ForkOptions {
@@ -187,10 +215,12 @@ export interface ForkResult {
  * Same-file fork: the primitive behind both "start a new story in this
  * world" (no `atScene`) and "branch this story from an earlier point"
  * (`atScene` given). One transaction, one new `stories` row, and — when
- * continuing — a straight `INSERT ... SELECT` per chronicle table with
- * `story_id` rewritten. No file copy, because switching which story is
- * current in this file is already just a different `story_id` filter
- * (`World.withStory`); there is nothing to close and reopen.
+ * continuing — a per-table `INSERT ... SELECT` with `story_id` rewritten and
+ * every table's own id regenerated (with cross-references remapped to
+ * match, table-by-table in dependency order). No file copy, because
+ * switching which story is current in this file is already just a
+ * different `story_id` filter (`World.withStory`); there is nothing to
+ * close and reopen.
  */
 export function forkStory(world: World, opts: ForkOptions): ForkResult {
   const source = getStory(world.db, opts.fromStoryId);
@@ -209,32 +239,93 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
     }
 
     const scene = opts.atScene;
-    for (const { table, sceneCol, extra } of CHRONICLE_TABLES) {
-      const cols = rows<{ name: string }>(world.db.prepare(`PRAGMA table_info(${table})`).all())
+    // Old id -> new id, per table that needed a fresh one. Built table by
+    // table, in the dependency order CHRONICLE_TABLES already lists, so a
+    // ref column can always find its target's remap already populated.
+    const idMaps = new Map<string, Map<string, string>>();
+
+    for (const { table, sceneCol, extra, idColumn, refs } of CHRONICLE_TABLES) {
+      const allCols = rows<{ name: string }>(world.db.prepare(`PRAGMA table_info(${table})`).all())
         .map((r) => r.name)
         .filter((c) => c !== 'rowid_pk');
-      const selectCols = cols.map((c) => (c === 'story_id' ? '?' : c)).join(', ');
+      // An 'integer' id (AUTOINCREMENT) is dropped from both the select and
+      // the insert, exactly like rowid_pk — SQLite assigns the next one
+      // itself. A 'text' id is kept in both lists and rewritten per row below.
+      const cols = idColumn === 'integer' ? allCols.filter((c) => c !== 'id') : allCols;
       const sceneClause = sceneCol ? `AND ${sceneCol} < ?` : '';
-      const args: unknown[] = [story.id, opts.fromStoryId];
-      if (sceneCol) args.push(scene);
-      world.db
-        .prepare(
-          `INSERT INTO ${table} (${cols.join(', ')})
-           SELECT ${selectCols} FROM ${table} WHERE story_id = ? ${extra} ${sceneClause}`,
-        )
-        .run(...([story.id, opts.fromStoryId, ...(sceneCol ? [scene] : [])] as never[]));
+      const selectArgs: unknown[] = [opts.fromStoryId];
+      if (sceneCol) selectArgs.push(scene);
+
+      // 'integer' ids still need their *old* value read (to build the remap
+      // other tables' refs would look up, though none actually do for these
+      // three tables — kept for symmetry, not because anything needs it),
+      // even though the column is excluded from the copy itself. Tables with
+      // no id-collision concern at all (`idColumn: null`) have no `id`
+      // column forced in either — `scenes`/`chapters` key on `story_id` plus
+      // a natural column and have no `id` column at all.
+      const selectCols = idColumn === 'integer' ? ['id', ...cols] : cols;
+      const source_rows = rows<Record<string, unknown>>(
+        world.db
+          .prepare(`SELECT ${selectCols.join(', ')} FROM ${table} WHERE story_id = ? ${extra} ${sceneClause}`)
+          .all(...(selectArgs as never[])),
+      );
+      if (!source_rows.length) continue;
+
+      const ownMap: Map<string, string> | null = idColumn ? new Map() : null;
+      if (ownMap) idMaps.set(table, ownMap);
+
+      const insertCols = cols.join(', ');
+      const placeholders = cols.map(() => '?').join(', ');
+      const stmt = world.db.prepare(`INSERT INTO ${table} (${insertCols}) VALUES (${placeholders})`);
+
+      for (const row of source_rows) {
+        if (idColumn === 'integer') {
+          // Nothing in this codebase's schema references edges/divergences/
+          // style_anchors ids from another table (checked directly against
+          // every FOREIGN KEY in schema.sql before relying on it), so the
+          // remap only needs to exist for completeness — nothing ever reads it.
+          ownMap!.set(String(row.id), '');
+        }
+        const values = cols.map((c) => {
+          if (c === 'story_id') return story.id;
+          if (c === 'id' && idColumn === 'text') {
+            const fresh = `${String(row.id).split(':')[0] ?? table}:${randomUUID()}`;
+            ownMap!.set(String(row.id), fresh);
+            return fresh;
+          }
+          if ((refs as readonly string[]).includes(c) && row[c] != null) {
+            // The referenced table was already copied (dependency order), so
+            // its remap exists. A ref to a row this fork did *not* copy (out
+            // of scene range, e.g. an illustration for a turn before the
+            // fork's own window that somehow points forward — should not
+            // happen, but the fallback is "drop the reference" rather than
+            // insert a dangling one) leaves the column NULL.
+            const table_for_ref = c === 'turn_id' ? 'turns' : c === 'cause_event_id' ? 'events' : c === 'from_consequence_id' ? 'consequences' : null;
+            const refMap = table_for_ref ? idMaps.get(table_for_ref) : undefined;
+            return refMap?.get(String(row[c])) ?? null;
+          }
+          return row[c] as never;
+        });
+        stmt.run(...(values as never[]));
+      }
     }
 
     // fact_knowledge has no story_id column of its own; it is scoped through
-    // fact_id, so it is copied per fact this fork just copied, not by a
-    // top-level story_id filter.
-    const copiedFactIds = rows<{ id: string }>(
-      world.db.prepare(`SELECT id FROM facts WHERE story_id = ? AND scene < ?`).all(story.id, scene),
-    ).map((r) => r.id);
-    for (const factId of copiedFactIds) {
-      world.db
-        .prepare(`INSERT INTO fact_knowledge SELECT * FROM fact_knowledge WHERE fact_id = ? AND since_scene < ?`)
-        .run(factId, scene);
+    // fact_id, so it is copied per remapped fact id, using the fact_knowledge
+    // rows attached to the *original* fact (since since_scene lives on
+    // fact_knowledge, not facts, the scene filter belongs here too).
+    const factMap = idMaps.get('facts');
+    if (factMap) {
+      for (const [oldFactId, newFactId] of factMap) {
+        const knowledge = rows<Record<string, unknown>>(
+          world.db.prepare(`SELECT * FROM fact_knowledge WHERE fact_id = ? AND since_scene < ?`).all(oldFactId, scene),
+        );
+        for (const k of knowledge) {
+          world.db
+            .prepare(`INSERT INTO fact_knowledge (fact_id, entity_id, level, since_scene, distortion) VALUES (?,?,?,?,?)`)
+            .run(newFactId, ...([k.entity_id, k.level, k.since_scene, k.distortion] as never[]));
+        }
+      }
     }
 
     // The new story resumes exactly where the copy ends, same as truncateToScene.

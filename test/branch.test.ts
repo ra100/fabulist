@@ -8,7 +8,7 @@ import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine.ts';
-import { branchSave, truncateToScene } from '../src/loop/branch.ts';
+import { branchSave, forkStory, truncateToScene } from '../src/loop/branch.ts';
 import { seedConsequences } from '../src/consequence/propagate.ts';
 
 function tmp() {
@@ -271,5 +271,124 @@ test('the removal report accounts for what the branch discarded', async () => {
   assert.ok(removed.events > 0);
   assert.ok(removed.consequences > 0);
   assert.ok(removed.retiredEdgesRestored > 0, 'restored relations are reported too');
+  world.close();
+});
+
+// -------------------------------------------------------------- forkStory
+
+test('forkStory with no atScene creates an empty, non-overlapping story that shares canon', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world);
+
+  const result = forkStory(world, { fromStoryId: world.storyId, title: 'a second playthrough' });
+  assert.equal(result.copiedFrom, null);
+  assert.equal(result.copiedUpToScene, null);
+  assert.equal(result.story.forkedFrom, null, 'not a continuation, so no lineage recorded');
+
+  const fresh = world.withStory(result.story.id);
+  assert.equal(fresh.chronicle.turns().length, 0, 'nothing copied');
+  assert.equal(fresh.threads.open().length, 0);
+  assert.ok(fresh.graph.counts().entities > 15, 'canon is shared, not copied');
+  assert.equal(fresh.session.get().scene, 1, 'a brand-new story starts at scene 1');
+
+  // The original story is completely unaffected by the fork existing.
+  assert.ok(world.chronicle.turns().length > 0);
+  world.close();
+});
+
+test('forkStory with atScene copies chronicle forward with fresh, non-colliding ids', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world); // scenes 1-3, several turns/events/facts/threads
+
+  const beforeTurns = world.chronicle.turns().length;
+  const beforeFacts = world.chronicle.facts().length;
+  const beforeThreads = world.threads.open(50).length;
+
+  const result = forkStory(world, { fromStoryId: world.storyId, title: 'continued', atScene: 2 });
+  assert.equal(result.copiedFrom, world.storyId);
+  assert.equal(result.copiedUpToScene, 2);
+  assert.equal(result.story.forkedFrom, world.storyId);
+  assert.equal(result.story.forkedAtScene, 2);
+
+  const forked = world.withStory(result.story.id);
+
+  // Everything scoped to scene < 2 made it across.
+  assert.equal(forked.chronicle.turns().length, world.chronicle.turns({ scene: undefined }).filter((t) => t.scene < 2).length);
+  assert.ok(forked.chronicle.turns().length > 0);
+  assert.equal(forked.session.get().scene, 2, 'the fork resumes exactly where the copy ends');
+
+  // The original story's own rows are completely untouched: same counts,
+  // same ids, no row lost to the copy and no row silently shared.
+  assert.equal(world.chronicle.turns().length, beforeTurns);
+  assert.equal(world.chronicle.facts().length, beforeFacts);
+  assert.equal(world.threads.open(50).length, beforeThreads);
+
+  // The defining property of the fix: every copied row's id is a *new* id,
+  // not the original's — reproduced directly before the fix that copying
+  // with the original id collided with the still-existing source row.
+  const originalTurnIds = new Set(world.chronicle.turns().map((t) => t.id));
+  const forkedTurnIds = forked.chronicle.turns().map((t) => t.id);
+  assert.ok(forkedTurnIds.length > 0);
+  for (const id of forkedTurnIds) assert.ok(!originalTurnIds.has(id), `forked turn id ${id} must not equal any original turn id`);
+
+  const originalFactIds = new Set(world.chronicle.facts().map((f) => f.id));
+  for (const f of forked.chronicle.facts()) assert.ok(!originalFactIds.has(f.id), 'forked fact ids are fresh too');
+
+  world.close();
+});
+
+test('forkStory preserves fact_knowledge (epistemic state) under the remapped fact ids', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world);
+
+  // playHistory records a fact known specifically by novice-tem, at scene 3;
+  // fork before that scene closes so the copy actually includes it.
+  const fact = world.chronicle.facts().find((f) => f.text.includes('Anselm drew a knife'));
+  assert.ok(fact, 'the seeded fact from playHistory exists');
+  assert.ok(world.chronicle.knows('char:novice-tem', fact!.id));
+
+  const result = forkStory(world, { fromStoryId: world.storyId, atScene: 4 });
+  const forked = world.withStory(result.story.id);
+
+  const forkedFact = forked.chronicle.facts().find((f) => f.text === fact!.text);
+  assert.ok(forkedFact, 'the fact itself was copied');
+  assert.notEqual(forkedFact!.id, fact!.id, 'under a fresh id');
+  assert.ok(forked.chronicle.knows('char:novice-tem', forkedFact!.id), 'knowledge of it survived the id remap');
+  // The original fact's own knowledge entry is untouched by the fork: still
+  // exactly one knower, under the original id, not duplicated onto it.
+  assert.ok(world.chronicle.knows('char:novice-tem', fact!.id), 'the original story keeps its own knowledge entry');
+  assert.equal(world.chronicle.knowersOf(fact!.id).length, 1, 'not duplicated onto the original fact id');
+  world.close();
+});
+
+test('a forked story plays forward independently with the engine, no dangling references', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world);
+
+  const result = forkStory(world, { fromStoryId: world.storyId, atScene: 2 });
+  const forked = world.withStory(result.story.id);
+  const engine = new Engine({ world: forked, providers: new ProviderRegistry(new MockProvider()) });
+
+  const out = await engine.takeTurn('i go to the tavern by the gate');
+  assert.equal(out.kind, 'narrated');
+  assert.equal(forked.chronicle.turns().length, 2, "scene 1's copied turn plus the new one");
+
+  // The original story's turn count is exactly what it was before the fork
+  // and the fork's own subsequent play — nothing leaked backward.
+  const originalTurns = world.chronicle.turns().length;
+  await engine.takeTurn('i wait quietly');
+  assert.equal(world.chronicle.turns().length, originalTurns, 'playing the fork never touches the original');
+  world.close();
+});
+
+test('forkStory refuses a scene below 1 and an unknown source story', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  assert.throws(() => forkStory(world, { fromStoryId: world.storyId, atScene: 0 }), /scene must be 1/);
+  assert.throws(() => forkStory(world, { fromStoryId: 'story:does-not-exist' }), /no story/);
   world.close();
 });
