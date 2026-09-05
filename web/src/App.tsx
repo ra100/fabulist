@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
+  checkServerFreshness,
   type BookTurn,
   type Consequence,
   type Edge,
@@ -12,6 +13,7 @@ import {
   type Sheet,
   type PlayResponse,
   type ProvidersReport,
+  type StaleServer,
   type State,
   type Story,
   type Thread,
@@ -57,6 +59,8 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   // null while unknown, so the wizard does not flash before the check returns.
   const [fresh, setFresh] = useState<boolean | null>(null);
+  // Non-null when the server predates this bundle. See `checkServerFreshness`.
+  const [stale, setStale] = useState<StaleServer | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -78,6 +82,12 @@ export function App() {
       await refresh();
     })();
   }, [refresh]);
+
+  // Independent of the world check: a stale server is worth saying even when
+  // everything else looks fine, because the symptom appears later and elsewhere.
+  useEffect(() => {
+    void checkServerFreshness().then(setStale).catch(() => {});
+  }, []);
 
   if (fresh === null) return <div className="wizard"><div className="wizard-card dim">loading…</div></div>;
 
@@ -131,6 +141,19 @@ export function App() {
           ))}
         </nav>
       </header>
+
+      {stale ? (
+        <div className="card warn" style={{ margin: 12 }}>
+          <b>This page is newer than the server.</b>{' '}
+          <span className="small">
+            {stale.missing.length} route{stale.missing.length === 1 ? '' : 's'} this build needs
+            {stale.missing.length ? <> — including <span className="mono">{stale.missing[0]}</span></> : null}
+            {stale.missing.length > 1 ? <> and {stale.missing.length - 1} more</> : null}{' '}
+            {stale.missing.length === 1 ? 'is' : 'are'} missing, so some controls will fail with a 404 rather than
+            work. Restart it: <span className="mono">pnpm serve</span>
+          </span>
+        </div>
+      ) : null}
 
       {error ? <div className="card warn" style={{ margin: 12 }}>{error}</div> : null}
 
@@ -1773,11 +1796,19 @@ function UsagePanel({ usage }: { usage: State['usage'] | null }) {
 }
 
 /**
- * Which image providers are usable here. Same probe-on-demand shape as
- * `ProvidersPanel`, with one deliberate difference: "off" is always offered
- * and is the honest default, because unlike text narration — which always
- * needs *some* provider — illustration is optional, and a fresh install
- * should not silently start writing image files nobody asked for.
+ * Which image providers are usable here, and which one is in use.
+ *
+ * "Off" is always offered and is the honest default: unlike text narration,
+ * which always needs *some* provider, illustration is optional and a fresh
+ * install should not silently start writing image files nobody asked for.
+ *
+ * Probes on mount rather than on a button, unlike `ProvidersPanel`. It used to
+ * be probe-on-demand and that was a discoverability bug, not a saving: the
+ * provider list *and* the switcher both live behind the probe, so before the
+ * click this panel was a single dim sentence and there was no visible way to
+ * choose an image provider at all. The probe is local (a port check and a
+ * credential lookup, no third-party calls), so paying for it on mount is
+ * cheaper than a user concluding the feature does not exist.
  */
 function ImageProvidersPanel() {
   const [report, setReport] = useState<ImageProvidersReport | null>(null);
@@ -1794,6 +1825,13 @@ function ImageProvidersPanel() {
     }
     setBusy(false);
   };
+
+  // Probe once on mount. `probe` is stable enough for this to be a one-shot:
+  // the button below re-runs it on demand.
+  useEffect(() => {
+    void probe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const badge = (status: string) =>
     status === 'ready' ? (
@@ -1822,22 +1860,24 @@ function ImageProvidersPanel() {
       <div className="row">
         <h3 className="grow" style={{ margin: 0 }}>illustration</h3>
         <button disabled={busy} onClick={() => void probe()}>
-          {busy ? 'checking…' : report ? 'recheck' : 'check'}
+          {busy ? 'checking…' : 'recheck'}
         </button>
       </div>
 
       {error ? <p className="small warn">{error}</p> : null}
 
-      {!report && !busy ? (
+      {!report ? (
         <p className="small dimmer" style={{ marginTop: 8 }}>
-          Checks a local ComfyUI server and shares the bedrock text providers' AWS credentials for the
-          image models. Off by default — nothing generates until a provider is chosen.
+          {busy ? 'checking a local ComfyUI server and the bedrock image models…' : 'no answer yet — press recheck.'}
         </p>
       ) : null}
 
       {report ? (
         <>
-          <p className="small dim" style={{ marginTop: 8 }}>current: <b>{report.profile}</b></p>
+          <p className="small dim" style={{ marginTop: 8 }}>
+            current: <b>{report.profile}</b>
+            {report.profile === 'none' ? ' — nothing generates until you pick one below' : null}
+          </p>
           {report.results.map((r) => (
             <div key={r.key} className="provider">
               <span className="provider-status">{badge(r.status)}</span>

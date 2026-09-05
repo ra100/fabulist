@@ -102,15 +102,45 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 
 // ------------------------------------------------------------------- routes
 
-const routes: Array<{ method: string; pattern: RegExp; handler: Handler }> = [];
+const routes: Array<{ method: string; path: string; pattern: RegExp; handler: Handler }> = [];
+
+/** Set once per process, so the client can tell a restart from a reload. */
+const STARTED_AT = new Date().toISOString();
 
 function route(method: string, path: string, handler: Handler): void {
   // `:name` becomes a named capture, so params come out typed as strings.
   const pattern = new RegExp(
     `^${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/:(\w+)/g, '(?<$1>[^/]+)')}$`,
   );
-  routes.push({ method, pattern, handler });
+  // The literal path is kept beside the compiled pattern so `/api/meta` can
+  // report the inventory this build actually serves. Recovering it from the
+  // regex afterwards would mean un-escaping and un-capturing, and a
+  // hand-maintained list drifts the first time a route is added without
+  // remembering to update it.
+  routes.push({ method, path, pattern, handler });
 }
+
+/**
+ * What this build serves.
+ *
+ * Exists because of a concrete failure that cost real debugging time: the web
+ * client is a static bundle, so rebuilding `dist/` while an older server keeps
+ * running produces a UI whose newer features call routes the backend does not
+ * have. It surfaced as `no route for POST /api/stories` from a Stories tab that
+ * rendered perfectly — a 404 that looks like a broken feature rather than a
+ * stale process.
+ *
+ * Route paths rather than a version number: a hand-bumped version is one more
+ * thing to forget, and the inventory answers "can this page's features work
+ * here" directly instead of by proxy.
+ */
+route('GET', '/api/meta', (_req, res) => {
+  send(res, 200, {
+    // Sorted so two servers can be diffed by eye.
+    routes: routes.map((r) => `${r.method} ${r.path}`).sort(),
+    startedAt: STARTED_AT,
+  });
+});
 
 route('GET', '/api/state', (_req, res, { world }) => {
   const session = world.session.get();

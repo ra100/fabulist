@@ -46,7 +46,7 @@ pnpm integrity            # check a save for dangling references
 ```
 
 ```bash
-pnpm test                 # 559 tests, offline
+pnpm test                 # 561 tests, offline
 pnpm typecheck
 ```
 
@@ -208,14 +208,32 @@ unconfigured provider should not stop you playing.
 specs including local base URLs and model ids, the lint threshold, and your blocklist.
 Changes apply to the next turn — no restart, and no hand-edited file.
 
+Two lists in settings, doing different jobs. **models available here** is a diagnostic: it
+probes every service the build knows how to speak to and reports the one-line fix for the
+ones it cannot reach. **models** is configuration, and lists only what you have added — it
+starts empty, because the built-in profiles cover the common cases and nothing needs adding
+until you want a specific server, model id or account. `add` gives a blank form (name, then
+`kind`, then only the fields that kind uses); *start from a known service* pre-fills it from
+one of the built-in specs, which is usually what you want, since the profiles refer to those
+names.
+
 Switching profile refuses rather than silently degrading, because discovering three turns
 later that the mock is writing is worse than being told a profile is unavailable. Provider
 specs can be **tested before they are kept**, which matters most for local servers: the
 defaults guess port 8000 and a model id of `default`, and both are usually wrong.
 
+Illustration is configured in the same place, under **settings → illustration**. It probes
+on open, lists which image providers are reachable, and is **off** until you choose one —
+nothing generates images before that, and every illustration control falls back to handing
+you the composed prompt to paste elsewhere.
+
 Two fields are deliberately not editable at runtime. `dbPath` would leave the UI talking to
 a database the engine is not using, and a context window below 64k is refused outright
 rather than accepted into a frame budget that assumes it.
+
+If the page and the server disagree — `dist/` rebuilt while an older `pnpm serve` kept
+running — a banner says so and names a missing route, rather than leaving you with a control
+that 404s. `GET /api/meta` reports the route inventory the running build actually serves.
 
 Narration **streams**. Prose arrives as it is written, with the current stage shown while
 the gates run — for a writing tool that is the difference between watching and waiting.

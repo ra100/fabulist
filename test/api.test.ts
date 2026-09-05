@@ -513,3 +513,47 @@ test('DELETE /api/stories/:id refuses to delete the last story in a world', asyn
     assert.match((del.body as { error: string }).error, /last story/);
   });
 });
+
+/**
+ * `/api/meta` exists so a stale server is diagnosable. The web client is a
+ * static bundle, so rebuilding `dist/` while an old server keeps running
+ * produces a UI whose newer controls 404 — which is how
+ * `no route for POST /api/stories` was first seen, from a Stories tab that
+ * rendered perfectly.
+ */
+test('the meta endpoint reports the route inventory this build serves', async () => {
+  await withServer(async (base) => {
+    const { status, body } = await get(base, '/api/meta');
+    assert.equal(status, 200);
+    const routes = body.routes as string[];
+
+    assert.ok(routes.length > 40, `expected a real inventory, got ${routes.length}`);
+    assert.ok(routes.includes('GET /api/meta'), 'it reports itself');
+    // The routes whose absence produced the original confusing 404.
+    for (const r of ['GET /api/stories', 'POST /api/stories', 'DELETE /api/stories/:id']) {
+      assert.ok(routes.includes(r), `${r} missing from the inventory`);
+    }
+    // Parameterised paths are reported in their literal `:param` form, not as a
+    // compiled regex, so a client can compare them by string equality.
+    assert.ok(routes.includes('POST /api/stories/:id/switch'));
+    assert.deepEqual([...routes].sort(), routes, 'sorted, so two servers can be diffed by eye');
+    assert.match(String(body.startedAt), /^\d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+test('every route the inventory advertises is actually dispatchable', async () => {
+  await withServer(async (base) => {
+    const { body } = await get(base, '/api/meta');
+    // A GET with no parameters must not 404. This catches an inventory that
+    // drifts from the table it is generated from — the failure the endpoint
+    // exists to prevent, turned back on itself.
+    const simpleGets = (body.routes as string[])
+      .filter((r) => r.startsWith('GET /') && !r.includes(':'))
+      .map((r) => r.slice('GET '.length));
+    assert.ok(simpleGets.length > 10);
+    for (const path of simpleGets) {
+      const res = await fetch(`${base}${path}`);
+      assert.notEqual(res.status, 404, `${path} is advertised but not dispatchable`);
+    }
+  });
+});

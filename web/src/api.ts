@@ -394,7 +394,59 @@ const post = <T>(path: string, body?: unknown) =>
   req<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) });
 const put = <T>(path: string, body: unknown) => req<T>(path, { method: 'PUT', body: JSON.stringify(body) });
 
+export interface ServerMeta {
+  routes: string[];
+  startedAt: string;
+}
+
+/**
+ * Routes this bundle needs that a server predating them will not have.
+ *
+ * Only the ones whose absence breaks a *visible* feature belong here: the point
+ * is to explain a confusing 404 before the user hits it, not to assert that
+ * every route matches. Append when a new tab or panel starts depending on a new
+ * route.
+ */
+const REQUIRED_ROUTES = [
+  'GET /api/meta',
+  'GET /api/stories',
+  'POST /api/stories',
+  'POST /api/stories/fork',
+  'POST /api/stories/:id/switch',
+  'PUT /api/stories/:id/title',
+  'DELETE /api/stories/:id',
+  'GET /api/images/providers',
+  'POST /api/images/profile',
+] as const;
+
+export interface StaleServer {
+  missing: string[];
+}
+
+/**
+ * Detects a server older than this page.
+ *
+ * `dist/` is a static bundle, so `pnpm build:web` while an old server keeps
+ * running leaves the two out of step, and the symptom is a 404 from a control
+ * that renders correctly. A server with no `/api/meta` at all is by definition
+ * older than this check, which is why the fetch failing is itself a positive
+ * result rather than an error to swallow.
+ */
+export async function checkServerFreshness(): Promise<StaleServer | null> {
+  let meta: ServerMeta;
+  try {
+    meta = await req<ServerMeta>('/meta');
+  } catch {
+    // No /api/meta: predates this mechanism entirely.
+    return { missing: [...REQUIRED_ROUTES] };
+  }
+  const have = new Set(meta.routes);
+  const missing = REQUIRED_ROUTES.filter((r) => !have.has(r));
+  return missing.length ? { missing } : null;
+}
+
 export const api = {
+  meta: () => req<ServerMeta>('/meta'),
   state: () => req<State>('/state'),
   graph: (params: { layer?: string; type?: string; limit?: number } = {}) => {
     const q = new URLSearchParams();

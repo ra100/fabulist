@@ -318,7 +318,8 @@ export function SceneIllustration({ turnId, defaultStyle }: { turnId: string; de
           </div>
           {ready === false ? (
             <p className="small dimmer" style={{ marginBottom: 'var(--s2)' }}>
-              No image model configured — copy the prompt into whatever image tool you have instead.
+              No image model configured (settings → illustration) — copy the prompt into whatever image tool you have
+              instead.
             </p>
           ) : null}
           {showPrompt && prompt ? <PromptText prompt={prompt} /> : null}

@@ -253,6 +253,24 @@ function ProvidersEditor({
     setTested(null);
   };
 
+  /**
+   * Begins a new provider pre-filled from a preset, rather than listing the
+   * preset as though it were already configured.
+   *
+   * The key is copied too, which matters more than convenience: `PROFILES`
+   * references presets *by key* (`bedrock` needs `bedrock:sonnet` to exist), so
+   * keeping the suggested name makes the profile work without the user having to
+   * know that coupling.
+   */
+  const startFromPreset = (name: string) => {
+    const preset = bundle.presets[name];
+    if (!preset) return;
+    setEditing('');
+    setKey(name);
+    setSpec({ ...preset });
+    setTested(null);
+  };
+
   const field = (name: keyof ProviderSpec, label: string, placeholder = '') => (
     <div className="row" key={name} style={{ marginBottom: 6 }}>
       <span className="dim" style={{ width: 96 }}>{label}</span>
@@ -264,6 +282,15 @@ function ProvidersEditor({
     </div>
   );
 
+  // Only what the user actually configured. The presets are candidates, not
+  // accounts: listing all sixteen made the screen read as "sixteen
+  // half-configured providers you must now fix" when in fact none of them were
+  // ever added. They are still reachable, as templates, from the add flow below.
+  const mine = Object.keys(cfg.providers).sort();
+  const templates = Object.keys(bundle.presets)
+    .filter((name) => !(name in cfg.providers))
+    .sort();
+
   return (
     <div className="card">
       <div className="row">
@@ -271,34 +298,62 @@ function ProvidersEditor({
         <button disabled={busy} onClick={startNew}>add</button>
       </div>
       <p className="hint">
-        Local servers rarely match the defaults — the port and the model id are whatever you launched. Edit them here
-        rather than in a file.
+        The models you have configured. Nothing here is contacted until a profile or a role points at it.
       </p>
 
       <div style={{ marginTop: 9 }}>
-        {bundle.providerKeys.map((name) => {
-          const custom = name in cfg.providers;
-          return (
+        {mine.length === 0 ? (
+          <p className="small dimmer" style={{ margin: '4px 0' }}>
+            None yet — the built-in profiles cover the common cases, so this stays empty until you need a specific
+            server, model id or account. <b>add</b> starts a blank one; the templates below pre-fill a known service.
+          </p>
+        ) : (
+          mine.map((name) => (
             <div className="row small" key={name} style={{ marginBottom: 4 }}>
               <span className="grow mono">{name}</span>
-              {custom ? <span className="tag locked">yours</span> : <span className="tag">built in</span>}
+              <span className="tag locked">yours</span>
               <button style={{ padding: '2px 7px', fontSize: 11 }} onClick={() => startEdit(name)}>edit</button>
-              {custom ? (
-                <button
-                  style={{ padding: '2px 7px', fontSize: 11 }}
-                  disabled={busy}
-                  onClick={() => void apply(() => api.config.removeProvider(name))}
-                >
-                  ×
-                </button>
-              ) : null}
+              <button
+                style={{ padding: '2px 7px', fontSize: 11 }}
+                disabled={busy}
+                onClick={() => void apply(() => api.config.removeProvider(name))}
+              >
+                ×
+              </button>
             </div>
-          );
-        })}
+          ))
+        )}
       </div>
+
+      {editing === null && templates.length ? (
+        <details style={{ marginTop: 11 }}>
+          <summary className="small dim" style={{ cursor: 'pointer' }}>
+            start from a known service ({templates.length})
+          </summary>
+          <p className="hint" style={{ marginTop: 7 }}>
+            These pre-fill the form; nothing is saved until you press <b>keep</b>. The built-in profiles already refer
+            to these names, so keeping the suggested name is usually what you want.
+          </p>
+          <div className="row wrap" style={{ marginTop: 7, gap: 4 }}>
+            {templates.map((name) => (
+              <button
+                key={name}
+                className="mono"
+                style={{ padding: '2px 7px', fontSize: 11 }}
+                onClick={() => startFromPreset(name)}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        </details>
+      ) : null}
 
       {editing !== null ? (
         <div style={{ marginTop: 13, borderTop: '1px solid var(--line)', paddingTop: 11 }}>
+          <h3 className="eyebrow" style={{ marginTop: 0 }}>
+            {editing === '' ? 'add a model' : `editing ${editing}`}
+          </h3>
           <div className="row" style={{ marginBottom: 6 }}>
             <span className="dim" style={{ width: 96 }}>name</span>
             <input value={key} placeholder="vllm:my-model" onChange={(e) => setKey(e.target.value)} />
