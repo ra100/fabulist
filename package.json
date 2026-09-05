@@ -12,6 +12,7 @@
     "play": "node --disable-warning=ExperimentalWarning src/cli/play.ts",
     "seed": "node --disable-warning=ExperimentalWarning src/cli/seed.ts",
     "ingest": "node --disable-warning=ExperimentalWarning src/cli/ingest.ts",
+    "integrity": "node --disable-warning=ExperimentalWarning src/cli/integrity.ts",
     "lint:prose": "node --disable-warning=ExperimentalWarning src/cli/lintprose.ts",
     "serve": "node --disable-warning=ExperimentalWarning src/cli/serve.ts",
     "dev:web": "vite --config web/vite.config.ts",

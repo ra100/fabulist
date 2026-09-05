@@ -41,10 +41,11 @@ Terminal is still there if you prefer it:
 ```bash
 pnpm seed                 # the sample world
 pnpm play                 # interactive session
+pnpm integrity            # check a save for dangling references
 ```
 
 ```bash
-pnpm test                 # 527 tests, offline
+pnpm test                 # 551 tests, offline
 pnpm typecheck
 ```
 
@@ -446,12 +447,45 @@ in the discarded future is unbroken, so the integrity gate defends it again.
 
 ---
 
+## Checking a save
+
+```bash
+pnpm integrity              # or: pnpm integrity data/other-world.db
+```
+
+Every foreign key in the schema points at `stories(id)`. Not one entity reference is
+constrained, and that cannot be fixed with a foreign key: an id is valid if *either* a
+canon row or this story's chronicle row exists, and SQL cannot express "either of these
+two rows, one of which is scoped by a column in another table". Constraining it would
+mean either rejecting legitimate chronicle-only entities or collapsing canon and
+chronicle into one unscoped table — losing the property the whole design rests on.
+
+So the constraint moves out of the engine into a check you can run. It resolves through
+the overlay rather than asking `entities` flatly, which is what catches the interesting
+failure: an id that exists only as *another* story's chronicle row is dangling here even
+though a bare `WHERE id = ?` finds it. That is the shape a bad fork produces. It is
+whole-file rather than per-story for the same reason — a per-story check looks clean on
+both sides of a cross-story leak.
+
+It reports and never repairs; a dangling reference means something upstream is wrong, and
+deleting the evidence removes the signal. Exit code is 1 when anything dangles, so it
+also works as a gate in a script. Worth running after an ingest, a fork, a truncate, or
+any hand-editing of a save.
+
+One caveat it teaches by example: do not copy a WAL-mode save with `cp`. The first real
+run of this tool found three orphaned portraits that a `cp` of the same file reported as
+clean, because 4.1 MB of committed data was still in the `-wal` sidecar. Use
+`/branch`, or checkpoint first.
+
+---
+
 ## Layout
 
 ```
 src/domain/       types; the delta contract lives here
 src/db/           schema.sql and the connection
-src/store/        canon/chronicle overlay, cast, chronicle, threads, consequences, illustrations
+src/store/        canon/chronicle overlay, cast, chronicle, threads, consequences, illustrations,
+                  referential integrity check
 src/providers/    adapter interface, capability matrix, mock, http, bedrock,
                   google, copilot, sigv4, aws credential chain, probe;
                   image: mock, comfyui, bedrock stability
@@ -463,7 +497,7 @@ src/lint/         rule engine, two profiles, the prose gate
 src/ingest/       mediawiki client, parsers, scope, pass A, pass B, depth modes
 src/setup/        wiki discovery, planner, jobs, world building
 src/seed/         hand-authored canon for Saint Verrow
-src/cli/          play, seed, serve, ingest, script, lintprose
+src/cli/          play, seed, serve, ingest, script, lintprose, integrity
 src/server/       http api
 web/              vite + react inspector
 ```

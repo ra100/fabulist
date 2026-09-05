@@ -223,7 +223,7 @@ README note still outstanding — the only piece of Group A not landed.
 
 ---
 
-## Group B — after the migration, and partly free
+## Group B — after the migration, and partly free — **B3 done**
 
 ### B1 Move canon contradictions out of story scope · S–M
 
@@ -260,7 +260,7 @@ extraction returns whatever the prose used.
 
 Pair with C2's trigram index — exact alias hit first, fuzzy only on a miss.
 
-### B3 An integrity check for entity references · S
+### B3 An integrity check for entity references · S · done
 
 Every FK in the schema points at `stories(id)`. `edges.subject`/`object`,
 `sheets.entity_id`, `fact_knowledge.entity_id`, `relationships.from_id`/`to_id`,
@@ -274,6 +274,40 @@ this reason.
 Not a schema change: a diagnostic that reports orphans, runnable after ingest,
 fork and truncate. Cheap, and it is how a fork bug gets caught before it
 corrupts a save.
+
+Done, and landed early: it adds no scoping column, so unlike the rest of Group B
+it survives the multi-world migration unchanged.
+
+`store/integrity.ts` + `cli/integrity.ts` (`pnpm integrity [path]`, exit 1 when
+anything dangles). The full surface turned out to be **15 unconstrained entity
+references plus 3 intra-story row references across 10 tables** — enumerated
+from `pragma_foreign_key_list` rather than from reading the schema by eye.
+
+Two things make it worth more than a naive existence check:
+
+- It resolves through the **overlay**, not `entities` flatly. An id that exists
+  only as story A's chronicle row is dangling from story B's perspective even
+  though `SELECT 1 FROM entities WHERE id = ?` succeeds — and that is exactly
+  what a fork bug produces. Tested.
+- It is **whole-file, not per-story**, because the failures worth catching are
+  cross-story leaks and a per-story check looks clean on both sides of one.
+
+Read-only by design: it reports, never repairs. A dangling reference means
+something upstream is wrong, and deleting the evidence would remove the signal.
+
+**It found a real bug on its first run against `data/fabulist.db`:**
+`SetupService.reset()`'s table list omitted `illustrations`, so a reset emptied
+`entities` and left three portraits pointing at `char:brother-anselm`. The table
+postdates `reset()` and nothing linked the two. Fixed, with a regression test
+that asserts via `checkIntegrity` rather than counting one table — so the next
+table added fails it too instead of repeating the bug. Confirmed the test fails
+against the unfixed list.
+
+Incidental confirmation of A3's argument, worth recording: probing that save by
+`cp data/fabulist.db /tmp/probe.db` reported *clean*, because the 3 bad rows were
+in a 4.1 MB WAL the copy did not include. Copying a WAL-mode database by hand
+silently loses committed data — which is why `checkpoint()` exists and why
+bundling (C1) must use `VACUUM INTO` rather than a file copy.
 
 ---
 
@@ -355,7 +389,9 @@ requirement to hand someone a startable world.
 **Now, alongside the migration:** A1, A2, A3, A4, A5. Independent files, no
 scope columns touched, each shippable alone. A1 is the one to do first.
 
-**Immediately after it lands:** B3 (as a fork-correctness check), then B1, B2.
+**Immediately after it lands:** B1, B2. (**B3 done ahead of them** — it adds no
+scoping column, so it survives the migration unchanged, and it immediately found
+a real `reset()` bug.)
 
 **Then, on evidence:** C1 → C2 together, since C2 without C1 has nothing to
 index. C3 when timeline questions actually surface. C4 only if worlds get shared.

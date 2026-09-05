@@ -8,6 +8,7 @@ import { SetupPlanner } from '../src/setup/planner.ts';
 import { applyCustomWorld, assignPlayerCharacter, proposeOpening } from '../src/setup/apply.ts';
 import { JobRegistry } from '../src/setup/jobs.ts';
 import { SetupService } from '../src/setup/service.ts';
+import { checkIntegrity, formatIntegrityReport } from '../src/store/integrity.ts';
 import { fixtureFetcher } from '../src/ingest/client.ts';
 import { WIKI } from './fixtures/wiki.ts';
 
@@ -488,6 +489,38 @@ test('reset clears everything so the wizard can run again', async () => {
   assert.ok(svc.isFresh(), 'a reset is a reset, canon included');
   assert.equal(world.chronicle.turns().length, 0);
   assert.equal(world.session.get().playerCharacterId, '');
+  world.close();
+});
+
+/**
+ * Regression: `reset`'s table list was written before `illustrations` existed
+ * and was never extended, so a reset emptied `entities` and left portraits
+ * pointing at ids that no longer resolved. Found by `checkIntegrity` against a
+ * real save, which is why the assertion here is the integrity check itself
+ * rather than a count of one table — whatever table is added next should fail
+ * this test too, instead of quietly repeating the same bug.
+ */
+test('reset leaves no dangling references behind, illustrations included', () => {
+  const { world, svc } = service();
+  svc.useSample();
+
+  const entity = world.graph.list({ type: 'Character', limit: 1 })[0]!;
+  world.illustrations.reserve({
+    subject: { kind: 'portrait', entityId: entity.id },
+    visualStyle: 'drawing',
+    prompt: 'a portrait',
+    negativePrompt: '',
+    seed: 1,
+    provider: 'mock',
+    createdScene: 1,
+  });
+  assert.equal(world.illustrations.forEntity(entity.id).length, 1, 'precondition: an illustration exists');
+
+  svc.reset();
+
+  const report = checkIntegrity(world.db);
+  assert.ok(report.ok, formatIntegrityReport(report));
+  assert.equal(world.illustrations.forEntity(entity.id).length, 0, 'the illustration row went with the entity');
   world.close();
 });
 

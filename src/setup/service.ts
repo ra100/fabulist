@@ -302,10 +302,17 @@ export class SetupService {
    */
   reset(): void {
     const world = this.getWorld();
+    // Keep this list complete when a table is added. `illustrations` was
+    // missing until the integrity check (`store/integrity.ts`) found three
+    // portraits in a real save still pointing at `char:brother-anselm` after
+    // `entities` had been emptied — the table postdates this method and nothing
+    // linked the two. The image *files* under `data/images` are left alone
+    // deliberately: they live outside the database, and orphaned files cost
+    // disk rather than correctness.
     const tables = [
       'turns', 'events', 'consequences', 'fact_knowledge', 'facts', 'threads',
       'directives', 'divergences', 'style_anchors', 'relationships', 'sheets',
-      'edges', 'entities', 'scenes', 'chapters', 'ingest_pages',
+      'edges', 'entities', 'scenes', 'chapters', 'ingest_pages', 'illustrations',
     ];
     for (const t of tables) world.db.prepare(`DELETE FROM ${t}`).run();
     world.session.set({ scene: 1, turn: 0, playerCharacterId: '', currentLocationId: null });
