@@ -221,7 +221,15 @@ function RoutingPanel({
 
 const BLANK: ProviderSpec = { kind: 'openai-compat', model: '', baseUrl: 'http://127.0.0.1:8000/v1', auth: 'none', dialect: 'vllm' };
 
-function ProvidersEditor({
+/**
+ * Add, edit, test and keep a provider spec.
+ *
+ * Exported because the setup wizard shows the same editor before a world is
+ * built. Duplicating the form there would mean two places to keep the
+ * kind-to-fields mapping and the test-before-keep flow correct, and the wizard
+ * is exactly where a wrong local base URL is least likely to be noticed.
+ */
+export function ProvidersEditor({
   bundle,
   busy,
   apply,

@@ -231,6 +231,13 @@ Two fields are deliberately not editable at runtime. `dbPath` would leave the UI
 a database the engine is not using, and a context window below 64k is refused outright
 rather than accepted into a frame budget that assumes it.
 
+Provider setup is part of first run, not something to discover afterwards. The wizard's
+first screen states which model will write, and **set up a model…** opens a step with the
+profile picker, the reachability report and the same add/test/keep editor as settings. It is
+not a gate — the mock is a legitimate choice, and the step is skippable — but it will not
+pretend: with nothing configured it says so, rather than building a whole world on
+placeholder prose and letting you judge the app on it.
+
 If the page and the server disagree — `dist/` rebuilt while an older `pnpm serve` kept
 running — a banner says so and names a missing route, rather than leaving you with a control
 that 404s. `GET /api/meta` reports the route inventory the running build actually serves.

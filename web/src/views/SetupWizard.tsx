@@ -8,18 +8,22 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   api,
+  type AppConfig,
   type CandidateCharacter,
   type CharacterSketch,
+  type ConfigBundle,
   type IngestPlan,
   type Job,
   type PreviewResult,
   type ProvidersReport,
   type StyleContract,
+  type ValidationIssue,
   type WikiCandidate,
 } from '../api.ts';
+import { ProvidersEditor } from './ConfigPanels.tsx';
 import { Mark } from '../Mark.tsx';
 
-type Step = 'source' | 'universe' | 'wish' | 'plan' | 'preview' | 'running' | 'cast' | 'ready';
+type Step = 'source' | 'models' | 'universe' | 'wish' | 'plan' | 'preview' | 'running' | 'cast' | 'ready';
 
 export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) {
   const [step, setStep] = useState<Step>('source');
@@ -95,9 +99,17 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
         <p className="wizard-mark"><Mark size={14} />Fabulist</p>
         <div className="wizard-card">
           <div className="wizard-head">
-            <h2>Where are we playing?</h2>
+            {/*
+              The heading follows the step. "Where are we playing?" is wrong on
+              the models step, which is about how it gets written rather than
+              where — and a heading that contradicts the screen under it reads
+              as a bug.
+            */}
+            <h2>{step === 'models' ? 'Which model writes?' : 'Where are we playing?'}</h2>
             {step !== 'source' && step !== 'running' ? (
-              <button className="link" onClick={() => setStep('source')}>start over</button>
+              <button className="link" onClick={() => setStep('source')}>
+                {step === 'models' ? 'back' : 'start over'}
+              </button>
             ) : null}
           </div>
 
@@ -106,13 +118,21 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
         {/* ---------------------------------------------------------- source */}
         {step === 'source' ? (
           <>
+            {/*
+              Which model is writing, stated before anything is built rather
+              than discovered afterwards. Three cases, and all three end in a
+              route to the models step — the previous version offered a
+              one-click switch only when a better profile *already* happened to
+              be usable, which meant a machine with nothing configured got no
+              offer at all and silently built a world on the mock.
+            */}
             {providers?.profile === 'mock' && betterProfiles.length && !dismissedOffer ? (
               <div className="wizard-provider-offer">
                 <p className="small">
                   This machine can also run on <b>{betterProfiles.join(', ')}</b> instead of the built-in mock.
                   The mock proves the machinery, not the prose — worth switching before you judge either.
                 </p>
-                <div className="row">
+                <div className="row wrap">
                   {betterProfiles.map((name) => (
                     <button
                       key={name}
@@ -133,13 +153,34 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                       use {name}
                     </button>
                   ))}
+                  <button onClick={() => setStep('models')}>set up a model…</button>
                   <button className="link" onClick={() => setDismissedOffer(true)}>
                     stay on the mock
                   </button>
                 </div>
               </div>
+            ) : providers?.profile === 'mock' && !dismissedOffer ? (
+              // Nothing usable found. This is the case that used to be silent,
+              // and it is the one where saying so matters most: the prose the
+              // mock writes is deliberately plain, so a first-time visitor
+              // judging the app on it is judging the wrong thing.
+              <div className="wizard-provider-offer">
+                <p className="small">
+                  No model is configured yet, so the built-in <b>mock</b> will write — deterministic placeholder prose
+                  that proves the machinery and nothing else. A local server or an AWS/Google login is enough.
+                </p>
+                <div className="row wrap">
+                  <button className="primary" onClick={() => setStep('models')}>set up a model…</button>
+                  <button className="link" onClick={() => setDismissedOffer(true)}>
+                    continue on the mock
+                  </button>
+                </div>
+              </div>
             ) : providers && providers.profile !== 'mock' ? (
-              <p className="small dim wizard-provider-note">writing with <b>{providers.profile}</b></p>
+              <p className="small dim wizard-provider-note">
+                writing with <b>{providers.profile}</b>{' '}
+                <button className="link" onClick={() => setStep('models')}>change</button>
+              </p>
             ) : null}
             <div className="choices">
               <button
@@ -169,6 +210,15 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               </button>
             </div>
           </>
+        ) : null}
+
+        {/* ---------------------------------------------------------- models */}
+        {step === 'models' ? (
+          <ModelsStep
+            providers={providers}
+            onProvidersChanged={async () => setProviders(await api.providers())}
+            onBack={() => setStep('source')}
+          />
         ) : null}
 
         {/* -------------------------------------------------------- universe */}
@@ -594,5 +644,155 @@ function StyleEditor({ style, onChange }: { style: StyleContract; onChange: (s: 
         onBlur={(e) => onChange({ ...style, comparables: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
       />
     </div>
+  );
+}
+
+/**
+ * The provider step: which model writes, decided before a world exists.
+ *
+ * This closes what the source step's note used to concede as "half-closed".
+ * Settings could always switch profile live, and the wizard could offer a
+ * one-click switch — but only when a better profile *already* happened to be
+ * usable. On a machine with nothing configured there was no offer and no route
+ * to one, so the world got built on the mock and the plainness of mock prose
+ * was discovered afterwards, at exactly the moment a first-time visitor is
+ * deciding whether any of this is good.
+ *
+ * Deliberately not a gate. The mock is a legitimate choice — it is how the
+ * machinery is meant to be inspected offline — so this step is reachable,
+ * skippable, and never blocks. It refuses to pretend, which is different from
+ * refusing to continue.
+ *
+ * The editor is `ConfigPanels`' own `ProvidersEditor`, not a copy: the
+ * kind-to-fields mapping and the test-before-keep flow are exactly what a
+ * first-run user needs to get right, and two implementations would drift.
+ */
+function ModelsStep({
+  providers,
+  onProvidersChanged,
+  onBack,
+}: {
+  providers: ProvidersReport | null;
+  onProvidersChanged: () => Promise<void>;
+  onBack: () => void;
+}) {
+  const [bundle, setBundle] = useState<ConfigBundle | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const reload = async () => {
+    try {
+      setBundle(await api.config.get());
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const apply = async (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      await fn();
+      await reload();
+      // A newly kept provider can make a profile usable, so re-probe rather
+      // than leaving the list below stale.
+      await onProvidersChanged();
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  const usable = providers?.usableProfiles ?? [];
+  const current = providers?.profile ?? 'mock';
+
+  return (
+    <>
+      <p className="hint">
+        Which model writes the prose. The mock is deterministic placeholder text — fine for seeing how the machinery
+        works, misleading as a sample of the writing.
+      </p>
+
+      {note ? <div className="wizard-error">{note}</div> : null}
+
+      <h3 className="eyebrow rule">profile</h3>
+      {!providers ? (
+        <p className="small dimmer">checking what this machine can run…</p>
+      ) : (
+        <>
+          <div className="row wrap">
+            {(usable.includes('mock') ? usable : [...usable, 'mock']).map((name) => (
+              <button
+                key={name}
+                className={name === current ? 'primary' : ''}
+                aria-pressed={name === current}
+                disabled={busy || name === current}
+                onClick={() =>
+                  void (async () => {
+                    setBusy(true);
+                    setNote(null);
+                    try {
+                      const res = await api.setProfile(name);
+                      if (!res.ok) setNote(res.notes.join(' ') || `could not switch to ${name}`);
+                      await onProvidersChanged();
+                    } catch (e) {
+                      setNote(e instanceof Error ? e.message : String(e));
+                    }
+                    setBusy(false);
+                  })()
+                }
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          <p className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
+            {usable.filter((p) => p !== 'mock').length === 0
+              ? 'Only the mock is usable right now. Add a model below — a local server needs no key at all.'
+              : `Ready to use: ${usable.filter((p) => p !== 'mock').join(', ')}.`}
+          </p>
+        </>
+      )}
+
+      {providers?.results.length ? (
+        <details style={{ marginTop: 'var(--s3)' }}>
+          <summary className="small dim" style={{ cursor: 'pointer' }}>
+            what this machine can reach ({providers.results.filter((r) => r.status === 'ready').length} ready of{' '}
+            {providers.results.length})
+          </summary>
+          <div style={{ marginTop: 'var(--s2)' }}>
+            {providers.results.map((r) => (
+              <div key={r.key} className="provider">
+                <span className="provider-status">
+                  <span className={r.status === 'ready' ? 'status fired' : 'status pending'}>
+                    {r.status === 'ready' ? 'ready' : r.status === 'unknown' ? 'unknown' : 'not set'}
+                  </span>
+                </span>
+                <span className="mono">{r.key}</span>
+                {r.detail ? <span className="provider-detail">{r.detail}</span> : null}
+                {r.fix ? <span className="provider-fix">→ {r.fix}</span> : null}
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+
+      {bundle ? (
+        <div style={{ marginTop: 'var(--s4)' }}>
+          <ProvidersEditor bundle={bundle} busy={busy} apply={apply} reload={reload} />
+        </div>
+      ) : null}
+
+      <div className="row" style={{ marginTop: 'var(--s4)' }}>
+        <button className="primary" onClick={onBack}>
+          {current === 'mock' ? 'continue on the mock' : `continue with ${current}`}
+        </button>
+      </div>
+    </>
   );
 }
