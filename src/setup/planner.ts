@@ -224,6 +224,55 @@ export const customWorldSchema: JsonSchema = {
   },
 };
 
+const REFINE_SYSTEM = `You already sketched a player character for a role-play session
+before anything was read. The wiki has now actually been crawled, and you are given
+what was really found there: named characters, factions and locations that exist in
+scope.
+
+Revise the character sketch so it fits what is real rather than what was guessed.
+
+Rules:
+- if the sketch names an existing character ("existing"), keep it only if that name
+  appears in the people found; otherwise drop it back to null and sketch an original
+  instead
+- an original character's role and goals should reference real places or factions
+  from what was found, when one fits naturally — a sketch that could describe any
+  wiki was not worth reading the wiki for
+- keep or sharpen the vows; do not remove them
+- if nothing found changes anything, return the sketch unchanged
+
+Reply with JSON only, matching the same character shape as before.`;
+
+export const refineCharacterSchema: JsonSchema = {
+  name: 'refine_character',
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['character'],
+    properties: {
+      character: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          existing: { type: ['string', 'null'] },
+          name: { type: 'string' },
+          role: { type: 'string' },
+          goals: { type: 'array', items: { type: 'string' } },
+          vows: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['text', 'rank'],
+              properties: { text: { type: 'string' }, rank: { type: 'number' } },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
 export interface PlanRequest {
   /** What the player typed. */
   wish: string;
@@ -311,6 +360,46 @@ export class SetupPlanner {
       customWorldSchema,
     )) as Record<string, unknown>;
     return raw;
+  }
+
+  /**
+   * Sharpens a character sketch once the wiki has actually been read, instead
+   * of only guessed from titles. Called after discovery, before ingest, so the
+   * player still edits and approves it — same "propose, don't commit" shape as
+   * `plan()` itself, just fed better material.
+   */
+  async refineCharacter(
+    sketch: CharacterSketch,
+    found: { characters: string[]; factions: string[]; locations: string[] },
+  ): Promise<CharacterSketch> {
+    const user = [
+      `<current-sketch>${JSON.stringify(sketch)}</current-sketch>`,
+      `<found-characters>${found.characters.join(', ')}</found-characters>`,
+      `<found-factions>${found.factions.join(', ')}</found-factions>`,
+      `<found-locations>${found.locations.join(', ')}</found-locations>`,
+    ].join('\n\n');
+
+    try {
+      const raw = (await this.call('setup', REFINE_SYSTEM, user, refineCharacterSchema)) as Record<string, unknown>;
+      const refined = this.character(raw.character);
+      // The model may reply with a field left blank meaning "unchanged" rather
+      // than "clear this" — a schema has no way to express that distinction,
+      // so an empty string/array falls back to what the sketch already held
+      // rather than silently erasing a name or the vows the player already
+      // has on screen.
+      return {
+        existing: refined.existing ?? sketch.existing,
+        name: refined.name || sketch.name,
+        role: refined.role || sketch.role,
+        goals: refined.goals.length ? refined.goals : sketch.goals,
+        vows: refined.vows.length ? refined.vows : sketch.vows,
+      };
+    } catch {
+      // A refinement is a nice-to-have, not a requirement — the unrefined
+      // sketch from `plan()` is a perfectly playable fallback, so a failure
+      // here should never block the wizard.
+      return sketch;
+    }
   }
 
   private character(value: unknown): CharacterSketch {

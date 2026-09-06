@@ -30,6 +30,15 @@ export interface CrawlOptions {
   seedCategories?: string[];
   /** Titles to never include. */
   exclude?: string[];
+  /**
+   * Reported after each hop's batch of pages is fetched, so a caller running
+   * this inside a job can show real progress instead of a blind wait. The
+   * frontier is still expanding while hops remain, so `total` is the hop
+   * count, not a page count — the honest total during a crawl is "how many
+   * more passes", not "how many more pages", which is not known until the
+   * crawl stops discovering new links.
+   */
+  onProgress?: (info: { hop: number; hops: number; pagesFetched: number }) => void;
 }
 
 export interface CrawlResult {
@@ -110,6 +119,7 @@ export async function crawl(opts: CrawlOptions): Promise<CrawlResult> {
       }
     }
     frontier = next;
+    opts.onProgress?.({ hop: hop + 1, hops: hops + 1, pagesFetched: pages.size });
   }
 
   // Seed categories anchor the relevance signal for the whole crawl.

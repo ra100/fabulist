@@ -251,6 +251,11 @@ export interface PreviewResult {
   previewKey: string;
 }
 
+/** What `/setup/discover`'s job resolves to: a preview plus a sharpened character. */
+export interface DiscoverResult extends PreviewResult {
+  character: CharacterSketch;
+}
+
 export interface Job<T = unknown> {
   id: string;
   kind: string;
@@ -602,6 +607,14 @@ export const api = {
     plan: (wish: string, wiki: WikiCandidate) => post<IngestPlan>('/setup/plan', { wish, wiki }),
     preview: (baseUrl: string, seeds: string[], mode: string, excludeCategories: string[] = [], title = '') =>
       post<PreviewResult>('/setup/preview', { baseUrl, seeds, mode, excludeCategories, title }),
+    discover: (
+      baseUrl: string,
+      seeds: string[],
+      mode: string,
+      character: CharacterSketch,
+      excludeCategories: string[] = [],
+      title = '',
+    ) => post<Job<DiscoverResult>>('/setup/discover', { baseUrl, seeds, mode, character, excludeCategories, title }),
     ingest: (previewKey: string, character: CharacterSketch, style: Partial<StyleContract>, opening: string) =>
       post<Job>('/setup/ingest', { previewKey, character, style, opening }),
     custom: (description: string, style?: Partial<StyleContract>) => post<Job>('/setup/custom', { description, style }),

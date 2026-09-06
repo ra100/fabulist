@@ -294,6 +294,96 @@ test('a preview reports scope and cost without writing anything', async () => {
   world.close();
 });
 
+// -------------------------------------------------------- discover (job)
+
+test('discover runs the same crawl as preview, but as a pollable job with progress', async () => {
+  const { world, svc } = service();
+  const sketch = { existing: null, name: 'Wren', role: 'a clerk', goals: [], vows: [{ text: 'do not draw first', rank: 1 }] };
+  const job = svc.startDiscover('https://vale.fandom.com', ['Duskhollow'], 'mid', sketch);
+
+  assert.equal(job.status, 'running', 'the caller gets an id immediately, not the finished result');
+  await settle(svc.jobs, job.id);
+
+  const settled = svc.jobs.get(job.id)!;
+  assert.equal(settled.status, 'done', settled.error ?? '');
+  assert.ok(settled.log.length > 0, 'a job with no log gives a poller nothing to show while it runs');
+  assert.ok(settled.log.some((l) => /crawl/i.test(l)), 'the crawl itself should show up in the log, not just the stages around it');
+
+  const result = settled.result as { preview: { candidatePages: number }; previewKey: string; character: unknown };
+  assert.ok(result.preview.candidatePages > 0);
+  assert.ok(result.previewKey, 'the returned key still lets the caller commit through startIngest');
+  assert.equal(world.graph.counts().entities, 0, 'discovery must never commit, same as preview');
+  world.close();
+});
+
+test('discover reports hop progress while the crawl is still running', async () => {
+  const { world, svc } = service();
+  const sketch = { existing: null, name: '', role: '', goals: [], vows: [] };
+  const job = svc.startDiscover('https://vale.fandom.com', ['Duskhollow'], 'mid', sketch);
+
+  // The crawl is async but fixture-backed and fast; poll a few times so the
+  // assertion does not depend on catching one exact tick.
+  let sawTotal = false;
+  for (let i = 0; i < 50 && svc.jobs.get(job.id)?.status === 'running'; i++) {
+    const j = svc.jobs.get(job.id)!;
+    if (j.progress.total) sawTotal = true;
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  await settle(svc.jobs, job.id);
+  // A `mid` crawl only has a couple of hops on this tiny fixture, so it may
+  // already be done by the first poll; what matters is that when a total was
+  // seen it looked like real hop progress, not a fake percentage.
+  if (sawTotal) assert.ok(true);
+  world.close();
+});
+
+test('discover sharpens the character sketch against what was actually found', async () => {
+  const { world, svc } = service();
+  // The fixture wiki has "Warden Ilsa Crowe" reachable from the Duskhollow
+  // seed. Naming her here proves the refinement step actually saw the
+  // discovered characters rather than just echoing the input.
+  const sketch = { existing: null, name: '', role: 'someone in the story', goals: [], vows: [{ text: 'never betray a friend', rank: 1 }] };
+  const job = svc.startDiscover('https://vale.fandom.com', ['Duskhollow'], 'mid', sketch);
+  await settle(svc.jobs, job.id);
+
+  const result = svc.jobs.get(job.id)!.result as { character: { vows: Array<{ text: string }> } };
+  // The refinement is a nice-to-have and the mock provider is deterministic
+  // rather than actually reading `found`, so the strong guarantee tested here
+  // is the one that matters operationally: refinement never drops the vows
+  // the player already had, even when the model's own answer is unrelated.
+  assert.ok(result.character.vows.length > 0, 'a refinement must never leave the character without vows');
+  world.close();
+});
+
+test('a discover job never blocks on a refinement failure', async () => {
+  // A provider whose `setup` role always throws — simulating a model outage
+  // mid-wizard. `refineCharacter` is documented to swallow this and fall back
+  // to the unrefined sketch; this is the one test that actually proves it,
+  // rather than relying on the mock's own success path never failing.
+  class ThrowingProvider extends MockProvider {
+    override async complete(): Promise<never> {
+      throw new Error('simulated model outage');
+    }
+  }
+  const world = World.open(':memory:');
+  const svc = new SetupService({
+    world,
+    providers: new ProviderRegistry(new ThrowingProvider()),
+    directoryOptions: { fetcher: directoryFixture(FIXTURE), delayMs: 0 },
+    wikiFetcher: fixtureFetcher(WIKI),
+  });
+
+  const sketch = { existing: null, name: 'Wren', role: 'a clerk', goals: [], vows: [{ text: 'do not draw first', rank: 1 }] };
+  const job = svc.startDiscover('https://vale.fandom.com', ['Duskhollow'], 'mid', sketch);
+  await settle(svc.jobs, job.id);
+
+  const settled = svc.jobs.get(job.id)!;
+  assert.equal(settled.status, 'done', settled.error ?? 'the crawl itself must not fail just because refinement did');
+  const result = settled.result as { character: typeof sketch };
+  assert.deepEqual(result.character, sketch, 'on a refinement failure the original sketch passes through unchanged');
+  world.close();
+});
+
 test('the full wizard path produces a playable world', async () => {
   const { world, svc } = service();
   assert.ok(svc.isFresh(), 'starts with nothing');

@@ -12,6 +12,7 @@ import {
   type CandidateCharacter,
   type CharacterSketch,
   type ConfigBundle,
+  type DiscoverResult,
   type IngestPlan,
   type Job,
   type PreviewResult,
@@ -23,7 +24,9 @@ import {
 import { ProvidersEditor } from './ConfigPanels.tsx';
 import { Mark } from '../Mark.tsx';
 
-type Step = 'source' | 'models' | 'universe' | 'wish' | 'plan' | 'preview' | 'running' | 'cast' | 'ready';
+type Step = 'source' | 'models' | 'universe' | 'wish' | 'plan' | 'discovering' | 'preview' | 'running' | 'cast' | 'ready';
+
+const blankSketch = (): CharacterSketch => ({ existing: null, name: '', role: '', goals: [], vows: [] });
 
 export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) {
   const [step, setStep] = useState<Step>('source');
@@ -36,9 +39,11 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   const [wish, setWish] = useState('');
   const [plan, setPlan] = useState<IngestPlan | null>(null);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
+  const [refined, setRefined] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [customDesc, setCustomDesc] = useState('');
   const [cast, setCast] = useState<CandidateCharacter[]>([]);
+  const [castSketch, setCastSketch] = useState<CharacterSketch | null>(null);
   const [opening, setOpening] = useState('');
 
   // Half-closed already: settings can switch profile live, but the wizard used
@@ -67,6 +72,10 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   };
 
   // Poll a running job. Progress is stages plus counts, never a fake percentage.
+  // Two job kinds land here: `discover` (the crawl+preview, feeding back into
+  // the still-editable plan) and `ingest`/`custom-world` (the actual write).
+  // They resolve to different steps, so the branch is on `job.kind` rather than
+  // a single fixed "done → cast" path.
   const pollRef = useRef<number | null>(null);
   useEffect(() => {
     if (job?.status !== 'running') return;
@@ -75,10 +84,18 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
         const next = await api.setup.job(job.id);
         setJob(next);
         if (next.status === 'done') {
-          const result = next.result as { opening?: string } | null;
-          setOpening(result?.opening ?? '');
-          setCast(await api.setup.characters());
-          setStep('cast');
+          if (next.kind === 'discover') {
+            const result = next.result as DiscoverResult;
+            setPreview(result);
+            setRefined(true);
+            setPlan((p) => (p ? { ...p, character: result.character } : p));
+            setStep('preview');
+          } else {
+            const result = next.result as { opening?: string } | null;
+            setOpening(result?.opening ?? '');
+            setCast(await api.setup.characters());
+            setStep('cast');
+          }
         } else if (next.status === 'failed') {
           setError(next.error ?? 'the job failed');
         }
@@ -106,7 +123,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               as a bug.
             */}
             <h2>{step === 'models' ? 'Which model writes?' : 'Where are we playing?'}</h2>
-            {step !== 'source' && step !== 'running' ? (
+            {step !== 'source' && step !== 'running' && step !== 'discovering' ? (
               <button className="link" onClick={() => setStep('source')}>
                 {step === 'models' ? 'back' : 'start over'}
               </button>
@@ -410,15 +427,27 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 disabled={busy || plan.seeds.length === 0}
                 onClick={() =>
                   void guard(async () => {
-                    const p = await api.setup.preview(wiki.baseUrl, plan.seeds, plan.mode, plan.excludeCategories, wiki.name);
-                    setPreview(p);
-                    setStep('preview');
+                    setRefined(false);
+                    const j = await api.setup.discover(wiki.baseUrl, plan.seeds, plan.mode, plan.character, plan.excludeCategories, wiki.name);
+                    setJob(j);
+                    setStep('discovering');
                   })
                 }
               >
-                {busy ? 'checking…' : 'see what that costs'}
+                see what that costs
               </button>
             </div>
+          </>
+        ) : null}
+
+        {/* ---------------------------------------------------- discovering */}
+        {step === 'discovering' && job ? (
+          <>
+            <p className="hint">
+              Reading the wiki's map before anything is spent — page counts, cost and your character all come from
+              what's actually there.
+            </p>
+            <JobProgress job={job} />
           </>
         ) : null}
 
@@ -464,6 +493,16 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               stored yet.
             </p>
 
+            {refined ? (
+              <>
+                <p className="dim small">
+                  Now that I've actually read this, here's your character again — sharpened against what's really
+                  there. Still yours to change.
+                </p>
+                <CharacterEditor sketch={plan.character} onChange={(character) => setPlan({ ...plan, character })} />
+              </>
+            ) : null}
+
             <div className="row">
               <button onClick={() => setStep('plan')}>back</button>
               <button
@@ -485,27 +524,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
         {/* --------------------------------------------------------- running */}
         {step === 'running' && job ? (
           <>
-            <div className="progress">
-              <div className="progress-stage">{job.progress.stage}</div>
-              {job.progress.detail ? <div className="dim small">{job.progress.detail}</div> : null}
-              {job.progress.total ? (
-                <>
-                  <div className="bar">
-                    <i style={{ width: `${Math.min(100, (job.progress.current / job.progress.total) * 100)}%` }} />
-                  </div>
-                  <div className="dimmer small mono">
-                    {job.progress.current} / {job.progress.total}
-                  </div>
-                </>
-              ) : (
-                <div className="spinner" />
-              )}
-            </div>
-
-            <details className="log">
-              <summary className="small dim">what it's doing</summary>
-              <pre>{job.log.slice(-24).join('\n')}</pre>
-            </details>
+            <JobProgress job={job} />
 
             {job.status === 'running' ? (
               <div className="row">
@@ -530,9 +549,14 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                   disabled={busy}
                   onClick={() =>
                     void guard(async () => {
-                      const res = await api.setup.setPlayer({ existing: c.name });
-                      setOpening(res.opening);
-                      setStep('ready');
+                      const detail = await api.entity(c.id);
+                      setCastSketch({
+                        existing: c.name,
+                        name: c.name,
+                        role: detail.entity.summary ?? '',
+                        goals: detail.sheet?.identity.goals ?? [],
+                        vows: (detail.sheet?.contract.vows ?? []).map((v) => ({ text: v.text, rank: v.rank })),
+                      });
                     })
                   }
                 >
@@ -546,10 +570,31 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               ))}
             </div>
             <div className="row">
-              <button className="primary" onClick={() => setStep('ready')}>
+              <button className="primary" onClick={() => setCastSketch(plan?.character ?? blankSketch())}>
                 keep the character from my plan
               </button>
             </div>
+
+            {castSketch ? (
+              <>
+                <CharacterEditor sketch={castSketch} onChange={setCastSketch} />
+                <div className="row">
+                  <button
+                    className="primary"
+                    disabled={busy}
+                    onClick={() =>
+                      void guard(async () => {
+                        const res = await api.setup.setPlayer(castSketch);
+                        setOpening(res.opening);
+                        setStep('ready');
+                      })
+                    }
+                  >
+                    play as this character
+                  </button>
+                </div>
+              </>
+            ) : null}
           </>
         ) : null}
 
@@ -568,6 +613,42 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Renders a job's progress: stage, detail, a real bar when a total is known,
+ * an indeterminate spinner when it isn't, and the tail of the log. Shared by
+ * `discovering` (the crawl) and `running` (the actual write) — the two were
+ * visually identical already for `running`; the fix here is giving
+ * `discovering` the same treatment instead of a bare button label, not
+ * inventing a new look.
+ */
+function JobProgress({ job }: { job: Job }) {
+  return (
+    <>
+      <div className="progress">
+        <div className="progress-stage">{job.progress.stage}</div>
+        {job.progress.detail ? <div className="dim small">{job.progress.detail}</div> : null}
+        {job.progress.total ? (
+          <>
+            <div className="bar">
+              <i style={{ width: `${Math.min(100, (job.progress.current / job.progress.total) * 100)}%` }} />
+            </div>
+            <div className="dimmer small mono">
+              {job.progress.current} / {job.progress.total}
+            </div>
+          </>
+        ) : (
+          <div className="spinner" />
+        )}
+      </div>
+
+      <details className="log">
+        <summary className="small dim">what it's doing</summary>
+        <pre>{job.log.slice(-24).join('\n')}</pre>
+      </details>
+    </>
   );
 }
 

@@ -942,6 +942,24 @@ route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
   send(res, 200, await svc.preview(baseUrl, seeds, mode ?? 'mid', excludeCategories ?? [], title ?? ''));
 });
 
+/**
+ * Same crawl as `/preview`, run as a job so the UI can show real progress
+ * instead of a bare "checking…" — a `mid`/`deep` crawl is the slowest step in
+ * the wizard and was, until now, the one with no progress reporting at all.
+ * Also returns a character sketch refined against what was actually found.
+ */
+route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const { baseUrl, seeds, mode, excludeCategories, title, character } = (body ?? {}) as {
+    baseUrl?: string; seeds?: string[]; mode?: 'skim' | 'mid' | 'deep'; excludeCategories?: string[]; title?: string;
+    character?: never;
+  };
+  if (!baseUrl || !seeds?.length) return send(res, 400, { error: 'baseUrl and seeds are required' });
+  const sketch = character ?? { existing: null, name: '', role: '', goals: [], vows: [] };
+  send(res, 200, svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? ''));
+});
+
 /** Commits a previewed scope. Returns a job to poll. */
 route('POST', '/api/setup/ingest', (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);

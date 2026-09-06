@@ -110,11 +110,23 @@ export class SetupService {
    * Crawls and reports what an ingest would cost, without writing anything.
    * The crawl is cached under a key the caller passes back to `startIngest`, so
    * confirming a preview does not pay for the fetch twice.
+   *
+   * `onProgress` is optional and exists so `discover` (below) can report real
+   * stage/count during the crawl; called directly, `preview` stays a plain
+   * async call with no job involved, which is what the test suite and any
+   * caller not wired to `JobRegistry` still expect.
    */
-  async preview(baseUrl: string, seeds: string[], mode: DepthMode, excludeCategories: string[] = [], title = ''): Promise<PreviewResult & { previewKey: string }> {
+  async preview(
+    baseUrl: string,
+    seeds: string[],
+    mode: DepthMode,
+    excludeCategories: string[] = [],
+    title = '',
+    onProgress?: (info: { hop: number; hops: number; pagesFetched: number }) => void,
+  ): Promise<PreviewResult & { previewKey: string }> {
     const spec = MODES[mode];
     const client = this.client(baseUrl);
-    const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages });
+    const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages, onProgress });
     const scoped = prune(crawled, { maxPages: spec.maxPages, excludeCategories });
     const preview = discover(scoped, { maxPages: spec.maxPages });
 
@@ -126,6 +138,45 @@ export class SetupService {
     const estimatedSeconds = Math.round(preview.candidatePages * 0.15 + (spec.passB === 'none' ? 0 : passBPages * 3));
 
     return { preview, mode, seeds, estimatedSeconds, previewKey };
+  }
+
+  /**
+   * Same work as `preview`, run as a background job so the UI can show real
+   * progress instead of a bare "checking…" — a `mid`/`deep` crawl is easily
+   * the slowest step in the whole wizard, and until now it was the one step
+   * with no `JobRegistry` behind it at all.
+   *
+   * Also refines the character sketch against what the crawl actually found —
+   * named characters, factions, locations — rather than leaving it as a guess
+   * made from page *titles* before anything was read. Still just a proposal:
+   * the result is returned for the player to edit, nothing is written to
+   * canon here.
+   */
+  startDiscover(
+    baseUrl: string,
+    seeds: string[],
+    mode: DepthMode,
+    character: CharacterSketch,
+    excludeCategories: string[] = [],
+    title = '',
+  ): Job<PreviewResult & { previewKey: string; character: CharacterSketch }> {
+    return this.jobs.start('discover', async (handle) => {
+      handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
+      const result = await this.preview(baseUrl, seeds, mode, excludeCategories, title, (info) => {
+        handle.stage('crawling', `pass ${info.hop} of ${info.hops} \u00b7 ${info.pagesFetched} pages so far`);
+        handle.count(info.hop, info.hops);
+      });
+
+      handle.stage('sharpening your character', 'matching it against what was actually found');
+      const refined = await this.planner.refineCharacter(character, {
+        characters: result.preview.characters,
+        factions: result.preview.factions,
+        locations: result.preview.locations,
+      });
+
+      handle.stage('done');
+      return { ...result, character: refined };
+    });
   }
 
   /**
