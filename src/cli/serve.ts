@@ -12,11 +12,26 @@ import { SetupService } from '../setup/service.ts';
 import { ConfigService } from '../config/service.ts';
 import { IllustrationService } from '../illustration/service.ts';
 
-const cfg = loadConfig();
 const args = process.argv.slice(2);
 const portArg = args.find((a) => a.startsWith('--port='));
 const port = Number(portArg?.split('=')[1] ?? process.env.PORT ?? 4317);
 const inMemory = args.includes('--memory');
+
+/**
+ * Where config writes land. `--memory` means "throwaway", and that has to
+ * include the config file: settings and the setup wizard *write* through
+ * `ConfigService` (switching profile, keeping a provider spec), so a throwaway
+ * server pointed at the real `fabulist.config.json` silently edits it. That
+ * happened twice while browser-testing the provider UI — a kept `bedrock:sonnet`
+ * and a switched profile, both of which had to be reverted by hand afterwards.
+ *
+ * `--config=<path>` overrides it explicitly, for the same reason
+ * `--memory` exists at all.
+ */
+const configArg = args.find((a) => a.startsWith('--config='))?.slice('--config='.length);
+const configPath = configArg ?? (inMemory ? join('data', '.memory-config.json') : 'fabulist.config.json');
+
+const cfg = loadConfig(configPath);
 const dbPath = inMemory ? ':memory:' : cfg.dbPath;
 // Images live beside the database rather than inside it (see `store/illustration.ts`),
 // so an in-memory run keeps them in-memory-adjacent too: a throwaway `data/images`
@@ -25,6 +40,10 @@ const dbPath = inMemory ? ':memory:' : cfg.dbPath;
 const imagesDir = inMemory ? join('data', '.memory-images') : join(dirname(dbPath), 'images');
 
 if (!inMemory) mkdirSync(dirname(dbPath), { recursive: true });
+// The throwaway config lives under `data/`, which a fresh clone does not have
+// until something writes a save there — and the first profile switch in a
+// `--memory` session would otherwise fail on the missing directory.
+mkdirSync(dirname(configPath), { recursive: true });
 const bootWorld = World.open(dbPath, undefined, imagesDir);
 if (args.includes('--sample')) {
   seedWorld(bootWorld);
@@ -40,7 +59,7 @@ const currentStory = new CurrentStory(bootWorld.db, bootWorld.storyId, imagesDir
 const getWorld = () => currentStory.world();
 
 const { registry, notes } = buildSwappableRegistry(cfg);
-const configService = new ConfigService({ registry });
+const configService = new ConfigService({ registry, path: configPath });
 for (const n of notes) console.log(n);
 if (cfg.profile === 'mock') console.log('tip: pnpm providers — the UI can switch profile without a restart');
 

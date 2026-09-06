@@ -10,6 +10,10 @@ import { World } from '../src/store/index.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { Engine } from '../src/loop/engine.ts';
 import { createApiServer } from '../src/server/api.ts';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SwappableImageRegistry } from '../src/providers/image.ts';
 
 /** In-memory config, so nothing touches a real file. */
 function service(initial: Partial<Config> = {}, registry?: SwappableRegistry) {
@@ -362,4 +366,103 @@ test('a live config change is visible to a turn taken immediately after', async 
     const lint = (turn.body.meta as unknown as { lint: { findings: Array<{ rule: string }> } }).lint;
     assert.ok(lint.findings.some((f) => /blocklist/i.test(f.rule)), 'no restart was needed');
   });
+});
+
+/**
+ * Regression: an unrelated provider edit used to silently revert the image
+ * profile, turning illustration off behind the user's back.
+ *
+ * `switchImageProfile` writes the config file directly, while `ConfigService`
+ * holds an in-memory copy taken at construction. Without a reload after the
+ * switch, the next `PUT /api/config/provider/:key` saved that stale copy and
+ * `imageProfile` vanished from the file. Reproduced against a live server before
+ * the fix, which is also how it was found — it only became visible once the
+ * server stopped writing to the developer's real config.
+ */
+test('switching the image profile survives a later, unrelated config write', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'story-cfg-'));
+  const path = join(dir, 'cfg.json');
+  try {
+    const world = World.open(':memory:');
+    seedWorld(world);
+    const config = new ConfigService({ path });
+    const imageRegistry = new SwappableImageRegistry(null, 'none');
+    const server = createApiServer({
+      world,
+      engine: new Engine({ world, providers: new ProviderRegistry(new MockProvider()) }),
+      config,
+      imageRegistry,
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${port}`;
+    const readFile = () => JSON.parse(readFileSync(path, 'utf8')) as { imageProfile?: string };
+
+    try {
+      const switched = await fetch(`${base}/api/images/profile`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ profile: 'mock' }),
+      });
+      assert.equal(switched.status, 200);
+      assert.equal(readFile().imageProfile, 'mock', 'the switch is persisted');
+
+      // Anything that saves through ConfigService. Nothing about image profiles.
+      const put = await fetch(`${base}/api/config/provider/probe:x`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'ollama', model: 'x', baseUrl: 'http://127.0.0.1:11434' }),
+      });
+      assert.equal(put.status, 200);
+      assert.equal(readFile().imageProfile, 'mock', 'and survives an unrelated write');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      world.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The routes that write config must write the file the server was started with.
+ * Their module-level defaults point at `fabulist.config.json`, so a server on a
+ * throwaway config would otherwise edit the operator's real one — which happened
+ * twice while browser-testing the provider UI.
+ */
+test('profile switches write the server\'s own config file, not the default path', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'story-cfg-'));
+  const path = join(dir, 'cfg.json');
+  try {
+    const world = World.open(':memory:');
+    seedWorld(world);
+    const config = new ConfigService({ path });
+    const registry = new SwappableRegistry(new ProviderRegistry(new MockProvider()), 'mock');
+    const server = createApiServer({
+      world,
+      engine: new Engine({ world, providers: registry }),
+      config,
+      registry,
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      // 'mock' always resolves, so this exercises the write path without needing
+      // credentials for anything.
+      const res = await fetch(`http://127.0.0.1:${port}/api/providers/profile`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ profile: 'mock' }),
+      });
+      assert.equal(res.status, 200);
+      assert.ok(existsSync(path), 'the switch wrote the config it was given');
+      assert.equal((JSON.parse(readFileSync(path, 'utf8')) as { profile: string }).profile, 'mock');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      world.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

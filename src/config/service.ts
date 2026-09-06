@@ -62,7 +62,14 @@ export const ROUTABLE_ROLES = [
 
 export class ConfigService {
   private cfg: Config;
-  private path: string;
+  /**
+   * Readable so callers that write config through the *module* functions rather
+   * than through this service (`switchProfile`, `switchImageProfile` — they
+   * predate it and take a path of their own) can be handed the same file. Their
+   * defaults point at `fabulist.config.json`, so a server running on a throwaway
+   * config would otherwise still write profile switches to the real one.
+   */
+  readonly path: string;
   private registry: SwappableRegistry | undefined;
   private env: Record<string, string | undefined>;
   private saveFn: (cfg: Config, path: string) => void;

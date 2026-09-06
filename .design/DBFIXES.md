@@ -229,7 +229,9 @@ it does not use). Asserted **on the wire** against a real local HTTP server, not
 read back off the constructor: the default is sent, it carries a contact URL, it
 never matches `Mozilla|Chrome|Safari|Gecko`, and an override reaches the server.
 
-README note still outstanding — the only piece of Group A not landed.
+README note landed with the same commit: the ingest section now states the
+`robots.txt`/ToU position the crawl relies on and why the UA must not be a
+browser-spoofing string.
 
 ---
 
@@ -413,9 +415,11 @@ concretely failing after C2 — those are the two cases embeddings genuinely win
 Then it is a small brute-force embedding table fused by RRF, and `sqlite-vec`
 only past ~20k vectors, where it is a 162 KB drop-in rather than a migration.
 
-Gates per item, as elsewhere in this repo: `pnpm test` green (512 tests today),
-`pnpm typecheck` clean, and for anything touching a frame, one played turn
-compared before and after.
+Gates per item, as elsewhere in this repo: `pnpm test` green (561 tests as of
+Group A + B3), `pnpm typecheck` clean, `pnpm build:web` clean for anything
+touching the web app, and for anything touching a frame, one played turn compared
+before and after. Anything touching config or provider UI also wants a live
+browser check — that surface has no test coverage at all.
 
 ---
 

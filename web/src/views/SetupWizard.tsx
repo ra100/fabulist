@@ -688,9 +688,10 @@ function ModelsStep({
     }
   };
 
+  // Load the config once on entering the step. `reload` is redefined every
+  // render, so depending on it would refetch continuously.
   useEffect(() => {
     void reload();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const apply = async (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => {

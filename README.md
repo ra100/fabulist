@@ -46,7 +46,7 @@ pnpm integrity            # check a save for dangling references
 ```
 
 ```bash
-pnpm test                 # 561 tests, offline
+pnpm test                 # 564 tests, offline
 pnpm typecheck
 ```
 
@@ -241,6 +241,10 @@ placeholder prose and letting you judge the app on it.
 If the page and the server disagree — `dist/` rebuilt while an older `pnpm serve` kept
 running — a banner says so and names a missing route, rather than leaving you with a control
 that 404s. `GET /api/meta` reports the route inventory the running build actually serves.
+
+For a throwaway session, `pnpm serve --memory` uses an in-memory database *and* a throwaway
+config under `data/`, so switching profile or keeping a provider spec while poking at the UI
+does not edit your real `fabulist.config.json`. `--config=<path>` sets it explicitly.
 
 Narration **streams**. Prose arrives as it is written, with the current stage shown while
 the gates run — for a writing tool that is the difference between watching and waiting.

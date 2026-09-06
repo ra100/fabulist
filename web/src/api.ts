@@ -406,8 +406,13 @@ export interface ServerMeta {
  * is to explain a confusing 404 before the user hits it, not to assert that
  * every route matches. Append when a new tab or panel starts depending on a new
  * route.
+ *
+ * Exported so `test/api.test.ts` can assert every entry is actually served. A
+ * typo or a renamed route here would fire the "page is newer than the server"
+ * banner permanently against a perfectly healthy server — a false alarm in the
+ * mechanism whose whole job is telling truth about staleness.
  */
-const REQUIRED_ROUTES = [
+export const REQUIRED_ROUTES = [
   'GET /api/meta',
   'GET /api/stories',
   'POST /api/stories',

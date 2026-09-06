@@ -557,3 +557,19 @@ test('every route the inventory advertises is actually dispatchable', async () =
     }
   });
 });
+
+/**
+ * The freshness check is only useful if its own list is right. A typo or a
+ * renamed route in `REQUIRED_ROUTES` would fire the "this page is newer than the
+ * server" banner permanently against a perfectly healthy server — a false alarm
+ * in the mechanism whose entire job is telling the truth about staleness.
+ */
+test('every route the web client demands is actually served', async () => {
+  const { REQUIRED_ROUTES } = await import('../web/src/api.ts');
+  await withServer(async (base) => {
+    const { body } = await get(base, '/api/meta');
+    const served = new Set(body.routes as string[]);
+    const missing = REQUIRED_ROUTES.filter((r) => !served.has(r));
+    assert.deepEqual(missing, [], `the client would warn about routes that do exist: ${missing.join(', ')}`);
+  });
+});

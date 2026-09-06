@@ -458,10 +458,20 @@ route('GET', '/api/images/providers', async (_req, res, { imageRegistry }) => {
 });
 
 /** Same refuse-and-explain contract as `/api/providers/profile`. `profile: null` (or omitted) turns illustration off. */
-route('POST', '/api/images/profile', (_req, res, { imageRegistry, body }) => {
+route('POST', '/api/images/profile', (_req, res, { imageRegistry, body, config }) => {
   if (!imageRegistry) return send(res, 503, { error: 'no swappable image registry on this server' });
   const { profile } = (body ?? {}) as { profile?: string | null };
-  const result = switchImageProfile(imageRegistry, profile ?? null);
+  // Same reason as `/api/providers/profile`: write to the config this server was
+  // started with, not to `switchImageProfile`'s default path.
+  const result = switchImageProfile(imageRegistry, profile ?? null, config?.path);
+  // And reload, exactly as the text-profile route does. `switchImageProfile`
+  // writes the file directly, while `ConfigService` holds an in-memory copy taken
+  // at construction — so without this, the next `PUT /api/config/provider/:key`
+  // saves that stale copy and silently reverts the image profile to whatever it
+  // was, turning illustration off behind the user's back. Reproduced directly
+  // (switch image provider, then edit an unrelated provider: `imageProfile`
+  // vanished from the file) before adding this.
+  if (result.ok) config?.reload();
   if (!result.ok) return send(res, 400, { error: `"${profile}" is not usable`, notes: result.notes });
   send(res, 200, result);
 });
@@ -858,7 +868,10 @@ route('POST', '/api/providers/profile', (_req, res, ctx) => {
   const { profile } = (body ?? {}) as { profile?: string };
   if (!profile) return send(res, 400, { error: 'profile is required' });
 
-  const result = switchProfile(registry, profile);
+  // The config service knows which file this server is actually using;
+  // `switchProfile`'s own default points at `fabulist.config.json`, which on a
+  // throwaway (`--memory`) server would edit the operator's real config.
+  const result = switchProfile(registry, profile, ctx.config?.path);
   if (result.ok) ctx.config?.reload();
   if (!result.ok) {
     return send(res, 400, {

@@ -1826,11 +1826,11 @@ function ImageProvidersPanel() {
     setBusy(false);
   };
 
-  // Probe once on mount. `probe` is stable enough for this to be a one-shot:
-  // the button below re-runs it on demand.
+  // Probe once on mount; the button re-runs it on demand. `probe` is
+  // deliberately not a dependency — it is redefined every render, so depending
+  // on it would re-probe on every keystroke elsewhere in the panel.
   useEffect(() => {
     void probe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const badge = (status: string) =>
