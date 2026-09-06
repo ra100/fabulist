@@ -9,7 +9,7 @@ import { dirname } from 'node:path';
 import { stdin, stdout } from 'node:process';
 import { World } from '../store/index.ts';
 import { seedWorld } from '../seed/verrow.ts';
-import { Engine } from '../loop/engine.ts';
+import { Engine, type TurnOutcome } from '../loop/engine.ts';
 import { loadConfig, buildRegistry } from '../config/config.ts';
 import { seedConsequences, tickConsequences, worldTick } from '../consequence/propagate.ts';
 import { makeProseGate } from '../lint/gate.ts';
@@ -99,7 +99,7 @@ async function play(
   rl: ReturnType<typeof createInterface>,
   overrideIntegrity = false,
 ): Promise<void> {
-  let outcome;
+  let outcome: TurnOutcome;
   try {
     outcome = await engine.takeTurn(input, { overrideIntegrity });
   } catch (err) {
@@ -179,7 +179,7 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
       if (sheet.contract.vows.length) {
         console.log(`\n${BOLD}vows${RESET}`);
         for (const v of [...sheet.contract.vows].sort((a, b) => a.rank - b.rank)) {
-          console.log(`  ${v.broken ? YELLOW + '[broken]' + RESET : '[held]  '} r${v.rank} ${v.text}`);
+          console.log(`  ${v.broken ? `${YELLOW}[broken]${RESET}` : '[held]  '} r${v.rank} ${v.text}`);
         }
       }
       if (sheet.identity.goals.length) console.log(`\ngoals: ${sheet.identity.goals.join('; ')}`);

@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readSse, readNdjson, readAwsEventStream } from '../src/providers/stream.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { OpenAICompatProvider, AnthropicProvider, OllamaProvider } from '../src/providers/http.ts';
-import { ProviderRegistry, SwappableRegistry, type Provider, type ProviderCapabilities } from '../src/providers/provider.ts';
+import { ProviderRegistry, SwappableRegistry, type ProviderCapabilities } from '../src/providers/provider.ts';
 import { switchProfile, defaultConfig, saveConfig, loadConfig } from '../src/config/config.ts';
 import { World } from '../src/store/index.ts';
 import { seedWorld } from '../src/seed/verrow.ts';

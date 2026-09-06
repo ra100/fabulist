@@ -8,7 +8,7 @@
  * Keys come from the environment. Nothing here is imported by the engine tests,
  * so the suite stays offline.
  */
-import { adaptRequest, type CompletionRequest, type CompletionResult, type Provider, type ProviderCapabilities } from './provider.ts';
+import type { CompletionRequest, CompletionResult, Provider, ProviderCapabilities } from './provider.ts';
 import { readNdjson, readSse, parseJsonSafe } from './stream.ts';
 import { BedrockProvider } from './bedrock.ts';
 import { VertexProvider } from './google.ts';

@@ -128,7 +128,7 @@ export class JobRegistry {
    */
   cancel(id: string): boolean {
     const job = this.jobs.get(id);
-    if (!job || job.status !== 'running') return false;
+    if (job?.status !== 'running') return false;
     this.cancels.add(id);
     job.log.push('cancellation requested');
     return true;

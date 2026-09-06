@@ -48,6 +48,7 @@ pnpm integrity            # check a save for dangling references
 ```bash
 pnpm test                 # 564 tests, offline
 pnpm typecheck
+pnpm lint                 # biome, TypeScript only
 ```
 
 ---
@@ -529,6 +530,37 @@ silently replaces the previous backup is a footgun, not a safety net.
 
 The result is a save in its own right, not just bytes: `pnpm integrity` passes on it and
 `World.open` will play it.
+
+---
+
+## Linting
+
+```bash
+pnpm lint                 # errors fail; 21 documented warnings do not
+pnpm lint:fix             # apply the safe fixes
+pnpm format <path>        # format one file or directory, never the whole repo
+```
+
+[Biome](https://biomejs.dev) 2.5, pinned exactly. It replaces nothing — there was no eslint
+or prettier here — and it is added **for the linter, not the formatter**.
+
+That distinction is deliberate and `biome.jsonc` explains each rule choice inline. The
+codebase is ~20k lines written to a consistent hand style; `biome format --write .` rewrites
+83 of 99 files (+5226/−2121), which would destroy `git blame` and collide with in-flight work
+for no correctness gain. So `pnpm format` takes a path: normalise a file while you are already
+working in it, not as a repo-wide sweep. Note `biome check` *always* includes formatting —
+use `biome lint` when you want lint only.
+
+Rules turned off are turned off with a reason, not because they were noisy. `useButtonType`
+fires 82 times and guards against a `<button>` accidentally submitting a form; this app
+contains zero `<form>` elements, so it is all cost. `noUnusedFunctionParameters` fires only
+on public signatures whose callers do pass the argument. `useExhaustiveDependencies` wants
+`probe`/`reload` in dependency arrays where that causes an infinite refetch. CSS is excluded
+entirely: `styles.css` is hand-tuned design work and its 36 findings are opinions about
+cascade order that were deliberate decisions.
+
+What it did find on first run was real: six dead imports, a stale `let` with an implicit
+`any`, and a handful of `||` that should have been `?.`. Those are fixed.
 
 ---
 

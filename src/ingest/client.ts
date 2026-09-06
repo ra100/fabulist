@@ -15,9 +15,7 @@ export interface WikiPage {
   links: string[];
 }
 
-export interface FetchLike {
-  (url: string): Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
-}
+export type FetchLike = (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 /**
  * Identifies the crawler honestly, which is load-bearing rather than polite.

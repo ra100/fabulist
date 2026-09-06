@@ -1,0 +1,122 @@
+{
+  // Biome replaces nothing here — there was no eslint or prettier to migrate
+  // from. It is added for the linter, not the formatter: the codebase is ~20k
+  // lines written to a consistent hand style, and `biome format --write .`
+  // rewrites 83 of 99 files (+5226/-2121). That would destroy `git blame` and
+  // collide with in-flight work for no correctness gain, so formatting is
+  // deliberately NOT enforced repo-wide. `pnpm format` takes a path, so a file
+  // can be normalised when it is being worked on anyway.
+  "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": false,
+    // TypeScript only. `web/src/styles.css` is hand-tuned design work (see
+    // `.design/TOKENS.md` and `.design/CRITIQUE.md`) and all 36 of its findings
+    // are `noDescendingSpecificity` / `noImportantStyles` — opinions about
+    // cascade order and `!important` that were deliberate there. Linting it
+    // would mean 36 permanent warnings nobody acts on, which is how a linter
+    // ends up ignored entirely.
+    "includes": ["src/**/*.ts", "test/**/*.ts", "web/src/**/*.ts", "web/src/**/*.tsx"]
+  },
+  // Matches the existing hand style, measured rather than assumed: 2-space
+  // indent, single quotes, semicolons, trailing commas, and a 120-column limit
+  // (the 95th-percentile line is 100 and the widest deliberate lines run to
+  // ~180 in the API and frame builders).
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120,
+    "lineEnding": "lf"
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "a11y": {
+        // 82 findings, and the rule's purpose does not apply: it exists because a
+        // `<button>` without `type` defaults to `type="submit"` and can submit a
+        // surrounding form by accident. This app contains **zero** `<form>`
+        // elements (checked, not assumed) — every button is a click handler — so
+        // the rule is all cost and no protection. Revisit if a real form appears.
+        "useButtonType": "off",
+        // Warnings, not errors: real but low-severity, and each needs a judgement
+        // rather than a mechanical fix. `noLabelWithoutControl` fires on
+        // `<label><span>…</span><StylePicker/></label>` — the label *does* wrap a
+        // control, Biome just cannot see through a custom component.
+        // `noAutofocus` is deliberate on the wizard's one-field-per-screen steps,
+        // where the field is the only thing to interact with.
+        "noLabelWithoutControl": "warn",
+        "noAutofocus": "warn",
+        "noSvgWithoutTitle": "warn",
+        "useSemanticElements": "warn",
+        "noStaticElementInteractions": "warn",
+        "useFocusableInteractive": "warn",
+        "useAriaPropsForRole": "warn"
+      },
+      "suspicious": {
+        // A CLI and a server; printing is the job.
+        "noConsole": "off",
+        "noExplicitAny": "warn",
+        // `while ((m = re.exec(text)))` is the canonical way to iterate a global
+        // regex, and `lint/rules.ts` uses it deliberately in a generator.
+        "noAssignInExpressions": "off",
+        // Warn: the remaining cases are static lists (provider notes, lint
+        // findings) that are rebuilt wholesale rather than reordered, so the
+        // reconciliation bug this rule prevents cannot occur. Worth seeing if a
+        // new one appears on a list that *does* reorder.
+        "noArrayIndexKey": "warn"
+      },
+      "style": {
+        // `strict` plus `noUncheckedIndexedAccess` makes `!` the readable way to
+        // say "checked above"; the alternative is noise on every array index.
+        "noNonNullAssertion": "off",
+        "useConst": "error"
+      },
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error",
+        // Off, not because the findings are wrong, but because every one of them
+        // is a *public signature* whose callers do pass the argument
+        // (`seedConsequences(world, delta, events)`, `buildImageProvider(spec,
+        // env)`). Renaming to `_delta` to satisfy the rule would churn call-site
+        // readability to describe an implementation detail.
+        "noUnusedFunctionParameters": "off",
+        // Both misfire on this codebase. `useExhaustiveDependencies` wants
+        // `probe`/`reload` in dependency arrays, but they are redefined every
+        // render, so obeying it causes an infinite refetch — the mount-once
+        // effects are correct and commented. `useHookAtTopLevel` reads
+        // `svc.useSample()` in `server/api.ts` as a React hook; it is a server
+        // method that happens to start with "use".
+        "useExhaustiveDependencies": "off",
+        "useHookAtTopLevel": "off"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "jsxQuoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all",
+      "arrowParentheses": "always",
+      "bracketSpacing": true
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        // Import order in this repo groups node builtins, then domain, then
+        // local — a convention Biome's sorter does not reproduce, and
+        // reordering every file is the same blame-destroying churn as
+        // reformatting.
+        "organizeImports": "off"
+      }
+    }
+  }
+}

@@ -15,6 +15,10 @@
     "ingest": "node --disable-warning=ExperimentalWarning src/cli/ingest.ts",
     "integrity": "node --disable-warning=ExperimentalWarning src/cli/integrity.ts",
     "lint:prose": "node --disable-warning=ExperimentalWarning src/cli/lintprose.ts",
+    "lint": "biome lint src test web/src",
+    "lint:fix": "biome check --write src test web/src",
+    "format": "biome format --write",
+    "format:check": "biome format src test web/src",
     "serve": "node --disable-warning=ExperimentalWarning src/cli/serve.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "build:web": "vite build --config web/vite.config.ts",
@@ -23,6 +27,7 @@
     "providers": "node --disable-warning=ExperimentalWarning src/cli/providers.ts"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.12",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

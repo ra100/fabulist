@@ -118,7 +118,7 @@ test('a wiki-namespace-style title is recognised as navigation, not content, by 
 });
 
 test('sections split on headings', () => {
-  const sections = parseSections(WIKI['Duskhollow']!.wikitext!);
+  const sections = parseSections(WIKI.Duskhollow!.wikitext!);
   assert.deepEqual(sections.map((s) => s.title), ['History', 'Notable residents', 'See also']);
   assert.match(sections[0]!.body, /Sundering of Marrow/);
 });
@@ -137,7 +137,7 @@ test('markup stripping removes templates, tables and refs', () => {
 });
 
 test('the lead paragraph becomes a usable summary', () => {
-  const summary = firstParagraph(WIKI['Duskhollow']!.wikitext!);
+  const summary = firstParagraph(WIKI.Duskhollow!.wikitext!);
   assert.match(summary, /^Duskhollow is a terraced city/);
   assert.ok(!summary.includes("'''"));
 });

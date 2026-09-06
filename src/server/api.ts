@@ -9,7 +9,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import type { Engine } from '../loop/engine.ts';
-import { CurrentStory, World } from '../store/index.ts';
+import type { CurrentStory, World } from '../store/index.ts';
 import { forkStory } from '../loop/branch.ts';
 import { createStory, deleteStory, listStories } from '../store/world.ts';
 import {
@@ -27,7 +27,7 @@ import { switchImageProfile, switchProfile } from '../config/config.ts';
 import { probeImageProviders } from '../providers/imageConfig.ts';
 import { ROUTABLE_ROLES, validateSpec, type ConfigService } from '../config/service.ts';
 import { seedConsequences as seedCons, tickConsequences as tickCons, worldTick as wTick } from '../consequence/propagate.ts';
-import { IllustrationService, NoImageProviderError } from '../illustration/service.ts';
+import { type IllustrationService, NoImageProviderError } from '../illustration/service.ts';
 import { composePortraitPrompt, composeScenePrompt } from '../illustration/composer.ts';
 
 export interface ServerOptions {
@@ -287,7 +287,7 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, params, bo
 
 route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
   const { input, overrideIntegrity } = (body ?? {}) as { input?: string; overrideIntegrity?: boolean };
-  if (!input || !input.trim()) return send(res, 400, { error: 'input required' });
+  if (!input?.trim()) return send(res, 400, { error: 'input required' });
 
   const outcome = await engine.takeTurn(input, { overrideIntegrity: overrideIntegrity === true });
 
@@ -763,7 +763,7 @@ route('GET', '/api/providers', async (_req, res, ctx) => {
  */
 route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => {
   const { input, overrideIntegrity } = (body ?? {}) as { input?: string; overrideIntegrity?: boolean };
-  if (!input || !input.trim()) return send(res, 400, { error: 'input required' });
+  if (!input?.trim()) return send(res, 400, { error: 'input required' });
 
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',

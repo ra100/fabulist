@@ -1638,7 +1638,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                   </span>
                   <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     <button
-                      disabled={busy === s.id + 'switch'}
+                      disabled={busy === `${s.id}switch`}
                       onClick={() => void run(s.id, 'switch', async () => {
                         await api.stories.switchTo(s.id);
                         onSwitched();
@@ -1663,7 +1663,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                     </button>
                     <button
                       className="warn"
-                      disabled={stories.length <= 1 || busy === s.id + 'delete'}
+                      disabled={stories.length <= 1 || busy === `${s.id}delete`}
                       title={stories.length <= 1 ? 'the last story in a world cannot be deleted this way' : 'delete this story only — canon and every other story are unaffected'}
                       onClick={async () => {
                         if (!window.confirm(`Delete "${s.title || 'untitled story'}"? This only removes this one story — canon and other stories are unaffected.`)) return;
@@ -1717,7 +1717,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 <button
                   className="primary"
-                  disabled={busy === forkFrom.id + 'fork'}
+                  disabled={busy === `${forkFrom.id}fork`}
                   onClick={() => void run(forkFrom.id, 'fork', async () => {
                     const scene = forkScene.trim() ? Number(forkScene.trim()) : undefined;
                     if (scene !== undefined && (!Number.isFinite(scene) || scene < 1)) throw new Error('scene must be a number of 1 or greater');

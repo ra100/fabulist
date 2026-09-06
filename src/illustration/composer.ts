@@ -167,7 +167,7 @@ export function composeScenePrompt(
   const prompt = [
     location ? `Scene at ${locationAnchor(location)}.` : 'Scene.',
     cast && `Present: ${cast}.`,
-    sceneDetail && sceneDetail.trim(),
+    sceneDetail?.trim(),
     `World: ${worldAnchor(style)}.`,
     fragment.positive,
     'wide establishing composition',

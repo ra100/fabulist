@@ -22,7 +22,6 @@ import {
   buildIntegrityFrame,
   buildNarratorFrame,
   buildRefereeFrame,
-  renderVows,
   type FrameContext,
 } from '../frame/builders.ts';
 import { adaptRequest, extractJson, type Provider } from '../providers/provider.ts';

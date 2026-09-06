@@ -69,7 +69,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   // Poll a running job. Progress is stages plus counts, never a fake percentage.
   const pollRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!job || job.status !== 'running') return;
+    if (job?.status !== 'running') return;
     const tick = async () => {
       try {
         const next = await api.setup.job(job.id);

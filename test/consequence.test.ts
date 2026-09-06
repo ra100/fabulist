@@ -4,7 +4,6 @@ import { World } from '../src/store/index.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import {
   applyDirectiveRecalc,
-  defaultSeedOptions,
   seedConsequences,
   tickConsequences,
   transmitRumours,
