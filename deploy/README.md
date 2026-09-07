@@ -4,95 +4,120 @@ Scope of this deployment (see the conversation that produced it): the app has
 **zero built-in request authentication** (`src/server/api.ts`'s ~60 routes all
 trust whoever can reach them) and the MCP+OAuth front door described in
 `.design/MCP-CONNECTOR.md` doesn't exist yet. This is therefore a **private**
-deployment — public DNS and TLS, but nginx restricts entry to an IP
-allowlist. Revisit exposure once MCP+OAuth (or some other real auth layer)
+deployment — public DNS and TLS, but the reverse proxy restricts entry to an
+IP allowlist. Revisit exposure once MCP+OAuth (or some other real auth layer)
 lands.
+
+**Reverse proxy: openresty, not a separate nginx.** The VPS already runs
+openresty for other sites (visible in the existing `/etc/cron.d/certbot`
+entries that stop/start it around certificate renewal), so this deployment
+reuses it rather than installing a second, competing nginx that would fight
+it for ports 80/443.
+
+**TLS: a `*.rast.io` wildcard cert via DNS-01**, not a per-domain HTTP-01 cert
+(HTTP-01 cannot issue wildcards at all — an ACME/CA-level rule, not a certbot
+limitation). Issued with the `certbot-dns-websupport` plugin, which talks to
+Websupport's DNS API to satisfy the challenge automatically — no manual DNS
+step, and it renews unattended forever after. That plugin needs
+`certbot>=3.2.0`; this box's apt certbot is 2.9.0, and mixing pip into an
+apt-managed certbot install breaks (dependency conflict, confirmed while
+setting this up) — so it lives in its own virtualenv at `/opt/certbot-venv`,
+completely separate from the apt certbot, which keeps renewing whatever it
+already managed (e.g. `fabulist.rast.io`'s old per-domain cert, if you don't
+retire it) with zero interaction between the two.
 
 ## What's here
 
 | File | Purpose |
 |---|---|
 | `docker-compose.yml` | The one service, pinned to `ra100/fabulist:latest`, `/data` as a named volume |
-| `nginx/fabulist.conf` | Reverse proxy + IP allowlist + SSE-safe proxy settings, for `fabulist.rast.io` |
-| `vps-setup.sh` | One-time: installs Docker/nginx/certbot, copies the compose file, starts the app, installs the nginx site |
+| `nginx/fabulist.conf` | openresty/nginx server block: IP allowlist, SSE-safe proxy settings, TLS pointed at the wildcard cert, HTTP→HTTPS redirect |
+| `vps-setup.sh` | One-time: installs Docker, copies the compose file + `deploy.sh`, starts the app. Does **not** touch openresty or certbot — those are managed separately (below) |
 | `deploy.sh` | The repeatable step: `docker compose pull && up -d`. This is the *only* command the CI deploy key can run (see below) |
 
-## One-time VPS setup
+## Already done (as of this doc)
 
-```bash
-scp -P 25 deploy/vps-setup.sh deploy/docker-compose.yml -r deploy/nginx ra100@omnius.rast.io:~/
-ssh -p 25 ra100@omnius.rast.io
-chmod +x vps-setup.sh
-DEPLOY_PATH=/home/ra100/Development/fabulist DOMAIN=fabulist.rast.io ./vps-setup.sh
-```
+- [x] `*.rast.io` wildcard cert issued via `certbot-dns-websupport` in
+      `/opt/certbot-venv`, reusing the existing Let's Encrypt account.
+- [x] Renewal cron entry added to `/etc/cron.d/certbot`:
+      `/usr/local/bin/certbot renew --cert-name rast.io --post-hook "systemctl reload openresty"`
+      (`/usr/local/bin/certbot` symlinked to the venv's certbot — separate
+      from `/usr/bin/certbot`, the apt one, so the existing cron lines that
+      reference `/usr/bin/certbot` / `--standalone` keep managing their own
+      lineages untouched).
+- [x] SSH deploy key generated, `SSH_PRIVATE_KEY` secret and
+      `SSH_DOMAIN`/`SSH_PORT`/`SSH_USER` variables set on the GitHub repo.
 
-It stops partway to tell you to edit the IP allowlist in the installed nginx
-config (`/etc/nginx/sites-available/fabulist.rast.io`) before reloading —
-replace both `CHANGE-ME-YOUR-IP-*` lines with real addresses (`curl -4
-ifconfig.me` from each network you'll play from), then:
+## What's left to actually make it run
 
-```bash
-sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d fabulist.rast.io
-```
+1. **Restrict the deploy key on the VPS.** The public half of the key you
+   generated needs to land in `~/.ssh/authorized_keys` for the `ra100` user,
+   forced to only ever run `deploy.sh`:
 
-Also copy `deploy/deploy.sh` to the deploy path — `vps-setup.sh` doesn't do
-this automatically since it's meant to be re-fetched by CI on every release,
-not baked in once:
+   ```bash
+   echo 'command="/home/ra100/Development/fabulist/deploy.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...your-pubkey... fabulist-deploy@github-actions' >> ~/.ssh/authorized_keys
+   ```
 
-```bash
-cp deploy.sh /home/ra100/Development/fabulist/deploy.sh
-chmod +x /home/ra100/Development/fabulist/deploy.sh
-```
+   The path in `command=` must match exactly where `deploy.sh` ends up in
+   step 2 — `/home/ra100/Development/fabulist/deploy.sh`.
 
-## Continuous deployment from GitHub Actions
+2. **Run the app-side one-time setup**, from your Mac:
 
-`release.yml`'s `deploy` job runs after `docker` publishes a new image, and
-SSHes in to run `deploy.sh`. It needs one secret and three repo variables —
-you said you'd set these yourself; here's exactly what each one is and how to
-set it with `gh` if you'd rather not click through the UI.
+   ```bash
+   scp -P 25 deploy/vps-setup.sh deploy/docker-compose.yml deploy/deploy.sh ra100@omnius.rast.io:~/
+   ssh -p 25 ra100@omnius.rast.io
+   chmod +x vps-setup.sh
+   DEPLOY_PATH=/home/ra100/Development/fabulist ./vps-setup.sh
+   ```
 
-**Generate a dedicated deploy key** (don't reuse your personal key — this one
-should be restricted to doing nothing but this one command):
+   This installs Docker if missing, copies `docker-compose.yml` and
+   `deploy.sh` into place, and starts the container listening on
+   `127.0.0.1:4317`.
 
-```bash
-ssh-keygen -t ed25519 -C "fabulist-deploy@github-actions" -f fabulist_deploy_key -N ""
-```
+3. **Install the openresty server block.** Copy `deploy/nginx/fabulist.conf`
+   to wherever your openresty config includes server blocks from (check the
+   `include` directives in openresty's main `nginx.conf` — commonly a
+   `conf.d/` or `sites-enabled/`-style directory, whatever this box's other
+   sites already use), then edit both `CHANGE-ME-YOUR-IP-*` lines to your
+   real allowed source IPs (`curl -4 ifconfig.me` from each network you'll
+   play from). Then:
 
-**Restrict what that key can do**, on the VPS, in `~/.ssh/authorized_keys`
-(as the `ra100` user — append a line, don't replace existing entries):
+   ```bash
+   sudo openresty -t && sudo systemctl reload openresty
+   ```
 
-```
-command="/home/ra100/Development/fabulist/deploy.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...rest-of-fabulist_deploy_key.pub... fabulist-deploy@github-actions
-```
+4. **Verify end-to-end**, from an allowlisted IP:
 
-The `command=` forces sshd to run `deploy.sh` no matter what the client asks
-for — this is what makes "the CI key leaked" a non-event: it can pull+restart
-this one compose project and touch nothing else on the box, not even a shell.
+   ```bash
+   curl -s https://fabulist.rast.io/api/meta
+   ```
 
-**Set the GitHub secret and variables** (repo: `ra100/fabulist`):
+5. **Test the restricted deploy key actually works and actually is
+   restricted**, from your Mac, using the private key file (not through
+   GitHub Actions yet):
 
-```bash
-gh secret set SSH_PRIVATE_KEY --repo ra100/fabulist < fabulist_deploy_key
-gh variable set SSH_DOMAIN --repo ra100/fabulist --body "omnius.rast.io"
-gh variable set SSH_PORT   --repo ra100/fabulist --body "25"
-gh variable set SSH_USER   --repo ra100/fabulist --body "ra100"
-```
+   ```bash
+   ssh -i fabulist_deploy_key -p 25 ra100@omnius.rast.io "whoami; ls /"
+   ```
 
-Then delete the local private key file (`fabulist_deploy_key`) — it only
-needs to exist long enough to be pasted into the two places above.
+   This should run `deploy.sh` regardless of the command you typed — if you
+   see `whoami`/`ls` output instead, the `command=` restriction in step 1
+   isn't taking effect and needs a look before trusting it with a real
+   secret.
 
-## Cutting a release (unchanged from before this doc)
+Once all five are done, the pipeline is live: `git tag vX.Y.Z && git push
+--tags` builds+pushes the Docker image and redeploys automatically.
+
+## Cutting a release
 
 ```bash
 git tag vX.Y.Z && git push --tags
 ```
 
-This builds+pushes the Docker image (as it already did) and now also
-deploys it. Watch it with `gh run watch --repo ra100/fabulist` or
+Watch it with `gh run watch --repo ra100/fabulist` or
 `gh run list --repo ra100/fabulist`.
 
-## Verifying after deploy
+## Verifying after a deploy
 
 ```bash
 ssh -p 25 ra100@omnius.rast.io 'cd Development/fabulist && docker compose ps && docker compose logs --tail 20'
