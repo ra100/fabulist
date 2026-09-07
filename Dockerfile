@@ -52,4 +52,8 @@ ENV PORT=4317
 # nothing outside it — including Docker's own port mapping — can reach it.
 # The flag below overrides the bind host without touching serve.ts's default
 # for the non-Docker path.
-CMD ["node", "--disable-warning=ExperimentalWarning", "src/cli/serve.ts", "--host=0.0.0.0", "--config=/data/fabulist.config.json"]
+# --data-root=/data alongside --config=/data/fabulist.config.json: both must
+# point inside the mounted volume, or worlds land in the container's writable
+# layer and vanish the moment `docker compose up -d` recreates the container
+# (see serve.ts's --data-root comment for the failure this fixes).
+CMD ["node", "--disable-warning=ExperimentalWarning", "src/cli/serve.ts", "--host=0.0.0.0", "--config=/data/fabulist.config.json", "--data-root=/data"]
