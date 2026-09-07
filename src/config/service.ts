@@ -15,17 +15,22 @@
  * as a warning on the field, not as a broken engine three turns later.
  */
 import {
+  buildImageRegistry,
   buildRegistry,
   loadConfig,
   saveConfig,
   type Config,
 } from './config.ts';
 import { defaultAuth, PRESETS, PROFILES, type ProviderKind, type ProviderSpec } from '../providers/http.ts';
+import { IMAGE_PRESETS, type ImageProviderKind, type ImageProviderSpec } from '../providers/imageConfig.ts';
+import type { SwappableImageRegistry } from '../providers/image.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
 
 export interface ConfigServiceOptions {
   path?: string;
   registry?: SwappableRegistry;
+  /** Swapped when an image provider spec changes, so edits need no restart. */
+  imageRegistry?: SwappableImageRegistry;
   env?: Record<string, string | undefined>;
   /** Injected for tests, so nothing touches a real file. */
   load?: (path: string) => Config;
@@ -35,6 +40,13 @@ export interface ConfigServiceOptions {
 export interface ValidationIssue {
   field: string;
   message: string;
+  /**
+   * Absent means "error": the value was rejected. `warning` means the value was
+   * kept and is legal, but deserves saying out loud — a remote image host over
+   * plain http, for instance, works fine on a trusted LAN and still sends an
+   * API key in clear text.
+   */
+  severity?: 'error' | 'warning';
 }
 
 export interface PatchResult {
@@ -45,6 +57,7 @@ export interface PatchResult {
 }
 
 const KINDS: ProviderKind[] = ['openai-compat', 'anthropic', 'ollama', 'bedrock', 'google', 'copilot', 'mock'];
+const IMAGE_KINDS: ImageProviderKind[] = ['mock', 'comfyui', 'unsloth', 'bedrock-stability'];
 
 /** Roles the UI may route independently. */
 export const ROUTABLE_ROLES = [
@@ -71,19 +84,32 @@ export class ConfigService {
    */
   readonly path: string;
   private registry: SwappableRegistry | undefined;
+  /**
+   * The live image registry, so editing an image provider's host takes effect on
+   * the next illustration instead of at the next restart — the same reasoning
+   * that makes `registry` swappable here.
+   */
+  private imageRegistry: SwappableImageRegistry | undefined;
   private env: Record<string, string | undefined>;
   private saveFn: (cfg: Config, path: string) => void;
 
   constructor(opts: ConfigServiceOptions = {}) {
     this.path = opts.path ?? 'fabulist.config.json';
     this.registry = opts.registry;
+    this.imageRegistry = opts.imageRegistry;
     this.env = opts.env ?? process.env;
     this.saveFn = opts.save ?? ((cfg, path) => saveConfig(cfg, path));
     this.cfg = (opts.load ?? ((p: string) => loadConfig(p)))(this.path);
   }
 
   get(): Config {
-    return { ...this.cfg, providers: { ...this.cfg.providers }, routes: { ...this.cfg.routes }, blocklist: [...this.cfg.blocklist] };
+    return {
+      ...this.cfg,
+      providers: { ...this.cfg.providers },
+      routes: { ...this.cfg.routes },
+      blocklist: [...this.cfg.blocklist],
+      imageProviders: { ...(this.cfg.imageProviders ?? {}) },
+    };
   }
 
   /**
@@ -97,6 +123,16 @@ export class ConfigService {
   /** Every provider key the UI can offer: presets plus anything configured. */
   providerKeys(): string[] {
     return [...new Set([...Object.keys(PRESETS), ...Object.keys(this.cfg.providers)])].sort();
+  }
+
+  /** The same, for images. */
+  imageProviderKeys(): string[] {
+    return [...new Set([...Object.keys(IMAGE_PRESETS), ...Object.keys(this.cfg.imageProviders ?? {})])].sort();
+  }
+
+  /** A spec by key, preset or override, for the UI to prefill an editor from. */
+  resolveImageSpec(key: string): ImageProviderSpec | undefined {
+    return this.cfg.imageProviders?.[key] ?? IMAGE_PRESETS[key];
   }
 
   profileNames(): string[] {
@@ -155,6 +191,19 @@ export class ConfigService {
       next.providers = providers;
     }
 
+    if (partial.imageProviders !== undefined) {
+      // Was missing entirely, which is why ComfyUI and Unsloth were stuck on
+      // their loopback preset defaults: `PUT /api/config` accepted the field,
+      // dropped it on the floor, and reported success.
+      const imageProviders: Record<string, ImageProviderSpec> = {};
+      for (const [key, spec] of Object.entries(partial.imageProviders)) {
+        const checked = validateImageSpec(key, spec);
+        issues.push(...checked.issues);
+        if (checked.spec) imageProviders[key] = checked.spec;
+      }
+      next.imageProviders = imageProviders;
+    }
+
     // dbPath is deliberately not patchable: the world is already open, so
     // changing it at runtime would leave the UI talking to a database the engine
     // is not using.
@@ -164,6 +213,10 @@ export class ConfigService {
 
     const touchesRegistry =
       partial.routes !== undefined || partial.providers !== undefined || partial.mockTokenDelayMs !== undefined;
+    // The image registry holds one built provider, so a spec edit only reaches
+    // illustration if it is rebuilt — otherwise changing a host would appear to
+    // save and then keep calling the old one until a restart.
+    const touchesImageRegistry = partial.imageProviders !== undefined || partial.imageProfile !== undefined;
 
     this.cfg = next;
     this.saveFn(this.cfg, this.path);
@@ -173,6 +226,16 @@ export class ConfigService {
       const { registry } = buildRegistry(this.cfg, this.env);
       this.registry.swap(registry, this.cfg.profile);
       registryRebuilt = true;
+    }
+
+    if (touchesImageRegistry && this.imageRegistry) {
+      const { registry: rebuilt, notes } = buildImageRegistry(this.cfg, this.env);
+      // `buildImageRegistry` reports a spec that would not build (a missing API
+      // key, say) as a note rather than throwing, and that is exactly the
+      // feedback the editor needs — surfaced as an issue on the provider rather
+      // than swallowed into a server log nobody is reading.
+      for (const note of notes) issues.push({ field: 'imageProviders', message: note, severity: 'warning' });
+      this.imageRegistry.swap(rebuilt.get(), this.cfg.imageProfile ?? 'none');
     }
 
     return { config: this.get(), issues, registryRebuilt };
@@ -199,6 +262,33 @@ export class ConfigService {
   /** The spec behind a key, preset or configured, for the editor to prefill. */
   resolveSpec(key: string): ProviderSpec | undefined {
     return this.cfg.providers[key] ?? PRESETS[key];
+  }
+
+  // -------------------------------------------------------- image providers
+
+  /**
+   * Saves one image provider spec. This is what makes a ComfyUI or Unsloth on
+   * another machine reachable: override the preset key with the same kind and a
+   * different `baseUrl`, and `buildImageProvider` picks it up on the rebuild
+   * that `patch` performs.
+   */
+  putImageProvider(key: string, spec: ImageProviderSpec): PatchResult {
+    const trimmed = key.trim();
+    if (!trimmed) {
+      return { config: this.get(), issues: [{ field: 'key', message: 'a name is required' }], registryRebuilt: false };
+    }
+    return this.patch({ imageProviders: { ...(this.cfg.imageProviders ?? {}), [trimmed]: spec } });
+  }
+
+  removeImageProvider(key: string): PatchResult {
+    const imageProviders = { ...(this.cfg.imageProviders ?? {}) };
+    delete imageProviders[key];
+    // No route map to clean up here, unlike text. If the active `imageProfile`
+    // pointed at this key and no preset shares the name, the rebuild below
+    // reports "unknown image provider key … illustration stays off" as a
+    // warning — which is the honest outcome and is surfaced rather than hidden.
+    // Deleting an override that shadows a preset simply reverts to the preset.
+    return this.patch({ imageProviders });
   }
 
   // -------------------------------------------------------------- blocklist
@@ -315,4 +405,113 @@ export function validateSpec(key: string, raw: unknown): { spec: ProviderSpec | 
   }
 
   return { spec: issues.some((i) => i.field.endsWith('.kind') || i.field.endsWith('.model')) ? null : spec, issues };
+}
+
+/**
+ * Validates one image-provider spec: the mirror of `validateSpec` for text.
+ *
+ * Worth its own function rather than a shared one, because the field sets
+ * genuinely differ (no dialect, no context window, an `apiKeyEnv` only one kind
+ * uses) — and because the *reason* `baseUrl` matters is different. For a text
+ * provider a local server is a convenience. For images it is the point of this
+ * function: ComfyUI and Unsloth Studio usually run on whichever machine has the
+ * GPU, which is frequently not this one, and until this existed both were
+ * effectively pinned to their `127.0.0.1` preset defaults because `patch()`
+ * ignored `imageProviders` entirely.
+ */
+export function validateImageSpec(
+  key: string,
+  raw: unknown,
+): { spec: ImageProviderSpec | null; issues: ValidationIssue[] } {
+  const issues: ValidationIssue[] = [];
+  if (!raw || typeof raw !== 'object') {
+    return { spec: null, issues: [{ field: key, message: 'not an object' }] };
+  }
+  const s = raw as Record<string, unknown>;
+  const kind = String(s.kind ?? '');
+  if (!IMAGE_KINDS.includes(kind as ImageProviderKind)) {
+    issues.push({ field: `${key}.kind`, message: `must be one of ${IMAGE_KINDS.join(', ')}` });
+    return { spec: null, issues };
+  }
+
+  // `model` means something different per kind — a ComfyUI checkpoint filename,
+  // a Bedrock model id, an informational label for Unsloth — but every kind
+  // needs *something*, and an unset ComfyUI checkpoint is its #1 failure mode.
+  const model = String(s.model ?? '').trim();
+  if (!model) issues.push({ field: `${key}.model`, message: 'a model id, checkpoint filename or label is required' });
+
+  const spec: ImageProviderSpec = { kind: kind as ImageProviderKind, model };
+
+  if (s.baseUrl !== undefined && String(s.baseUrl).trim()) {
+    const value = String(s.baseUrl).trim();
+    try {
+      const url = new URL(value);
+      if (!/^https?:$/.test(url.protocol)) throw new Error('scheme');
+      // Only a trailing slash is stripped, never a path: a reverse-proxied
+      // Unsloth or ComfyUI can legitimately live at
+      // `https://gpu.example.com/comfy`, and dropping that prefix would send
+      // every request to the wrong host root.
+      spec.baseUrl = value.replace(/\/$/, '');
+    } catch {
+      issues.push({ field: `${key}.baseUrl`, message: 'must be an http or https URL, e.g. http://192.168.1.40:8188' });
+    }
+  }
+
+  // A remote host over plain http is flagged, not refused: it is entirely
+  // normal on a trusted LAN, and for Unsloth it also means the bearer key
+  // crosses the network in clear text — worth knowing, not worth blocking.
+  if (spec.baseUrl) {
+    try {
+      const url = new URL(spec.baseUrl);
+      const loopback = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|::1)$/i.test(url.hostname);
+      if (!loopback && url.protocol === 'http:') {
+        issues.push({
+          field: `${key}.baseUrl`,
+          message:
+            spec.kind === 'unsloth'
+              ? 'remote host over plain http: requests and the API key travel unencrypted'
+              : 'remote host over plain http: requests travel unencrypted',
+          severity: 'warning',
+        });
+      }
+    } catch {
+      // Unreachable: the URL parsed above.
+    }
+  }
+
+  for (const field of ['apiKeyEnv', 'profile', 'region', 'note'] as const) {
+    const value = s[field];
+    if (value !== undefined && String(value).trim()) {
+      (spec as unknown as Record<string, unknown>)[field] = String(value).trim();
+    }
+  }
+
+  if (s.capabilities && typeof s.capabilities === 'object') {
+    spec.capabilities = s.capabilities as ImageProviderSpec['capabilities'];
+  }
+
+  // Unsloth authenticates a *local* desktop install from its own on-disk secret,
+  // so a missing key is no longer an error — only a remote instance genuinely
+  // needs one. Warned rather than errored, because the loopback case is the
+  // common one and works without any key at all.
+  if (spec.kind === 'unsloth' && !spec.apiKeyEnv) {
+    let loopback = true;
+    try {
+      if (spec.baseUrl) loopback = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|::1)$/i.test(new URL(spec.baseUrl).hostname);
+    } catch {
+      // Already reported above.
+    }
+    if (!loopback) {
+      issues.push({
+        field: `${key}.apiKeyEnv`,
+        message: 'a remote Unsloth cannot use this machine\u2019s desktop login: name the env var holding its API key',
+        severity: 'warning',
+      });
+    }
+  }
+
+  return {
+    spec: issues.some((i) => i.severity !== 'warning' && (i.field.endsWith('.kind') || i.field.endsWith('.model'))) ? null : spec,
+    issues,
+  };
 }

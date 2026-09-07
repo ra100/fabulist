@@ -25,7 +25,7 @@ import type { SwappableRegistry } from '../providers/provider.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
 import { switchImageProfile, switchProfile } from '../config/config.ts';
 import { probeImageProviders } from '../providers/imageConfig.ts';
-import { ROUTABLE_ROLES, validateSpec, type ConfigService } from '../config/service.ts';
+import { ROUTABLE_ROLES, validateImageSpec, validateSpec, type ConfigService } from '../config/service.ts';
 import { seedConsequences as seedCons, tickConsequences as tickCons, worldTick as wTick } from '../consequence/propagate.ts';
 import { type IllustrationService, NoImageProviderError } from '../illustration/service.ts';
 import { composePortraitPrompt, composeScenePrompt } from '../illustration/composer.ts';
@@ -452,9 +452,20 @@ function parseVisualStyle(v: unknown): VisualStyle | undefined {
 }
 
 /** Which image providers are usable here, mirroring `/api/providers` for text. */
-route('GET', '/api/images/providers', async (_req, res, { imageRegistry }) => {
-  const results = await probeImageProviders();
-  send(res, 200, { profile: imageRegistry?.profile() ?? 'none', results });
+route('GET', '/api/images/providers', async (_req, res, { imageRegistry, config }) => {
+  // Configured overrides must be included, or a custom host saved through
+  // `PUT /api/config/image-provider/:key` would never appear in the picker and
+  // an edited preset would still be probed at its loopback default — the panel
+  // would contradict the file. Mirrors how `/api/providers` reads
+  // `cfg.providers` for text.
+  const results = await probeImageProviders(config?.get().imageProviders ?? {}, {});
+  send(res, 200, {
+    profile: imageRegistry?.profile() ?? 'none',
+    results,
+    // The keys the UI may offer, so a custom provider is selectable rather than
+    // merely visible.
+    keys: config?.imageProviderKeys() ?? [],
+  });
 });
 
 /** Same refuse-and-explain contract as `/api/providers/profile`. `profile: null` (or omitted) turns illustration off. */
@@ -851,6 +862,46 @@ route('POST', '/api/config/provider/test', async (_req, res, { body }) => {
   const { probeProvider } = await import('../providers/probe.ts');
   const result = await probeProvider(name, checked.spec, {});
   send(res, 200, { ...result, issues: checked.issues });
+});
+
+/**
+ * Image-provider CRUD, mirroring the text routes above. This is what lets a
+ * ComfyUI or Unsloth Studio on another machine be configured at all: the specs
+ * always carried a `baseUrl`, but nothing could write one, so both were pinned
+ * to their loopback preset defaults.
+ */
+route('PUT', '/api/config/image-provider/:key', (_req, res, { config, params, body }) => {
+  const svc = requireConfig(res, config);
+  if (!svc) return;
+  const key = decodeURIComponent(params.key ?? '');
+  send(res, 200, svc.putImageProvider(key, (body ?? {}) as never));
+});
+
+route('DELETE', '/api/config/image-provider/:key', (_req, res, { config, params }) => {
+  const svc = requireConfig(res, config);
+  if (!svc) return;
+  send(res, 200, svc.removeImageProvider(decodeURIComponent(params.key ?? '')));
+});
+
+/**
+ * Validates and probes one image spec without saving it — the same
+ * "test precedes keep" contract as the text route, and more useful here: the
+ * whole point of a custom `baseUrl` is that it may be wrong or unreachable, and
+ * finding that out at illustration time costs a turn.
+ */
+route('POST', '/api/config/image-provider/test', async (_req, res, { body }) => {
+  const { key, spec } = (body ?? {}) as { key?: string; spec?: unknown };
+  const name = (key ?? 'candidate').trim() || 'candidate';
+  const checked = validateImageSpec(name, spec);
+  if (!checked.spec) return send(res, 200, { status: 'unavailable', issues: checked.issues, detail: 'the spec is not valid yet' });
+
+  const { probeImageProviders } = await import('../providers/imageConfig.ts');
+  // Probe *only* the candidate, not the whole catalog: this must report on the
+  // host being typed, and probing every preset would also make the request as
+  // slow as its least reachable entry.
+  const results = await probeImageProviders({ [name]: checked.spec }, {});
+  const result = results.find((r) => r.key === name);
+  send(res, 200, { ...(result ?? { status: 'unknown', detail: 'no probe result' }), issues: checked.issues });
 });
 
 route('POST', '/api/config/blocklist', (_req, res, { config, body }) => {
