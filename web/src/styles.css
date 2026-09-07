@@ -2216,6 +2216,97 @@ button.link:hover { background: none; color: var(--ink); }
   }
   .graph-wrap { height: 60vh; }
 }
+
+/*
+  The book column stacking above the side panel in `.main`'s flex column was
+  only true by accident of DOM order. `.pane` kept `flex: 1 1 0%` and `.side`
+  kept `flex: 0 0 auto`, so on a viewport shorter than the side panel's own
+  content — why-panel, open threads, divergence ledger, easily 1200px+ once a
+  chronicle has a few contradictions logged — the side panel claimed its full
+  natural height first and `.pane` (the book, the composer, the thing this
+  view exists to show) was squeezed to 0px. Measured on a 390×844 viewport:
+  `.pane` computed to `height: 0px`; the first turn's prose sat at
+  `top: -3306px`, three-plus screens of scrolling before a single sentence
+  was visible. A reader opening the book tab on a phone saw the machinery
+  panel, not the story.
+
+  The fix keeps every reading in `.side` — nothing is deleted — but demotes
+  it to a closed-by-default disclosure below the book. A first pass used a
+  plain `<details>` with `.side-toggle { display: contents }` on desktop, on
+  the theory that unboxing the host would restore the old layout for free.
+  It does restore the layout, but not the content: `<details>` hides its
+  body through the browser's own closed/open rendering, which fires
+  regardless of any `display` override on the host — the panel was closed
+  *and invisible* on desktop too, the exact bug this exists to fix, just
+  moved there. `.side-toggle-summary` (a real `<button aria-expanded>`) and
+  `.side-toggle-body[hidden]`, both driven by one `sideOpen` boolean in
+  BookTab, replace it: desktop hides the summary button by CSS and never
+  sets `hidden`, so the body renders exactly as it always did; below 960px
+  the summary becomes the visible header and `hidden` genuinely gates the
+  body's rendering.
+*/
+.side-toggle-summary { display: none; }
+/*
+  The `hidden` attribute is a UA-stylesheet `display: none` of the same
+  specificity as any single class selector — `.side-toggle-body[hidden]`
+  below is what actually gates visibility per breakpoint, not the attribute
+  alone. Above 960px it is always overridden back to visible regardless of
+  `sideOpen`'s value, since the toggle button that would change it is
+  itself hidden there.
+*/
+.side-toggle-body[hidden] { display: block; }
+
+@media (max-width: 960px) {
+  .side-toggle {
+    /* the toggle owns the aside's padding at its own edges, so the summary
+       can bleed to the true edge and read as a header bar, not a card */
+    margin: calc(var(--s4) * -1);
+  }
+  .side-toggle-summary {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: var(--s2);
+    cursor: pointer;
+    padding: var(--s3) var(--s4);
+    background: var(--surface-2);
+    border: none;
+    border-bottom: 1px solid var(--rule);
+    border-radius: 0;
+    box-shadow: none;
+    font-family: var(--sans);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.11em;
+    color: var(--ink-3);
+  }
+  .side-toggle-summary:hover:not(:disabled) {
+    background: var(--surface-2);
+    color: var(--ink-2);
+  }
+  /* a drawn caret, not a native triangle — same discipline as the select
+     chevron above: nothing in this app's chrome is browser-default */
+  .side-toggle-summary::after {
+    content: "";
+    display: inline-block;
+    flex: none;
+    width: 6px;
+    height: 6px;
+    margin-left: auto;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(45deg);
+    transition: transform var(--dur-normal) var(--ease-standard);
+  }
+  .side-toggle-summary[aria-expanded="true"]::after { transform: rotate(-135deg); }
+  .side-toggle-body { padding: var(--s4); }
+  /* below 960px `hidden` is real again: this is the one place the toggle
+     button is visible and able to flip `sideOpen`, so this is the one place
+     the body should actually obey it. */
+  .side-toggle-body[hidden] { display: none; }
+}
+
 @media (max-width: 640px) {
   :root { --gutter: 0rem; }
   .book .prose { font-size: 17px; }
@@ -2226,6 +2317,70 @@ button.link:hover { background: none; color: var(--ink); }
   .topbar { gap: var(--s3); padding: 0 var(--s3); }
   .meta { display: none; }
   .tabs button { padding: 7px 8px; }
+
+  /* The composer's action row: hint copy plus two buttons on one line was
+     already tight at 375px and overlapping by 320px. The hint takes the
+     full first line so both buttons get a real tap target on the second,
+     rather than three things fighting for one row. */
+  .composer .row:has(.hint) { flex-wrap: wrap; }
+  .composer .hint { flex-basis: 100%; order: -1; margin-bottom: var(--s1); }
+}
+
+/*
+  Eight tabs in one row was designed for a pointer that can read "causality"
+  at 12px, not a thumb on a phone screen — the row measured 399px wide
+  against a 390px portrait viewport and dragged the entire page into
+  horizontal scroll (`document.documentElement.scrollWidth` came back 574px
+  against a 390px `clientWidth`). The same failure reappears in landscape at
+  844×390 (899px of content against 844px of viewport), so this shares the
+  960px breakpoint where `.main` already goes to a single column, rather
+  than the narrower 640px used for prose-only adjustments — the tabs
+  overflow by *width*, not by portrait-vs-landscape.
+
+  `.tabs` gets its own scroller instead of the page: `min-width: 0` lets the
+  flex item actually shrink below its content size (the flex default floor
+  is content width, not zero), and the overflow it can no longer avoid
+  scrolls sideways in place, edge-veiled so the cut-off is legible rather
+  than an abrupt clip.
+*/
+@media (max-width: 960px) {
+  .tabs {
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 12px), transparent);
+    mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 12px), transparent);
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs button { flex-shrink: 0; }
+}
+
+/*
+  Reroll and pin lived at `opacity: 0` until `:hover`, which is correct on a
+  pointer — the tools stay quiet until the turn is actually under the
+  cursor — and wrong on touch, which has no hover state to reveal them at
+  all. `(hover: none) and (pointer: coarse)` targets the input method
+  rather than the viewport, so a touch tablet at a wide breakpoint still
+  gets tappable tools and a narrow desktop window keeps the hover-reveal.
+
+  Visible is not the same as reachable: `.turn-tools button` and the
+  `discard` control on a scene illustration were sized for a cursor
+  (22–23px tall — comfortably clickable, not comfortably tappable). A 44px
+  target is the usual touch floor; padding gets the whole hit area there
+  without inflating the type, which would read as a different, louder
+  control than the desktop one sitting right next to it in every other
+  respect.
+*/
+@media (hover: none) and (pointer: coarse) {
+  .turn-tools button,
+  .lint-finding button {
+    opacity: 1;
+  }
+  .turn-tools button,
+  .scene-illustrate-toggle {
+    padding-top: var(--s3);
+    padding-bottom: var(--s3);
+  }
 }
 
 /* ---- prose arriving, token by token ------------------------------------- */
