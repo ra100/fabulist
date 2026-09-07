@@ -30,6 +30,9 @@ import { ROUTABLE_ROLES, validateImageSpec, validateSpec, type ConfigService } f
 import { seedConsequences as seedCons, tickConsequences as tickCons, worldTick as wTick } from '../consequence/propagate.ts';
 import { type IllustrationService, NoImageProviderError } from '../illustration/service.ts';
 import { composePortraitPrompt, composeScenePrompt } from '../illustration/composer.ts';
+import type { McpAuth } from '../mcp/auth.ts';
+import { handleMcpRequest, protectedResourceMetadata } from '../mcp/server.ts';
+import type { McpToolContext } from '../mcp/tools.ts';
 
 export interface ServerOptions {
   /**
@@ -61,6 +64,18 @@ export interface ServerOptions {
   currentWorld?: CurrentWorld;
   /** Where world directories live; defaults to `data`. */
   dataRoot?: string;
+  /**
+   * Enables `/mcp` and its `/.well-known/oauth-protected-resource` metadata
+   * route — a remote MCP server for Claude/ChatGPT-style connectors, see
+   * `.design/MCP-CONNECTOR.md`. Absent means the route is not mounted at
+   * all, never mounted-but-unauthenticated: `buildMcpAuth` (`src/mcp/auth.ts`)
+   * returns `null` when neither `MCP_OAUTH_ISSUER` nor `MCP_DEV_TOKEN` is
+   * configured, and `serve.ts` passes that straight through as "do not
+   * enable this."
+   */
+  mcpAuth?: McpAuth;
+  /** The externally-reachable URL of the `/mcp` route, required alongside `mcpAuth` \u2014 what the OAuth resource-indicator and metadata point back at. */
+  mcpResourceUrl?: string;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -1277,19 +1292,43 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
 }
 
 export function createApiServer(opts: ServerOptions) {
-  const { engine, webRoot, setup, registry, config, illustrations, imageRegistry, currentStory, currentWorld } = opts;
+  const { engine, webRoot, setup, registry, config, illustrations, imageRegistry, currentStory, currentWorld, mcpAuth, mcpResourceUrl } = opts;
   const dataRoot = opts.dataRoot ?? 'data';
   const getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
+  // Built once per server, not per request: the tools themselves are stateless
+  // closures over `getWorld`/`engine`/`dataRoot`, identical to every plain
+  // route's own `ctx` above — only the transport connecting to them is
+  // rebuilt per request (see `src/mcp/server.ts`'s own header comment on why).
+  const mcpToolContext: McpToolContext | undefined = mcpAuth
+    ? { world: getWorld, engine, currentStory, currentWorld, dataRoot }
+    : undefined;
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
     res.setHeader('access-control-allow-origin', '*');
     res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('access-control-allow-headers', 'content-type');
+    res.setHeader('access-control-allow-headers', 'content-type,authorization');
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       return res.end();
+    }
+
+    // RFC 9728: served whenever MCP is enabled at all, unauthenticated by
+    // design — a client fetches this *because* it just got a 401, so gating
+    // the metadata document itself behind auth would be circular.
+    if (mcpAuth && mcpResourceUrl && url.pathname === '/.well-known/oauth-protected-resource') {
+      return send(res, 200, protectedResourceMetadata(mcpAuth, mcpResourceUrl));
+    }
+
+    if (mcpAuth && mcpToolContext && mcpResourceUrl && url.pathname === '/mcp') {
+      try {
+        const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
+        await handleMcpRequest(req, res, body, { toolContext: mcpToolContext, auth: mcpAuth, resourceUrl: mcpResourceUrl });
+      } catch (err) {
+        if (!res.headersSent) send(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      }
+      return;
     }
 
     if (url.pathname.startsWith('/api/')) {

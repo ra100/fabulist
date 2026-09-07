@@ -12,6 +12,7 @@ import { makeProseGate } from '../lint/gate.ts';
 import { SetupService } from '../setup/service.ts';
 import { ConfigService } from '../config/service.ts';
 import { IllustrationService } from '../illustration/service.ts';
+import { buildMcpAuth } from '../mcp/auth.ts';
 
 const args = process.argv.slice(2);
 const portArg = args.find((a) => a.startsWith('--port='));
@@ -134,6 +135,41 @@ if (!webRoot) console.log('web/dist not built; serving the API only (pnpm build:
 const setup = new SetupService({ world: getWorld, providers: registry });
 if (setup.isFresh()) console.log('no world yet - the UI will open the setup wizard');
 
+/**
+ * `/mcp` — a remote MCP server for Claude/ChatGPT-style connectors. See
+ * `.design/MCP-CONNECTOR.md` and `src/mcp/auth.ts`'s own header comment for
+ * the two modes. `buildMcpAuth` returns `null` when neither is configured,
+ * and that is read here as "do not mount the route at all" — never
+ * mounted-but-unauthenticated, which is why this is a plain `undefined` fed
+ * to `createApiServer`, not a flag it interprets.
+ *
+ * `mcpResourceUrl` is what gets handed to a remote client as "where to send
+ * the bearer token" (the RFC 8707 resource indicator) — it must be the URL
+ * *that client* can actually reach, which `host` almost never is: `host`
+ * defaults to `127.0.0.1` (unreachable from anywhere but this machine) and
+ * the Docker path sets it to `0.0.0.0` (a bind address, not a client-facing
+ * one — confirmed directly by running the built image and watching a real
+ * curl request come back with `resource_metadata="http://0.0.0.0:.../..."`,
+ * which no external client could ever follow). There is no correct default
+ * to fall back to here, so this refuses to guess one: `MCP_RESOURCE_URL`
+ * must be set explicitly whenever MCP is enabled on anything but a bare
+ * localhost dev loop.
+ */
+const mcpAuth = buildMcpAuth();
+const mcpResourceUrl = process.env.MCP_RESOURCE_URL ?? (host === '127.0.0.1' ? `http://127.0.0.1:${port}/mcp` : undefined);
+if (mcpAuth && !mcpResourceUrl) {
+  console.error(
+    `MCP auth is configured (${mcpAuth.describe()}) but MCP_RESOURCE_URL is not set, and --host=${host} means there is no ` +
+      `safe default to fall back to. Set MCP_RESOURCE_URL to the URL a remote client actually reaches (e.g. ` +
+      `https://your-domain.example/mcp). /mcp will not be mounted until this is set.`,
+  );
+} else if (mcpAuth && mcpResourceUrl) {
+  console.log(mcpAuth.describe());
+  console.log(`/mcp mounted at ${mcpResourceUrl}`);
+} else {
+  console.log('/mcp not mounted (set MCP_OAUTH_ISSUER or MCP_DEV_TOKEN to enable it)');
+}
+
 const server = createApiServer({
   world: getWorld,
   engine,
@@ -146,6 +182,8 @@ const server = createApiServer({
   currentStory,
   currentWorld,
   dataRoot,
+  mcpAuth: mcpAuth ?? undefined,
+  mcpResourceUrl,
 });
 server.listen(port, host, () => {
   console.log(`fabulist on http://${host}:${port}`);

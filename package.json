@@ -1,6 +1,6 @@
 {
   "name": "@ra100/fabulist",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "description": "A state-first fiction engine: the prose is a view, the world is the graph underneath",
@@ -36,7 +36,7 @@
     "lint:fix": "biome check --write src test web/src",
     "format": "biome format --write",
     "format:check": "biome format src test web/src",
-    "serve": "node --disable-warning=ExperimentalWarning src/cli/serve.ts",
+    "serve": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/cli/serve.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "build:web": "vite build --config web/vite.config.ts",
     "typecheck": "tsc --noEmit",
@@ -58,6 +58,9 @@
   },
   "dependencies": {
     "7zip-min": "^3.0.1",
-    "sax": "^1.6.1"
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "jose": "^6.2.12",
+    "sax": "^1.6.1",
+    "zod": "^3.25.76"
   }
 }

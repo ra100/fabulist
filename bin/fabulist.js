@@ -25,7 +25,7 @@ const serveTs = join(here, '..', 'src', 'cli', 'serve.ts');
 
 const result = spawnSync(
   process.execPath,
-  ['--disable-warning=ExperimentalWarning', serveTs, ...process.argv.slice(2)],
+  ['--disable-warning=ExperimentalWarning', '--env-file-if-exists=.env', serveTs, ...process.argv.slice(2)],
   { stdio: 'inherit' },
 );
 

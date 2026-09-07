@@ -8,13 +8,17 @@
  * whether an act is physically possible if the character would never attempt it,
  * and it is the cheapest call in the loop.
  */
+import { randomUUID } from 'node:crypto';
 import type {
   Delta,
   EntityId,
   Frame,
+  IntegrityVerdict,
   Interrupt,
   LintReport,
+  RefereeVerdict,
   SessionState,
+  StoryId,
   Turn,
   TurnMeta,
 } from '../domain/types.ts';
@@ -25,7 +29,17 @@ import type { Provider, Registry } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
 import { commitDelta, type CommitResult } from './commit.ts';
 import { Compactor } from './compact.ts';
-import { classify, direct, extract, integrity, narrate, referee, type RoleDeps } from './roles.ts';
+import {
+  buildNarratorPrompt,
+  classify,
+  type DirectorPlan,
+  direct,
+  extract,
+  integrity,
+  narrate,
+  referee,
+  type RoleDeps,
+} from './roles.ts';
 import type { ValidationResult } from './validate.ts';
 
 /** Per-role output reservations. The narrator needs far more room than the rest. */
@@ -60,7 +74,16 @@ export type TurnOutcome =
   | { kind: 'narrated'; turn: Turn; prose: string; delta: Delta; commit: CommitResult; validation: ValidationResult }
   | { kind: 'interrupted'; interrupt: Interrupt; distance: string; reasoning: string }
   | { kind: 'blocked'; reason: string; validation: ValidationResult }
-  | { kind: 'answered'; text: string };
+  | { kind: 'answered'; text: string }
+  /**
+   * Everything through Direct ran and agreed on a beat, but no Narrator role
+   * wrote it — `narrateExternally` was set. `resumeToken` identifies the
+   * pending state for `Engine.commitExternalNarration`; `system`/`user` are
+   * exactly what this engine's own `narrate()` would have sent a provider
+   * (see `roles.ts`'s `buildNarratorPrompt`), so an external caller renders
+   * from the identical material rather than a paraphrase of it.
+   */
+  | { kind: 'awaiting-narration'; resumeToken: string; system: string; user: string; maxTokens: number };
 
 export interface TakeTurnOptions {
   /** Set when the player answered an interrupt with 'override' or 'establish-break'. */
@@ -74,7 +97,44 @@ export interface TakeTurnOptions {
   onToken?: (chunk: string) => void;
   /** Called once the gates have passed, so the UI can stop saying "thinking". */
   onStage?: (stage: string) => void;
+  /**
+   * Stop after Direct and return `{ kind: 'awaiting-narration' }` instead of
+   * calling this engine's own Narrator role. For a caller — the MCP tool
+   * path — whose whole point is that the *calling* model writes the prose,
+   * at zero cost to this engine's own configured provider. Every gate before
+   * Narrate (integrity, referee, director) still runs here, unchanged: the
+   * parts of the loop that keep the world consistent are not optional just
+   * because prose-writing moved elsewhere.
+   */
+  narrateExternally?: boolean;
 }
+
+/**
+ * State a turn needs to resume from once external prose comes back —
+ * everything computed before Narrate that `commitExternalNarration` would
+ * otherwise have to recompute (wasting the calls already made, and risking a
+ * second integrity/referee run disagreeing with the first). Kept in-memory,
+ * per `Engine` instance: MCP tool calls hit the same long-lived server
+ * process this engine already lives in (see `src/mcp/`), so there is no
+ * cross-process state to reconstruct, only a short window between "here is
+ * the frame" and "here is the prose" within one conversation.
+ */
+interface PendingNarration {
+  storyId: StoryId;
+  rawInput: string;
+  actorId: EntityId;
+  intent: Awaited<ReturnType<typeof classify>>;
+  integrityVerdict: IntegrityVerdict | null;
+  refereeVerdict: RefereeVerdict;
+  plan: DirectorPlan;
+  agreedBeat: string;
+  overrideIntegrity: boolean;
+  calls: TurnMeta['providerCalls'];
+  createdAt: number;
+}
+
+/** Ten minutes: long enough for a chat client's own model to write a reply, short enough that an abandoned turn does not accumulate forever. */
+const PENDING_NARRATION_TTL_MS = 10 * 60 * 1000;
 
 export class Engine {
   /**
@@ -95,6 +155,9 @@ export class Engine {
   private autoCompact: boolean;
   /** Frames from the last turn, for the "why?" panel. */
   lastFrames: Record<string, Frame> = {};
+  /** See `PendingNarration`. Keyed by `resumeToken`, a random id — not the turn's own eventual id, which does not exist until commit. */
+  private pending = new Map<string, PendingNarration>();
+
 
   constructor(opts: EngineOptions) {
     this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
@@ -237,8 +300,73 @@ export class Engine {
       .join('\n');
 
     // 6. NARRATE
+    if (opts.narrateExternally) {
+      opts.onStage?.('awaiting narration');
+      const resumeToken = randomUUID();
+      this.pending.set(resumeToken, {
+        storyId: world.storyId,
+        rawInput,
+        actorId,
+        intent,
+        integrityVerdict,
+        refereeVerdict,
+        plan,
+        agreedBeat,
+        overrideIntegrity: opts.overrideIntegrity ?? false,
+        calls,
+        createdAt: Date.now(),
+      });
+      this.sweepExpiredPending();
+      const { system, user, maxTokens } = buildNarratorPrompt(deps, rawInput, agreedBeat, intent.verbatim);
+      return { kind: 'awaiting-narration', resumeToken, system, user, maxTokens };
+    }
+
     opts.onStage?.('writing');
-    let prose = await narrate(deps, rawInput, agreedBeat, intent.verbatim, opts.onToken);
+    const prose = await narrate(deps, rawInput, agreedBeat, intent.verbatim, opts.onToken);
+
+    return this.finishTurn({
+      world,
+      session,
+      rawInput,
+      actorId,
+      intent,
+      integrityVerdict,
+      refereeVerdict,
+      plan,
+      overrideIntegrity: opts.overrideIntegrity ?? false,
+      prose,
+      calls,
+      deps,
+      onStage: opts.onStage,
+    });
+  }
+
+  /**
+   * Steps 6b–9, shared by the normal in-process path (`takeTurnOn`, prose
+   * from this engine's own Narrator role) and the external-narration resume
+   * path (`commitExternalNarration`, prose from whatever wrote it on the
+   * other end of an MCP tool call). One implementation, so a future change
+   * to the prose gate or the commit sequence cannot apply to one path and
+   * not the other by accident.
+   */
+  private async finishTurn(args: {
+    world: World;
+    session: SessionState;
+    rawInput: string;
+    actorId: EntityId;
+    intent: Awaited<ReturnType<typeof classify>>;
+    integrityVerdict: IntegrityVerdict | null;
+    refereeVerdict: RefereeVerdict;
+    plan: DirectorPlan;
+    overrideIntegrity: boolean;
+    prose: string;
+    calls: TurnMeta['providerCalls'];
+    deps: RoleDeps;
+    onStage?: (stage: string) => void;
+  }): Promise<TurnOutcome> {
+    const { world, session, rawInput, actorId, intent, integrityVerdict, refereeVerdict, plan, overrideIntegrity, deps } =
+      args;
+    let prose = args.prose;
 
     // 6b. PROSE GATE. Deterministic lint first; the model only runs if it trips.
     let lint: LintReport | null = null;
@@ -251,7 +379,7 @@ export class Engine {
     }
 
     // 7-8. EXTRACT + VALIDATE
-    opts.onStage?.('recording what changed');
+    args.onStage?.('recording what changed');
     const { delta, validation } = await extract(deps, prose, rawInput);
     if (!validation.ok) {
       // Surfaced, not silently dropped: a discarded delta is how the graph and
@@ -261,7 +389,7 @@ export class Engine {
 
     // A vow break the player authorised must be recorded even if extraction
     // missed it, or the most consequential beat in the story vanishes.
-    if (opts.overrideIntegrity && integrityVerdict?.violatedVows.length) {
+    if (overrideIntegrity && integrityVerdict?.violatedVows.length) {
       for (const vowId of integrityVerdict.violatedVows) {
         if (!delta.vowBreaks.some((v) => v.vowId === vowId)) {
           delta.vowBreaks.push({ entityId: actorId, vowId });
@@ -284,7 +412,7 @@ export class Engine {
       move: plan.move,
       frameLog: this.lastFrames.narrate?.log ?? null,
       lint,
-      providerCalls: calls,
+      providerCalls: args.calls,
     };
 
     const turnNo = session.turn + 1;
@@ -304,6 +432,65 @@ export class Engine {
 
     return { kind: 'narrated', turn, prose, delta, commit, validation };
   }
+
+  /** Expired pending narrations are dropped lazily, on the next write to `pending`, rather than on a timer — no interval to leak if an `Engine` is ever discarded. */
+  private sweepExpiredPending(): void {
+    const cutoff = Date.now() - PENDING_NARRATION_TTL_MS;
+    for (const [token, p] of this.pending) {
+      if (p.createdAt < cutoff) this.pending.delete(token);
+    }
+  }
+
+  /**
+   * Resumes a turn `takeTurn({ narrateExternally: true })` paused before
+   * Narrate, given prose written elsewhere — the MCP tool path's whole
+   * point (`src/mcp/tools.ts`). Runs exactly the gates a normal turn would
+   * have run *after* Narrate (prose gate, extract, validate, commit); every
+   * gate before Narrate already ran when the pending state was recorded, and
+   * is not re-run here, both to avoid double-charging those calls and
+   * because a second run could legitimately disagree with the first (a
+   * non-deterministic model call), which would leave the returned frame and
+   * the committed delta reasoning about two different verdicts.
+   *
+   * Throws on an unknown or expired token rather than returning a
+   * `TurnOutcome`, since there is no in-fiction meaning for "your turn
+   * vanished" — that is a caller bug (a stale token, a second attempt after
+   * the ten-minute window) rather than something a player did.
+   */
+  async commitExternalNarration(resumeToken: string, prose: string): Promise<TurnOutcome> {
+    const pending = this.pending.get(resumeToken);
+    if (!pending) throw new Error(`no pending narration for token ${resumeToken} (expired or already resolved)`);
+    this.pending.delete(resumeToken);
+
+    this.busy = true;
+    try {
+      const world = this.getWorld();
+      if (world.storyId !== pending.storyId) {
+        // The story switched under this pending turn (a save switch mid-
+        // conversation). Committing against the wrong story's graph would be
+        // silent corruption, not a recoverable error, so this refuses outright.
+        throw new Error('the open story changed since this turn was proposed; nothing was committed');
+      }
+      const deps = this.deps(world, pending.calls);
+      return await this.finishTurn({
+        world,
+        session: world.session.get(),
+        rawInput: pending.rawInput,
+        actorId: pending.actorId,
+        intent: pending.intent,
+        integrityVerdict: pending.integrityVerdict,
+        refereeVerdict: pending.refereeVerdict,
+        plan: pending.plan,
+        overrideIntegrity: pending.overrideIntegrity,
+        prose,
+        calls: pending.calls,
+        deps,
+      });
+    } finally {
+      this.busy = false;
+    }
+  }
+
 
   /**
    * Re-renders a stored turn's prose through the *current* style contract,
