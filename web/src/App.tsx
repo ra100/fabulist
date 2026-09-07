@@ -28,7 +28,6 @@ import { ConfigPanels } from './views/ConfigPanels.tsx';
 import { AppearanceEditor, PortraitPanel, SceneIllustration, StylePicker } from './views/Illustration.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
-import { MarkFull } from './MarkFull.tsx';
 
 type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'library' | 'settings';
 
@@ -125,10 +124,12 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <h1>
-          {/* The full lockup, not the inline glyph, and deliberately taller than the
-              18px title: it stands as a logo rather than an ornament beside a word.
-              Four paragraph lines rather than the icon's ten — see MarkFull.tsx. */}
-          <MarkFull height={30} />
+          {/* The shipped icon itself, as a 30px badge, taller than the 18px title so it
+              reads as a logo rather than an ornament beside a word. Pointing at the real
+              file rather than redrawing it means the masthead and the browser tab cannot
+              drift apart — and the mark is a corner crop, so it needs the tile's bounds
+              and cannot be inlined as artwork on transparency. */}
+          <img className="masthead-badge" src="/favicon.svg" width={30} height={30} alt="" />
           {state?.worldTitle ?? 'Fabulist'}
         </h1>
         {state ? (

@@ -226,6 +226,160 @@ SET = [
 ]
 
 
+# ---------------------------------------------------------------- the quill tip
+# A different proportion of the same construction: longer, thinner, with a longer taper —
+# a cut quill rather than a fountain-pen nib. What actually distinguishes the two, and so
+# what these numbers do:
+#
+#   * a quill is cut from a shaft, so the barrel is not a separate metal collar but the
+#     feather continuing — near the body's own width (bwf 0.78) and longer
+#   * the sides are straighter and converge over a long distance, so the dome is lower
+#     (0.74) and the widest point sits high (sy_f 0.26) with a long taper below it
+#   * the slit runs further down (y1f 0.88) and is narrower
+#
+# At 3.06:1 this reads as a pen nib and very little else, where the ~1:1.5 almond reads as
+# a rounded bulb. It also holds better at 32px, because a distinctive silhouette survives
+# downsampling where a blobby one does not.
+#
+# WORTH BEING EXPLICIT ABOUT: this proportion largely dissolves the marginalia reading. The
+# almond at ~1:1.5 was one of the four properties driving it, and at 3:1 there is no almond
+# left. So this is not a refinement of the joke version — it is a return to a straight nib,
+# and it is a different decision rather than a tuning of the same one.
+#
+# It also resolves, from an angle the earlier study missed, the tension between a strong
+# arrangement and a strong reading: a thin form survives the corner crop, because its taper
+# stays legible even with the shaft cut, where the fat almond's collar was load-bearing.
+QUILL_GEO = dict(top=126, tip=474, hw=70, dome=1.02, sy_f=0.26, belly=0.46, tipc=0.58,
+                 bar=90, bwf=0.58, r_ap=22, w=19, y0f=0.26, y1f=0.88, join=26)
+
+
+def quill_body(top, tip, hw, dome, sy_f, belly, tipc):
+    """A nib's outline rather than almond()'s.
+
+    almond() gives a lens whose sides converge in a near-straight run, which at 3:1 with a
+    sharp point and a wide shaft reads as a DAGGER — handle, shoulder, blade. Reported on
+    review and correct.
+
+    A nib's sides are convex: they belly out past the shoulder and only turn in near the
+    end, and the point is fine rather than needle-sharp because the tines flare. So this
+    exposes `belly` (how far the taper holds its width) and `tipc` (how wide it still is
+    approaching the point) as separate controls, and both are raised well above what a lens
+    would use. Length is unchanged — length was never what made it a blade.
+    """
+    h = tip - top
+    sy = top + h * sy_f
+    return (f"M{C} {top} "
+            f"C{C + hw * dome} {top + h * 0.07} {C + hw} {sy - h * 0.07} {C + hw} {sy} "
+            f"C{C + hw} {sy + h * belly} {C + hw * tipc} {tip - h * 0.20} {C} {tip} "
+            f"C{C - hw * tipc} {tip - h * 0.20} {C - hw} {sy + h * belly} {C - hw} {sy} "
+            f"C{C - hw} {sy - h * 0.07} {C - hw * dome} {top + h * 0.07} {C} {top} Z")
+
+
+def quill_art(fill=None, engraved=False, g=None):
+    g = g or QUILL_GEO
+    fill = fill or GOLD_ICON
+    bar = barrel(g['top'], g['hw'], g['bar'], join=g['join'], wf=g['bwf'])
+    body = quill_body(g['top'], g['tip'], g['hw'], g['dome'], g['sy_f'], g['belly'], g['tipc'])
+    cut = cleft(g['top'], g['tip'], g['r_ap'], g['w'], g['y0f'], g['y1f'])
+    if engraved:
+        return (f'<path d="{bar}" fill="{B.SURF2}" stroke="{B.INK}" stroke-width="11"/>'
+                f'<path d="{body}" fill="{B.SURF2}" stroke="{B.INK}" stroke-width="11"/>'
+                f'<path d="{cut}" fill="{B.GROUND}" stroke="{B.INK2}" stroke-width="6"/>')
+    return (f'<path d="{bar}" fill="{fill}"/>'
+            f'<path d="{body} {cut}" fill="{fill}" fill-rule="evenodd"/>')
+
+
+def quill_page(engraved=False, k=0.60, dx=-94, lines=10, gap=21, sw=12, pw=140,
+               px=296, rule_x=274):
+    """The quill tip in the master composition, so it is directly comparable."""
+    off = C * (1 - k)
+    jit = (1.0, 0.95, 1.0, 0.93, 0.99, 0.96, 1.0, 0.94, 0.98)
+    y0 = C - (lines - 1) * gap / 2
+    rules = ''.join(
+        f'<path d="M{px} {y0 + i * gap:.1f} '
+        f'H{px + pw * (0.56 if i == lines - 1 else jit[i % len(jit)]):.1f}" '
+        f'stroke="{B.INK2 if i < lines - 2 else B.INK3}" stroke-width="{sw}" '
+        f'stroke-linecap="round"/>' for i in range(lines))
+    return B.tile(f'<path d="M{rule_x} 118 V394" stroke="{B.RULE2}" stroke-width="7"/>{rules}'
+                  f'<g transform="translate({dx},0) translate({off:.1f},{off:.1f}) '
+                  f'scale({k})">{quill_art(engraved=engraved)}</g>')
+
+
+def quill_corner(k=2.05, shift=175, angle=-45):
+    """The quill tip in the corner crop — thin enough that the taper survives the crop."""
+    t = shift * 0.7071
+    off = C * (1 - k)
+    return B.tile(f'<g transform="translate({-t:.1f},{-t:.1f})">'
+                  f'<g transform="rotate({angle} {C} {C}) translate({off:.1f},{off:.1f}) '
+                  f'scale({k})">{quill_art()}</g></g>')
+
+
+# ---------------------------------------------------------------- the corner crop
+# A different composition of the same nib: rotated 45 degrees, anchored past the top-left
+# corner, and left to be cropped by the tile, so about half of it is gone and the whole
+# bottom-right diagonal is empty. The nib enters the frame and points into that void,
+# which reads as the blank page it is about to write on.
+#
+# What it buys. This is the only composition here with real edge contact — everything else
+# floats inside padding — so it is the only one whose arrangement reads as chosen. It also
+# happens to neutralise BOTH earlier misreads at once: the map pin and the anatomical read
+# each need a closed silhouette, and an open, cropped form is neither.
+#
+# What it costs, stated plainly. The barrel is the element that made the shape
+# unmistakably a pen, and the barrel is exactly what the crop removes. At this crop the
+# mark reads as a leaf or a petal about as readily as a nib. So this trades iconographic
+# clarity for compositional strength — it becomes an abstract crop rather than a depicted
+# object. That is a legitimate kind of mark, but it is a different decision from "a nib
+# beside a page", not a refinement of it.
+#
+# Two findings from the study (render/_corner*.png):
+#
+#   * THE PAGE CANNOT BE ROTATED. Ruled lines read as text only while they are horizontal;
+#     at 45 degrees they become hatching and the ruled edge becomes a stray diagonal. So
+#     this composition works with the nib alone, and if it were adopted the icon and the
+#     masthead lockup would diverge further than they do now.
+#   * A LIGHT CROP IS WORSE THAN A HEAVY ONE. At about a third cut, a fragment of the
+#     collar survives and reads as a nick bitten out of the outline — a bug, not a
+#     decision. Removing it entirely is what makes the crop read as deliberate.
+# Step 2 of the explicitness study (render/_push.png): proportion and cut widened one
+# step from the original 1.9/150/hw118/cut33. That is as far as those levers go here —
+# see the note below.
+CORNER_K, CORNER_SHIFT = 2.05, 170
+CORNER_HW, CORNER_DOME, CORNER_RAP, CORNER_W = 128, 1.06, 39, 35
+
+
+def corner(k=CORNER_K, shift=CORNER_SHIFT, angle=-45, fill=None,
+           hw=CORNER_HW, dome=CORNER_DOME, r_ap=CORNER_RAP, w=CORNER_W):
+    """The nib rotated, oversized, and slid off the top-left corner along its own axis.
+
+    THE CROP CAPS HOW FAR PROPORTION CAN BE PUSHED, which was not obvious until it was
+    rendered as a four-step ramp (render/_push.png). Widening the almond and the cut one
+    step reads as a mild increase. Past that it reverses: the cut grows until the dark
+    becomes the figure and the gold is reduced to a frame around it, and the result is an
+    abstract two-tone diagonal that reads as less of anything, not more of something.
+
+    The reason is structural. The suggestive reading depended on a *closed* almond
+    containing a cut, and the corner crop deliberately broke that silhouette open — which
+    is exactly why the crop neutralised the map-pin and anatomical reads in the first
+    place. So on this composition the two goals are in direct tension: what makes the
+    arrangement strong is what limits how far it can be pushed. The upright uncropped
+    form is the one those levers work on, and marginalia-3 is already the top of it.
+    """
+    fill = fill or GOLD_ICON
+    g = dict(top=158, tip=452, hw=hw, dome=dome, bar=58, join=30,
+             r_ap=r_ap, w=w, y0f=0.30, y1f=0.82, bwf=0.40)
+    art = (f'<path d="{barrel(g["top"], g["hw"], g["bar"], join=g["join"], wf=g["bwf"])}" '
+           f'fill="{fill}"/>'
+           f'<path d="{almond(g["top"], g["tip"], g["hw"], dome=g["dome"])} '
+           f'{cleft(g["top"], g["tip"], g["r_ap"], g["w"], g["y0f"], g["y1f"])}" '
+           f'fill="{fill}" fill-rule="evenodd"/>')
+    t = shift * 0.7071
+    off = C * (1 - k)
+    return B.tile(f'<g transform="translate({-t:.1f},{-t:.1f})">'
+                  f'<g transform="rotate({angle} {C} {C}) translate({off:.1f},{off:.1f}) '
+                  f'scale({k})">{art}</g></g>')
+
+
 # ---------------------------------------------------------------- the small tier
 # marginalia-page-engraved is the chosen mark. Measured against the pixel grid it holds
 # every element down to 96px, goes borderline at 64 (the paragraph stops being text and
@@ -337,13 +491,15 @@ def favicon(fill=None, widen=1.0, lamp=0.0, stub=58, bwf=0.40):
 # The viewBox crops to the ink exactly (no padding), so the component controls its own
 # size. At 13px the keyhole cut lands near one device pixel, so the cut is widened for the
 # inline mark the same way the small tier widens it — same reason, different floor.
-MARK_GEO = dict(top=158, tip=452, hw=118, dome=1.00, bar=58, join=30,
-                r_ap=33, w=30, y0f=0.30, y1f=0.82, bwf=0.40)
+# The inline glyph follows the SHIPPED icon's shape family, which is now the quill nib
+# (quill-corner is a crop of it). An abstract crop cannot be an inline glyph — it needs a
+# frame to crop against and a masthead has none — so the glyph is the uncropped nib.
+MARK_GEO = dict(QUILL_GEO)
 
 
 def mark_paths(cut_widen=1.0):
     g = MARK_GEO
-    body = almond(g['top'], g['tip'], g['hw'], dome=g['dome'])
+    body = quill_body(g['top'], g['tip'], g['hw'], g['dome'], g['sy_f'], g['belly'], g['tipc'])
     bar = barrel(g['top'], g['hw'], g['bar'], join=g['join'], wf=g['bwf'])
     cut = cleft(g['top'], g['tip'], g['r_ap'] * cut_widen, g['w'] * cut_widen,
                 g['y0f'], g['y1f'])
@@ -438,6 +594,17 @@ def main():
     fav = favicon()
     open('icon-marginalia-page-16.svg', 'w').write(fav)
     print('icon-marginalia-page-16.svg')
+
+    # the quill tip — a longer, thinner proportion, not wired to anything
+    for nm, svg in (('icon-quill-page.svg', quill_page()),
+                    ('icon-quill-page-engraved.svg', quill_page(engraved=True)),
+                    ('icon-quill-corner.svg', quill_corner())):
+        open(nm, 'w').write(svg)
+        print(nm)
+
+    # the corner crop — an alternative composition, not wired to anything
+    open('icon-marginalia-corner.svg', 'w').write(corner())
+    print('icon-marginalia-corner.svg')
 
     # The engraved master's sibling, kept because that variant is still on the sheet and
     # its bone body is what lets a gold lamp read at this size.

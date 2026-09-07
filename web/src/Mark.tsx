@@ -1,46 +1,46 @@
 /**
  * The mark: a drawn nib.
  *
- * It appears in the masthead, in the wizard and on every scene break — one shape in
- * three places, which is what makes it a mark rather than a decoration. Drawn rather
- * than set in type, so it never depends on a font shipping the ornament, and it
- * inherits `currentColor` so each preset tints it.
+ * The inline glyph, set against type at cap height. It appears in the wizard and on every
+ * scene break, and it inherits `currentColor` so each palette preset tints it.
  *
- * The path data is **generated**, not drawn here, so this can never drift from the app
- * icon it is supposed to match:
+ * It is the *uncropped* nib, where the shipped app icon is a corner crop of the same shape
+ * (`.design/brand/icon-quill-corner.svg`). That is deliberate rather than a drift: a crop
+ * needs a frame to crop against, and inline type has none. Same shape family, different
+ * composition — the normal relationship between a favicon and a wordmark glyph.
+ *
+ * The path data is **generated**, not drawn here:
  *
  *     python3 .design/brand/marginalia.py --mark
  *
- * Two things about it are size decisions rather than taste, and both were settled by
- * rendering at 13px and looking (`.design/brand/render/_mark.png`):
+ * Two things about it are size decisions settled by rendering at 13px, not taste
+ * (`.design/brand/render/_mark.png`):
  *
- *  - The cut is at its base width. Widening it — which is what the ≤48px *icon* does so
- *    the cut survives the pixel grid — inverts figure and ground at this size: the
- *    interior becomes a teardrop and the mark reads as a map pin. At base width the cut
- *    stays a slit and the shape stays a nib.
- *  - `size` is the **height**. The nib is taller than it is wide (0.7329), so forcing a
+ *  - The cut stays at its base width. Widening it inverts figure and ground at this size —
+ *    the interior becomes a teardrop and the mark reads as a map pin.
+ *  - `size` is the **height**. The nib is far taller than wide (0.3398), so forcing a
  *    square box would letterbox it and the mark would render smaller than asked.
  */
 
 /** Ink-tight viewBox: no padding, so the caller's `size` is the mark's real height. */
-const VIEWBOX = '138 130 236 322';
-const RATIO = 0.7329;
+const VIEWBOX = '186 62 140 412';
+const RATIO = 0.3398;
 
-/** The holder. A separate shape behind the body, so the body keeps a full round dome. */
-const BARREL = 'M208.8 188 L212.58 130 L299.42 130 L303.2 188 Z';
+/** The shaft. A separate shape behind the body, so the body keeps its full shoulder. */
+const BARREL = 'M215.4 152 L218.65 62 L293.35 62 L296.6 152 Z';
 
 /** Body with the vent-and-slit cut knocked out of it in one path. */
 const BODY =
-  'M256 158 C374 178.58 374 225.62 374 246.2 C374 346.16 303.2 393.2 256 452 ' +
-  'C208.8 393.2 138 346.16 138 246.2 C138 225.62 138 178.58 256 158 Z ' +
-  'M223 246.2 a33 33 0 1 1 66 0 C289 310.88 257.4 369.68 256 399.08 ' +
-  'C254.6 369.68 223 310.88 223 246.2 Z';
+  'M256 126 C327.4 150.36 326 192.12 326 216.48 C326 376.56 296.6 404.4 256 474 ' +
+  'C215.4 404.4 186 376.56 186 216.48 C186 192.12 184.6 150.36 256 126 Z ' +
+  'M234 216.48 a22 22 0 1 1 44 0 C278 293.04 257.4 397.44 256 432.24 ' +
+  'C254.6 397.44 234 293.04 234 216.48 Z';
 
 export function Mark({ size = 13 }: { size?: number }) {
   return (
     <svg
       className="mark"
-      width={Math.round(size * RATIO)}
+      width={Math.max(1, Math.round(size * RATIO))}
       height={size}
       viewBox={VIEWBOX}
       fill="none"

@@ -96,6 +96,10 @@ def gallery_all():
               ('gauge', 'the instrument scale'),
               ('folio', 'the folio marginal'),
               ('seal', 'seal × instrument dial')]
+    QUILL = [('quill-page', '3.06:1 · reads as a nib'),
+             ('quill-page-engraved', 'the same, engraved'),
+             ('quill-corner', 'thin enough to survive the crop'),
+             ('marginalia-page', 'committed master · ~1:1.5')]
     JOKE = [('marginalia-1', 'plausible · 18°'),
             ('marginalia-2', 'noticeable · upright'),
             ('marginalia-3', 'not subtle · full almond'),
@@ -136,6 +140,7 @@ def gallery_all():
     section('SIX DRAFTS', DRAFTS)
     section('THE MARGINALIA SET — the joke on purpose, on a dial',
             JOKE, mark='marginalia-page')
+    section('THE QUILL TIP — longer, thinner, a straight nib again', QUILL)
 
     H = y
     out = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
