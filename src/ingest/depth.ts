@@ -11,7 +11,7 @@
  */
 import type { DepthLevelValue, Entity, EntityId } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
-import type { WikiClient, WikiPage } from './client.ts';
+import type { PageSource, WikiPage } from './client.ts';
 import { runPassA, type PassAResult } from './passA.ts';
 import { crawl, discover, prune, type CrawlResult, type DiscoveryPreview } from './scope.ts';
 
@@ -73,7 +73,7 @@ export class NullPassBExtractor implements PassBExtractor {
 }
 
 export interface IngestOptions {
-  client: WikiClient;
+  client: PageSource;
   seeds: string[];
   mode: DepthMode;
   wiki?: string;
@@ -376,7 +376,7 @@ function applyPassB(
 export async function upgradeDepth(
   world: World,
   target: DepthMode,
-  opts: { client: WikiClient; extractor?: PassBExtractor; limit?: number; wiki?: string },
+  opts: { client: PageSource; extractor?: PassBExtractor; limit?: number; wiki?: string },
 ): Promise<{ examined: number; upgraded: number; passA: PassAResult | null }> {
   const spec = MODES[target];
   const stale = world.graph.belowDepth(spec.level, opts.limit ?? 200);
@@ -406,7 +406,7 @@ export async function promoteRegion(
   world: World,
   rootId: EntityId,
   target: DepthMode,
-  opts: { client: WikiClient; hops?: number; extractor?: PassBExtractor; wiki?: string },
+  opts: { client: PageSource; hops?: number; extractor?: PassBExtractor; wiki?: string },
 ): Promise<{ titles: string[]; passA: PassAResult | null }> {
   const spec = MODES[target];
   const hops = opts.hops ?? 1;
@@ -446,7 +446,7 @@ export async function deepenOnDemand(
   world: World,
   entityId: EntityId,
   target: DepthMode,
-  opts: { client: WikiClient; extractor?: PassBExtractor; wiki?: string },
+  opts: { client: PageSource; extractor?: PassBExtractor; wiki?: string },
 ): Promise<boolean> {
   const entity = world.graph.get(entityId);
   const spec = MODES[target];

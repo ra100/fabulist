@@ -167,6 +167,32 @@ generic. Set `userAgent` to something with your own contact details for a large 
 operator who can reach you sends mail before blocking a range. Never a browser-spoofing
 string: the Terms bar forged headers separately from the crawl rules.
 
+### Database dumps: `--dump`
+
+Every Fandom wiki's `Special:Statistics` page carries a "Database download" section,
+captioned by Fandom itself as **"usually best for bot use"** — a `.7z`-compressed MediaWiki
+XML export of every current page, refreshed on request roughly weekly. Add `--dump` to read
+from it first:
+
+```bash
+pnpm ingest --wiki=https://masseffect.fandom.com \
+            --seed="Commander Shepard" --mode=mid --dump --commit
+```
+
+The dump downloads once (cached under `data/dumps/<wiki>/`, reused on every later run), then
+the crawl reads pages from it locally with **no further network calls** for anything the
+snapshot covers. The live `api.php` client only runs as a fallback, for titles created after
+the dump's last refresh — so a real ingest still completes even against a wiki whose dump is
+a few weeks stale.
+
+This is a materially better position than the live crawl above, not just a faster one: it is
+one bounded request against a bulk-export endpoint Fandom itself points bot operators at,
+rather than automated repeated querying under a favourable-but-contested reading of the ToU's
+"for any purpose" clause. It is also a better *crawl*, independent of any of that — the whole
+link graph is available at once, which fixes the under-counting `scope.ts` already documents
+for inbound-link ranking on a partial live crawl. See
+`docs/legal-briefing-fandom-ingest.md` §6 and `src/ingest/dump.ts`.
+
 ---
 
 ## Providers

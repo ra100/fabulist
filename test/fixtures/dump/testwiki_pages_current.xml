@@ -1,0 +1,50 @@
+<mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/" version="0.11" xml:lang="en">
+  <siteinfo>
+    <sitename>Test Wiki</sitename>
+    <dbname>testwiki</dbname>
+  </siteinfo>
+  <page>
+    <title>Alpha</title>
+    <ns>0</ns>
+    <id>1</id>
+    <revision>
+      <id>101</id>
+      <text bytes="10" xml:space="preserve">{{Infobox character
+| name = Alpha
+| affiliation = [[Beta Faction]]
+}}
+'''Alpha''' is a hero of [[Beta City]]. [[Category:Characters]]</text>
+    </revision>
+  </page>
+  <page>
+    <title>Redirect Page</title>
+    <ns>0</ns>
+    <id>2</id>
+    <redirect title="Alpha" />
+    <revision>
+      <id>102</id>
+      <text bytes="5" xml:space="preserve">#REDIRECT [[Alpha]]</text>
+    </revision>
+  </page>
+  <page>
+    <title>Talk:Alpha</title>
+    <ns>1</ns>
+    <id>3</id>
+    <revision>
+      <id>103</id>
+      <text bytes="5" xml:space="preserve">Some talk</text>
+    </revision>
+  </page>
+  <page>
+    <title>Beta Faction</title>
+    <ns>0</ns>
+    <id>4</id>
+    <revision>
+      <id>104</id>
+      <text bytes="5" xml:space="preserve">{{Infobox organization
+| name = Beta Faction
+}}
+The '''Beta Faction''' rules [[Beta City]]. Special chars: café, naïve, — em dash, 'curly quote'.</text>
+    </revision>
+  </page>
+</mediawiki>
