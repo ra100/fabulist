@@ -17,6 +17,13 @@ const args = process.argv.slice(2);
 const portArg = args.find((a) => a.startsWith('--port='));
 const port = Number(portArg?.split('=')[1] ?? process.env.PORT ?? 4317);
 const inMemory = args.includes('--memory');
+// Loopback-only by default: right for "my laptop, my save file", wrong inside
+// a container, where 127.0.0.1 is the container's own network namespace and
+// unreachable through Docker's port mapping. `--host=0.0.0.0` (what the
+// Dockerfile passes) opts into listening on every interface; the default is
+// unchanged for anyone not passing the flag.
+const hostArg = args.find((a) => a.startsWith('--host='));
+const host = hostArg?.split('=')[1] ?? process.env.HOST ?? '127.0.0.1';
 
 /**
  * Where config writes land. `--memory` means "throwaway", and that has to
@@ -127,8 +134,8 @@ const server = createApiServer({
   currentWorld,
   dataRoot,
 });
-server.listen(port, '127.0.0.1', () => {
-  console.log(`fabulist on http://127.0.0.1:${port}`);
+server.listen(port, host, () => {
+  console.log(`fabulist on http://${host}:${port}`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
