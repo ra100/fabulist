@@ -218,98 +218,101 @@ Four findings, one of them a correction of my own reasoning:
   crossing big enough to read as deliberate; at ten-odd pixels it read as a bug. Two
   adjacent objects with a clean gutter is also the honest manuscript layout.
 
-### Chosen: `marginalia-page`, in four tiers
+### Shipped: `icon-quill-corner.svg`, one drawing at every size
 
-Picked on review. It ships as **two drawings, not one**, because the master does not
-reduce — measured against the pixel grid rather than guessed:
+The tier system is gone, and that is the point of this choice rather than a side effect.
 
-| Size | Drawing | Why |
-| --- | --- | --- |
-| 512 | `icon-marginalia-page.svg` | everything reads |
-| 180 | the same | everything reads |
-| 96 | the same | the floor — the paragraph is still text |
-| ≤48 | `icon-marginalia-page-16.svg` | at 64 the paragraph stops being text and becomes a grey block; at 48 it is a grey slab |
+Every earlier candidate needed two or three drawings, because each was built from fine
+detail — a page of ruled lines at 12 units, a hairline rule, a thin nib — and fine detail
+is exactly what a raster pipeline destroys first. What downsampling preserves is **large
+high-contrast areas**, and the corner crop is nothing but one, so there is nothing in it
+to lose. Rasterised and magnified at 64/48/32/24/16 (`render/_survive.png`), it holds its
+structure at every size while both page compositions collapse into a grey smear by 32px.
 
-The small tier keeps the mark **upright and centred**, drops the paragraph and the ruled
-edge, and is otherwise the master's nib verbatim: same gold, same collar length, same
-keyhole cut. `render/_family.png` puts the two rows together — the small drawing is the
-master's nib isolated and scaled up, not a new shape.
+That removes a whole class of problem: no tier boundary to police, no `favicon.svg` /
+`icon.svg` split to keep in sync, no chance of the wrong drawing at the wrong size. Given
+how much of this work went into measuring exactly where each tier breaks, deleting the
+problem beat managing it.
 
-**An earlier attempt tilted a narrow nib 45° instead. Upright is better, and measurement
-says so rather than taste.** Fitted to the same 448 box:
+What it gives up, plainly: the page. The mark no longer says *a nib beside a chronicle* —
+it is an abstract cropped blade. The thesis in the composition is gone, and graphic
+strength and scale-robustness came in exchange.
 
-| | Scale that fits | Almond body |
-| --- | --- | --- |
-| upright, with collar | 1.258 | 370 |
-| upright, no collar | 1.524 | 448 *(+21.1%)* |
-| 45°, with collar | 1.544 | 454 |
-
-Dropping the collar buys the same space the rotation did — 448 against 454, inside 1.3%
-— so the tilt was paying for size with an orientation change it never needed to make.
-One mark, one orientation, every size.
-
-**But the collar cannot go, and finding that took three renders.** Removing it isolates
-the master's cut, which is a *keyhole*: a round aperture at the top of a tapering slit.
-Isolated, and scaled up 21% by the collar's absence, that aperture stops reading as a
-vent hole and becomes **the head of a map pin** — the body around it as the ring. At 48px
-it is Google Maps' marker, and it cannot be tuned out: the cut was tried at 1.5×, 1.15×
-and 1.0×, and even at the master's own width the aperture is a bulge and the bulge is the
-pin's head by construction. With the collar gone only two readings are available at all:
-
-| Cut | Reads as |
+| File | Role |
 | --- | --- |
-| narrow, no lamp | the anatomy, plainly |
-| keyhole + lamp | a map pin |
-| *collar restored* | a nib — and only then |
+| `web/public/favicon.svg` | the single vector, at every size |
+| `web/public/apple-touch-icon.png` | 180, generated from it |
+| `web/public/icon-192.png`, `icon-512.png` | manifest rasters, generated from it |
 
-So the collar is back at the **master's own length**, not as a stub. A short collar caps
-the pin but leaves a silhouette matching nothing; at full length the small tier's outline
-*is* the master's outline, which is the entire point of a size-specific drawing. It costs
-about 17% of scale against a collarless one, and that is the price of the match.
+**The shape is the quill nib**, not the earlier almond: longer, thinner, with convex
+bellied sides. See *the quill tip* below for why the almond could not be cropped this way,
+and *the dagger* for why length was never what made a thin nib read as a blade.
 
-**No lamp, and this only shows up in gold.** Against the *engraved* master's bone contour
-a gold lamp is a real value and hue jump, so it read down to 24px — which is why the
-engraved sibling keeps it. Against the *solid gold* master it is gold inside a dark
-aperture inside a gold body: three rings with no contrast where it matters, reading as a
-hole with something in it rather than as a lamp. It is also redundant, since the accent
-was a single lamp on the engraved version precisely because the body was bone, and here
-the whole body is already the accent. The master keeps its lamp — at 512 it reads — and
-the small tier drops it, which costs nothing because it never read at that size anyway.
+**The masthead shows the icon file itself** (`<img src="/favicon.svg">` at 30px), not a
+redrawing of it, so the tab and the header cannot drift. This replaced a bespoke nib+page
+lockup, which was deleted along with `web/src/MarkFull.tsx`: once the icon became a crop,
+that lockup depicted a mark that no longer existed.
 
-`icon-marginalia-page-engraved-16.svg` is still emitted for the engraved variant, in
-bone with the lamp, since that pairing is the one where a lamp works.
+Three consequences worth knowing:
 
-### A third tier: the masthead lockup
+- **A crop cannot be an inline glyph.** It needs a frame to crop against, and inline type
+  has none. So the masthead shows the tile — which was the "box inside a box" I argued
+  against earlier, and on rendering it turned out to read as an app badge rather than a
+  box. `web/src/Mark.tsx` keeps the *uncropped* nib for the wizard and scene breaks, where
+  `currentColor` still lets each preset tint it.
+- **The badge does not follow the palette.** The icon is a static file with a fixed colour,
+  so under a non-Chronicle preset the warm tile sits against a differently-tinted bar. That
+  is the cost of tab and masthead matching under every preset; the alternative was one of
+  the two always being wrong.
+- **No maskable variant.** The art is full-bleed, so an Android maskable crop would cut
+  into it. The manifest does not declare `purpose: maskable`, so it letterboxes instead —
+  acceptable, and worth revisiting if a real install target appears.
 
-`web/src/MarkFull.tsx` is the mark in the app header — the whole lockup, nib and ruled
-edge and page, standing taller than the 18px title (30px, 1.67×) so it reads as a logo
-rather than as an ornament beside a word.
+### The corner crop, and a direction that closed
 
-It is a **third drawing**, not the master scaled down, for the same reason the small tier
-exists: a masthead gives about 30px, and the master's ten-line paragraph stops being text
-below 64px. Line counts were rendered at 24/28/32/40px before choosing
-(`render/_headerlockup.png`):
+`icon-marginalia-corner.svg` is a different composition of the same nib: rotated 45°,
+anchored past the top-left corner, cropped by the tile, with the whole bottom-right
+diagonal empty. The nib enters the frame and points into that void.
 
-| | At 24–28px |
-| --- | --- |
-| 10 lines, master weight | a grey slab with faint striping |
-| 5 lines, gap 38, stroke 22 | reads |
-| **4 lines, gap 46, stroke 26** | **reads clearly, and the short last line still says *paragraph*** |
-| 3 lines, gap 58, stroke 32 | chunky, and reads as a list rather than prose |
+It is the only composition here with real **edge contact** — everything else floats inside
+padding — which is what makes its arrangement read as chosen. It also neutralises both
+earlier misreads at once, because the map pin and the anatomical read each need a *closed*
+silhouette and an open cropped form is neither.
 
-Two deliberate differences from the icon:
+It pays for that. The collar is what made the shape unmistakably a pen, and the crop
+removes it, so the mark reads as a leaf or petal about as readily as a nib. It is an
+abstract crop rather than a depicted object — a legitimate kind of mark, but a different
+decision rather than a refinement.
 
-- **No tile.** The dark ground and rounded corners are right for a file standing on its
-  own; inside a bar that already has a surface they are a box drawn inside a box.
-- **The nib takes `currentColor`, the page and rule take tokens.** So the nib follows the
-  palette preset exactly as the inline mark does, and no colour is named in the component.
-  The consequence, which is correct rather than a bug: under a non-Chronicle preset the
-  masthead nib and the browser tab will not match, because the icon is a static file with
-  a fixed colour and the app mark follows the picker.
+Three results from pushing it, all rendered (`render/_corner*.png`, `_push.png`, `_bleed.png`):
 
-`Mark.tsx` remains the glyph — the nib alone, set inline at cap height — and still serves
-the wizard and every scene break. Its geometry is generated from the same source
-(`--mark`), so glyph, lockup and icon cannot drift apart.
+- **The page cannot be rotated.** Ruled lines read as text only while horizontal; at 45°
+  they become hatching and the ruled edge becomes a stray diagonal. Nib only.
+- **A light crop is worse than a heavy one.** At about a third cut, a fragment of the
+  collar survives and reads as a nick bitten out of the outline — a bug, not a decision.
+  Removing it entirely is what makes the crop read as deliberate.
+- **Proportion reverses past one step.** Widening the almond and cut once reads as a mild
+  increase; past that the cut grows until the dark is the figure and the gold is a frame
+  around it, giving an abstract two-tone diagonal that reads as less of anything. The
+  levers that bite on proportion need the closed silhouette the crop just broke, so on
+  this composition arrangement and reading are in direct tension.
+
+**A closed-form-with-edge-bleed variant was tried to escape that tension, and it does not
+work.** The idea: keep the silhouette closed, so proportion still bites, but anchor it to
+a frame edge for the contact. Six placements were rendered — bottom-left, bottom-right,
+bottom-only, left-edge, and two scales — and every one reads as a **vase**.
+
+The reason is structural, and it closes the direction rather than needing better tuning.
+The collar has to stay in frame, since it is what holds off the map pin and it carries the
+aperture. That leaves only the bottom edge to bleed off, and the bottom is where the tip
+is. The tip is what makes the shape a *writing* instrument; the collar is what makes it
+manufactured. Keep the collar, lose the tip, and a rounded body over a narrow neck with no
+point is an urn — unmistakably, at every size tested. **The closed form has no expendable
+edge.**
+
+So the choice is real rather than a gradient: the corner crop has the strong arrangement
+and a capped reading, the upright closed form has the strong reading and a conventional
+arrangement, and there is no third position that gets both.
 
 ### The gold is the icon's, not the app's
 

@@ -80,6 +80,8 @@
     <button data-fav="icon-marginalia-page-engraved-16.svg">engraved small</button>
     <button data-fav="icon-nib.svg">nib</button>
     <button data-fav="icon-rubric.svg">rubric</button>
+    <button data-fav="icon-marginalia-corner.svg">corner crop</button>
+    <button data-fav="icon-quill-page.svg">quill</button>
   </div>
 </header>
 
@@ -96,6 +98,12 @@ const DRAFTS = [
   ['folio', 'the folio marginal + bookmark'],
   ['seal', 'monastic seal × instrument dial'],
 ];
+const QUILL = [
+  ['quill-page', '3.06:1 — reads as a pen nib and little else'],
+  ['quill-page-engraved', 'the same, engraved'],
+  ['quill-corner', 'thin enough that the taper survives the crop'],
+  ['marginalia-page', 'the committed master, for comparison — ~1:1.5'],
+];
 const JOKE = [
   ['marginalia-1', 'plausible · 18°'],
   ['marginalia-2', 'noticeable · upright'],
@@ -103,6 +111,7 @@ const JOKE = [
   ['marginalia-flagged', 'flagged: diverged from canon'],
   ['marginalia-page', 'doodle in the margin of a page'],
   ['marginalia-page-engraved', 'the same, engraved'],
+  ['marginalia-corner', 'rotated 45\u00b0, cropped by the corner \u2014 the page cannot rotate, so nib only'],
 ];
 
 const el = (h) => { const d = document.createElement('div'); d.innerHTML = h.trim(); return d.firstChild; };
@@ -157,6 +166,7 @@ out.append(el(`<div>
 // ---- the catalogue ---------------------------------------------------------
 out.append(el(`<div>${section('Six drafts', 'each derived from something already in .design/LINEAGE.md', DRAFTS, [128, 48, 32, 16])}</div>`));
 out.append(el(`<div>${section('The marginalia set', 'the joke on purpose, on a dial — referenced by nothing', JOKE, [128, 48, 32, 16])}</div>`));
+out.append(el(`<div>${section('The quill tip', 'longer, thinner, longer taper — a cut quill rather than a fountain-pen nib. This proportion largely dissolves the marginalia reading: the ~1:1.5 almond was one of the four properties driving it, and at 3:1 there is no almond left.', QUILL, [128, 48, 32, 16])}</div>`));
 
 // ---- controls --------------------------------------------------------------
 const SWATCH = {

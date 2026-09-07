@@ -1305,23 +1305,20 @@ hr {
 .topbar .mark { color: var(--accent); flex: none; align-self: baseline; }
 .wizard-mark .mark { color: var(--accent); margin-right: 7px; }
 
-/* ---- the mark, full ------------------------------------------------------ */
-/* The whole lockup — nib, ruled edge, page. It stands taller than the title on
-   purpose, so it reads as a logo rather than as an ornament beside a word, which
-   means it is centred on the row rather than set against the baseline: a 30px
-   object hung from an 18px baseline would drop below the bar. The nib inherits
-   the accent the same way the inline mark does; the page and rule read their own
-   tokens inside the component. */
-.mark-full {
+/* ---- the masthead badge -------------------------------------------------- */
+/* The shipped icon file itself, at 30px, taller than the 18px title so it reads
+   as a logo rather than an ornament. It is centred on the row rather than set
+   against the baseline: a 30px object hung from an 18px baseline drops below the
+   bar. Unlike .mark it does not take currentColor — the icon is a static file
+   with a fixed colour, since nine palette presets cannot share one favicon, so
+   the tab and the masthead match under every preset. */
+.masthead-badge {
   display: block;
   flex: none;
   align-self: center;
-  color: var(--accent);
+  margin-right: 3px;
+  border-radius: 7px;   /* matches the tile's own corner at this size */
 }
-/* The lockup already ends in a ruled page, so the title needs a real gap after
-   it — the h1's own 8px gap reads as too tight against a right edge that is a
-   column of rules rather than a single glyph. */
-.topbar h1 .mark-full { margin-right: 3px; }
 
 /* ---- waiting: a ruled page, not a shimmer -------------------------------- */
 /* The author's words are already real and shown. What is missing is the ink,
