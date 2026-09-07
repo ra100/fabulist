@@ -693,7 +693,13 @@ test('llama.cpp takes a bare json_schema alongside json_object', async () => {
 // ----------------------------------------------------------- build + presets
 
 test('keyless providers build with no environment at all', () => {
-  for (const key of ['ollama:qwen2.5', 'vllm:local', 'llamacpp:local', 'unsloth:local', 'lmstudio:local']) {
+  // `unsloth:local` is deliberately NOT in this list. Unsloth Studio serves
+  // `/v1/chat/completions` on port 8888 behind a bearer key — confirmed
+  // against a running instance's own `GET /openapi.json` — so it is an
+  // api-key provider like OpenAI, not a keyless local server. It was listed
+  // here only because the preset wrongly described it as an unauthenticated
+  // vLLM on port 8000, a configuration that could never have connected.
+  for (const key of ['ollama:qwen2.5', 'vllm:local', 'llamacpp:local', 'lmstudio:local']) {
     const provider = buildProvider(PRESETS[key]!, {});
     assert.ok(provider.model, `${key} built`);
   }
@@ -711,6 +717,22 @@ test('copilot will not build until acknowledged', () => {
 
 test('api-key providers still refuse to build without their key', () => {
   assert.throws(() => buildProvider(PRESETS['openai:gpt-4o']!, {}), /OPENAI_API_KEY/);
+});
+
+/**
+ * Unsloth is api-key auth but declares `localAuth: 'unsloth-desktop'`, so it
+ * builds with no key exported: a desktop install exchanges its own on-disk
+ * secret for a bearer token (verified against a running instance), and the
+ * token is resolved per request rather than at construction. Demanding a key
+ * up front made the *common* local setup fail for no reason.
+ */
+test('unsloth builds without a key, because a local desktop login can supply one', () => {
+  assert.ok(buildProvider(PRESETS['unsloth:local']!, {}).model, 'no key needed to construct');
+  assert.ok(buildProvider(PRESETS['unsloth:local']!, { UNSLOTH_API_KEY: 'sk-unsloth-x' }).model, 'an explicit key still works');
+  // The escape hatch is per-spec, so nothing else silently gains it.
+  const withoutLocalAuth = { ...PRESETS['unsloth:local']! };
+  delete withoutLocalAuth.localAuth;
+  assert.throws(() => buildProvider(withoutLocalAuth, {}), /UNSLOTH_API_KEY/);
 });
 
 test('default auth mode follows the provider kind', () => {

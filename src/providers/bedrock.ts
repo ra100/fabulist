@@ -130,13 +130,7 @@ export class BedrockProvider implements Provider {
       }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        // 403 here is nearly always model access rather than bad credentials, and
-        // saying so saves a long detour through the IAM console.
-        const hint =
-          res.status === 403
-            ? ` — check that model access is enabled for ${this.model} in region ${region}`
-            : '';
-        throw new Error(`bedrock ${res.status}${hint}: ${text.slice(0, 300)}`);
+        throw new Error(`bedrock ${res.status}${bedrockHint(res.status, text, this.model, region)}: ${text.slice(0, 300)}`);
       }
       json = (await res.json()) as ConverseResponse;
     } finally {
@@ -193,6 +187,60 @@ export class BedrockProvider implements Provider {
       profile: this.profile ?? 'default',
     };
   }
+}
+
+/**
+ * Turns a Bedrock error into the one-line fix it actually calls for.
+ *
+ * This used to assume every 403 meant "model access is not enabled", on the
+ * reasoning that it saves a detour through the IAM console. That assumption is
+ * wrong often enough to be actively harmful: **expired credentials also return
+ * 403**, and the resulting message sent us hunting model entitlement in the
+ * Bedrock console while the real cause was a stale `aws_session_token` in
+ * `~/.aws/credentials`. Confirmed directly against the API rather than guessed
+ * — an expired token answers with:
+ *
+ *   UnrecognizedClientException: The security token included in the request is invalid
+ *
+ * so the *error code in the body*, not the status, is what distinguishes the two.
+ * AWS uses several codes for this depending on credential kind, hence the set
+ * below; `InvalidClientTokenId` is the STS spelling of the same thing, and
+ * `ExpiredToken`/`ExpiredTokenException` is what a lapsed SSO session returns.
+ */
+export function bedrockHint(status: number, body: string, model: string, region: string): string {
+  // The body is JSON with `message`, and often an `__type`/`code` naming the
+  // exception; the CLI surfaces the same string. Matching on the text keeps
+  // this robust across both shapes without parsing.
+  const expired =
+    /UnrecognizedClientException|InvalidClientTokenId|ExpiredToken|InvalidSecurityToken|security token included in the request is invalid|token.{0,20}expired/i.test(
+      body,
+    );
+  if (expired) {
+    return ' — AWS credentials are invalid or expired, not a model-access problem: refresh them (aws sso login) and check AWS_PROFILE points at the profile you meant';
+  }
+
+  // A genuinely unauthorised *identity* is different again from an unentitled
+  // model: the first needs an IAM policy, the second a console opt-in.
+  if (/AccessDeniedException/i.test(body) && /not authorized to perform/i.test(body)) {
+    return ` — this identity lacks bedrock:InvokeModel for ${model}; the credentials are valid, so this is an IAM policy gap rather than model access`;
+  }
+
+  if (status === 403) {
+    return ` — check that model access is enabled for ${model} in region ${region}`;
+  }
+
+  // The other status worth naming: an id that needs a cross-region inference
+  // profile fails as a 400 with a very specific instruction, and the `us.`
+  // prefix in this file's presets exists precisely because of it.
+  if (status === 400 && /inference profile/i.test(body)) {
+    return ` — ${model} cannot be invoked on demand; use the cross-region inference profile id (prefix it with "us.")`;
+  }
+
+  if (status === 429 || /ThrottlingException/i.test(body)) {
+    return ' — throttled by Bedrock; retry, or request a quota increase for this model';
+  }
+
+  return '';
 }
 
 /**

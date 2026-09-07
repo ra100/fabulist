@@ -71,8 +71,17 @@ export class OpenAICompatProvider implements Provider {
   private fetcher: typeof fetch;
   private timeoutMs: number;
   private dialect: OpenAIDialect;
+  /**
+   * Resolves an auth header per request when there is no static key.
+   *
+   * Exists for Unsloth Studio, which needs a bearer token but can mint one from
+   * a local desktop secret — so a local install is usable with no key
+   * configured. Kept as an injected hook rather than special-casing Unsloth in
+   * this class: the adapter's job is the wire shape, not credential discovery.
+   */
+  private authHeader: (() => Promise<Record<string, string>>) | undefined;
 
-  constructor(id: string, opts: HttpOptions & { dialect?: OpenAIDialect }) {
+  constructor(id: string, opts: HttpOptions & { dialect?: OpenAIDialect; authHeader?: () => Promise<Record<string, string>> }) {
     this.id = id;
     this.model = opts.model;
     this.capabilities = opts.capabilities;
@@ -81,6 +90,13 @@ export class OpenAICompatProvider implements Provider {
     this.fetcher = opts.fetcher ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? 120_000;
     this.dialect = opts.dialect ?? 'openai';
+    this.authHeader = opts.authHeader;
+  }
+
+  /** A static key wins; otherwise ask the resolver, if one was supplied. */
+  private async headers(): Promise<Record<string, string>> {
+    if (this.apiKey) return { authorization: `Bearer ${this.apiKey}` };
+    return this.authHeader ? await this.authHeader() : {};
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
@@ -115,7 +131,7 @@ export class OpenAICompatProvider implements Provider {
       }
     }
 
-    const headers: Record<string, string> = this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {};
+    const headers: Record<string, string> = await this.headers();
 
     // Streaming is only for prose. A half-arrived JSON object is worthless.
     if (req.onToken && this.capabilities.streaming && !req.schema) {
@@ -444,6 +460,12 @@ export interface ProviderSpec {
   location?: string;
   /** Copilot: required acknowledgement that the endpoint is unofficial. */
   allowUnofficial?: boolean;
+  /**
+   * A local credential fallback this target supports, tried when `apiKeyEnv` is
+   * unset. `unsloth-desktop` exchanges the desktop install's on-disk secret for
+   * a bearer token, which is what makes a local Unsloth usable with no key.
+   */
+  localAuth?: 'unsloth-desktop';
   /** Human note shown by the provider doctor. */
   note?: string;
 }
@@ -535,11 +557,24 @@ export const PRESETS: Record<string, ProviderSpec> = {
   'unsloth:local': {
     kind: 'openai-compat',
     model: 'unsloth',
-    baseUrl: 'http://127.0.0.1:8000/v1',
-    auth: 'none',
-    dialect: 'vllm',
-    note: 'Unsloth models served through vLLM; same endpoint, same dialect',
-    capabilities: { contextWindow: 64_000, structuredOutput: 'native-schema', costTier: 'free', proseQuality: 0.5, steerability: 0.55 },
+    // Unsloth Studio's real port and auth, confirmed against a running
+    // instance's `GET /openapi.json` rather than assumed: it serves
+    // `/v1/chat/completions` on 8888 behind a bearer key, *not* an unauthed
+    // vLLM on 8000. This preset previously described the latter, so it could
+    // only ever have failed — with a connection refusal or a 401.
+    baseUrl: 'http://127.0.0.1:8888/v1',
+    auth: 'api-key',
+    apiKeyEnv: 'UNSLOTH_API_KEY',
+    // A desktop install is authenticated from its own local secret, so this
+    // builds and works with no key exported; UNSLOTH_API_KEY is needed only for
+    // a remote instance, whose secret this machine cannot read.
+    localAuth: 'unsloth-desktop',
+    note: 'Unsloth Studio. A local desktop install needs no key; set UNSLOTH_API_KEY for a remote one. Serves images on the same port — see the unsloth:local image preset',
+    // Downgraded from 'native-schema': the OpenAI-compatible surface here is
+    // llama-server's, which honours json_object but not a full json_schema
+    // contract, and claiming otherwise is exactly the silent-corruption path
+    // `provider.ts` warns about for the extract role.
+    capabilities: { contextWindow: 64_000, structuredOutput: 'json-mode', costTier: 'free', proseQuality: 0.5, steerability: 0.55 },
   },
   'lmstudio:local': {
     kind: 'openai-compat',
@@ -615,7 +650,12 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
   const auth = spec.auth ?? defaultAuth(spec.kind);
   const apiKey = auth === 'api-key' && spec.apiKeyEnv ? (env[spec.apiKeyEnv] ?? '') : '';
 
-  if (auth === 'api-key' && !apiKey) {
+  // A spec may name its own local credential fallback. Unsloth is the case that
+  // needs it: it requires a bearer token, but a desktop install can mint one
+  // from a secret already on this machine, so demanding an exported key would
+  // make the common local setup fail for no reason.
+  const localAuth = spec.localAuth === 'unsloth-desktop';
+  if (auth === 'api-key' && !apiKey && !localAuth) {
     throw new Error(`missing ${spec.apiKeyEnv ?? 'API key'} for model ${spec.model}`);
   }
 
@@ -644,14 +684,28 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
         capabilities,
         allowUnofficial: spec.allowUnofficial === true,
       });
-    case 'openai-compat':
+    case 'openai-compat': {
+      const base = spec.baseUrl ?? 'https://api.openai.com/v1';
+      // The resolver is attached only when the spec asked for it, so no other
+      // openai-compatible target grows a surprise credential lookup.
+      const authHeader = localAuth
+        ? async () => {
+            const { UnslothAuth } = await import('./unslothAuth.ts');
+            // `/v1` is this provider's API prefix; the auth endpoints sit at the
+            // server root, so it is stripped before handing the base over.
+            const root = base.replace(/\/v1\/?$/, '');
+            return new UnslothAuth({ baseUrl: root }).authHeader();
+          }
+        : undefined;
       return new OpenAICompatProvider(spec.model.split(':')[0] ?? 'openai', {
         apiKey,
-        baseUrl: spec.baseUrl ?? 'https://api.openai.com/v1',
+        baseUrl: base,
         model: spec.model,
         capabilities,
         ...(spec.dialect ? { dialect: spec.dialect } : {}),
+        ...(authHeader ? { authHeader } : {}),
       });
+    }
     default:
       throw new Error(`unsupported provider kind: ${spec.kind}`);
   }

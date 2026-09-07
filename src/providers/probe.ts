@@ -85,9 +85,26 @@ export async function probeProvider(key: string, spec: ProviderSpec, opts: Probe
 
     case 'api-key': {
       const present = !!(spec.apiKeyEnv && env[spec.apiKeyEnv]);
-      return present
-        ? { ...base, status: 'ready', detail: `${spec.apiKeyEnv} is set` }
-        : { ...base, status: 'unavailable', detail: `${spec.apiKeyEnv} is not set`, fix: `export ${spec.apiKeyEnv}=…` };
+      if (present) return { ...base, status: 'ready', detail: `${spec.apiKeyEnv} is set` };
+      // A target with a local credential fallback is not unavailable just
+      // because no key is exported: Unsloth's desktop secret authenticates a
+      // local install, so reporting "not set" here would send someone to create
+      // a key they do not need. Probed for real rather than assumed present.
+      if (spec.localAuth === 'unsloth-desktop') {
+        const { UnslothAuth } = await import('./unslothAuth.ts');
+        const root = (spec.baseUrl ?? '').replace(/\/v1\/?$/, '');
+        const resolved = await new UnslothAuth({ baseUrl: root, fetcher, timeoutMs }).token().catch(() => null);
+        if (resolved) {
+          return { ...base, status: 'ready', detail: `no key needed: authenticated via this machine\u2019s ${resolved.source === 'desktop-secret' ? 'desktop login' : resolved.source}` };
+        }
+        return {
+          ...base,
+          status: 'unavailable',
+          detail: `${spec.apiKeyEnv} is not set and no local desktop login was available`,
+          fix: `start Unsloth Studio locally, or export ${spec.apiKeyEnv}=… for a remote instance`,
+        };
+      }
+      return { ...base, status: 'unavailable', detail: `${spec.apiKeyEnv} is not set`, fix: `export ${spec.apiKeyEnv}=…` };
     }
 
     case 'aws-profile': {
@@ -95,13 +112,26 @@ export async function probeProvider(key: string, spec: ProviderSpec, opts: Probe
       const profile = spec.profile ?? aws.profileName();
       try {
         const resolved = await aws.resolve(profile);
+        const source = resolved.credentials.source;
+        // Resolving proves the credentials were *found*, never that they still
+        // work. Static keys in particular are read straight off disk: a stale
+        // `aws_session_token` in `~/.aws/credentials` resolves perfectly and
+        // then fails every call with a 403 that the runtime used to blame on
+        // model access. That cost a real debugging detour, so the distinction
+        // is surfaced here rather than left for the first failed turn.
+        //
+        // SSO differs in kind: `resolve` reads a cached token that carries an
+        // expiry, so a lapsed one throws and lands in the catch below.
+        const unverifiable = /credentials file|environment/i.test(source);
         return {
           ...base,
           status: 'ready',
-          detail: `profile "${profile}" via ${resolved.credentials.source}, region ${spec.region ?? resolved.region}`,
+          detail: `profile "${profile}" via ${source}, region ${spec.region ?? resolved.region}`,
           // Credentials resolving proves identity, not model entitlement, and
           // Bedrock access is granted per model per region.
-          fix: '',
+          fix: unverifiable
+            ? 'static keys, not a live session — if calls fail with 403 they are expired: refresh (aws sso login) rather than checking model access'
+            : '',
         };
       } catch (err) {
         const profiles = aws.listProfiles();

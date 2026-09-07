@@ -35,6 +35,7 @@
  * honestly, unlike a plain txt2img id — but that too is unverified here.
  */
 import { signRequest } from './sigv4.ts';
+import { bedrockHint } from './bedrock.ts';
 import { AwsCredentialProvider, type AwsEnvironment } from './aws.ts';
 import type { ImageCapabilities, ImageProvider, ImageRequest, ImageResult } from './image.ts';
 
@@ -114,10 +115,17 @@ export class BedrockStabilityProvider implements ImageProvider {
       const res = await this.fetcher(signed.url, { method: 'POST', headers: signed.headers, body: signed.body, signal: controller.signal });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
+        // Shares `bedrockHint` with the text adapter so expired credentials are
+        // never misreported as a model-access or Marketplace problem — the same
+        // 403 ambiguity, and the Marketplace advice below is expensive to chase
+        // when the real cause is a stale token. The Stability-specific note is
+        // appended only once the generic hint has had no better explanation.
+        const generic = bedrockHint(res.status, text, this.model, region);
         const hint =
-          res.status === 403
+          generic ||
+          (res.status === 403
             ? ` — check Bedrock model access and, for Stability models specifically, the AWS Marketplace subscription for ${this.model}`
-            : '';
+            : '');
         throw new Error(`bedrock-stability ${res.status}${hint}: ${text.slice(0, 300)}`);
       }
       const json = (await res.json()) as StabilityResponse;
