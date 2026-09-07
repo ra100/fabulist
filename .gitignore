@@ -38,6 +38,11 @@ web/dist/
 .design/*.jpg
 .design/*.webp
 
+# Same reasoning one level down: .design/brand/*.svg are the icon drafts and are
+# tracked, but the contact sheets and pixel tests are rebuilt by build.py.
+.design/brand/render/
+__pycache__/
+
 # Local run artefacts (server logs, detached-process scratch).
 .run/
 .worktrees/

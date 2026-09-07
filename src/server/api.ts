@@ -88,6 +88,10 @@ const MIME: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2',
+  // Icon assets in web/public. Without these the fallback is octet-stream, which a
+  // browser will not accept for apple-touch-icon or for manifest icon entries.
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json',
 };
 
 function send(res: ServerResponse, status: number, body: unknown): void {

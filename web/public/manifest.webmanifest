@@ -1,0 +1,14 @@
+{
+  "name": "Fabulist",
+  "short_name": "Fabulist",
+  "description": "A state-first fiction engine: the prose is a view, the world is the graph underneath.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0c0a07",
+  "theme_color": "#0c0a07",
+  "icons": [
+    { "src": "/icon.svg", "type": "image/svg+xml", "sizes": "any" },
+    { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192" },
+    { "src": "/icon-512.png", "type": "image/png", "sizes": "512x512" }
+  ]
+}
