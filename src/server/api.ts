@@ -9,9 +9,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import type { Engine } from '../loop/engine.ts';
-import type { CurrentStory, World } from '../store/index.ts';
+import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { forkStory } from '../loop/branch.ts';
 import { createStory, deleteStory, listStories } from '../store/world.ts';
+import { createWorldFile, deleteWorldFile, listWorlds, renameWorldFile } from '../store/worlds.ts';
 import {
   applyDirectiveRecalc,
   seedConsequences,
@@ -56,6 +57,10 @@ export interface ServerOptions {
   imageRegistry?: SwappableImageRegistry;
   /** Enables the story-management routes (list/create/switch/rename/delete/fork). */
   currentStory?: CurrentStory;
+  /** Enables the world-management routes (list/create/switch/rename/delete). */
+  currentWorld?: CurrentWorld;
+  /** Where world directories live; defaults to `data`. */
+  dataRoot?: string;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -69,6 +74,8 @@ interface RouteContext {
   illustrations: IllustrationService | undefined;
   imageRegistry: SwappableImageRegistry | undefined;
   currentStory: CurrentStory | undefined;
+  currentWorld: CurrentWorld | undefined;
+  dataRoot: string;
   url: URL;
   body: unknown;
   params: Record<string, string>;
@@ -666,10 +673,17 @@ function requireCurrentStory(res: ServerResponse, currentStory: CurrentStory | u
   return currentStory;
 }
 
-/** Every story in this world file, most recently played first. */
+/**
+ * Every story in this world file, most recently played first.
+ *
+ * `current` is included per row rather than left for the client to work out.
+ * Without it every row rendered identically, each with an equally live "open"
+ * button and nothing marking the one already being read — which made the
+ * feature look missing rather than merely unlabelled.
+ */
 route('GET', '/api/stories', (_req, res, { world }) => {
   const stories = listStories(world.db).sort((a, b) => b.lastPlayedAt.localeCompare(a.lastPlayedAt));
-  send(res, 200, stories);
+  send(res, 200, stories.map((s) => ({ ...s, current: s.id === world.storyId })));
 });
 
 /**
@@ -741,6 +755,111 @@ route('DELETE', '/api/stories/:id', (_req, res, { world, params }) => {
     send(res, 200, { ok: true });
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ------------------------------------------------------------------- worlds
+//
+// The layer above stories. `/api/stories/*` moves between playthroughs inside
+// one file; these move between files. See `store/worlds.ts` for why the two are
+// kept separate, and `CurrentWorld` for why a switch reuses the story getter
+// every consumer already holds rather than introducing a second seam.
+
+function requireCurrentWorld(res: ServerResponse, currentWorld: CurrentWorld | undefined): CurrentWorld | null {
+  if (!currentWorld) {
+    send(res, 503, { error: 'world management is not enabled on this server' });
+    return null;
+  }
+  return currentWorld;
+}
+
+/** Every world on this machine, most recently played first, with the open one flagged. */
+route('GET', '/api/worlds', (_req, res, { currentWorld, dataRoot }) => {
+  const open = currentWorld?.slug() ?? null;
+  send(res, 200, {
+    current: open,
+    worlds: listWorlds(dataRoot).map((w) => ({
+      slug: w.slug,
+      title: w.title,
+      storyCount: w.storyCount,
+      entityCount: w.entityCount,
+      lastPlayedAt: w.lastPlayedAt,
+      bytes: w.bytes,
+      current: w.slug === open,
+    })),
+  });
+});
+
+/**
+ * Creates an empty world and does *not* switch to it.
+ *
+ * Not switching is the deliberate half. Creating a world is the first step of a
+ * flow that continues in the setup wizard, and the caller decides when to leave
+ * the story it currently has open — the same reasoning `POST /api/stories`
+ * already applies one level down. A create-and-switch would also mean an
+ * accidental click silently navigates away from an in-progress scene.
+ */
+route('POST', '/api/worlds', (_req, res, { currentWorld, dataRoot, body }) => {
+  const cw = requireCurrentWorld(res, currentWorld);
+  if (!cw) return;
+  const { title } = (body ?? {}) as { title?: string };
+  try {
+    send(res, 201, createWorldFile(title?.trim() ?? '', dataRoot));
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * Switches which world every subsequent request operates on. Closes the old
+ * database and opens the new one; takes effect immediately, no restart.
+ */
+route('POST', '/api/worlds/:slug/switch', (_req, res, { currentWorld, params }) => {
+  const cw = requireCurrentWorld(res, currentWorld);
+  if (!cw) return;
+  const slug = decodeURIComponent(params.slug ?? '');
+  try {
+    cw.switchTo(slug);
+    send(res, 200, { current: cw.slug() });
+  } catch (err) {
+    send(res, 404, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Retitles a world, moving its directory too when it is not the open one. */
+route('PUT', '/api/worlds/:slug/title', (_req, res, { currentWorld, dataRoot, params, body }) => {
+  const cw = requireCurrentWorld(res, currentWorld);
+  if (!cw) return;
+  const slug = decodeURIComponent(params.slug ?? '');
+  const { title } = (body ?? {}) as { title?: string };
+  if (typeof title !== 'string' || !title.trim()) return send(res, 400, { error: 'title is required' });
+  try {
+    send(res, 200, renameWorldFile(slug, title, { dataRoot, openSlug: cw.slug() }));
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * Deletes a world outright — canon, every story in it, and its images.
+ *
+ * Refuses the open world (switch away first, so the server is never left
+ * holding a closed handle) and refuses the last one, so there is always
+ * somewhere to land. Emptying the only world you have is `POST
+ * /api/setup/reset`, which keeps the file and clears its contents.
+ */
+route('DELETE', '/api/worlds/:slug', (_req, res, { currentWorld, dataRoot, params }) => {
+  const cw = requireCurrentWorld(res, currentWorld);
+  if (!cw) return;
+  const slug = decodeURIComponent(params.slug ?? '');
+  if (listWorlds(dataRoot).length <= 1) {
+    return send(res, 409, { error: 'cannot delete the only world; use reset to empty it instead' });
+  }
+  try {
+    deleteWorldFile(slug, { dataRoot, openSlug: cw.slug() });
+    send(res, 200, { ok: true });
+  } catch (err) {
+    send(res, 409, { error: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -1149,7 +1268,8 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
 }
 
 export function createApiServer(opts: ServerOptions) {
-  const { engine, webRoot, setup, registry, config, illustrations, imageRegistry, currentStory } = opts;
+  const { engine, webRoot, setup, registry, config, illustrations, imageRegistry, currentStory, currentWorld } = opts;
+  const dataRoot = opts.dataRoot ?? 'data';
   const getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
 
   const server = createServer(async (req, res) => {
@@ -1174,7 +1294,7 @@ export function createApiServer(opts: ServerOptions) {
         // a restart. Every route body still just reads `world` as a plain
         // value — the getter is dereferenced exactly once, here.
         const world = getWorld();
-        await match.handler(req, res, { world, engine, setup, registry, config, illustrations, imageRegistry, currentStory, url, body, params });
+        await match.handler(req, res, { world, engine, setup, registry, config, illustrations, imageRegistry, currentStory, currentWorld, dataRoot, url, body, params });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.

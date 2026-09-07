@@ -2,7 +2,8 @@
 /** Serves the API and the built inspector UI. */
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { CurrentStory, World } from '../store/index.ts';
+import { CurrentWorld } from '../store/index.ts';
+import { createWorldFile, listWorlds, migrateLegacySave, worldsRoot } from '../store/worlds.ts';
 import { seedWorld } from '../seed/verrow.ts';
 import { Engine } from '../loop/engine.ts';
 import { createApiServer } from '../server/api.ts';
@@ -32,38 +33,71 @@ const configArg = args.find((a) => a.startsWith('--config='))?.slice('--config='
 const configPath = configArg ?? (inMemory ? join('data', '.memory-config.json') : 'fabulist.config.json');
 
 const cfg = loadConfig(configPath);
-const dbPath = inMemory ? ':memory:' : cfg.dbPath;
-// Images live beside the database rather than inside it (see `store/illustration.ts`),
-// so an in-memory run keeps them in-memory-adjacent too: a throwaway `data/images`
-// directory next to `:memory:`'s nonexistent file would otherwise litter the
-// working directory every time `--memory` is used for a quick test session.
-const imagesDir = inMemory ? join('data', '.memory-images') : join(dirname(dbPath), 'images');
 
-if (!inMemory) mkdirSync(dirname(dbPath), { recursive: true });
+/**
+ * Boot resolves a *world directory*, not a bare database path.
+ *
+ * `cfg.dbPath` is now only the legacy pointer and the migration source. A world
+ * is a directory under `data/worlds/` (see `store/worlds.ts`), because switching
+ * worlds at runtime means closing one file and opening another — which the old
+ * single-`dbPath` shape could not express, and which is why config still refuses
+ * to let `dbPath` be patched.
+ *
+ * `--memory` keeps its own throwaway world so a quick test session never touches
+ * a real one, and `--world=<slug>` overrides which world to open.
+ */
+const dataRoot = inMemory ? join('data', '.memory-worlds') : 'data';
+const worldArg = args.find((a) => a.startsWith('--world='))?.slice('--world='.length);
+
+mkdirSync(worldsRoot(dataRoot), { recursive: true });
 // The throwaway config lives under `data/`, which a fresh clone does not have
 // until something writes a save there — and the first profile switch in a
 // `--memory` session would otherwise fail on the missing directory.
 mkdirSync(dirname(configPath), { recursive: true });
-const bootWorld = World.open(dbPath, undefined, imagesDir);
+
+// A save from before the multi-world layout is somebody's actual novel, so it is
+// moved into the new layout rather than left at a path nothing reads anymore.
+// Only for real runs: a `--memory` session must never touch the real save.
+if (!inMemory) {
+  const migrated = migrateLegacySave(cfg.dbPath, dataRoot);
+  if (migrated) {
+    console.log(`moved ${cfg.dbPath} into ${migrated.dir} (worlds now live in one directory each)`);
+  }
+}
+
+// Land on the requested world, else the most recently played, else create one.
+// A fresh install gets an empty world so the wizard has somewhere to ingest into
+// — the same role `World.open` on a nonexistent path used to play.
+const existing = listWorlds(dataRoot);
+const bootSlug =
+  worldArg ??
+  existing[0]?.slug ??
+  createWorldFile(inMemory ? 'scratch world' : '', dataRoot).slug;
+
+const currentWorld = CurrentWorld.open(bootSlug, dataRoot);
 if (args.includes('--sample')) {
-  seedWorld(bootWorld);
+  seedWorld(currentWorld.world());
   console.log('seeded the Saint Verrow sample');
 }
 
 // The one thing every long-lived piece below resolves through, rather than
 // each holding its own captured `World`: a story switch (POST
-// /api/stories/:id/switch) takes effect on the very next request across all
-// of them — Engine, SetupService, IllustrationService, and every plain route
-// in api.ts — with no restart. See store/index.ts's CurrentStory for why.
-const currentStory = new CurrentStory(bootWorld.db, bootWorld.storyId, imagesDir);
-const getWorld = () => currentStory.world();
+// /api/stories/:id/switch) *or* a world switch (POST /api/worlds/:slug/switch)
+// takes effect on the very next request across all of them — Engine,
+// SetupService, IllustrationService, and every plain route in api.ts — with no
+// restart. See store/index.ts's CurrentStory/CurrentWorld for why.
+const currentStory = currentWorld.stories();
+const getWorld = () => currentWorld.world();
 
 const { registry, notes } = buildSwappableRegistry(cfg);
-const configService = new ConfigService({ registry, path: configPath });
+const { registry: imageRegistry, notes: imageNotes } = buildImageRegistry(cfg);
+// Both registries are handed to the config service so editing a provider — text
+// or image, including an image host on another machine — takes effect on the
+// next call rather than at the next restart.
+const configService = new ConfigService({ registry, imageRegistry, path: configPath });
 for (const n of notes) console.log(n);
 if (cfg.profile === 'mock') console.log('tip: pnpm providers — the UI can switch profile without a restart');
 
-const { registry: imageRegistry, notes: imageNotes } = buildImageRegistry(cfg);
 for (const n of imageNotes) console.log(n);
 const illustrations = new IllustrationService({ world: getWorld, providers: imageRegistry });
 
@@ -90,6 +124,8 @@ const server = createApiServer({
   illustrations,
   imageRegistry,
   currentStory,
+  currentWorld,
+  dataRoot,
 });
 server.listen(port, '127.0.0.1', () => {
   console.log(`fabulist on http://127.0.0.1:${port}`);
@@ -98,7 +134,7 @@ server.listen(port, '127.0.0.1', () => {
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
     server.close();
-    bootWorld.close();
+    currentWorld.close();
     process.exit(0);
   });
 }

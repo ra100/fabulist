@@ -20,6 +20,7 @@ import {
   type Story,
   type Thread,
   type TurnMeta,
+  type WorldSummary,
 } from './api.ts';
 import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
@@ -28,7 +29,7 @@ import { AppearanceEditor, PortraitPanel, SceneIllustration, StylePicker } from 
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 
-type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'stories' | 'settings';
+type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'library' | 'settings';
 
 /** Scene numbers read as roman, the way a book numbers its parts. */
 function roman(n: number): string {
@@ -66,7 +67,20 @@ export function App() {
 
   const refresh = useCallback(async () => {
     try {
-      setState(await api.state());
+      // Freshness is re-checked on every refresh, not just at mount. Switching
+      // worlds can move you into an *empty* world, and that has to open the
+      // setup wizard — a mount-only check left you looking at a book view with
+      // no canon, no cast and no way to start one, which is indistinguishable
+      // from the app being broken. Both reads happen together so the wizard
+      // decision and the state it is deciding about cannot disagree.
+      const [nextState, status] = await Promise.all([
+        api.state(),
+        api.setup.status().catch(() => null),
+      ]);
+      setState(nextState);
+      // Null means the setup routes are disabled; leave the current answer
+      // alone rather than guessing a world exists.
+      if (status) setFresh(status.fresh);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -136,7 +150,7 @@ export function App() {
           </div>
         ) : null}
         <nav className="tabs">
-          {(['book', 'graph', 'cast', 'threads', 'causality', 'facts', 'stories', 'settings'] as Tab[]).map((t) => (
+          {(['book', 'graph', 'cast', 'threads', 'causality', 'facts', 'library', 'settings'] as Tab[]).map((t) => (
             <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
               {t}
             </button>
@@ -165,7 +179,7 @@ export function App() {
       {tab === 'threads' ? <ThreadsTab state={state} onChanged={refresh} /> : null}
       {tab === 'causality' ? <CausalityTab /> : null}
       {tab === 'facts' ? <FactsTab /> : null}
-      {tab === 'stories' ? (
+      {tab === 'library' ? (
         <StoriesTab
           currentSceneTurn={state ? `${state.session.scene}·${state.session.turn}` : '?'}
           onSwitched={() => {
@@ -1547,13 +1561,19 @@ function SettingsTab({ state, onChanged }: { state: State | null; onChanged: () 
 }
 
 /**
- * The save browser: every story in this world file, and what a player can do
- * with one. Replaces the old topbar "new" button's only option (discard
- * everything, canon included, and re-run the wizard) with the actual range
- * multi-story supports — switch to a different playthrough, start a fresh
- * one sharing this world's canon, or branch/continue an existing one from an
- * earlier scene, all without losing anything. "discard this world entirely"
- * is still here, at the bottom, for when that really is what is wanted.
+ * The library: both axes of "which fiction am I in".
+ *
+ * Two panels because there are genuinely two levels, and collapsing them is
+ * what made switching look impossible. A **world** is a file — its own canon,
+ * cast and images, nothing shared. A **book** is a playthrough inside one
+ * world, sharing that world's canon. Worlds come first because it is the
+ * coarser move, and because a player looking for "my other world" was
+ * previously staring at a list of books with no indication another world could
+ * exist at all.
+ *
+ * Every row states whether it is the open one. That was the actual bug behind
+ * "I don't see a way to switch": the switching worked, but nothing marked the
+ * current row, so every entry looked like an identical inert label.
  */
 function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
   currentSceneTurn: string;
@@ -1561,21 +1581,28 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
   onResetToWizard: () => void;
 }) {
   const [stories, setStories] = useState<Story[] | null>(null);
+  const [worlds, setWorlds] = useState<WorldSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  const [worldRenaming, setWorldRenaming] = useState<{ slug: string; title: string } | null>(null);
+  const [newWorldTitle, setNewWorldTitle] = useState('');
   const [forkFrom, setForkFrom] = useState<{ id: string; title: string } | null>(null);
   const [forkScene, setForkScene] = useState('');
   const [forkTitle, setForkTitle] = useState('');
 
   const load = useCallback(async () => {
     try {
-      setStories(await api.stories.list());
+      // Both lists in parallel: they are independent reads, and a world switch
+      // invalidates both, so they are always refetched together anyway.
+      const [storyList, worldList] = await Promise.all([api.stories.list(), api.worlds.list()]);
+      setStories(storyList);
+      setWorlds(worldList.worlds);
       setError(null);
     } catch (e) {
-      // A server without story management enabled (currentStory not
-      // configured) 503s every route here — worth saying plainly rather
-      // than showing an empty, confusing list.
+      // A server without story/world management enabled (currentStory or
+      // currentWorld not configured) 503s every route here — worth saying
+      // plainly rather than showing an empty, confusing list.
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
@@ -1601,10 +1628,119 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
           {error ? <div className="card warn">{error}</div> : null}
 
           <div className="card">
-            <h3>stories in this world</h3>
+            <h3>worlds</h3>
             <p className="hint">
-              Every story here shares the same canon — the wiki (or authored world) underneath — but plays out
-              independently: what one story's characters do, say, or learn never touches another's.
+              A world is its own file: its own canon, cast and illustrations. Nothing is shared between two
+              worlds. Switching closes one and opens the other — no restart, but it does replace everything on
+              screen.
+            </p>
+            {!worlds ? (
+              <p className="empty">loading…</p>
+            ) : (
+              worlds.map((w) => (
+                <div key={w.slug} className="field-row" style={{ alignItems: 'flex-start' }}>
+                  <span style={{ flex: 1 }}>
+                    {worldRenaming?.slug === w.slug ? (
+                      <input
+                        autoFocus
+                        value={worldRenaming.title}
+                        onChange={(e) => setWorldRenaming({ slug: w.slug, title: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') setWorldRenaming(null);
+                          if (e.key === 'Enter') {
+                            void run(w.slug, 'wrename', async () => {
+                              await api.worlds.rename(w.slug, worldRenaming.title);
+                              setWorldRenaming(null);
+                              await load();
+                              onSwitched();
+                            });
+                          }
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <b>{w.title || 'untitled world'}</b>
+                        {w.current ? <span className="tag locked" style={{ marginLeft: 6 }}>open</span> : null}
+                        <br />
+                        <span className="small dimmer">
+                          <span className="mono">{w.slug}</span> · {w.entityCount} entities ·{' '}
+                          {w.storyCount} book{w.storyCount === 1 ? '' : 's'}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                  <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      className={w.current ? '' : 'primary'}
+                      disabled={w.current || busy === `${w.slug}wswitch`}
+                      title={w.current ? 'already open' : 'close the current world and open this one'}
+                      onClick={() => void run(w.slug, 'wswitch', async () => {
+                        await api.worlds.switchTo(w.slug);
+                        await load();
+                        onSwitched();
+                      })}
+                    >
+                      {w.current ? 'open' : 'switch'}
+                    </button>
+                    <button
+                      disabled={worldRenaming?.slug === w.slug}
+                      onClick={() => setWorldRenaming({ slug: w.slug, title: w.title })}
+                    >
+                      rename
+                    </button>
+                    <button
+                      className="warn"
+                      disabled={w.current || worlds.length <= 1 || busy === `${w.slug}wdelete`}
+                      title={
+                        w.current
+                          ? 'switch to another world before deleting this one'
+                          : worlds.length <= 1
+                            ? 'the only world cannot be deleted; use "discard this world" below to empty it'
+                            : 'delete this world, its canon, every book in it, and its images'
+                      }
+                      onClick={() => {
+                        if (!window.confirm(`Delete the world "${w.title || w.slug}"? This removes its canon, all ${w.storyCount} book(s) and its images. This cannot be undone.`)) return;
+                        void run(w.slug, 'wdelete', async () => {
+                          await api.worlds.remove(w.slug);
+                          await load();
+                        });
+                      }}
+                    >
+                      delete
+                    </button>
+                  </span>
+                </div>
+              ))
+            )}
+            <div className="field-row" style={{ marginTop: 'var(--s3)' }}>
+              <input
+                value={newWorldTitle}
+                onChange={(e) => setNewWorldTitle(e.target.value)}
+                placeholder="new world title — e.g. Mass Effect"
+              />
+              <button
+                disabled={busy === 'newworld create'}
+                title="creates an empty world; switch to it and the setup wizard will offer to ingest a wiki"
+                onClick={() => void run('newworld', 'create', async () => {
+                  await api.worlds.create(newWorldTitle.trim() || undefined);
+                  setNewWorldTitle('');
+                  await load();
+                })}
+              >
+                add world
+              </button>
+            </div>
+            <p className="hint small">
+              A new world starts empty. Switch to it and the setup wizard opens, so you can ingest a wiki or
+              author one by hand — the world you are in now is left untouched.
+            </p>
+          </div>
+
+          <div className="card">
+            <h3>books in this world</h3>
+            <p className="hint">
+              Every book here shares the same canon — the wiki (or authored world) underneath — but plays out
+              independently: what one book's characters do, say, or learn never touches another's.
             </p>
             {!stories ? (
               <p className="empty">loading…</p>
@@ -1630,7 +1766,8 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                       />
                     ) : (
                       <>
-                        <b>{s.title || 'untitled story'}</b>
+                        <b>{s.title || 'untitled book'}</b>
+                        {s.current ? <span className="tag locked" style={{ marginLeft: 6 }}>reading</span> : null}
                         {' — '}
                         scene {s.scene}·{s.turn}
                         {s.forkedFrom ? (
@@ -1641,13 +1778,16 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                   </span>
                   <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     <button
-                      disabled={busy === `${s.id}switch`}
+                      className={s.current ? '' : 'primary'}
+                      disabled={s.current || busy === `${s.id}switch`}
+                      title={s.current ? 'already reading this book' : 'open this book'}
                       onClick={() => void run(s.id, 'switch', async () => {
                         await api.stories.switchTo(s.id);
+                        await load();
                         onSwitched();
                       })}
                     >
-                      open
+                      {s.current ? 'reading' : 'open'}
                     </button>
                     <button
                       disabled={renaming?.id === s.id}
@@ -1685,9 +1825,10 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
           </div>
 
           <div className="card">
-            <h3>start a new story</h3>
+            <h3>start a new book</h3>
             <p className="hint">
-              A fresh playthrough of the same world — same canon, no history. Currently at scene/turn {currentSceneTurn}.
+              A fresh playthrough of <em>this</em> world — same canon, no history. To start a different world
+              instead, add one above. Currently at scene/turn {currentSceneTurn}.
             </p>
             <button
               className="primary"
@@ -1697,7 +1838,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                 await load();
               })}
             >
-              new story
+              new book
             </button>
           </div>
 
@@ -1737,21 +1878,21 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
           ) : null}
 
           <div className="card">
-            <h3>discard this world</h3>
+            <h3>empty this world</h3>
             <p className="hint warn">
-              Wipes every story in this file, and canon with them, so the setup wizard can run again from
-              scratch. Unlike everything above, this cannot be undone by opening another story — there will not
-              be one.
+              Wipes every book in <em>this</em> world, and its canon with them, so the setup wizard can run
+              again from scratch. The world file stays (under the same name); it is its contents that go. To
+              remove a world outright, use its delete button above.
             </p>
             <button
               className="warn"
               onClick={async () => {
-                if (!window.confirm('Discard this world and everything that happened in it — every story, and canon?')) return;
+                if (!window.confirm('Empty this world — every book in it, and its canon? The world itself stays, but nothing in it will.')) return;
                 await api.setup.reset();
                 onResetToWizard();
               }}
             >
-              discard world &amp; start over
+              empty world &amp; start over
             </button>
           </div>
         </div>

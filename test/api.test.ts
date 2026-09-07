@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import { CurrentStory, World } from '../src/store/index.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CurrentStory, CurrentWorld, World } from '../src/store/index.ts';
+import { createWorldFile } from '../src/store/worlds.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
@@ -571,5 +575,162 @@ test('every route the web client demands is actually served', async () => {
     const served = new Set(body.routes as string[]);
     const missing = REQUIRED_ROUTES.filter((r) => !served.has(r));
     assert.deepEqual(missing, [], `the client would warn about routes that do exist: ${missing.join(', ')}`);
+  });
+});
+
+// ------------------------------------------------------------------- worlds
+//
+// The file-level layer. Unlike the story routes, these need a real directory on
+// disk, because a world *is* a directory — so this harness uses a temp root
+// rather than `:memory:`.
+
+async function withWorldServer(
+  fn: (base: string, cw: CurrentWorld, root: string) => Promise<void>,
+) {
+  const root = mkdtempSync(join(tmpdir(), 'fabulist-api-worlds-'));
+  createWorldFile('First World', root);
+  const cw = CurrentWorld.open('first-world', root);
+  const engine = new Engine({ world: cw.world, providers: new ProviderRegistry(new MockProvider()) });
+  const server = createApiServer({
+    world: cw.world,
+    engine,
+    currentStory: cw.stories(),
+    currentWorld: cw,
+    dataRoot: root,
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await fn(`http://127.0.0.1:${port}`, cw, root);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    cw.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('the worlds list flags which one is open', async () => {
+  await withWorldServer(async (base) => {
+    await send(base, 'POST', '/api/worlds', { title: 'Second World' });
+    const { status, body } = await get(base, '/api/worlds');
+    assert.equal(status, 200);
+    const { current, worlds } = body as { current: string; worlds: Array<{ slug: string; current: boolean }> };
+    assert.equal(current, 'first-world');
+    // The whole point: without a per-row flag the UI cannot tell the open world
+    // from the others, which is what made switching look like it did not exist.
+    assert.deepEqual(
+      worlds.filter((w) => w.current).map((w) => w.slug),
+      ['first-world'],
+    );
+    assert.equal(worlds.length, 2);
+  });
+});
+
+test('creating a world does not switch to it', async () => {
+  await withWorldServer(async (base, cw) => {
+    const { status } = await send(base, 'POST', '/api/worlds', { title: 'Elsewhere' });
+    assert.equal(status, 201);
+    // An accidental click must not navigate away from an in-progress scene.
+    assert.equal(cw.slug(), 'first-world', 'still in the world we were reading');
+  });
+});
+
+test('switching worlds takes effect on the very next request', async () => {
+  await withWorldServer(async (base, cw, root) => {
+    // Give the second world distinct canon, so a leak would be visible.
+    const other = createWorldFile('Other', root);
+    const w = World.open(other.dbPath, undefined, other.imagesDir);
+    w.graph.upsert({ id: 'char:zed', type: 'Character', name: 'Zed' }, 'canon');
+    w.chronicle.setMeta('worldTitle', 'Other');
+    w.close();
+
+    const before = await get(base, '/api/state');
+    assert.notEqual((before.body as { worldTitle: string }).worldTitle, 'Other');
+
+    const sw = await send(base, 'POST', '/api/worlds/other/switch');
+    assert.equal(sw.status, 200);
+    assert.equal(cw.slug(), 'other');
+
+    // Through the plain `world` getter every route holds — not via cw directly.
+    const after = await get(base, '/api/state');
+    assert.equal((after.body as { worldTitle: string }).worldTitle, 'Other', 'no restart needed');
+  });
+});
+
+test('switching to a world that does not exist 404s and changes nothing', async () => {
+  await withWorldServer(async (base, cw) => {
+    const { status } = await send(base, 'POST', '/api/worlds/ghost/switch');
+    assert.equal(status, 404);
+    assert.equal(cw.slug(), 'first-world');
+    // The server must still be serving: a close-then-fail-to-open would leave
+    // every later request broken until a restart.
+    const state = await get(base, '/api/state');
+    assert.equal(state.status, 200, 'the open world still answers');
+  });
+});
+
+test('a world cannot be deleted while it is open', async () => {
+  await withWorldServer(async (base) => {
+    await send(base, 'POST', '/api/worlds', { title: 'Spare' });
+    const { status, body } = await send(base, 'DELETE', '/api/worlds/first-world');
+    assert.equal(status, 409);
+    assert.match((body as { error: string }).error, /currently open/);
+  });
+});
+
+test('the only world cannot be deleted, so there is always somewhere to land', async () => {
+  await withWorldServer(async (base) => {
+    const { status, body } = await send(base, 'DELETE', '/api/worlds/first-world');
+    assert.equal(status, 409);
+    assert.match((body as { error: string }).error, /only world/);
+  });
+});
+
+test('deleting another world removes it from the list', async () => {
+  await withWorldServer(async (base) => {
+    await send(base, 'POST', '/api/worlds', { title: 'Doomed' });
+    const del = await send(base, 'DELETE', '/api/worlds/doomed');
+    assert.equal(del.status, 200);
+    const { body } = await get(base, '/api/worlds');
+    assert.deepEqual((body as { worlds: Array<{ slug: string }> }).worlds.map((w) => w.slug), ['first-world']);
+  });
+});
+
+test('renaming a world updates the title reported by state', async () => {
+  await withWorldServer(async (base) => {
+    const { status } = await send(base, 'PUT', '/api/worlds/first-world/title', { title: 'Renamed' });
+    assert.equal(status, 200);
+    const { body } = await get(base, '/api/state');
+    assert.equal((body as { worldTitle: string }).worldTitle, 'Renamed');
+  });
+});
+
+test('world routes 503 when the server has no CurrentWorld configured', async () => {
+  await withServer(async (base) => {
+    // Same contract as the story routes: a server built without world
+    // management says so plainly rather than 404ing or half-working.
+    for (const [method, path] of [
+      ['POST', '/api/worlds'],
+      ['POST', '/api/worlds/x/switch'],
+      ['DELETE', '/api/worlds/x'],
+    ] as const) {
+      const { status } = await send(base, method, path, {});
+      assert.equal(status, 503, `${method} ${path}`);
+    }
+  });
+});
+
+test('the stories list flags the one being read', async () => {
+  await withMultiStoryServer(async (base, world) => {
+    const created = await send(base, 'POST', '/api/stories', { title: 'another' });
+    const { body } = await get(base, '/api/stories');
+    const rows = body as Array<{ id: string; current: boolean }>;
+    assert.equal(rows.length, 2);
+    assert.deepEqual(
+      rows.filter((r) => r.current).map((r) => r.id),
+      [world.storyId],
+      'exactly the open story is flagged, so the UI can stop showing identical rows',
+    );
+    assert.ok(rows.some((r) => r.id === (created.body as { id: string }).id));
   });
 });

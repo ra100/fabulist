@@ -11,7 +11,7 @@
  * migration changes what is underneath that property, not what callers do
  * with it.
  */
-import { openDb, type Db } from '../db/db.ts';
+import { checkpoint, openDb, type Db } from '../db/db.ts';
 import type { StoryId } from '../domain/types.ts';
 import { GraphStore } from './graph.ts';
 import { CastStore } from './cast.ts';
@@ -25,6 +25,7 @@ import {
   getStory,
   resolveDefaultStory,
 } from './world.ts';
+import { isWorldDir, pathsFor } from './worlds.ts';
 
 export class World {
   readonly graph: GraphStore;
@@ -111,6 +112,141 @@ export class CurrentStory {
   switchTo(storyId: StoryId): void {
     if (!getStory(this.db, storyId)) throw new Error(`no story ${storyId} in this world`);
     this.storyId = storyId;
+  }
+
+  /**
+   * Rebinds to a different open database — the story half of a *world* switch.
+   *
+   * Exists so `CurrentWorld` can swap the file without anything downstream
+   * holding a stale handle. Deliberately takes an already-open `Db` and an
+   * already-resolved story id rather than a path: opening files and deciding
+   * which story to land on is `CurrentWorld`'s job, and duplicating that here
+   * would give two places the power to open a database.
+   */
+  rebind(db: Db, storyId: StoryId, imagesDir?: string): void {
+    if (!getStory(db, storyId)) throw new Error(`no story ${storyId} in that world`);
+    this.db = db;
+    this.storyId = storyId;
+    this.imagesDir = imagesDir;
+  }
+}
+
+/**
+ * Server-level "which world file is current" — `CurrentStory` one level up.
+ *
+ * `CurrentStory` solved switching *within* a file, which needs no I/O: the
+ * database handle stays put and only a `story_id` changes. A world switch is a
+ * genuinely different operation, because a world *is* the file. There is no
+ * cross-file query, so the old handle must be closed and a new one opened, and
+ * everything holding the old one has to notice.
+ *
+ * Which is why this owns a `CurrentStory` rather than sitting beside one. Every
+ * long-lived consumer — `Engine`, `SetupService`, `IllustrationService`, and
+ * every plain route in `api.ts` — already resolves `world` through a getter for
+ * story switching. Pointing that single getter at a `CurrentStory` this class
+ * rebinds means a world switch reuses the seam that already exists and is
+ * already tested, instead of adding a parallel one that each consumer would
+ * have to opt into (and that new code would forget).
+ *
+ * `dbPath` in config stays unpatchable, and is now only the *boot* choice; it
+ * is no longer the answer to "which world am I in".
+ */
+export class CurrentWorld {
+  private dataRoot: string;
+  private slugValue: string;
+  private db: Db;
+  private story: CurrentStory;
+
+  private constructor(dataRoot: string, slug: string, db: Db, story: CurrentStory) {
+    this.dataRoot = dataRoot;
+    this.slugValue = slug;
+    this.db = db;
+    this.story = story;
+  }
+
+  /** Opens a world by slug and binds to its default story. */
+  static open(slug: string, dataRoot = 'data'): CurrentWorld {
+    const paths = pathsFor(slug, dataRoot);
+    if (!isWorldDir(paths.dir)) throw new Error(`no world "${slug}"`);
+    const db = openDb(paths.dbPath);
+    const story = new CurrentStory(db, resolveDefaultStory(db), paths.imagesDir);
+    return new CurrentWorld(dataRoot, slug, db, story);
+  }
+
+  /** The story pointer to hand to `createApiServer`, `Engine`, and friends. */
+  stories(): CurrentStory {
+    return this.story;
+  }
+
+  /** The getter every consumer holds. Survives both story and world switches. */
+  world = (): World => this.story.world();
+
+  slug(): string {
+    return this.slugValue;
+  }
+
+  /**
+   * Closes the current file and opens another, rebinding the shared
+   * `CurrentStory` so existing consumers follow along.
+   *
+   * Order matters and is the whole point of this method. The new database is
+   * opened and its default story resolved *before* anything is closed, so a
+   * switch to a missing or corrupt world throws with the old world still open
+   * and fully usable — the alternative (close, then fail to open) leaves the
+   * server holding a closed handle and every subsequent request failing, which
+   * is unrecoverable without a restart.
+   *
+   * A checkpoint precedes the close so the world being left behind is a single
+   * tidy file rather than one carrying a multi-megabyte `-wal` (see `db.ts`),
+   * which matters now that leaving a world is a routine click rather than a
+   * process exit.
+   */
+  switchTo(slug: string): void {
+    if (slug === this.slugValue) return;
+    const paths = pathsFor(slug, this.dataRoot);
+    if (!isWorldDir(paths.dir)) throw new Error(`no world "${slug}"`);
+
+    const nextDb = openDb(paths.dbPath);
+    let nextStoryId: StoryId;
+    try {
+      nextStoryId = resolveDefaultStory(nextDb);
+    } catch (err) {
+      // Leave the old world untouched: a world with several stories and no
+      // recorded "current" one is a legitimate state we simply cannot
+      // auto-resolve, and it must not cost the player their open session.
+      nextDb.close();
+      throw err;
+    }
+
+    const previous = this.db;
+    this.db = nextDb;
+    this.slugValue = slug;
+    this.story.rebind(nextDb, nextStoryId, paths.imagesDir);
+
+    checkpoint(previous);
+    previous.close();
+  }
+
+  /**
+   * Re-resolves the current world in place — used after an operation replaced
+   * the story rows underneath (`SetupService.reset`) or renamed the directory.
+   */
+  reopen(slug = this.slugValue): void {
+    const paths = pathsFor(slug, this.dataRoot);
+    if (!isWorldDir(paths.dir)) throw new Error(`no world "${slug}"`);
+    const nextDb = openDb(paths.dbPath);
+    const nextStoryId = resolveDefaultStory(nextDb);
+    const previous = this.db;
+    this.db = nextDb;
+    this.slugValue = slug;
+    this.story.rebind(nextDb, nextStoryId, paths.imagesDir);
+    checkpoint(previous);
+    previous.close();
+  }
+
+  close(): void {
+    checkpoint(this.db);
+    this.db.close();
   }
 }
 

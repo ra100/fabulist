@@ -230,7 +230,10 @@ you the composed prompt to paste elsewhere.
 
 Two fields are deliberately not editable at runtime. `dbPath` would leave the UI talking to
 a database the engine is not using, and a context window below 64k is refused outright
-rather than accepted into a frame budget that assumes it.
+rather than accepted into a frame budget that assumes it. `dbPath` is now only the *boot*
+choice and the migration source: worlds live in `data/worlds/<slug>/`, and switching between
+them at runtime goes through **library → worlds**, which closes one database and opens
+another rather than editing config.
 
 Provider setup is part of first run, not something to discover afterwards. The wizard's
 first screen states which model will write, and **set up a model…** opens a step with the
@@ -625,10 +628,21 @@ Node 24 runs TypeScript directly, so there is no backend build step. That rules 
 - **Multiple stories per world.** A world file can hold more than one independent
   playthrough — canon shared, everything else isolated per `story_id` — with a
   same-file fork primitive (`forkStory`) for both a fresh new story and a
-  scene-boundary continuation of an existing one, reachable end to end: a "stories"
+  scene-boundary continuation of an existing one, reachable end to end: a "library"
   tab in the UI replaces the old destructive "new" button, and `POST
   /api/stories/:id/switch` takes effect on the very next request with no restart.
-  What is not fixed: opening a *different world file* (a different fandom entirely)
-  still means editing config and restarting. See `.design/GAPS.md` §2.3 for the full
-  account, including a real id-collision bug found and fixed in the fork's
-  copy-forward (nothing had tested that path before it shipped).
+  See `.design/GAPS.md` §2.3 for the full account, including a real id-collision bug
+  found and fixed in the fork's copy-forward (nothing had tested that path before it
+  shipped).
+- **Multiple worlds.** Opening a *different* world — a different fandom entirely —
+  no longer means editing config and restarting. A world is now a self-contained
+  directory (`data/worlds/<slug>/world.db` plus its own `images/`), discovered by
+  scanning rather than tracked in an index that could disagree with the disk, and
+  `CurrentWorld` swaps the database handle live: `POST /api/worlds/:slug/switch`
+  closes one file and opens another, and every consumer follows because they all
+  resolve through the same story getter that already existed for story switching.
+  Both axes are in the "library" tab, each row stating whether it is the open one —
+  the absence of that marker, not the absence of the feature, was what made
+  switching look impossible. Creating a world leaves the current one untouched and
+  starts empty, so switching into it opens the setup wizard; a pre-existing
+  `data/fabulist.db` is migrated into the new layout automatically on first boot.

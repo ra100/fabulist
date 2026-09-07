@@ -93,9 +93,21 @@ export interface Knobs {
   npcAgency: number; propagationDepth: number; ignoranceBudget: number; proseDensity: number;
 }
 
+export interface WorldSummary {
+  slug: string;
+  title: string;
+  storyCount: number;
+  entityCount: number;
+  lastPlayedAt: string;
+  bytes: number;
+  current: boolean;
+}
+
 export interface Story {
   id: string;
   title: string;
+  /** Server-supplied rather than derived: see `GET /api/stories`. */
+  current?: boolean;
   scene: number;
   turn: number;
   playerCharacterId: string;
@@ -443,6 +455,11 @@ export const REQUIRED_ROUTES = [
   'POST /api/stories/:id/switch',
   'PUT /api/stories/:id/title',
   'DELETE /api/stories/:id',
+  'GET /api/worlds',
+  'POST /api/worlds',
+  'POST /api/worlds/:slug/switch',
+  'PUT /api/worlds/:slug/title',
+  'DELETE /api/worlds/:slug',
   'GET /api/images/providers',
   'POST /api/images/profile',
 ] as const;
@@ -617,6 +634,19 @@ export const api = {
     switchTo: (id: string) => post<{ current: string }>(`/stories/${encodeURIComponent(id)}/switch`),
     rename: (id: string, title: string) => put<{ id: string; title: string }>(`/stories/${encodeURIComponent(id)}/title`, { title }),
     remove: (id: string) => req<{ ok: boolean }>(`/stories/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  },
+
+  /**
+   * Worlds are files; stories are rows inside one. Switching a world closes one
+   * database and opens another, so unlike a story switch it invalidates every
+   * cached view — callers should refetch state wholesale afterwards.
+   */
+  worlds: {
+    list: () => req<{ current: string | null; worlds: WorldSummary[] }>('/worlds'),
+    create: (title?: string) => post<WorldSummary>('/worlds', title ? { title } : {}),
+    switchTo: (slug: string) => post<{ current: string }>(`/worlds/${encodeURIComponent(slug)}/switch`),
+    rename: (slug: string, title: string) => put<WorldSummary>(`/worlds/${encodeURIComponent(slug)}/title`, { title }),
+    remove: (slug: string) => req<{ ok: boolean }>(`/worlds/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
   },
 
   setup: {
