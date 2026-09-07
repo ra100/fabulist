@@ -28,6 +28,7 @@ import { ConfigPanels } from './views/ConfigPanels.tsx';
 import { AppearanceEditor, PortraitPanel, SceneIllustration, StylePicker } from './views/Illustration.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
+import { MarkFull } from './MarkFull.tsx';
 
 type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'library' | 'settings';
 
@@ -124,7 +125,10 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <h1>
-          <Mark size={14} />
+          {/* The full lockup, not the inline glyph, and deliberately taller than the
+              18px title: it stands as a logo rather than an ornament beside a word.
+              Four paragraph lines rather than the icon's ten — see MarkFull.tsx. */}
+          <MarkFull height={30} />
           {state?.worldTitle ?? 'Fabulist'}
         </h1>
         {state ? (

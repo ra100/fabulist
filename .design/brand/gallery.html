@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fabulist — icon drafts</title>
+<link id="fav" rel="icon" type="image/svg+xml" href="icon-marginalia-page-16.svg" />
+<style>
+  /* Chronicle preset, transcribed — see build.py's token block. */
+  :root {
+    --ground:#0c0a07; --s1:#171310; --s2:#201d18; --s3:#2b2722;
+    --rule:#37322c; --rule2:#4d4740;
+    --ink:#ede7de; --ink2:#b0aaa0; --ink3:#948d84;
+    --gold:#e9b452; --gold-m:#bd8f41; --rubric:#d6715e;
+    --sans:Seravek,"Avenir Next",-apple-system,system-ui,sans-serif;
+    --mono:"PT Mono","SF Mono",Menlo,ui-monospace,monospace;
+    --serif:"Hoefler Text","Iowan Old Style",Charter,Georgia,serif;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:0 32px 80px; background:var(--ground); color:var(--ink2);
+    font:13px/1.5 var(--sans);
+  }
+  header {
+    position:sticky; top:0; z-index:10; margin:0 -32px 34px; padding:14px 32px;
+    background:var(--s1); border-bottom:1px solid var(--rule);
+    box-shadow:inset 0 1px 0 rgb(255 255 255 / .04);
+    display:flex; align-items:center; gap:28px; flex-wrap:wrap;
+  }
+  h1 { font:600 17px/1 var(--serif); letter-spacing:-.01em; margin:0; color:var(--ink); }
+  h1 b { color:var(--gold); font-weight:600; }
+  h2 {
+    font:400 11px/1 var(--sans); letter-spacing:.1em; text-transform:uppercase;
+    color:var(--gold); margin:44px 0 4px;
+  }
+  h2 + .sub { font:11px/1.4 var(--mono); color:var(--rule2); margin:0 0 18px;
+               padding-bottom:12px; border-bottom:1px solid var(--rule); }
+  .ctl { display:flex; align-items:center; gap:7px; }
+  .ctl span { font:10px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase; color:var(--ink3); }
+  button {
+    font:11px/1 var(--sans); color:var(--ink2); background:var(--s2);
+    border:1px solid var(--rule); border-radius:5px; padding:6px 10px; cursor:pointer;
+  }
+  button:hover { color:var(--ink); border-color:var(--rule2); }
+  button[aria-pressed="true"] { color:var(--ground); background:var(--gold); border-color:var(--gold); }
+
+  /* the swatch each icon sits on — this is what the background toggle changes */
+  .grid { display:flex; flex-wrap:wrap; gap:34px; }
+  figure { margin:0; }
+  .pad {
+    display:flex; align-items:flex-end; gap:12px; padding:14px;
+    border-radius:9px; background:var(--bg-swatch, transparent);
+    border:1px solid var(--bg-border, transparent);
+  }
+  figcaption { margin-top:9px; font:11px/1.45 var(--mono); color:var(--ink3); }
+  figcaption em { display:block; font-style:normal; color:var(--rule2); font-size:10px; }
+  figcaption.pick { color:var(--gold); }
+  figcaption.pick em { color:var(--gold-m); }
+  .n { font:9px/1 var(--mono); color:var(--rule2); text-align:center; margin-top:5px; }
+  img { display:block; }
+  .zoom img { image-rendering:pixelated; }
+  .row { display:flex; align-items:flex-end; gap:10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Fabulist · <b>icon drafts</b></h1>
+  <div class="ctl">
+    <span>ground</span>
+    <button data-bg="none" aria-pressed="true">app</button>
+    <button data-bg="light">light chrome</button>
+    <button data-bg="mid">mid grey</button>
+    <button data-bg="dark">black</button>
+  </div>
+  <div class="ctl">
+    <span>this tab's favicon</span>
+    <button data-fav="icon-marginalia-page-16.svg" aria-pressed="true">small tier</button>
+    <button data-fav="icon-marginalia-page.svg">master</button>
+    <button data-fav="icon-marginalia-page-engraved-16.svg">engraved small</button>
+    <button data-fav="icon-nib.svg">nib</button>
+    <button data-fav="icon-rubric.svg">rubric</button>
+  </div>
+</header>
+
+<div id="out"></div>
+
+<script>
+const PICK = 'marginalia-page';
+
+const DRAFTS = [
+  ['nib', 'the instrument, alone'],
+  ['rubric', 'the rubricated initial'],
+  ['strata', 'prose is a view, the graph is underneath'],
+  ['gauge', 'the instrument scale, one lamp'],
+  ['folio', 'the folio marginal + bookmark'],
+  ['seal', 'monastic seal × instrument dial'],
+];
+const JOKE = [
+  ['marginalia-1', 'plausible · 18°'],
+  ['marginalia-2', 'noticeable · upright'],
+  ['marginalia-3', 'not subtle · full almond'],
+  ['marginalia-flagged', 'flagged: diverged from canon'],
+  ['marginalia-page', 'doodle in the margin of a page'],
+  ['marginalia-page-engraved', 'the same, engraved'],
+];
+
+const el = (h) => { const d = document.createElement('div'); d.innerHTML = h.trim(); return d.firstChild; };
+const img = (src, s) => `<img src="${src}" width="${s}" height="${s}" alt="">`;
+
+function tile(name, note, sizes, isPick) {
+  const small = `icon-${name}-16.svg`;
+  return `<figure><div class="pad">` +
+    sizes.map(s => `<div>${img(`icon-${name}.svg`, s)}<div class="n">${s}</div></div>`).join('') +
+    `</div><figcaption class="${isPick ? 'pick' : ''}">${name}${isPick ? ' · THE PICK' : ''}<em>${note}</em></figcaption></figure>`;
+}
+
+function section(title, sub, items, sizes) {
+  return `<h2>${title}</h2><p class="sub">${sub}</p><div class="grid">` +
+    items.map(([n, note]) => tile(n, note, sizes, n === PICK)).join('') + `</div>`;
+}
+
+const out = document.getElementById('out');
+
+// ---- the pick, in its tiers -------------------------------------------------
+out.append(el(`<div>
+  <h2>The pick — ${PICK}</h2>
+  <p class="sub">master serves 512 / 180 / 96 · below 48 it needs its own drawing</p>
+  <div class="grid">
+    <figure><div class="pad">
+      <div>${img(`icon-${PICK}.svg`, 512)}<div class="n">512</div></div>
+      <div>${img(`icon-${PICK}.svg`, 180)}<div class="n">180</div></div>
+      <div>${img(`icon-${PICK}.svg`, 96)}<div class="n">96</div></div>
+      <div>${img(`icon-${PICK}.svg`, 64)}<div class="n">64 · dying</div></div>
+      <div>${img(`icon-${PICK}.svg`, 48)}<div class="n">48 · slab</div></div>
+    </div><figcaption class="pick">master<em>at 64 the paragraph stops being text; at 48 it is a grey slab</em></figcaption></figure>
+  </div>
+</div>`));
+
+// ---- the small tier, magnified so the pixels show --------------------------
+const SMALLS = [
+  [`icon-${PICK}-16.svg`, "the master's nib isolated: same gold, same collar, same cut", true],
+  ['icon-marginalia-page-engraved-16.svg', 'the engraved variant\u2019s sibling \u2014 bone, so its lamp reads', false],
+];
+out.append(el(`<div>
+  <h2>Small tier — 48 and below</h2>
+  <p class="sub">each size shown at native scale, then ×4 nearest-neighbour so the pixels are visible</p>
+  <div class="grid">` +
+  SMALLS.map(([src, note, good]) => `<figure><div class="pad">` +
+    [48, 32, 24, 16].map(s =>
+      `<div class="row"><div>${img(src, s)}<div class="n">${s}</div></div>` +
+      `<div class="zoom">${img(src, s * 4)}<div class="n">×4</div></div></div>`
+    ).join('') +
+    `</div><figcaption class="${good ? 'pick' : ''}">${src.replace('icon-' + PICK, '…')}<em>${note}</em></figcaption></figure>`).join('') +
+  `</div></div>`));
+
+// ---- the catalogue ---------------------------------------------------------
+out.append(el(`<div>${section('Six drafts', 'each derived from something already in .design/LINEAGE.md', DRAFTS, [128, 48, 32, 16])}</div>`));
+out.append(el(`<div>${section('The marginalia set', 'the joke on purpose, on a dial — referenced by nothing', JOKE, [128, 48, 32, 16])}</div>`));
+
+// ---- controls --------------------------------------------------------------
+const SWATCH = {
+  none:  ['transparent', 'transparent'],
+  light: ['#f9f2ed', '#dcd0c9'],
+  mid:   ['#8c857c', '#6d675f'],
+  dark:  ['#000000', '#222222'],
+};
+document.querySelectorAll('[data-bg]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('[data-bg]').forEach(o => o.setAttribute('aria-pressed', o === b));
+  const [bg, br] = SWATCH[b.dataset.bg];
+  document.documentElement.style.setProperty('--bg-swatch', bg);
+  document.documentElement.style.setProperty('--bg-border', br);
+});
+document.querySelectorAll('[data-fav]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('[data-fav]').forEach(o => o.setAttribute('aria-pressed', o === b));
+  // swap the node rather than the href: some browsers ignore an in-place change
+  const old = document.getElementById('fav');
+  const next = old.cloneNode();
+  next.href = b.dataset.fav + '?' + Date.now();
+  old.replaceWith(next);
+});
+</script>
+</body>
+</html>
