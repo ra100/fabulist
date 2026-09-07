@@ -136,6 +136,16 @@ async function play(
     return;
   }
 
+  if (outcome.kind === 'awaiting-narration') {
+    // Unreachable from this CLI: it never sets `narrateExternally`, which is
+    // the MCP tool path's own option (`src/mcp/tools.ts`), not this one's.
+    // Handled explicitly anyway, rather than narrowed away with an assertion,
+    // so a future caller that *does* start passing the option gets a clear
+    // failure here instead of `outcome.prose` reading as `undefined`.
+    console.log(`${YELLOW}internal error: awaiting external narration, but nothing narrates externally here${RESET}`);
+    return;
+  }
+
   console.log(`\n${outcome.prose}\n`);
 
   const seeded = seedConsequences(world, outcome.delta, outcome.commit.events);

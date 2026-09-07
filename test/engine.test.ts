@@ -42,6 +42,86 @@ test('a plain turn narrates, extracts a delta, and commits an event', async () =
   world.close();
 });
 
+// ----------------------------------------------------- external narration
+
+test('narrateExternally stops before the narrator role and commits nothing yet', async () => {
+  const { world, engine } = setup();
+  const out = await engine.takeTurn('i warm the ink and keep copying', { narrateExternally: true });
+  assert.equal(out.kind, 'awaiting-narration');
+  if (out.kind !== 'awaiting-narration') return;
+
+  assert.ok(out.resumeToken.length > 0);
+  assert.match(out.system, /narrator/i, 'the exact system prompt the in-process Narrator would have used');
+  assert.ok(out.user.length > 0, 'the assembled scene frame, not an empty placeholder');
+  assert.ok(out.maxTokens > 0);
+  assert.equal(world.chronicle.turns().length, 0, 'nothing committed while awaiting narration');
+  assert.equal(world.chronicle.events().length, 0);
+  world.close();
+});
+
+test('commitExternalNarration finishes the turn with prose written elsewhere', async () => {
+  const { world, engine } = setup();
+  const proposal = await engine.takeTurn('i warm the ink and keep copying', { narrateExternally: true });
+  assert.equal(proposal.kind, 'awaiting-narration');
+  if (proposal.kind !== 'awaiting-narration') return;
+
+  const out = await engine.commitExternalNarration(proposal.resumeToken, 'Anselm dips the quill and keeps to his letters.');
+  assert.equal(out.kind, 'narrated');
+  if (out.kind !== 'narrated') return;
+
+  assert.equal(out.prose, 'Anselm dips the quill and keeps to his letters.', 'the externally-written prose, verbatim');
+  assert.ok(out.delta.events.length > 0, 'extract still ran against the real prose');
+  assert.equal(world.chronicle.turns().length, 1);
+  assert.equal(world.chronicle.events().length, out.commit.events.length);
+  world.close();
+});
+
+test('commitExternalNarration throws on an unknown resume token', async () => {
+  const { world, engine } = setup();
+  await assert.rejects(() => engine.commitExternalNarration('not-a-real-token', 'anything'), /no pending narration/i);
+  world.close();
+});
+
+test('commitExternalNarration cannot be replayed against the same token twice', async () => {
+  const { world, engine } = setup();
+  const proposal = await engine.takeTurn('i warm the ink and keep copying', { narrateExternally: true });
+  if (proposal.kind !== 'awaiting-narration') throw new Error('expected awaiting-narration');
+
+  await engine.commitExternalNarration(proposal.resumeToken, 'First telling.');
+  await assert.rejects(
+    () => engine.commitExternalNarration(proposal.resumeToken, 'Second telling.'),
+    /no pending narration/i,
+    'a resume token is single-use, like the id it will become is not reusable',
+  );
+  world.close();
+});
+
+test('a vow breach still interrupts before narrateExternally ever gets a say', async () => {
+  const { world, engine } = setup();
+  // Same gate, same refusal, regardless of which side is meant to narrate —
+  // the integrity gate runs well before the narrateExternally branch.
+  const out = await engine.takeTurn('i stab the captain', { narrateExternally: true });
+  assert.equal(out.kind, 'interrupted');
+  world.close();
+});
+
+test('overrideIntegrity carries through an external-narration resume, same as the in-process path', async () => {
+  const { world, engine } = setup();
+  const blocked = await engine.takeTurn('i stab the captain', { narrateExternally: true });
+  assert.equal(blocked.kind, 'interrupted');
+
+  const proposal = await engine.takeTurn('i stab the captain', { narrateExternally: true, overrideIntegrity: true });
+  assert.equal(proposal.kind, 'awaiting-narration');
+  if (proposal.kind !== 'awaiting-narration') return;
+
+  const out = await engine.commitExternalNarration(proposal.resumeToken, 'Anselm drives the blade home, and something in him breaks with it.');
+  assert.equal(out.kind, 'narrated');
+  if (out.kind !== 'narrated') return;
+
+  assert.equal(out.commit.brokenVows.length, 1, 'the vow break was recorded on resume, exactly as the in-process path records it');
+  world.close();
+});
+
 test('every role that ran is logged with its token counts', async () => {
   const { world, engine } = setup();
   const out = await engine.takeTurn('i keep copying');

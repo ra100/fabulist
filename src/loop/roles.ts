@@ -319,7 +319,16 @@ export async function direct(deps: RoleDeps, rawInput: string): Promise<Director
 
 // ------------------------------------------------------------------ narrator
 
-function narratorSystem(style: StyleContract, verbatim: boolean): string {
+/**
+ * Exported (unlike the other role prompt builders) so a caller that skips the
+ * narrator role entirely — an MCP tool handing the frame to an external
+ * model, see `src/mcp/` — can still show that model the exact system prompt
+ * the in-process Narrator would have used. Keeping this identical between
+ * the two paths is what makes the style contract mean the same thing whether
+ * the prose comes from this engine's own provider or from whatever wrote it
+ * on the other end of an MCP tool call.
+ */
+export function narratorSystem(style: StyleContract, verbatim: boolean): string {
   return `You are the narrator of a role-play session. You write prose and nothing else.
 
 You do not invent world facts. Render what the referee and director already
@@ -351,6 +360,33 @@ genre: ${style.genreLens}
 target: about ${style.sceneTarget} words`;
 }
 
+/**
+ * Assembles exactly what the narrator role would send a provider, without
+ * sending it. Exported for the MCP tool path (`src/mcp/tools.ts`), which
+ * skips this engine's own Narrator role and hands an external model
+ * (whatever wrote the request — Claude, ChatGPT, anything else speaking MCP)
+ * the identical system prompt and scene frame instead, so the style contract
+ * is honoured the same way regardless of which model ends up writing the
+ * prose. `narrate()` below is now a thin wrapper: build the prompt, send it,
+ * log the call — kept as one function for every caller that still wants the
+ * engine to narrate for itself.
+ */
+export function buildNarratorPrompt(
+  deps: RoleDeps,
+  rawInput: string,
+  agreedBeat: string,
+  verbatim: boolean,
+): { system: string; user: string; maxTokens: number } {
+  const ctx = deps.ctx('narrate', { rawInput, agreedBeat });
+  const frame = buildNarratorFrame(ctx);
+  const style = ctx.session.style;
+  return {
+    system: narratorSystem(style, verbatim),
+    user: frame.text,
+    maxTokens: Math.max(512, Math.ceil(style.sceneTarget * 2)),
+  };
+}
+
 export async function narrate(
   deps: RoleDeps,
   rawInput: string,
@@ -358,19 +394,17 @@ export async function narrate(
   verbatim: boolean,
   onToken?: (chunk: string) => void,
 ): Promise<string> {
-  const ctx = deps.ctx('narrate', { rawInput, agreedBeat });
-  const frame = buildNarratorFrame(ctx);
+  const { system, user, maxTokens } = buildNarratorPrompt(deps, rawInput, agreedBeat, verbatim);
   const provider = deps.provider('narrate');
-  const style = ctx.session.style;
 
   const req = adaptRequest(
     {
       messages: [
-        { role: 'system', content: narratorSystem(style, verbatim) },
-        { role: 'user', content: frame.text },
+        { role: 'system', content: system },
+        { role: 'user', content: user },
       ],
       role: 'narrate',
-      maxTokens: Math.max(512, Math.ceil(style.sceneTarget * 2)),
+      maxTokens,
       temperature: 0.8,
       ...(onToken ? { onToken } : {}),
     },

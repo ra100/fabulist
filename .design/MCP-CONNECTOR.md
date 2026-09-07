@@ -1,5 +1,14 @@
 # MCP + Connector — bring-your-own-chat as a third distribution channel
 
+**Status: implemented and verified against a real WorkOS AuthKit account, not just
+mocks.** A real browser flow (registered a real DCR client, signed in with a real
+email, approved a real OAuth consent screen) produced a real access token, and that
+exact token was verified by this repo's own unmodified `src/mcp/auth.ts` and accepted
+by a real running `/mcp` server with a real `200 OK` `initialize` response — see
+"Verified live against a real account" below for the full trace. Not yet deployed
+anywhere real, and no `oauth_clients`/`oauth_tokens` schema or per-user web identity
+exists yet — see "What's actually built" for the precise line.
+
 Companion to `.design/SAAS-MULTIUSER.md`, not a replacement for it. That document
 covers the hosted web app (login, shared canon, OpenRouter billing, Docker/npm
 distribution). This one covers a different, additive surface: **Claude, ChatGPT, and
@@ -20,6 +29,134 @@ server, which is not optional per the MCP spec and is the one piece worth taking
 seriously before starting.
 
 ---
+
+## What's actually built · done
+
+Implemented and verified — not just the plan below, real code with real tests:
+
+- **`src/loop/engine.ts`**: `TakeTurnOptions.narrateExternally` stops a turn right
+  after Direct and returns `{ kind: 'awaiting-narration', resumeToken, system, user,
+  maxTokens }` — the exact material the in-process Narrator role would have sent a
+  provider (`roles.ts`'s new `buildNarratorPrompt`), without calling this engine's own
+  configured provider at all. `Engine.commitExternalNarration(resumeToken, prose)`
+  resumes with externally-written prose and runs the same prose-gate/extract/
+  validate/commit steps a normal turn runs (`finishTurn`, shared code, not a
+  parallel path that could drift). Pending state lives in an in-memory `Map` with a
+  10-minute TTL, swept lazily — no new schema, no cross-process concern, because MCP
+  tool calls hit the same long-lived server process the engine already lives in.
+- **`src/mcp/tools.ts`**: every read tool from the table below (`list_worlds`
+  through `get_book`), plus `propose_turn`/`commit_narration`/`resolve_interrupt`,
+  as plain functions over `World`/`Engine` — no MCP protocol types, independently
+  testable (`test/mcp-tools.test.ts`, 15 tests).
+- **`src/mcp/auth.ts`**: two modes, resolved once from environment
+  (`MCP_OAUTH_ISSUER`/`MCP_OAUTH_AUDIENCE` for real OAuth against any RFC
+  8414-compliant issuer — AuthKit included; `MCP_DEV_TOKEN` for a single static
+  bearer secret with a constant-time comparison, mapping to a fixed `dev` pseudo-user).
+  Neither configured means `/mcp` is not mounted at all — never mounted-but-
+  unauthenticated. Verified against a real local JWKS server and real signed JWTs
+  (`test/mcp-auth.test.ts`, 13 tests: right issuer, wrong issuer, wrong audience,
+  expired, missing subject claim, all independently checked).
+- **`src/mcp/server.ts`**: wraps `tools.ts` in the official
+  `@modelcontextprotocol/sdk`'s `McpServer` + `StreamableHTTPServerTransport`, one
+  fresh instance per request (stateless mode — this server's actual state is the
+  SQLite world files and the engine's own pending-narration map, not an MCP
+  session). Verifies the bearer token before the SDK ever sees the request; the
+  verified user id flows into every tool call via `extra.authInfo`.
+- **`src/server/api.ts` / `src/cli/serve.ts`**: `/mcp` and
+  `/.well-known/oauth-protected-resource` mounted only when `mcpAuth` *and* a real,
+  externally-reachable `mcpResourceUrl` are both present. `serve.ts` refuses to guess
+  a default resource URL under `--host=0.0.0.0` (the Docker default) — confirmed
+  directly by running the built image and watching a real client get handed an
+  unreachable `resource_metadata="http://0.0.0.0:.../..."` before this guard existed;
+  `MCP_RESOURCE_URL` must be set explicitly for any non-localhost deployment, or
+  `/mcp` does not mount, with a clear boot-log error explaining why.
+- **`test/mcp-e2e.test.ts`**: the proof that the pieces above actually fit together —
+  a real `createApiServer` on a real port, a real MCP client (the same SDK Claude/
+  ChatGPT use) connecting over real Streamable HTTP, listing tools, calling
+  `propose_turn` on both an ordinary action and a vow-breaching one, resolving the
+  interrupt via `resolve_interrupt`, and completing via `commit_narration` — 7 tests,
+  all passing. Also verified by hand against the actual built Docker image with curl:
+  a missing token gets a 401 with a correct `WWW-Authenticate`, a correct token gets
+  a real `initialize` response, and the protected-resource metadata reflects a real
+  externally-reachable URL once `MCP_RESOURCE_URL` is set.
+- **736 total tests pass** (up from 695 before this work), `tsc --noEmit` clean,
+  zero new lint findings, Docker build verified end-to-end with the new dependencies
+  (`@modelcontextprotocol/sdk`, `jose`, `zod`).
+
+**Not built, and deliberately out of scope for this pass** (per §2/§6 below, both
+require `SAAS-MULTIUSER.md`'s identity work first, which does not exist yet):
+
+- Any real multi-user web identity — `MCP_DEV_TOKEN`'s `dev` pseudo-user is a
+  single-operator stand-in, not a many-user auth system. Wiring a real AuthKit (or
+  equivalent) account and setting `MCP_OAUTH_ISSUER` against it is an operational
+  step, not code — the `buildOAuthAuth` path is already implemented and tested
+  against a real JWKS/JWT flow, it has simply never been pointed at a real account.
+- `oauth_clients`/`oauth_tokens` schema, and tying a verified token's `userId` to
+  this app's own `world_access`/`stories.owner_user_id` rows (§2) — there is no
+  `users` table yet for it to tie to.
+- The ChatGPT `search`/`fetch` compatibility pair (§4) — optional polish, not
+  attempted.
+- Deployment: `fabulist.rast.io`'s nginx config still IP-allowlists everything, and
+  this work has not touched it. `/mcp` exists and works; nothing has exposed it
+  publicly anywhere.
+
+---
+
+## Verified live against a real account · done
+
+Not a mock JWKS server this time — an actual, complete, human-in-the-loop OAuth
+authorization-code flow against the real `WORKOS_API_KEY`/`WORKOS_CLIENT_ID` in
+`.env`, `MCP_OAUTH_ISSUER` pointed at the real AuthKit domain
+`https://fastidious-attic-52.authkit.app`:
+
+1. **Dynamic Client Registration was found disabled**, live: `POST /oauth2/register`
+   returned `dynamic_client_registration_disabled` on first check. This is a WorkOS
+   Dashboard → Connect → Configuration setting, not something fixable from code —
+   flagged, then enabled by hand. Re-checked after: `registration_endpoint` and
+   `client_id_metadata_document_supported: true` both now present in the metadata
+   document, and `POST /oauth2/register` returns a real `client_id`/`client_secret`.
+2. **A real browser** (Playwright, driving the actual hosted AuthKit UI) opened the
+   real `/oauth2/authorize` URL with a freshly-registered client and a real PKCE
+   challenge, entered a real email, received and entered a real emailed sign-in
+   code, and approved a real OAuth consent screen ("fabulist-mcp-test would like
+   access to your account"). This produced a real authorization code.
+3. **That code was exchanged** at the real `/oauth2/token` endpoint for a real access
+   token, `id_token`, and refresh token — a genuine 200 response, not a stub.
+4. **The real access token's `aud` claim confirmed AuthKit's documented default
+   exactly**: with no Resource Indicator configured, `aud` is the *environment's*
+   client ID (`client_01M1YFPQ...`), distinct from both the DCR-registered app's
+   client ID and `WORKOS_CLIENT_ID` in `.env` — a third identifier, matching the docs'
+   description precisely rather than assumed.
+5. **This repo's own, unmodified `buildOAuthAuth`** (`src/mcp/auth.ts`) was called
+   directly against that real token with the real issuer and the real audience from
+   step 4, and correctly returned `{ userId: 'user_01M1YPZ1...' }` — the real `sub`
+   claim, extracted correctly.
+6. **A real running server** (`createApiServer` with that same real `mcpAuth`) was
+   sent that same real token as a real `Authorization: Bearer` header on a real
+   `POST /mcp` `initialize` request, and returned a real `200 OK` with a correct MCP
+   protocol response.
+
+One environmental wrinkle, noted for anyone repeating this from the same kind of
+sandboxed/proxied network: outbound HTTPS in this session's environment goes through
+an intercepting proxy with a self-signed certificate, which Node's `undici`-based
+`fetch` (and therefore `jose`'s `createRemoteJWKSet`) correctly refuses by default —
+plain `curl` doesn't hit the same wall because it validates differently. Steps 5–6
+above needed `NODE_TLS_REJECT_UNAUTHORIZED=0` to get past that proxy in *this*
+diagnostic session; a normal deployment on ordinary network egress (which is what
+`fabulist.rast.io` or any real host actually has) will not need it, and it must never
+be set outside a throwaway diagnostic — it disables all TLS validation, not just for
+the proxy in question.
+
+Every temporary artifact from this check (the DCR-registered test client, the test
+user created via the Management API, local callback-catcher processes, `.env`-like
+scratch files) was deleted afterward; nothing from it persists in the repo or the
+WorkOS account beyond the DCR-enabled setting and the one real user
+(`fabulist@rast.io`) that completed the flow.
+
+---
+
+
+
 
 ## 1. What MCP actually requires of the server — read this before estimating scope
 
@@ -181,15 +318,15 @@ deep-research polish, as a follow-up, not a blocker.
 
 ## 5. What's new to build, sized honestly
 
-| Piece | Size | Why |
-|---|---|---|
-| Streamable HTTP MCP transport (`/mcp` route) | S | Thin adapter over existing store reads / turn loop, using an off-the-shelf MCP server SDK for the wire protocol |
-| Read tools (`list_worlds`, `get_state`, `get_cast`, etc.) | S | Each is a few lines calling code that already exists |
-| `propose_turn` in mode (b) | M | The turn pipeline already exists; this is "run it, stop before the Narrator role, return the frame instead" — a real but bounded change to the loop's output shape |
-| Interrupt-as-tool-exchange (§3) | M | The one genuinely new state machine; reuses the integrity gate's decision logic, needs new storage for pending interrupts and expiry handling |
-| OAuth 2.1 authorization server (§1) | M–L | Protected Resource Metadata, Authorization Server Metadata, Dynamic Client Registration, token issuance/refresh. Use an existing library for the OAuth mechanics rather than hand-rolling RFC 7591/8414/9728 — this is the one place "implement the protocol directly" (this codebase's usual style, per `sigv4.ts`/`google.ts`) is the wrong call, because the surface is large and security-sensitive in a way SigV4 signing is not |
-| `oauth_clients` / `oauth_tokens` tables | S | Additive schema, same pattern as everything else |
-| ChatGPT `search`/`fetch` compatibility pair | S | Optional, thin wrapper over existing entity/fact/turn reads |
+| Piece | Size | Status | Why |
+|---|---|---|---|
+| Streamable HTTP MCP transport (`/mcp` route) | S | **done** | Thin adapter over existing store reads / turn loop, using an off-the-shelf MCP server SDK for the wire protocol |
+| Read tools (`list_worlds`, `get_state`, `get_cast`, etc.) | S | **done** | Each is a few lines calling code that already exists |
+| `propose_turn` in mode (b) | M | **done** | The turn pipeline already exists; this is "run it, stop before the Narrator role, return the frame instead" — a real but bounded change to the loop's output shape |
+| Interrupt-as-tool-exchange (§3) | M | **done, simpler than planned** | Turned out not to need durable server-side "pending interrupt" storage at all — the web UI's own resolution already works by resubmitting the original text with `overrideIntegrity: true` (no stored interrupt row exists there either), so `resolve_interrupt` does the same: the calling model hands the original text back, no new expiry/storage concern beyond what `narrateExternally`'s pending map already needed |
+| OAuth 2.1 authorization server (§1) | M–L | **done, delegated rather than built** | Not hand-rolled RFC 7591/8414/9728 after all — `src/mcp/auth.ts`'s OAuth mode is a JWT-verification client against any RFC 8414-compliant issuer (AuthKit, confirmed against AuthKit's own docs), so this server never has to *be* the authorization server, only trust one. The dev-token mode is the genuinely small addition, for exercising everything before an AuthKit account exists |
+| `oauth_clients` / `oauth_tokens` tables | S | not started | Needs `SAAS-MULTIUSER.md`'s `users` table to tie to first |
+| ChatGPT `search`/`fetch` compatibility pair | S | not started | Optional, thin wrapper over existing entity/fact/turn reads |
 
 Nothing here requires touching `entities`/`edges`/`sheets` or any canon/chronicle
 logic. The turn loop, the integrity gate, the frame assembler, the consequence
@@ -205,17 +342,34 @@ This channel depends on identity existing (§2), but not on billing, sharing, or
 mobile from the other document — it can land in parallel with, or even before,
 `SAAS-MULTIUSER.md` Phase 2 (money), since this channel has no money to move.
 
-1. **Prerequisite: `SAAS-MULTIUSER.md` Phase 0** (users, per-request identity) must
-   exist first — MCP tokens map onto the same `users` rows.
-2. **MCP Phase A**: read-only tools + OAuth authorization server + Dynamic Client
-   Registration. Gets a user from "nothing" to "Claude can browse my world" with no
-   write path yet — the safest possible first slice, and the natural point to verify
-   the OAuth flow actually works against real Claude/ChatGPT clients before trusting
-   it with mutations.
-3. **MCP Phase B**: `propose_turn` (mode b) + the interrupt exchange. This is where
-   the channel becomes actually playable, not just inspectable.
-4. **MCP Phase C**: ChatGPT `search`/`fetch` compatibility pair, if wanted.
+**Turned out not to be strictly sequential in practice.** Phases A and B below are
+both done, ahead of `SAAS-MULTIUSER.md` Phase 0, because the read tools and
+`propose_turn`/`commit_narration`/`resolve_interrupt` needed no `users` table at all
+— `McpToolContext` resolves world/story exactly the way every existing plain API
+route does, with no per-caller identity threaded through it yet. What genuinely still
+needs Phase 0 first is narrower than originally scoped: only tying a verified
+`userId` to *this app's own* access-control rows (`world_access`,
+`stories.owner_user_id`) — the auth *mechanism* (`buildOAuthAuth`) was buildable, and
+built, without it.
+
+1. ~~**Prerequisite: `SAAS-MULTIUSER.md` Phase 0**~~ — turned out not to block
+   Phases A/B below; still required before tokens can be scoped to *this app's*
+   per-user worlds/stories rather than "the one world this server happens to have
+   open," which is everything today.
+2. **MCP Phase A** · done: read-only tools + OAuth-mode auth (verifying against any
+   RFC 8414 issuer, AuthKit included) + a dev-token mode for testing without one.
+   Verified end to end against a real MCP client, not just unit-tested.
+3. **MCP Phase B** · done: `propose_turn` (mode b) + the interrupt exchange, and
+   `commit_narration`. Verified end to end, including the integrity-gate interrupt
+   path, over a real MCP client connection.
+4. **MCP Phase C**: ChatGPT `search`/`fetch` compatibility pair, if wanted. Not
+   started.
+5. **Genuinely still blocked on `SAAS-MULTIUSER.md`**: tying `verified.userId` from
+   `auth.ts` to a real `users` row and this app's own per-user world/story access
+   control, rather than every valid token seeing whatever world the server has open
+   — the one place identity is still notional rather than real.
 
 Independent of `SAAS-MULTIUSER.md` Phases 2–4 (money, sharing, mobile) entirely —
 those are about the hosted web UI; this channel has no UI and no per-token billing
 to speak of, since the chat client's own subscription absorbs the LLM cost.
+
