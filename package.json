@@ -49,10 +49,15 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/sax": "^1.2.7",
     "@vitejs/plugin-react": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.0",
     "vite": "^7.0.0"
+  },
+  "dependencies": {
+    "7zip-min": "^3.0.1",
+    "sax": "^1.6.1"
   }
 }

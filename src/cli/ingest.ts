@@ -5,13 +5,15 @@
  *
  *   pnpm ingest --wiki=https://x.fandom.com --seed="A Page" --seed="Another"
  *   pnpm ingest ... --mode=mid --commit
+ *   pnpm ingest ... --dump --commit          # offline-first: dump backbone, live fallback
  *   pnpm ingest --upgrade=deep
  */
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { World } from '../store/index.ts';
 import { loadConfig } from '../config/config.ts';
-import { WikiClient } from '../ingest/client.ts';
+import { WikiClient, type PageSource } from '../ingest/client.ts';
+import { DumpSource, HybridSource, ensureDumpXml } from '../ingest/dump.ts';
 import { crawl, discover, prune } from '../ingest/scope.ts';
 import { ingest, MODES, upgradeDepth, DEFAULT_PASSB_CONCURRENCY, type DepthMode, type PassBExtractor } from '../ingest/depth.ts';
 import { LlmPassBExtractor } from '../ingest/passB.ts';
@@ -27,6 +29,12 @@ const mode = (flag('mode') ?? 'skim') as DepthMode;
 const commit = args.includes('--commit');
 const upgrade = flag('upgrade') as DepthMode | undefined;
 const exclude = all('exclude');
+// See docs/legal-briefing-fandom-ingest.md §6.1 and src/ingest/dump.ts: reads
+// Fandom's own XML database dump first (one bounded download, no repeated
+// querying) and only calls the live api.php crawler for titles the dump
+// does not have. Off by default so existing behaviour and tests are
+// unaffected; on is the recommended path for any real ingest.
+const useDump = args.includes('--dump');
 // Pass B is the longest operation here — 150 sequential ~7k-token calls at mid,
 // 3000 at deep — so the pool size is worth exposing rather than burying.
 const concurrencyRaw = flag('concurrency');
@@ -51,7 +59,9 @@ if (upgrade) {
     console.error('--upgrade needs --wiki=<url> to fetch the pages it is missing');
     process.exit(1);
   }
-  const client = new WikiClient({ baseUrl: `${wikiUrl.replace(/\/$/, '')}/api.php`.replace('/api.php/api.php', '/api.php') });
+  const client: PageSource = useDump
+    ? await buildDumpSource(wikiUrl)
+    : new WikiClient({ baseUrl: `${wikiUrl.replace(/\/$/, '')}/api.php`.replace('/api.php/api.php', '/api.php') });
   const res = await upgradeDepth(world, upgrade, { client, wiki: hostOf(wikiUrl) });
   console.log(`examined ${res.examined} node(s) below ${upgrade}, upgraded ${res.upgraded}`);
   world.close();
@@ -66,6 +76,7 @@ if (!wikiUrl || seeds.length === 0) {
   --exclude="Page Title"     repeatable
   --commit                   write to the graph (otherwise discovery only)
   --upgrade=mid|deep         deepen what is already ingested
+  --dump                     read from Fandom's XML database dump first, live api.php only as fallback
   --concurrency=N            pass B extractions in flight (default ${DEFAULT_PASSB_CONCURRENCY})
 
 Discovery runs by default and commits nothing: a crawl that silently pulls
@@ -76,7 +87,8 @@ step goes wrong.`);
 }
 
 const base = wikiUrl.replace(/\/$/, '').replace(/\/api\.php$/, '');
-const client = new WikiClient({ baseUrl: base, delayMs: 200 });
+const liveClient = new WikiClient({ baseUrl: base, delayMs: 200 });
+const client: PageSource = useDump ? await buildDumpSource(wikiUrl, liveClient) : liveClient;
 const spec = MODES[mode];
 
 console.log(`crawling ${seeds.length} seed(s) at ${mode} (${spec.hops} hops, up to ${spec.maxPages} pages)…`);
@@ -85,7 +97,7 @@ const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.max
 const scoped = prune(crawled, { maxPages: spec.maxPages });
 const preview = discover(scoped, { maxPages: spec.maxPages });
 
-console.log(`\n${preview.candidatePages} pages, ${client.requests} api request(s)`);
+console.log(`\n${preview.candidatePages} pages, ${liveClient.requests} api request(s)${useDump ? ' (dump-backed; live requests are fallback only)' : ''}`);
 console.log(`by hop: ${Object.entries(preview.byHop).map(([h, n]) => `${h}=${n}`).join(' ')}`);
 console.log(`by type: ${Object.entries(preview.byType).map(([t, n]) => `${t}=${n}`).join(' ')}`);
 console.log(`seed categories: ${preview.seedCategories.slice(0, 8).join(', ')}`);
@@ -152,3 +164,18 @@ function hostOf(url: string): string {
     return 'wiki';
   }
 }
+
+/**
+ * Downloads (or reuses the cached copy of) the wiki's XML dump and loads it
+ * into memory, wrapped in a `HybridSource` when a live client is given so
+ * pages the dump does not have — created after its last refresh — still
+ * resolve instead of silently vanishing from the crawl.
+ */
+async function buildDumpSource(url: string, live?: PageSource): Promise<PageSource> {
+  console.log(`fetching database dump for ${hostOf(url)} (cached after first run)…`);
+  const xmlPath = await ensureDumpXml({ wikiUrl: url });
+  const dump = await DumpSource.load(xmlPath);
+  console.log(`dump loaded: ${dump.size().toLocaleString()} main-namespace pages`);
+  return live ? new HybridSource(dump, live) : dump;
+}
+

@@ -18,6 +18,18 @@ export interface WikiPage {
 export type FetchLike = (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 /**
+ * The narrow surface `crawl()` and the depth-upgrade paths in `depth.ts`
+ * actually depend on. Named separately from `WikiClient` so a non-live
+ * source — `DumpSource` and `HybridSource` in `dump.ts` — can stand in for it
+ * without those callers changing at all.
+ */
+export interface PageSource {
+  fetchPages(titles: string[]): Promise<WikiPage[]>;
+  fetchPage(title: string): Promise<WikiPage | null>;
+}
+
+
+/**
  * Identifies the crawler honestly, which is load-bearing rather than polite.
  *
  * Fandom's `robots.txt` grants `User-agent: *` an explicit `Allow: /api.php?`
@@ -61,7 +73,7 @@ interface QueryPage {
 
 const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, ms)) : Promise.resolve());
 
-export class WikiClient {
+export class WikiClient implements PageSource {
   readonly baseUrl: string;
   readonly userAgent: string;
   private fetcher: FetchLike;

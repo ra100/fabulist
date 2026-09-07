@@ -81,7 +81,60 @@ Split the artifact into three layers; this is the analytically decisive move.
 9. **Opt-in routes / safe worlds.** Follow published fan-content policies (CDPR, Paramount fan-film guidelines, Wizards, GW). For shipped bundles, prefer **public-domain or permissive worlds** — Sherlock Holmes, Lovecraft, Oz, mythology, SCP (CC BY-SA), or original settings.
 10. **Document reasoning now.** A `LICENSING.md` recording per-wiki checks, the 3.0 basis, Art. 4 analysis, and minimisation choices is good-faith evidence that improves willfulness/damages posture.
 
+## 6.1 Database dumps: a materially better access path than live crawling
+
+Verified directly (2026-09-07): every Fandom wiki's `Special:Statistics` page carries a
+"Database download" section linking a `.7z`-compressed MediaWiki XML export of the wiki's
+current pages, at `s3.amazonaws.com/wikia_xml_dumps/…`. Fandom's own copy captions the
+"current pages" link **"This version is usually best for bot use"**, and
+`community.fandom.com/wiki/Help:Database_download` documents the feature explicitly:
+generated for "personal backup or for bot maintenance tasks," admin-refreshable roughly
+weekly, governed by the same per-wiki license as the wiki itself. This is not a
+Fandom-specific format — it is the standard MediaWiki XML export `dumpBackup.php` produces on
+any MediaWiki install.
+
+**Why this changes the access-layer analysis, not the content-layer one.** Everything in §1
+about CC BY-SA 3.0, and everything in §3 about third-party character/trademark IP, applies
+identically — the dump contains the same contributor text about the same fictional universe.
+What changes is *how the bytes are obtained*, which is the ToU's separate concern from what
+you may do with them once you have them (§1's "different layers" point):
+
+- The live crawl in `client.ts` relies on a favourable-but-contested reading: `robots.txt`'s
+  `Allow: /api.php?` for a generic UA, against the ToU's separate, unqualified ban on "any
+  robot… to scrape, extract, retrieve or index any portion of the content… for any purpose."
+  That tension is real and unresolved (§1).
+- A dump download is not that pattern at all. It is a single request against a documented
+  bulk-export endpoint that Fandom's own help page frames as the recommended path for exactly
+  this use case — bot consumption — and that endpoint is not paginated, repeated, or
+  indexing-shaped in the way the ToU's robot clause is worried about. It is closer to
+  `wget`-ing a published backup than to crawling a site.
+- It also **strictly reduces** exposure versus the live path rather than trading one risk for
+  another: fewer requests, no `api.php` traffic pattern to rate-limit or misidentify, and (per
+  §5) a stronger claim that any TDM/Art. 4 reservation-of-rights argument does not apply,
+  since this is not "extraction… by automated means" of the live site in the sense Art. 4(3)
+  contemplates — it is consuming an export the rightsholder's platform itself produces and
+  distributes for that purpose.
+
+**Implementation: `src/ingest/dump.ts`.** `ensureDumpXml` downloads and caches the archive
+under `data/dumps/<wiki>/` (gitignored, never distributed — consistent with model (d)'s
+"copying happens on the user's machine" framing in §4); `DumpSource` streams the XML with a
+SAX parser (a multi-hundred-megabyte file is normal for one mid-sized wiki, so this is never
+loaded as a DOM) and exposes the same `fetchPages`/`fetchPage` surface `WikiClient` already
+does. `HybridSource` composes the two: dump first, live `WikiClient` only for titles the
+snapshot does not have. `pnpm ingest --dump` wires this into the CLI; nothing in `scope.ts`,
+`passA.ts`, or `passB.ts` changed to support it.
+
+**What does not change.** This is still local, user-run ingest (model (a) in §4) — the
+dump is downloaded, decompressed, and consumed on the user's own machine, into their own
+local `data/`, and nothing about it is redistributed. Everything §4(a)'s risk assessment says
+still applies. It does **not** license the third-party character IP in §3, does not grant
+database rights (§5), and does not change the ShareAlike analysis in §2 for anything
+extracted from it. Bundling a pre-fetched dump with a shipped product would still be model
+(b) or (c) — the mitigation here is about *how one machine obtains the source text*, not
+about what may be redistributed afterward.
+
 ## Risk Table
+
 
 | # | Model | Fandom ToU | CC BY-SA 3.0 duty | Third-party copyright | Trademark | EU/UK | Enforcement likelihood | Overall |
 |---|---|---|---|---|---|---|---|---|

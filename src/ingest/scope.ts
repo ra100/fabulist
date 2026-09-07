@@ -5,7 +5,7 @@
  * playthrough needs a few hundred. The ranking below is the part that matters,
  * and it deliberately does not use raw link count.
  */
-import type { WikiClient, WikiPage } from './client.ts';
+import type { PageSource, WikiPage } from './client.ts';
 import { firstParagraph, inferEntityType, parseCategories, parseInfobox, parseLinks } from './parse.ts';
 import type { EntityType } from '../domain/types.ts';
 
@@ -22,7 +22,7 @@ export interface Candidate {
 }
 
 export interface CrawlOptions {
-  client: WikiClient;
+  client: PageSource;
   seeds: string[];
   hops: number;
   maxPages: number;
