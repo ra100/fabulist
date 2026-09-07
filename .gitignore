@@ -6,6 +6,15 @@ dist/
 *.db-shm
 .env
 .env.local
+
+# Personal override of fabulist.config.json (and any --config= alternative),
+# same *.local convention as .env.local above. The tracked config carries
+# safe committed defaults (profile: "mock"); every runtime write — a profile
+# switch, a kept provider spec — lands here instead, via config.ts's
+# loadConfig/saveConfig, so the tracked file never drifts to one person's
+# local setup.
+*.config.local.json
+
 data/
 .cache/
 coverage/

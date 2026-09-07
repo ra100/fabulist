@@ -51,18 +51,57 @@ export function defaultConfig(): Config {
   };
 }
 
-export function loadConfig(path = 'fabulist.config.json'): Config {
-  if (!existsSync(path)) return defaultConfig();
-  try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<Config>;
-    return { ...defaultConfig(), ...raw };
-  } catch (err) {
-    throw new Error(`could not read ${path}: ${String(err)}`);
-  }
+/**
+ * The gitignored sibling that holds a *personal* override of `path`, the same
+ * way `.env.local` sits beside `.env`. Inserted before the final extension —
+ * `fabulist.config.json` → `fabulist.config.local.json` — so a `--config=`
+ * override (the throwaway `--memory` server, a test fixture) gets its own
+ * local sibling too, rather than every server on the machine sharing one.
+ */
+export function localPathFor(path: string): string {
+  const dot = path.lastIndexOf('.');
+  return dot === -1 ? `${path}.local` : `${path.slice(0, dot)}.local${path.slice(dot)}`;
 }
 
+/**
+ * Layers a personal override on top of the tracked file: `defaultConfig()` <
+ * `path` < `localPathFor(path)`. `path` is meant to be committed with safe
+ * defaults (`profile: "mock"`) and never edited by the running app again —
+ * `saveConfig` below always writes the local layer instead. Before this
+ * existed, every runtime write (a profile switch, a kept provider spec)
+ * landed on the tracked file itself, so the committed default drifted to
+ * whatever the last person to run the app locally happened to be using, and
+ * showed up as a permanently dirty file with nothing meaningful to commit.
+ */
+export function loadConfig(path = 'fabulist.config.json'): Config {
+  let cfg = defaultConfig();
+  if (existsSync(path)) {
+    try {
+      cfg = { ...cfg, ...(JSON.parse(readFileSync(path, 'utf8')) as Partial<Config>) };
+    } catch (err) {
+      throw new Error(`could not read ${path}: ${String(err)}`);
+    }
+  }
+  const localPath = localPathFor(path);
+  if (existsSync(localPath)) {
+    try {
+      cfg = { ...cfg, ...(JSON.parse(readFileSync(localPath, 'utf8')) as Partial<Config>) };
+    } catch (err) {
+      throw new Error(`could not read ${localPath}: ${String(err)}`);
+    }
+  }
+  return cfg;
+}
+
+/**
+ * Always writes the local override, never `path` itself — the point of the
+ * split above. A first write with no local file yet creates one rather than
+ * touching the tracked default, so cloning the repo and running the app even
+ * once is enough to permanently stop `git status` from showing a dirty
+ * `fabulist.config.json`.
+ */
 export function saveConfig(cfg: Config, path = 'fabulist.config.json'): void {
-  writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+  writeFileSync(localPathFor(path), `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
 }
 
 /**
