@@ -223,6 +223,15 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
   const [rerollNote, setRerollNote] = useState('');
   /** Which turn is mid-reroll, so its button can say so and nothing else races it. */
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
+  /**
+   * Only reachable below 960px, where `.side-toggle` is a real disclosure
+   * rather than the `display: contents` pass-through it is on desktop — see
+   * the comment on `.side-toggle` in styles.css. Closed by default there:
+   * a phone screen shorter than this panel's natural height was forcing the
+   * book itself to 0px height, which is the bug this whole toggle exists
+   * to fix.
+   */
+  const [sideOpen, setSideOpen] = useState(false);
 
   const load = useCallback(async () => {
     const book = await api.book();
@@ -536,39 +545,62 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
       </div>
 
       <aside className="side">
-        <WhyPanel meta={lastMeta} />
-        {state ? (
-          <div className="card">
-            <h3>open threads</h3>
-            <div className="stack">
-              {state.threads.slice(0, 6).map((t) => (
-                <div key={t.id}>
-                  <div className="row baseline" style={{ marginBottom: 5 }}>
-                    <span className="small grow">{t.title}</span>
-                    <span className="mono dimmer">{t.tension.toFixed(2)}</span>
-                  </div>
-                  <div className={`meter ${t.tension >= 0.75 ? 'high' : t.tension >= 0.45 ? 'mid' : ''}`}>
-                    <i style={{ width: `${t.tension * 100}%` }} />
-                  </div>
+        {/*
+          A plain controlled toggle, not `<details>`: `<details>` hides its
+          body via the browser's own closed/open rendering, which fires
+          regardless of any `display` override on the host element — so a
+          `display: contents` escape hatch for desktop still left the panel
+          closed-and-invisible there too, the exact bug this was meant to
+          fix, just moved. `sideOpen` starts `false` and only matters below
+          960px; above it `.side-toggle-summary` is hidden by CSS and
+          `.side-toggle-body` is always rendered, so desktop sees exactly
+          what it always did.
+        */}
+        <div className="side-toggle">
+          <button
+            type="button"
+            className="side-toggle-summary"
+            aria-expanded={sideOpen}
+            onClick={() => setSideOpen((v) => !v)}
+          >
+            why · threads · divergence
+          </button>
+          <div className="side-toggle-body" hidden={!sideOpen}>
+            <WhyPanel meta={lastMeta} />
+            {state ? (
+              <div className="card">
+                <h3>open threads</h3>
+                <div className="stack">
+                  {state.threads.slice(0, 6).map((t) => (
+                    <div key={t.id}>
+                      <div className="row baseline" style={{ marginBottom: 5 }}>
+                        <span className="small grow">{t.title}</span>
+                        <span className="mono dimmer">{t.tension.toFixed(2)}</span>
+                      </div>
+                      <div className={`meter ${t.tension >= 0.75 ? 'high' : t.tension >= 0.45 ? 'mid' : ''}`}>
+                        <i style={{ width: `${t.tension * 100}%` }} />
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
-        {state?.divergences.length ? (
-          <div className="card">
-            <h3>divergence ledger</h3>
-            <div className="stack">
-              {state.divergences.map((d) => (
-                <div key={d.id} className="small">
-                  <span className="tag chronicle">{d.kind}</span>{' '}
-                  <span className="dim">{d.detail}</span>{' '}
-                  <span className="mono dimmer">s{d.scene}</span>
+              </div>
+            ) : null}
+            {state?.divergences.length ? (
+              <div className="card">
+                <h3>divergence ledger</h3>
+                <div className="stack">
+                  {state.divergences.map((d) => (
+                    <div key={d.id} className="small">
+                      <span className="tag chronicle">{d.kind}</span>{' '}
+                      <span className="dim">{d.detail}</span>{' '}
+                      <span className="mono dimmer">s{d.scene}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </div>
+            ) : null}
           </div>
-        ) : null}
+        </div>
       </aside>
     </div>
   );
