@@ -1,0 +1,28 @@
+services:
+  fabulist:
+    image: ra100/fabulist:latest
+    container_name: fabulist
+    restart: unless-stopped
+    # 127.0.0.1 only, never 0.0.0.0: nginx is the sole public listener (see
+    # deploy/nginx/fabulist.conf), and the container's own bind-all is only
+    # for reachability *inside* the container network, not a reason to also
+    # publish it on every host interface.
+    ports:
+      - "127.0.0.1:4317:4317"
+    volumes:
+      # Named volume, not a bind mount: this app's node:sqlite files are WAL
+      # mode (see Dockerfile's own comment on this) and the volume is the
+      # thing docker-fix (be4819f/v0.1.1) actually persists worlds into via
+      # --data-root=/data. Do not `cp` this while the container is running —
+      # see the README's "Copying a save" section for why.
+      - fabulist-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4317/api/meta', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  fabulist-data:
+    name: fabulist-data
