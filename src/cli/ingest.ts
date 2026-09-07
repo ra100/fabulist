@@ -13,7 +13,7 @@ import { World } from '../store/index.ts';
 import { loadConfig } from '../config/config.ts';
 import { WikiClient } from '../ingest/client.ts';
 import { crawl, discover, prune } from '../ingest/scope.ts';
-import { ingest, MODES, upgradeDepth, type DepthMode, type PassBExtractor } from '../ingest/depth.ts';
+import { ingest, MODES, upgradeDepth, DEFAULT_PASSB_CONCURRENCY, type DepthMode, type PassBExtractor } from '../ingest/depth.ts';
 import { LlmPassBExtractor } from '../ingest/passB.ts';
 import { buildRegistry } from '../config/config.ts';
 
@@ -27,6 +27,15 @@ const mode = (flag('mode') ?? 'skim') as DepthMode;
 const commit = args.includes('--commit');
 const upgrade = flag('upgrade') as DepthMode | undefined;
 const exclude = all('exclude');
+// Pass B is the longest operation here — 150 sequential ~7k-token calls at mid,
+// 3000 at deep — so the pool size is worth exposing rather than burying.
+const concurrencyRaw = flag('concurrency');
+const passBConcurrency = concurrencyRaw ? Number(concurrencyRaw) : undefined;
+
+if (passBConcurrency !== undefined && (!Number.isFinite(passBConcurrency) || passBConcurrency < 1)) {
+  console.error(`--concurrency must be a positive integer, got "${concurrencyRaw}"`);
+  process.exit(1);
+}
 
 if (!MODES[mode]) {
   console.error(`unknown mode "${mode}". one of: ${Object.keys(MODES).join(', ')}`);
@@ -57,6 +66,7 @@ if (!wikiUrl || seeds.length === 0) {
   --exclude="Page Title"     repeatable
   --commit                   write to the graph (otherwise discovery only)
   --upgrade=mid|deep         deepen what is already ingested
+  --concurrency=N            pass B extractions in flight (default ${DEFAULT_PASSB_CONCURRENCY})
 
 Discovery runs by default and commits nothing: a crawl that silently pulls
 3,000 pages of a continuity you do not care about is the likeliest way this
@@ -107,7 +117,22 @@ if (spec.passB !== 'none') {
   });
 }
 
-const res = await ingest({ world, client, seeds, mode, wiki: hostOf(wikiUrl), exclude, extractor });
+const res = await ingest({
+  world,
+  client,
+  seeds,
+  mode,
+  wiki: hostOf(wikiUrl),
+  exclude,
+  extractor,
+  ...(passBConcurrency !== undefined ? { passBConcurrency } : {}),
+  // A run that prints nothing for an hour is indistinguishable from a hung one.
+  onPassBProgress: (done, total, title) => {
+    const pct = Math.floor((done / total) * 100);
+    process.stdout.write(`\r  pass B ${done}/${total} (${pct}%) ${title.slice(0, 44).padEnd(44)}`);
+    if (done === total) process.stdout.write('\n');
+  },
+});
 console.log(`\ncommitted: ${res.passA?.entities} entities, ${res.passA?.edges} typed edges, ${res.passA?.mentions} mentions, ${res.passA?.sheets} sheets`);
 if (res.passA?.skipped.length) console.log(`skipped ${res.passA.skipped.length} page(s): ${res.passA.skipped.slice(0, 5).join(', ')}`);
 
