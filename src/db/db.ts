@@ -82,6 +82,12 @@ export function checkpoint(db: Db): void {
  */
 function migrate(db: Db): void {
   addColumnIfMissing(db, 'sheets', 'appearance', `TEXT NOT NULL DEFAULT '{}'`);
+  addColumnIfMissing(db, 'ingest_pages', 'passb_status', `TEXT NOT NULL DEFAULT ''`);
+  // Created here, not in `schema.sql`: on an existing save the column above
+  // did not exist until the line just ran, and `schema.sql` executes as one
+  // `exec()` before `migrate()` — an index built there against a column added
+  // here would be building against nothing on every pre-existing save.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_ingest_pages_wiki_status ON ingest_pages(wiki, passb_status)');
 }
 
 function addColumnIfMissing(db: Db, table: string, column: string, ddl: string): void {

@@ -348,17 +348,33 @@ CREATE TABLE IF NOT EXISTS prose_blocklist (
 -- ---------------------------------------------------------------- ingest log
 -- World-level: which pages were read is a property of the ingest (canon),
 -- not of any one story built on top of it.
+--
+-- `passb_status` is what makes an interrupted ingest resumable. '' means
+-- "not attempted" (skim-only, or not yet reached under mid/deep's core
+-- subsetting); 'done' means Pass B genuinely succeeded; 'failed' means it was
+-- attempted and the extractor reported a failure (a dead token, a rate limit,
+-- unparseable output — see `PassBOutput.failed`). Before this column existed,
+-- a page whose Pass B call failed silently and one the model had actually
+-- read were the identical shape: both landed as an empty, uncommitted-looking
+-- result, so a crawl that died mid-run (an expired credential, say) left no
+-- trace of which of its pages still needed the LLM pass at all.
 
 CREATE TABLE IF NOT EXISTS ingest_pages (
-  page_id    TEXT PRIMARY KEY,
-  wiki       TEXT NOT NULL,
-  title      TEXT NOT NULL,
-  revision   TEXT NOT NULL DEFAULT '',
-  depth      INTEGER NOT NULL DEFAULT 0,
-  hops       INTEGER NOT NULL DEFAULT 0,
-  score      REAL NOT NULL DEFAULT 0,
-  fetched_at TEXT NOT NULL DEFAULT ''
+  page_id      TEXT PRIMARY KEY,
+  wiki         TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  revision     TEXT NOT NULL DEFAULT '',
+  depth        INTEGER NOT NULL DEFAULT 0,
+  hops         INTEGER NOT NULL DEFAULT 0,
+  score        REAL NOT NULL DEFAULT 0,
+  fetched_at   TEXT NOT NULL DEFAULT '',
+  passb_status TEXT NOT NULL DEFAULT ''
 );
+
+-- The index on `passb_status` is created in `db.ts`'s `migrate()`, not here:
+-- an existing save's `ingest_pages` predates the column, and this whole file
+-- runs as one `exec()` before that migration adds it — an index referencing a
+-- not-yet-existing column would fail the entire open.
 
 -- -------------------------------------------------------------- illustration
 -- One row per generated image. Scene and portrait subjects are distinguished

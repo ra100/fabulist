@@ -1043,6 +1043,37 @@ route('POST', '/api/setup/player', async (_req, res, { setup, world, body }) => 
   send(res, 200, { ...assigned, opening: proposeOpening(world) });
 });
 
+/**
+ * Whether this world came from a wiki, and how much of the last ingest's
+ * scope Pass B has actually finished — what a Settings panel shows so
+ * "continue reading" is an informed choice rather than a leap of faith.
+ */
+route('GET', '/api/setup/ingest-health', (_req, res, { setup }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  send(res, 200, svc.ingestHealth());
+});
+
+/**
+ * Finishes an interrupted ingest, or extends one with a wider seed set or a
+ * deeper mode. Needs no wiki/seeds/mode in the body at all for a plain
+ * resume — `ingestHealth`'s persisted context already has them; the body's
+ * fields exist only to widen the scope for "read more".
+ */
+route('POST', '/api/setup/continue', (_req, res, { setup, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const { seeds, mode, excludeCategories } = (body ?? {}) as {
+    seeds?: string[]; mode?: 'skim' | 'mid' | 'deep'; excludeCategories?: string[];
+  };
+  try {
+    const job = svc.continueIngest({ seeds, mode, excludeCategories });
+    send(res, 200, job);
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 route('POST', '/api/setup/reset', (_req, res, { setup }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;

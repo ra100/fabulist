@@ -256,6 +256,24 @@ export interface DiscoverResult extends PreviewResult {
   character: CharacterSketch;
 }
 
+export interface IngestContext {
+  baseUrl: string;
+  mode: 'skim' | 'mid' | 'deep';
+  seeds: string[];
+  excludeCategories: string[];
+  title: string;
+  wikiName: string;
+}
+
+/** What Settings shows about a world's ingest: whether one exists, and how much is left. */
+export interface IngestHealth {
+  hasContext: boolean;
+  context: IngestContext | null;
+  pagesDone: number;
+  pagesFailed: number;
+  pagesPending: number;
+}
+
 export interface Job<T = unknown> {
   id: string;
   kind: string;
@@ -624,5 +642,8 @@ export const api = {
     characters: () => req<CandidateCharacter[]>('/setup/characters'),
     setPlayer: (sketch: Partial<CharacterSketch>) => post<{ playerCharacterId: string; created: boolean; warnings: string[]; opening: string }>('/setup/player', sketch),
     reset: () => post<{ ok: boolean }>('/setup/reset'),
+    ingestHealth: () => req<IngestHealth>('/setup/ingest-health'),
+    continue: (overrides: { seeds?: string[]; mode?: string; excludeCategories?: string[] } = {}) =>
+      post<Job>('/setup/continue', overrides),
   },
 };

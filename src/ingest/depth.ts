@@ -50,6 +50,19 @@ export interface PassBOutput {
   voiceCard?: { diction?: string; tics?: string[]; samples?: string[]; never?: string[] };
   /** Statements the page makes that contradict what is already in the graph. */
   contradictions?: Array<{ claim: string; conflictsWith: string }>;
+  /**
+   * True when this result is a swallowed failure (a provider error, an
+   * expired credential, unparseable output) rather than a genuine "the page
+   * said nothing extractable". `LlmPassBExtractor.extract` never throws
+   * across a page — one bad call must not abort the pass — but that used to
+   * mean a failure and an honestly empty page were the identical shape, so a
+   * token that expired mid-run and killed every remaining call left no trace
+   * to resume against: the page looked exactly as "done" as one the model had
+   * actually read. A caller that cares about resuming checks this; one that
+   * doesn't (the existing tests, the null extractor) is unaffected, since the
+   * field is optional and absent means "not a failure".
+   */
+  failed?: boolean;
 }
 
 /** Does nothing, on purpose. Keeps depth.ts complete before the LLM pass exists. */
@@ -107,22 +120,36 @@ export async function ingest(opts: IngestOptions & { world?: World }): Promise<I
 
   let passB: IngestResult['passB'] = null;
   if (spec.passB !== 'none' && opts.extractor) {
-    passB = await runPassB(opts.world, scoped, opts.extractor, spec);
+    passB = await runPassB(opts.world, scoped, opts.extractor, spec, { wiki: opts.wiki ?? 'wiki' });
   }
 
   return { preview, passA, passB, mode: opts.mode };
+}
+
+export interface RunPassBOptions {
+  /** Matches the `wiki` column in `ingest_pages`, for status bookkeeping. */
+  wiki?: string;
 }
 
 /**
  * Runs Pass B over the pages the mode selects: core entities only for mid, all
  * of the scope for deep. Core means the highest-scoring pages, which is where
  * relation quality actually pays off.
+ *
+ * **Resumable.** Any page this wiki already has marked `passb_status = 'done'`
+ * in `ingest_pages` (from this run or an earlier, interrupted one) is skipped
+ * outright — this is what makes re-running `ingest()` over an unchanged scope
+ * a resume rather than a redo. A page whose extraction genuinely fails (the
+ * extractor's own try/catch, or a result carrying `PassBOutput.failed`) is
+ * recorded `'failed'`, not `'done'`, so it stays pending for the next retry
+ * instead of being mistaken for "read and found nothing".
  */
 export async function runPassB(
   world: World,
   scoped: CrawlResult,
   extractor: PassBExtractor,
   spec: DepthSpec,
+  opts: RunPassBOptions = {},
 ): Promise<{ pages: number; edges: number; events: number; voiceCards: number }> {
   const targets =
     spec.passB === 'all'
@@ -130,10 +157,13 @@ export async function runPassB(
       : scoped.candidates.slice(0, Math.max(20, Math.floor(scoped.candidates.length * 0.25)));
 
   const out = { pages: 0, edges: 0, events: 0, voiceCards: 0 };
+  const wiki = opts.wiki ?? 'wiki';
+  const alreadyDone = donePages(world, wiki);
 
   for (const candidate of targets) {
     const page = scoped.pages.get(candidate.title);
     if (!page) continue;
+    if (alreadyDone.has(page.pageId)) continue;
     const entity = world.graph.resolveName(candidate.title);
     if (!entity) continue;
 
@@ -141,9 +171,19 @@ export async function runPassB(
     try {
       result = await extractor.extract(page, entity);
     } catch {
+      // Not committed and not stamped to depth: the resume path must keep
+      // seeing this page as pending, exactly as if Pass B had never been
+      // attempted, so a later retry (once whatever failed is fixed) picks it
+      // back up rather than skipping it as "already done".
+      recordPassBStatus(world, wiki, page.pageId, 'failed');
       continue; // one bad extraction must not abort the pass
     }
+    if (result.failed) {
+      recordPassBStatus(world, wiki, page.pageId, 'failed');
+      continue;
+    }
     out.pages++;
+    recordPassBStatus(world, wiki, page.pageId, 'done');
 
     for (const e of result.edges) {
       const target = world.graph.resolveName(e.objectName);
@@ -198,6 +238,21 @@ export async function runPassB(
   }
 
   return out;
+}
+
+/** Page ids already marked `done` for this wiki, so a resume never re-pays for them. */
+function donePages(world: World, wiki: string): Set<string> {
+  const rows = world.db.prepare(`SELECT page_id FROM ingest_pages WHERE wiki = ? AND passb_status = 'done'`).all(wiki) as Array<{
+    page_id: string;
+  }>;
+  return new Set(rows.map((r) => r.page_id));
+}
+
+/** Records whether Pass B genuinely succeeded on a page, for later resume. */
+function recordPassBStatus(world: World, wiki: string, pageId: string, status: 'done' | 'failed'): void {
+  world.db
+    .prepare(`UPDATE ingest_pages SET passb_status = ? WHERE page_id = ? AND wiki = ?`)
+    .run(status, pageId, wiki);
 }
 
 /**

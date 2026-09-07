@@ -9,7 +9,9 @@ import {
   type EntityDetail,
   type Fact,
   type ImageProvidersReport,
+  type IngestHealth,
   type Interrupt,
+  type Job,
   type Sheet,
   type PlayResponse,
   type ProvidersReport,
@@ -1456,6 +1458,7 @@ function SettingsTab({ state, onChanged }: { state: State | null; onChanged: () 
           </div>
         ) : null}
 
+        <IngestHealthPanel worldTitle={state?.worldTitle} onChanged={onChanged} />
         <ImageProvidersPanel />
         <ProvidersPanel />
         <UsagePanel usage={state?.usage ?? null} />
@@ -1791,6 +1794,176 @@ function UsagePanel({ usage }: { usage: State['usage'] | null }) {
           ))}
         </>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * "Finish reading this wiki" for a world an ingest left partway through — a
+ * token expiring 600 pages into a 3,000-page `deep` crawl used to have no
+ * recovery but re-running the whole ingest from the wizard and paying for
+ * every page a second time. `SetupService.ingestHealth`/`continueIngest` make
+ * that a genuine resume: pages Pass B already finished are never re-sent to
+ * the model, only what is still pending or came back `failed`.
+ *
+ * Absent entirely for a world with no wiki behind it (`hasContext: false` —
+ * the sample, or a custom-described world): there is nothing to continue, and
+ * saying so would just be noise on every settings screen that will never use
+ * this panel.
+ */
+function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | undefined; onChanged: () => void }) {
+  const [health, setHealth] = useState<IngestHealth | null>(null);
+  const [job, setJob] = useState<Job | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [moreSeeds, setMoreSeeds] = useState('');
+  const [deeper, setDeeper] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setHealth(await api.setup.ingestHealth());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh, worldTitle]);
+
+  // Poll while a continue job is running, same shape as the wizard's own job
+  // polling — stages and counts, never a fake percentage.
+  const pollRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (job?.status !== 'running') return;
+    const tick = async () => {
+      try {
+        const next = await api.setup.job(job.id);
+        setJob(next);
+        if (next.status !== 'running') {
+          await refresh();
+          onChanged();
+        }
+      } catch {
+        // A dropped poll is not fatal; the next tick retries.
+      }
+    };
+    pollRef.current = window.setInterval(tick, 700);
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+    };
+  }, [job, refresh, onChanged]);
+
+  const nextMode = (current: 'skim' | 'mid' | 'deep'): 'skim' | 'mid' | 'deep' =>
+    current === 'skim' ? 'mid' : current === 'mid' ? 'deep' : 'deep';
+
+  const start = (widen: boolean) =>
+    void (async () => {
+      setBusy(true);
+      setError(null);
+      try {
+        const overrides: { seeds?: string[]; mode?: string } = {};
+        if (widen) {
+          const added = moreSeeds.split(',').map((s) => s.trim()).filter(Boolean);
+          if (added.length && health?.context) overrides.seeds = [...health.context.seeds, ...added];
+          if (deeper && health?.context) overrides.mode = nextMode(health.context.mode);
+        }
+        setJob(await api.setup.continue(overrides));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+      setBusy(false);
+    })();
+
+  if (!health?.hasContext) return null; // nothing to continue: not a wiki ingest
+
+  const { context, pagesDone, pagesFailed, pagesPending } = health;
+  const total = pagesDone + pagesFailed + pagesPending;
+  const complete = total > 0 && pagesFailed === 0 && pagesPending === 0;
+
+  return (
+    <div className="card">
+      <div className="row">
+        <h3 className="grow" style={{ margin: 0 }}>reading {context?.wikiName}</h3>
+        <button disabled={busy} onClick={() => void refresh()}>refresh</button>
+      </div>
+
+      {error ? <p className="small warn">{error}</p> : null}
+
+      <p className="small dim" style={{ marginTop: 8 }}>
+        {context?.mode} mode · {context?.seeds.join(', ')}
+      </p>
+
+      {total > 0 ? (
+        <>
+          <div className="bar" style={{ margin: 'var(--s2) 0' }}>
+            <i style={{ width: `${Math.round((pagesDone / total) * 100)}%` }} />
+          </div>
+          <p className="small dimmer">
+            {pagesDone} of {total} pages read
+            {pagesFailed ? `, ${pagesFailed} failed (a dead token or rate limit, most likely)` : ''}
+            {pagesPending ? `, ${pagesPending} not yet reached` : ''}
+          </p>
+        </>
+      ) : (
+        <p className="small dimmer">Pass A ran; the LLM pass has not started or this mode skips it.</p>
+      )}
+
+      {job ? (
+        <div className="progress" style={{ padding: 'var(--s2) 0' }}>
+          <div className="progress-stage">{job.progress.stage}</div>
+          {job.progress.detail ? <div className="dim small">{job.progress.detail}</div> : null}
+          {job.status === 'running' ? (
+            job.progress.total ? (
+              <div className="bar">
+                <i style={{ width: `${Math.min(100, (job.progress.current / job.progress.total) * 100)}%` }} />
+              </div>
+            ) : (
+              <div className="spinner" />
+            )
+          ) : (
+            <p className="small dim">{job.status === 'failed' ? job.error : 'done.'}</p>
+          )}
+        </div>
+      ) : null}
+
+      {!complete || pagesFailed ? (
+        <div className="row" style={{ marginTop: 'var(--s3)' }}>
+          <button className="primary" disabled={busy || job?.status === 'running'} onClick={() => start(false)}>
+            {pagesFailed || pagesPending ? 'continue reading' : 'start pass B'}
+          </button>
+        </div>
+      ) : (
+        <p className="small dim" style={{ marginTop: 'var(--s2)' }}>Fully read at {context?.mode} mode.</p>
+      )}
+
+      <details style={{ marginTop: 'var(--s3)' }}>
+        <summary className="small dim" style={{ cursor: 'pointer' }}>read more</summary>
+        <div style={{ marginTop: 'var(--s2)' }}>
+          <label className="field-row">
+            <span>more seeds</span>
+            <input
+              value={moreSeeds}
+              placeholder="another page or category, comma-separated"
+              onChange={(e) => setMoreSeeds(e.target.value)}
+            />
+          </label>
+          {context && context.mode !== 'deep' ? (
+            <label className="field-row">
+              <span>go deeper</span>
+              <span className="row" style={{ alignItems: 'center', gap: 'var(--s2)' }}>
+                <input type="checkbox" checked={deeper} onChange={(e) => setDeeper(e.target.checked)} />
+                <span className="small dimmer">{context.mode} → {nextMode(context.mode)}</span>
+              </span>
+            </label>
+          ) : null}
+          <div className="row" style={{ marginTop: 'var(--s2)' }}>
+            <button disabled={busy || job?.status === 'running' || (!moreSeeds.trim() && !deeper)} onClick={() => start(true)}>
+              read more
+            </button>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

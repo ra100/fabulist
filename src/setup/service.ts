@@ -12,11 +12,11 @@ import { WikiClient } from '../ingest/client.ts';
 import { crawl, discover, prune, type CrawlResult, type DiscoveryPreview } from '../ingest/scope.ts';
 import { runPassA } from '../ingest/passA.ts';
 import { LlmPassBExtractor } from '../ingest/passB.ts';
-import { MODES, type DepthMode } from '../ingest/depth.ts';
+import { MODES, type DepthMode, type DepthSpec } from '../ingest/depth.ts';
 import { WikiDirectory, type DirectoryOptions, type WikiCandidate } from './directory.ts';
 import { SetupPlanner, type IngestPlan, type CharacterSketch } from './planner.ts';
 import { applyCustomWorld, applyStyle, assignPlayerCharacter, proposeOpening, type ApplyCustomResult } from './apply.ts';
-import { JobRegistry, type Job } from './jobs.ts';
+import { JobRegistry, type Job, type JobHandle } from './jobs.ts';
 import { seedWorld } from '../seed/verrow.ts';
 
 export type WorldSource = 'fandom' | 'custom' | 'sample';
@@ -48,6 +48,50 @@ export interface IngestJobResult {
   warnings: string[];
 }
 
+/**
+ * What a later session needs to continue reading a wiki without asking the
+ * player to re-enter the universe, seeds and mode. Stored as one JSON blob
+ * under a single `meta` key rather than its own table: this is world-level
+ * bookkeeping in the same spirit as `worldTitle` (`ChronicleStore.setMeta`),
+ * not canon, and a table would be one column read/written as a unit anyway.
+ */
+export interface IngestContext {
+  baseUrl: string;
+  mode: DepthMode;
+  seeds: string[];
+  excludeCategories: string[];
+  title: string;
+  wikiName: string;
+}
+
+const INGEST_CONTEXT_META_KEY = 'ingestContext';
+
+function saveIngestContext(world: World, ctx: IngestContext): void {
+  world.chronicle.setMeta(INGEST_CONTEXT_META_KEY, JSON.stringify(ctx));
+}
+
+function loadIngestContext(world: World): IngestContext | null {
+  const raw = world.chronicle.getMeta(INGEST_CONTEXT_META_KEY, '');
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as IngestContext;
+  } catch {
+    return null;
+  }
+}
+
+export interface IngestHealth {
+  /** False when this world was never ingested from a wiki (custom or sample). */
+  hasContext: boolean;
+  context: IngestContext | null;
+  /** Pages Pass B has genuinely finished, across every ingest run on this wiki. */
+  pagesDone: number;
+  /** Pages Pass B attempted and failed — a dead token, a rate limit, and so on. */
+  pagesFailed: number;
+  /** Pages Pass A has logged that Pass B has not yet reached at all. */
+  pagesPending: number;
+}
+
 export class SetupService {
   /**
    * A getter, not a resolved `World`. Same reasoning as `Engine`/`Compactor`:
@@ -64,7 +108,7 @@ export class SetupService {
   private wikiFetcher: SetupServiceOptions['wikiFetcher'];
   readonly jobs: JobRegistry;
   /** Cached crawl per preview, so committing does not re-fetch every page. */
-  private crawls = new Map<string, { crawl: CrawlResult; baseUrl: string; mode: DepthMode; title: string }>();
+  private crawls = new Map<string, { crawl: CrawlResult; baseUrl: string; mode: DepthMode; title: string; seeds: string[]; excludeCategories: string[] }>();
 
   constructor(opts: SetupServiceOptions) {
     this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
@@ -131,7 +175,7 @@ export class SetupService {
     const preview = discover(scoped, { maxPages: spec.maxPages });
 
     const previewKey = `${baseUrl}|${seeds.join(',')}|${mode}`;
-    this.crawls.set(previewKey, { crawl: scoped, baseUrl, mode, title });
+    this.crawls.set(previewKey, { crawl: scoped, baseUrl, mode, title, seeds, excludeCategories });
 
     // Pass A is fast; Pass B is one model call per page and dominates everything.
     const passBPages = spec.passB === 'all' ? preview.candidatePages : Math.floor(preview.candidatePages * 0.25);
@@ -193,7 +237,7 @@ export class SetupService {
     const cached = this.crawls.get(previewKey);
     if (!cached) throw new Error('no preview for that key; run a preview first');
 
-    const { crawl: scoped, baseUrl, mode, title } = cached;
+    const { crawl: scoped, baseUrl, mode, title, seeds, excludeCategories } = cached;
     const spec = MODES[mode];
     const wikiName = new URL(baseUrl).hostname.split('.')[0] ?? 'wiki';
 
@@ -205,6 +249,10 @@ export class SetupService {
       // across two stories/worlds, which is a real corruption, not a stale-read.
       const world = this.getWorld();
       world.chronicle.setMeta('worldTitle', title || wikiName);
+      // Persisted so a later session can offer "continue reading this wiki"
+      // without asking the player to re-enter the universe, seeds and mode —
+      // the whole reason a resume needs no return trip through the wizard.
+      saveIngestContext(world, { baseUrl, mode, seeds, excludeCategories, title, wikiName });
       const warnings: string[] = [];
       const pages = [...scoped.pages.values()];
 
@@ -216,67 +264,8 @@ export class SetupService {
       handle.log(`${passA.entities} entities, ${passA.edges} typed edges, ${passA.sheets} sheets`);
       if (passA.skipped.length) handle.log(`skipped ${passA.skipped.length} thin or malformed page(s)`);
 
-      let passB: IngestJobResult['passB'] = null;
-      if (spec.passB !== 'none') {
-        const extractor = new LlmPassBExtractor({
-          provider: this.providers.get('passb'),
-          world,
-          onError: (title, err) => handle.log(`pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
-        });
-
-        const targets =
-          spec.passB === 'all'
-            ? scoped.candidates
-            : scoped.candidates.slice(0, Math.max(20, Math.floor(scoped.candidates.length * 0.25)));
-
-        handle.stage('reading the prose', `${targets.length} pages`);
-        let done = 0;
-        let edges = 0;
-        let events = 0;
-        let voice = 0;
-
-        for (const candidate of targets) {
-          if (handle.cancelled()) {
-            handle.log('cancelled; keeping what was already written');
-            break;
-          }
-          const page = scoped.pages.get(candidate.title);
-          const entity = page ? world.graph.resolveName(candidate.title) : undefined;
-          if (!page || !entity) continue;
-
-          const out = await extractor.extract(page, entity);
-          for (const e of out.edges) {
-            const target = world.graph.resolveName(e.objectName);
-            if (!target || target.id === entity.id) continue;
-            world.graph.assertEdge(
-              { subject: entity.id, predicate: e.predicate, object: target.id, weight: e.weight ?? 0.6, evidence: e.evidence },
-              0, 'canon', `passB:${candidate.title}`,
-            );
-            edges++;
-          }
-          if (out.voiceCard) {
-            const sheet = world.cast.getOrBlank(entity.id);
-            sheet.voice = {
-              diction: out.voiceCard.diction || sheet.voice.diction,
-              tics: [...new Set([...sheet.voice.tics, ...(out.voiceCard.tics ?? [])])],
-              samples: [...new Set([...sheet.voice.samples, ...(out.voiceCard.samples ?? [])])].slice(0, 8),
-              never: [...new Set([...sheet.voice.never, ...(out.voiceCard.never ?? [])])],
-            };
-            world.cast.put(sheet);
-            voice++;
-          }
-          events += out.events.length;
-          for (const c of out.contradictions ?? []) {
-            world.chronicle.addDivergence(0, 'canon-contradiction', `${c.claim} (conflicts with: ${c.conflictsWith})`, candidate.title);
-          }
-          handle.count(++done, targets.length);
-        }
-
-        const st = extractor.stats;
-        const dropped = st.droppedNoEvidence + st.droppedBadPredicate + st.droppedUnknownObject;
-        passB = { pages: done, relations: edges, events, voiceCards: voice, dropped };
-        handle.log(`kept ${edges} relations, dropped ${dropped} unevidenced or unresolvable`);
-      }
+      const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
+      warnings.push(...passBWarnings);
 
       handle.stage('placing your character');
       const assigned = assignPlayerCharacter(world, plan.character);
@@ -301,6 +290,214 @@ export class SetupService {
         passB,
         playerCharacterId: assigned.playerCharacterId,
         opening,
+        warnings,
+      };
+    });
+  }
+
+  /**
+   * Runs Pass B over a scoped crawl, resuming rather than redoing: any page
+   * this wiki already has marked `passb_status = 'done'` (from this run or an
+   * earlier, interrupted one) is skipped outright. Shared by `startIngest`
+   * and `continueIngest` — the wizard's first ingest and a later "finish
+   * reading this wiki" are the same operation over a possibly-extended scope,
+   * not two different code paths that could drift.
+   *
+   * Failures are recorded, not swallowed: `PassBOutput.failed` (set by
+   * `LlmPassBExtractor` when the provider call itself threw — an expired
+   * token, a rate limit, unparseable output) marks the page `'failed'`
+   * instead of `'done'`, so the *next* resume retries exactly that page
+   * rather than treating a dead credential as "read and found nothing".
+   */
+  private async runResumablePassB(
+    world: World,
+    handle: JobHandle,
+    scoped: CrawlResult,
+    spec: DepthSpec,
+    wikiName: string,
+  ): Promise<{ passB: IngestJobResult['passB']; warnings: string[] }> {
+    const warnings: string[] = [];
+    if (spec.passB === 'none') return { passB: null, warnings };
+
+    const extractor = new LlmPassBExtractor({
+      provider: this.providers.get('passb'),
+      world,
+      onError: (title, err) => handle.log(`pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
+    });
+
+    const targets =
+      spec.passB === 'all'
+        ? scoped.candidates
+        : scoped.candidates.slice(0, Math.max(20, Math.floor(scoped.candidates.length * 0.25)));
+
+    const already = new Set(
+      (world.db.prepare(`SELECT page_id FROM ingest_pages WHERE wiki = ? AND passb_status = 'done'`).all(wikiName) as Array<{
+        page_id: string;
+      }>).map((r) => r.page_id),
+    );
+    const pending = targets.filter((c) => {
+      const page = scoped.pages.get(c.title);
+      return page && !already.has(page.pageId);
+    });
+    if (already.size) handle.log(`resuming: ${already.size} page(s) already extracted, ${pending.length} left`);
+
+    handle.stage('reading the prose', `${pending.length} pages`);
+    let done = 0;
+    let edges = 0;
+    let events = 0;
+    let voice = 0;
+    let failed = 0;
+
+    for (const candidate of pending) {
+      if (handle.cancelled()) {
+        handle.log('cancelled; keeping what was already written');
+        break;
+      }
+      const page = scoped.pages.get(candidate.title);
+      const entity = page ? world.graph.resolveName(candidate.title) : undefined;
+      if (!page || !entity) continue;
+
+      const out = await extractor.extract(page, entity);
+      if (out.failed) {
+        // Recorded so a later resume retries exactly this page, not silently
+        // treated as "read and found nothing" — which is the failure mode
+        // that made a dead token unresumable before this status existed.
+        world.db.prepare(`UPDATE ingest_pages SET passb_status = 'failed' WHERE page_id = ? AND wiki = ?`).run(page.pageId, wikiName);
+        failed++;
+        handle.count(done + failed, pending.length);
+        continue;
+      }
+      for (const e of out.edges) {
+        const target = world.graph.resolveName(e.objectName);
+        if (!target || target.id === entity.id) continue;
+        world.graph.assertEdge(
+          { subject: entity.id, predicate: e.predicate, object: target.id, weight: e.weight ?? 0.6, evidence: e.evidence },
+          0, 'canon', `passB:${candidate.title}`,
+        );
+        edges++;
+      }
+      if (out.voiceCard) {
+        const sheet = world.cast.getOrBlank(entity.id);
+        sheet.voice = {
+          diction: out.voiceCard.diction || sheet.voice.diction,
+          tics: [...new Set([...sheet.voice.tics, ...(out.voiceCard.tics ?? [])])],
+          samples: [...new Set([...sheet.voice.samples, ...(out.voiceCard.samples ?? [])])].slice(0, 8),
+          never: [...new Set([...sheet.voice.never, ...(out.voiceCard.never ?? [])])],
+        };
+        world.cast.put(sheet);
+        voice++;
+      }
+      events += out.events.length;
+      for (const c of out.contradictions ?? []) {
+        world.chronicle.addDivergence(0, 'canon-contradiction', `${c.claim} (conflicts with: ${c.conflictsWith})`, candidate.title);
+      }
+      world.db.prepare(`UPDATE ingest_pages SET passb_status = 'done' WHERE page_id = ? AND wiki = ?`).run(page.pageId, wikiName);
+      done++;
+      handle.count(done + failed, pending.length);
+    }
+
+    const st = extractor.stats;
+    const dropped = st.droppedNoEvidence + st.droppedBadPredicate + st.droppedUnknownObject;
+    const passB = { pages: done, relations: edges, events, voiceCards: voice, dropped };
+    handle.log(`kept ${edges} relations, dropped ${dropped} unevidenced or unresolvable${failed ? `, ${failed} page(s) failed and can be resumed later` : ''}`);
+    if (failed) warnings.push(`${failed} page(s) could not be read (a dead token or rate limit, most likely) — this ingest can be continued later from Settings without re-reading what already succeeded`);
+
+    return { passB, warnings };
+  }
+
+  /**
+   * What Settings shows: whether this world came from a wiki at all, and how
+   * much of the last ingest's scope Pass B has actually finished. `pending`
+   * covers both "never reached" (a page Pass A logged but Pass B has not yet
+   * attempted, e.g. under mid's core-only subsetting) and, implicitly, a
+   * wiki this world has no `ingest_pages` rows for yet.
+   */
+  ingestHealth(): IngestHealth {
+    const world = this.getWorld();
+    const context = loadIngestContext(world);
+    if (!context) return { hasContext: false, context: null, pagesDone: 0, pagesFailed: 0, pagesPending: 0 };
+
+    const counts = world.db
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN passb_status = 'done' THEN 1 ELSE 0 END) AS done,
+           SUM(CASE WHEN passb_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+           SUM(CASE WHEN passb_status = '' THEN 1 ELSE 0 END) AS pending
+         FROM ingest_pages WHERE wiki = ?`,
+      )
+      .get(context.wikiName) as { done: number | null; failed: number | null; pending: number | null };
+
+    return {
+      hasContext: true,
+      context,
+      pagesDone: counts.done ?? 0,
+      pagesFailed: counts.failed ?? 0,
+      pagesPending: counts.pending ?? 0,
+    };
+  }
+
+  /**
+   * Continues an ingest that was interrupted, or extends one with a broader
+   * seed set or a deeper mode — the same mechanism either way, since both are
+   * "re-crawl this scope, run Pass A (idempotent), run Pass B only on what
+   * Pass B has not genuinely finished yet". Needs no return trip through the
+   * wizard: `ingestHealth()`'s persisted context already has the wiki, seeds
+   * and mode this world was built from.
+   *
+   * `overrides` lets a caller widen the scope for "read more" rather than
+   * just "finish what was started" — a larger seed list, added exclusions, or
+   * a deeper mode, all still resuming rather than re-paying for pages already
+   * `done`.
+   */
+  continueIngest(overrides: { seeds?: string[]; mode?: DepthMode; excludeCategories?: string[] } = {}): Job<IngestJobResult> {
+    const world = this.getWorld();
+    const context = loadIngestContext(world);
+    if (!context) throw new Error('this world has no wiki ingest to continue — it was not built from a wiki, or predates this feature');
+
+    const baseUrl = context.baseUrl;
+    const mode = overrides.mode ?? context.mode;
+    const seeds = overrides.seeds?.length ? overrides.seeds : context.seeds;
+    const excludeCategories = overrides.excludeCategories ?? context.excludeCategories;
+    const spec = MODES[mode];
+    const wikiName = context.wikiName;
+
+    return this.jobs.start<IngestJobResult>('continue-ingest', async (handle) => {
+      handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
+      const client = this.client(baseUrl);
+      const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages, onProgress: (info) => {
+        handle.stage('crawling', `pass ${info.hop} of ${info.hops} \u00b7 ${info.pagesFetched} pages so far`);
+        handle.count(info.hop, info.hops);
+      } });
+      const scoped = prune(crawled, { maxPages: spec.maxPages, excludeCategories });
+
+      // Re-persist: a "read more" call may have widened seeds/mode/exclusions,
+      // and the next resume should pick those up rather than the narrower
+      // scope the very first ingest started from.
+      saveIngestContext(world, { baseUrl, mode, seeds, excludeCategories, title: context.title, wikiName });
+
+      const warnings: string[] = [];
+      const pages = [...scoped.pages.values()];
+      handle.stage('reading pages', `${pages.length} pages`);
+      handle.count(pages.length, pages.length);
+
+      handle.stage('building the graph', 'infoboxes, categories, links');
+      // Idempotent by construction (`passA.ts`'s doc comment): entity ids are
+      // deterministic slugs, so re-running over pages already ingested
+      // updates in place rather than duplicating.
+      const passA = runPassA(world, pages, { depth: spec.level, wiki: wikiName, voiceCards: spec.voiceCards !== 'none' });
+      handle.log(`${passA.entities} entities, ${passA.edges} typed edges, ${passA.sheets} sheets`);
+
+      const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
+      warnings.push(...passBWarnings);
+
+      handle.stage('done');
+      return {
+        entities: passA.entities,
+        edges: passA.edges,
+        sheets: passA.sheets,
+        passB,
+        playerCharacterId: world.session.get().playerCharacterId,
+        opening: '',
         warnings,
       };
     });

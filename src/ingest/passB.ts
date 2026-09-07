@@ -236,7 +236,13 @@ export class LlmPassBExtractor implements PassBExtractor {
       raw = extractJson(res.text);
     } catch (err) {
       this.onError?.(page.title, err);
-      return { edges: [], events: [], contradictions: [] };
+      // Marked `failed`, not just empty: an expired token or a rate limit
+      // returns exactly this shape, and until this flag existed it was
+      // indistinguishable from "the page genuinely said nothing extractable".
+      // That is the gap that made a token dying mid-run unresumable — every
+      // page after the failure looked exactly as done as one the model had
+      // actually read, so there was nothing to find and retry later.
+      return { edges: [], events: [], contradictions: [], failed: true };
     }
 
     return this.validate(raw, page, entity);

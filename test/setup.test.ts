@@ -562,6 +562,187 @@ test('the ingest job reports each stage it passes through', async () => {
   world.close();
 });
 
+// --------------------------------------------------------- resuming ingest
+
+/**
+ * Regression for the real failure this closes: a token expiring partway
+ * through a `mid`/`deep` ingest used to be indistinguishable from Pass B
+ * having genuinely read every page and found nothing on the ones it never
+ * reached — nothing recorded which pages had actually succeeded, so there
+ * was nothing to resume against. `ingest_pages.passb_status` is the fix;
+ * these tests exercise it through the real route (`startIngest`, called
+ * twice), not just the storage layer.
+ */
+test('a page whose Pass B call fails is recorded as failed, not silently as done', async () => {
+  const { world } = service();
+  const registry = new ProviderRegistry({
+    id: 'dying-token', model: 'x',
+    capabilities: { contextWindow: 64_000, structuredOutput: 'none', systemRole: true, streaming: false, costTier: 'free', charsPerToken: 4, proseQuality: 0, steerability: 0 },
+    async complete() {
+      throw new Error('token expired');
+    },
+  } as never);
+  const failingSvc = new SetupService({
+    world,
+    providers: registry,
+    directoryOptions: { fetcher: directoryFixture(FIXTURE), delayMs: 0 },
+    wikiFetcher: fixtureFetcher(WIKI),
+  });
+
+  const preview = await failingSvc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid');
+  const job = failingSvc.startIngest(preview.previewKey, {
+    character: { existing: null, name: 'X', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  await settle(failingSvc.jobs, job.id);
+
+  const settled = failingSvc.jobs.get(job.id)!;
+  assert.equal(settled.status, 'done', 'a dead model must not crash the whole ingest job');
+  const result = settled.result as { warnings: string[] };
+  assert.ok(
+    result.warnings.some((w) => /could not be read/.test(w)),
+    'the player is told some pages failed, not left to infer it',
+  );
+
+  const rows = world.db.prepare(`SELECT passb_status FROM ingest_pages WHERE wiki = 'vale'`).all() as Array<{ passb_status: string }>;
+  assert.ok(rows.length > 0, 'pass A still ran and logged pages');
+  assert.ok(
+    rows.every((r) => r.passb_status === 'failed' || r.passb_status === ''),
+    'nothing is wrongly marked done when every model call threw',
+  );
+  world.close();
+});
+
+test('a resumed ingest only re-reads the pages that failed or were never reached', async () => {
+  // A provider that fails on its first N calls, then succeeds — the shape of
+  // a token that expires mid-run and is then refreshed before the retry.
+  let calls = 0;
+  const failFirst = 3;
+  const provider = {
+    id: 'recovering', model: 'x',
+    capabilities: { contextWindow: 64_000, structuredOutput: 'none', systemRole: true, streaming: false, costTier: 'free', charsPerToken: 4, proseQuality: 0, steerability: 0 },
+    async complete() {
+      calls++;
+      if (calls <= failFirst) throw new Error('token expired');
+      return { text: '{"relations":[],"events":[]}', tokensIn: 1, tokensOut: 1, model: 'x', schemaEnforced: false };
+    },
+  };
+  const world = World.open(':memory:');
+  const svc = new SetupService({
+    world,
+    providers: new ProviderRegistry(provider as never),
+    directoryOptions: { fetcher: directoryFixture(FIXTURE), delayMs: 0 },
+    wikiFetcher: fixtureFetcher(WIKI),
+  });
+
+  const preview = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid');
+  const job = svc.startIngest(preview.previewKey, {
+    character: { existing: null, name: 'X', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  await settle(svc.jobs, job.id);
+
+  const afterFirst = world.db.prepare(`SELECT COUNT(*) n FROM ingest_pages WHERE wiki = 'vale' AND passb_status = 'failed'`).get() as { n: number };
+  assert.ok(afterFirst.n > 0, 'the first run left some pages marked failed');
+  const callsAfterFirstRun = calls;
+
+  // Second run: same preview, same scope, freshly previewed (a real resume
+  // goes through discover/preview again since the crawl cache is not kept
+  // across requests) — the point under test is that Pass B does not re-spend
+  // on the pages that already have passb_status = 'done'.
+  const preview2 = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid');
+  const job2 = svc.startIngest(preview2.previewKey, {
+    character: { existing: null, name: 'X', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  await settle(svc.jobs, job2.id);
+
+  const settled2 = svc.jobs.get(job2.id)!;
+  assert.equal(settled2.status, 'done');
+  const stillFailed = world.db.prepare(`SELECT COUNT(*) n FROM ingest_pages WHERE wiki = 'vale' AND passb_status = 'failed'`).get() as { n: number };
+  assert.equal(stillFailed.n, 0, 'everything eventually succeeded across the two runs');
+
+  // The second run only had to attempt the pages the first run left pending
+  // (failed or never reached), never the ones already `done` — so total calls
+  // across both runs is bounded by the page count, not by page count × 2.
+  const totalPages = (world.db.prepare(`SELECT COUNT(*) n FROM ingest_pages WHERE wiki = 'vale'`).get() as { n: number }).n;
+  assert.ok(calls <= totalPages + failFirst, `expected at most ${totalPages + failFirst} total model calls across both runs, got ${calls}`);
+  assert.ok(calls > callsAfterFirstRun, 'the second run did make some calls — it was not a total no-op');
+  world.close();
+});
+
+test('ingestHealth reports no context for a world never built from a wiki', () => {
+  const { world, svc } = service();
+  svc.useSample();
+  const health = svc.ingestHealth();
+  assert.equal(health.hasContext, false);
+  assert.equal(health.context, null);
+  world.close();
+});
+
+test('ingestHealth reports pending/done/failed after a real ingest', async () => {
+  const { world, svc } = service();
+  const preview = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid');
+  const job = svc.startIngest(preview.previewKey, {
+    character: { existing: null, name: 'X', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  await settle(svc.jobs, job.id);
+
+  const health = svc.ingestHealth();
+  assert.equal(health.hasContext, true, 'startIngest persists the context continueIngest needs');
+  assert.equal(health.context?.baseUrl, 'https://vale.fandom.com');
+  assert.equal(health.context?.mode, 'mid');
+  assert.deepEqual(health.context?.seeds, ['Duskhollow']);
+  assert.ok(health.pagesDone > 0, 'the mock provider succeeds, so pages should be done');
+  assert.equal(health.pagesFailed, 0);
+  world.close();
+});
+
+test('continueIngest needs no re-entry of the wiki, seeds or mode', async () => {
+  // The whole point: a player hitting "continue" in Settings gives nothing
+  // beyond the button press. Everything continueIngest needs must already be
+  // on the world from the first ingest.
+  const { world, svc } = service();
+  const preview = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'skim');
+  const job = svc.startIngest(preview.previewKey, {
+    character: { existing: null, name: 'X', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  await settle(svc.jobs, job.id);
+
+  const job2 = svc.continueIngest();
+  await settle(svc.jobs, job2.id);
+  const settled2 = svc.jobs.get(job2.id)!;
+  assert.equal(settled2.status, 'done', settled2.error ?? '');
+  world.close();
+});
+
+test('continueIngest is refused on a world with no wiki to continue', () => {
+  const { world, svc } = service();
+  svc.useSample();
+  assert.throws(() => svc.continueIngest(), /no wiki ingest to continue/);
+  world.close();
+});
+
+test('continueIngest can widen the scope to read more, not just resume', async () => {
+  const { world, svc } = service();
+  const preview = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'skim');
+  const job = svc.startIngest(preview.previewKey, {
+    character: { existing: null, name: 'X', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  await settle(svc.jobs, job.id);
+  const before = world.graph.counts().entities;
+
+  // Extend with a second seed and a deeper mode — "read more later", the
+  // other half of what continueIngest exists for besides plain resume.
+  const job2 = svc.continueIngest({ seeds: ['Duskhollow', 'Warden Ilsa Crowe'], mode: 'mid' });
+  await settle(svc.jobs, job2.id);
+  const settled2 = svc.jobs.get(job2.id)!;
+  assert.equal(settled2.status, 'done', settled2.error ?? '');
+  assert.ok(world.graph.counts().entities >= before, 'widening the scope does not lose what was already there');
+
+  const health = svc.ingestHealth();
+  assert.equal(health.context?.mode, 'mid', 'the widened mode is persisted for the next continue');
+  assert.deepEqual(health.context?.seeds, ['Duskhollow', 'Warden Ilsa Crowe']);
+  world.close();
+});
+
 test('the sample world is available without any setup', () => {
   const { world, svc } = service();
   const res = svc.useSample();

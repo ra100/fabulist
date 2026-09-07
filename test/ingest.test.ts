@@ -588,6 +588,45 @@ test('the null extractor keeps depth orchestration testable before the llm pass 
   world.close();
 });
 
+/**
+ * The same resumability fix as `SetupService.startIngest` (see setup.test.ts),
+ * exercised at this level too: `ingest()` is the CLI's own path
+ * (`cli/ingest.ts`), and it must not silently regress just because the
+ * wizard's copy of the loop got fixed.
+ */
+test('a page whose extractor marks failed is recorded, not treated as done', async () => {
+  const world = World.open(':memory:');
+  const extractor: PassBExtractor = {
+    async extract() {
+      return { edges: [], events: [], failed: true };
+    },
+  };
+  await ingest({ world, client: client(), seeds: ['Duskhollow'], mode: 'mid', wiki: 'vale', extractor });
+
+  const rows = world.db.prepare(`SELECT passb_status FROM ingest_pages WHERE wiki = 'vale'`).all() as Array<{ passb_status: string }>;
+  assert.ok(rows.length > 0);
+  assert.ok(rows.every((r) => r.passb_status !== 'done'), 'a failed extraction is never marked done');
+  world.close();
+});
+
+test('re-running ingest over the same scope does not re-spend on pages already done', async () => {
+  const world = World.open(':memory:');
+  let calls = 0;
+  const extractor: PassBExtractor = {
+    async extract() {
+      calls++;
+      return { edges: [], events: [] };
+    },
+  };
+  await ingest({ world, client: client(), seeds: ['Duskhollow'], mode: 'mid', wiki: 'vale', extractor });
+  const firstRunCalls = calls;
+  assert.ok(firstRunCalls > 0);
+
+  await ingest({ world, client: client(), seeds: ['Duskhollow'], mode: 'mid', wiki: 'vale', extractor });
+  assert.equal(calls, firstRunCalls, 'the second run made no new extractor calls: every page was already done');
+  world.close();
+});
+
 test('an ingested world is immediately playable', async () => {
   // The point of skim mode: start playing twenty minutes after picking a fandom.
   const world = World.open(':memory:');
