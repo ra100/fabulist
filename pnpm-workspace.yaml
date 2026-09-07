@@ -1,3 +1,6 @@
+allowBuilds:
+  esbuild: true
+
 # Vite needs esbuild's native binary, so its build script must be approved.
 onlyBuiltDependencies:
   - esbuild
