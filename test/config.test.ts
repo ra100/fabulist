@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { ConfigService, validateSpec, ROUTABLE_ROLES } from '../src/config/service.ts';
-import { defaultConfig, type Config } from '../src/config/config.ts';
+import { defaultConfig, loadConfig, localPathFor, saveConfig, type Config } from '../src/config/config.ts';
 import { ProviderRegistry, SwappableRegistry } from '../src/providers/provider.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { makeProseGate } from '../src/lint/gate.ts';
@@ -10,7 +10,7 @@ import { World } from '../src/store/index.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { Engine } from '../src/loop/engine.ts';
 import { createApiServer } from '../src/server/api.ts';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SwappableImageRegistry } from '../src/providers/image.ts';
@@ -29,6 +29,67 @@ function service(initial: Partial<Config> = {}, registry?: SwappableRegistry) {
   });
   return { svc, saved: () => stored };
 }
+
+function withTempDir(fn: (dir: string) => void) {
+  const dir = mkdtempSync(join(tmpdir(), 'story-cfg-local-'));
+  try {
+    fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// --------------------------------------------------- local config override
+
+test('localPathFor inserts .local before the final extension', () => {
+  assert.equal(localPathFor('fabulist.config.json'), 'fabulist.config.local.json');
+  assert.equal(localPathFor('/a/b/cfg.json'), '/a/b/cfg.local.json');
+  assert.equal(localPathFor('no-extension'), 'no-extension.local');
+});
+
+test('loadConfig reads the tracked file alone when no local override exists', () => {
+  withTempDir((dir) => {
+    const path = join(dir, 'fabulist.config.json');
+    writeFileSync(path, JSON.stringify({ ...defaultConfig(), profile: 'tracked' }));
+    assert.equal(loadConfig(path).profile, 'tracked');
+  });
+});
+
+test('a local override wins over the tracked file, field by field', () => {
+  withTempDir((dir) => {
+    const path = join(dir, 'fabulist.config.json');
+    writeFileSync(path, JSON.stringify({ ...defaultConfig(), profile: 'tracked', proseLintThreshold: 9 }));
+    writeFileSync(localPathFor(path), JSON.stringify({ profile: 'local' }));
+    const cfg = loadConfig(path);
+    assert.equal(cfg.profile, 'local', 'the local override wins');
+    assert.equal(cfg.proseLintThreshold, 9, 'a field the override never mentioned still comes from the tracked file');
+  });
+});
+
+test('saveConfig always writes the local override, never the tracked file', () => {
+  withTempDir((dir) => {
+    const path = join(dir, 'fabulist.config.json');
+    writeFileSync(path, JSON.stringify({ ...defaultConfig(), profile: 'tracked' }));
+    saveConfig({ ...defaultConfig(), profile: 'switched' }, path);
+
+    assert.equal(
+      JSON.parse(readFileSync(path, 'utf8')).profile,
+      'tracked',
+      'the tracked file is untouched by a runtime write',
+    );
+    assert.equal(loadConfig(path).profile, 'switched', 'but the effective config reflects the write');
+  });
+});
+
+test('the very first write creates the local override with no tracked file present at all', () => {
+  withTempDir((dir) => {
+    const path = join(dir, 'fabulist.config.json');
+    assert.ok(!existsSync(path));
+    saveConfig({ ...defaultConfig(), profile: 'first-run' }, path);
+    assert.ok(!existsSync(path), 'still no tracked file — nothing created or touched it');
+    assert.equal(loadConfig(path).profile, 'first-run');
+  });
+});
 
 // -------------------------------------------------------------- validation
 
@@ -396,7 +457,9 @@ test('switching the image profile survives a later, unrelated config write', asy
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const { port } = server.address() as AddressInfo;
     const base = `http://127.0.0.1:${port}`;
-    const readFile = () => JSON.parse(readFileSync(path, 'utf8')) as { imageProfile?: string };
+    // Writes land on the gitignored local override, not `path` itself — see
+    // `config.ts`'s `saveConfig`.
+    const readFile = () => JSON.parse(readFileSync(localPathFor(path), 'utf8')) as { imageProfile?: string };
 
     try {
       const switched = await fetch(`${base}/api/images/profile`, {
@@ -425,10 +488,12 @@ test('switching the image profile survives a later, unrelated config write', asy
 });
 
 /**
- * The routes that write config must write the file the server was started with.
- * Their module-level defaults point at `fabulist.config.json`, so a server on a
- * throwaway config would otherwise edit the operator's real one — which happened
- * twice while browser-testing the provider UI.
+ * The routes that write config must write the file the server was started with
+ * (its local override, not the tracked default it never touches — see
+ * `config.ts`'s `saveConfig`/`localPathFor`). Their module-level defaults point
+ * at `fabulist.config.json`, so a server on a throwaway config would otherwise
+ * edit the operator's real one — which happened twice while browser-testing
+ * the provider UI.
  */
 test('profile switches write the server\'s own config file, not the default path', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'story-cfg-'));
@@ -456,8 +521,10 @@ test('profile switches write the server\'s own config file, not the default path
         body: JSON.stringify({ profile: 'mock' }),
       });
       assert.equal(res.status, 200);
-      assert.ok(existsSync(path), 'the switch wrote the config it was given');
-      assert.equal((JSON.parse(readFileSync(path, 'utf8')) as { profile: string }).profile, 'mock');
+      assert.ok(!existsSync(path), 'the tracked path itself is never written');
+      const localPath = localPathFor(path);
+      assert.ok(existsSync(localPath), 'the switch wrote this server\'s local override instead');
+      assert.equal((JSON.parse(readFileSync(localPath, 'utf8')) as { profile: string }).profile, 'mock');
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
       world.close();
