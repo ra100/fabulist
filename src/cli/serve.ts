@@ -52,8 +52,21 @@ const cfg = loadConfig(configPath);
  *
  * `--memory` keeps its own throwaway world so a quick test session never touches
  * a real one, and `--world=<slug>` overrides which world to open.
+ *
+ * `--data-root=<path>` (or `DATA_ROOT`) overrides the base `data` directory
+ * everything above resolves under. This has to be settable independently of
+ * `--config=`: the Dockerfile mounts a *volume* at `/data` and only that path
+ * survives a container recreate, but pointing `--config=` at a file inside it
+ * says nothing about where `worldsRoot()`/`listWorlds()`/`createWorldFile()`
+ * put the actual SQLite world files — those defaulted to the bare `'data'`
+ * relative to `WORKDIR /app`, i.e. the container's writable layer, not the
+ * volume. A `docker compose pull && up -d` recreates the container and wipes
+ * that layer, so every world silently vanished on redeploy until this flag
+ * existed to route them into the same volume the config file already uses.
  */
-const dataRoot = inMemory ? join('data', '.memory-worlds') : 'data';
+const dataRootArg = args.find((a) => a.startsWith('--data-root='))?.slice('--data-root='.length);
+const dataRootBase = dataRootArg ?? process.env.DATA_ROOT ?? 'data';
+const dataRoot = inMemory ? join(dataRootBase, '.memory-worlds') : dataRootBase;
 const worldArg = args.find((a) => a.startsWith('--world='))?.slice('--world='.length);
 
 mkdirSync(worldsRoot(dataRoot), { recursive: true });
