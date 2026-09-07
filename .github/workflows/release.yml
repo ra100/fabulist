@@ -63,3 +63,36 @@ jobs:
           tags: |
             ra100/fabulist:latest
             ra100/fabulist:${{ github.ref_name }}
+
+  # Runs only after the image above is actually on Docker Hub — deploying
+  # before the push lands would pull the previous tag under a new name and
+  # look like a successful no-op release.
+  #
+  # The VPS side of this trusts nothing about *what* SSH asks it to run: the
+  # deploy key's `authorized_keys` entry carries a forced `command=` (see
+  # deploy/README.md), so this step's actual ssh command is a formality —
+  # the server always runs deploy/deploy.sh regardless, and that key can do
+  # nothing else on the box even if it leaked.
+  deploy:
+    needs: docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Deploy over SSH (forced remote command)
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_DOMAIN: ${{ vars.SSH_DOMAIN }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+          SSH_USER: ${{ vars.SSH_USER }}
+        run: |
+          set -euo pipefail
+          install -m 600 -D /dev/null "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          ssh-keyscan -p "$SSH_PORT" "$SSH_DOMAIN" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          # The string passed here is irrelevant when the key's
+          # authorized_keys entry carries a forced `command=` — sshd runs
+          # that fixed command regardless of what the client asks for. Kept
+          # non-empty and descriptive only for readable server-side logs.
+          ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            "$SSH_USER@$SSH_DOMAIN" "deploy fabulist ${{ github.ref_name }}"
