@@ -1,43 +1,20 @@
 name: release
 
-# Publishes to npm and Docker Hub on a version tag — nothing runs on an
-# ordinary push to main, so a release is a deliberate `git tag vX.Y.Z && git
-# push --tags`, not a side effect of merging.
+# Publishes to Docker Hub and deploys to the VPS on a version tag — nothing
+# runs on an ordinary push to main, so a release is a deliberate `git tag
+# vX.Y.Z && git push --tags`, not a side effect of merging.
+#
+# No npm job: `npm publish` from CI needs either a fully non-interactive
+# Automation token or an OTP prompt neither this workflow nor a headless
+# runner can answer. Publish to npm by hand (`pnpm build:web && npm publish
+# --access public`) from a machine that can supply the OTP, until/unless an
+# Automation token replaces NPM_ACCESS_TOKEN.
 on:
   push:
     tags:
       - 'v*'
 
 jobs:
-  npm:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.5.2
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: 'https://registry.npmjs.org'
-
-      # --frozen-lockfile: a release must build from exactly what's committed,
-      # never a lockfile pnpm decided to update on the runner.
-      - run: pnpm install --frozen-lockfile
-
-      # Explicit here even though `prepublishOnly` also runs it, so a failed
-      # build fails this step with a clear name instead of failing inside
-      # `npm publish`'s own lifecycle-hook output.
-      - run: pnpm build:web
-
-      - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_ACCESS_TOKEN }}
-
   docker:
     runs-on: ubuntu-latest
     permissions:
