@@ -1244,11 +1244,16 @@ route('POST', '/api/setup/continue', (_req, res, { setup, body }) => {
   }
 });
 
-route('POST', '/api/setup/reset', (_req, res, { setup }) => {
+route('POST', '/api/setup/reset', (_req, res, { setup, currentStory }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  svc.reset();
-  send(res, 200, { ok: true });
+  // `reset()` drops every story row and creates one blank replacement, so the
+  // id this server was bound to no longer exists. Rebinding is not optional:
+  // without it the very next request resolves `world()` against a deleted
+  // story, reading a default session with no row to write back to.
+  const storyId = svc.reset();
+  currentStory?.switchTo(storyId);
+  send(res, 200, { ok: true, storyId });
 });
 
 // ------------------------------------------------------------------- server

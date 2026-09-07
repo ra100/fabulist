@@ -7,6 +7,8 @@
  * likeliest way this whole step goes wrong, so the preview is not skippable.
  */
 import type { World } from '../store/index.ts';
+import { createStory } from '../store/world.ts';
+import type { StoryId } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
 import { WikiClient } from '../ingest/client.ts';
 import { crawl, discover, prune, type CrawlResult, type DiscoveryPreview } from '../ingest/scope.ts';
@@ -543,12 +545,16 @@ export class SetupService {
    * Wipes a save so the wizard can be run again. Canon included: this is a
    * reset of the whole file, not of one story — under multi-story that is a
    * meaningfully different (and more destructive) operation than "delete this
-   * story", which the save browser (Slice 3/4) needs to offer as a separate,
-   * less destructive action. Left as a whole-file wipe here deliberately,
-   * matching what the "new world" button in the topbar has always done;
-   * revisit when that button's semantics are actually redesigned.
+   * story", which the save browser offers as a separate, less destructive
+   * action.
+   *
+   * Returns the id of the single story the file is left holding, because that
+   * is not necessarily the story the caller was on: every previous story row is
+   * dropped and one blank story is created to replace them. A caller holding a
+   * `CurrentStory` must rebind to this id or its next `world()` resolves against
+   * a story that no longer exists.
    */
-  reset(): void {
+  reset(): StoryId {
     const world = this.getWorld();
     // Keep this list complete when a table is added. `illustrations` was
     // missing until the integrity check (`store/integrity.ts`) found three
@@ -563,6 +569,33 @@ export class SetupService {
       'edges', 'entities', 'scenes', 'chapters', 'ingest_pages', 'illustrations',
     ];
     for (const t of tables) world.db.prepare(`DELETE FROM ${t}`).run();
-    world.session.set({ scene: 1, turn: 0, playerCharacterId: '', currentLocationId: null });
+
+    // `stories` was the same omission as `illustrations`, found the same way —
+    // by checking rather than trusting. It postdates this method, so a reset
+    // emptied canon and left every playthrough row behind: the stories tab
+    // still listed them afterwards, contradicting the UI's own promise that
+    // this "wipes every story in this file, and canon with them", and one row
+    // still carried a `lastPlayedAt` from the world that had just been deleted.
+    //
+    // Replaced rather than merely emptied, because a file with zero stories is
+    // not a valid state to leave behind: `World.open` resolves through
+    // `resolveDefaultStory`, and every route resolves through a `CurrentStory`
+    // holding an id. Deleting all rows and creating one fresh blank story in
+    // the same operation keeps the file openable and gives the wizard exactly
+    // the clean slate it would get from a brand-new file.
+    world.db.prepare(`DELETE FROM stories`).run();
+    const fresh = createStory(world.db, { title: '' });
+
+    // The world label lives in `meta`, which is unscoped by design (it
+    // describes the file, not a story) and so survives every table sweep
+    // above. Left behind, `/api/state` reported the deleted world's title
+    // against an empty graph — the header read "Saint Verrow" with 0 entities
+    // until the wizard happened to overwrite it. Cleared here so a reset file
+    // is indistinguishable from a new one. `meta` is deleted by key rather
+    // than emptied, so anything else stored there later (a schema version, a
+    // per-file preference) is not silently destroyed by a world reset.
+    world.db.prepare(`DELETE FROM meta WHERE key = 'worldTitle'`).run();
+
+    return fresh.id;
   }
 }

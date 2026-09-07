@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { World } from '../src/store/index.ts';
+import { createStory, getStory, listStories } from '../src/store/world.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry, SwappableRegistry } from '../src/providers/provider.ts';
 import { WikiDirectory, directoryFixture } from '../src/setup/directory.ts';
@@ -756,10 +757,16 @@ test('reset clears everything so the wizard can run again', async () => {
   const { world, svc } = service();
   svc.useSample();
   assert.ok(!svc.isFresh());
-  svc.reset();
+  const freshId = svc.reset();
   assert.ok(svc.isFresh(), 'a reset is a reset, canon included');
   assert.equal(world.chronicle.turns().length, 0);
-  assert.equal(world.session.get().playerCharacterId, '');
+
+  // Read the session through the story the reset actually left behind. The old
+  // `World` handle is bound to a story id that no longer exists, and asking it
+  // for a session now throws rather than quietly returning defaults — which is
+  // the reason `reset` returns the new id and `/api/setup/reset` rebinds its
+  // `CurrentStory` to it.
+  assert.equal(world.withStory(freshId).session.get().playerCharacterId, '');
   world.close();
 });
 
@@ -792,6 +799,78 @@ test('reset leaves no dangling references behind, illustrations included', () =>
   const report = checkIntegrity(world.db);
   assert.ok(report.ok, formatIntegrityReport(report));
   assert.equal(world.illustrations.forEntity(entity.id).length, 0, 'the illustration row went with the entity');
+  world.close();
+});
+
+/**
+ * Regression, exactly the same shape as the `illustrations` one above and found
+ * the same way — by checking a real save after a reset instead of trusting the
+ * table list. `stories` postdates this method, so a reset emptied canon and
+ * left every playthrough row behind: the stories tab still listed two saves
+ * afterwards, contradicting the UI's own promise that discarding a world
+ * "wipes every story in this file, and canon with them", and one row still
+ * carried a `lastPlayedAt` from the world that had just been deleted.
+ */
+test('reset replaces every story row with one blank story', () => {
+  const { world, svc } = service();
+  svc.useSample();
+
+  const extra = createStory(world.db, { title: 'a second playthrough' });
+  world.db.prepare(`UPDATE stories SET title = 'the original' WHERE id = ?`).run(world.storyId);
+  assert.equal(listStories(world.db).length, 2, 'precondition: two stories exist');
+
+  const freshId = svc.reset();
+
+  const after = listStories(world.db);
+  assert.equal(after.length, 1, 'the old story rows are gone');
+  assert.equal(after[0]!.id, freshId, 'and reset reports the id of the one that replaced them');
+  assert.notEqual(freshId, extra.id, 'the replacement is genuinely new, not a survivor');
+  assert.equal(after[0]!.title, '', 'a discarded world leaves no stale title behind');
+  assert.equal(after[0]!.scene, 1);
+  assert.equal(after[0]!.turn, 0);
+  assert.equal(after[0]!.playerCharacterId, '', 'and no stale player character');
+  world.close();
+});
+
+/**
+ * `meta` is unscoped by design — it describes the file rather than a story — so
+ * it survives every table sweep in `reset`. Left behind, `/api/state` reported
+ * the deleted world's title against an empty graph: the header read "Saint
+ * Verrow" over 0 entities until the wizard happened to overwrite it.
+ */
+test('reset clears the world title so a wiped file is indistinguishable from a new one', () => {
+  const { world, svc } = service();
+  svc.useSample();
+  assert.equal(world.chronicle.getMeta('worldTitle'), 'Saint Verrow', 'precondition: the sample set a title');
+
+  svc.reset();
+
+  assert.equal(world.chronicle.getMeta('worldTitle', 'Untitled world'), 'Untitled world', 'the label went with the world');
+  world.close();
+});
+
+/**
+ * The invariant that makes the above safe: a file with zero stories is not a
+ * valid state to leave behind, because `World.open` resolves through
+ * `resolveDefaultStory` and every route resolves through a `CurrentStory`
+ * holding an id. A reset must hand back a story that actually exists.
+ */
+test('a reset world is still openable, and the session writes back to a real row', () => {
+  const { world, svc } = service();
+  svc.useSample();
+  const freshId = svc.reset();
+
+  assert.ok(getStory(world.db, freshId), 'the reported story really is in the file');
+
+  // Rebinding is what the /api/setup/reset route does; prove the rebound world
+  // is writable, since a session with no backing row silently loses writes.
+  const rebound = world.withStory(freshId);
+  rebound.session.set({ scene: 2, turn: 5 });
+  assert.equal(world.withStory(freshId).session.get().scene, 2, 'the write survived a fresh read');
+  assert.equal(world.withStory(freshId).session.get().turn, 5);
+
+  // And a plain open of the same file resolves without needing an explicit id.
+  assert.equal(listStories(world.db).length, 1, 'exactly one story, so auto-resolve cannot be ambiguous');
   world.close();
 });
 
