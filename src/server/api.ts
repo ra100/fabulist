@@ -21,7 +21,8 @@ import {
 } from '../consequence/propagate.ts';
 import type { Condition, Directive, Entity, Knobs, StyleContract, VisualStyle } from '../domain/types.ts';
 import { branchSave } from '../loop/branch.ts';
-import type { SetupService } from '../setup/service.ts';
+import { limitsFromWire, type SetupService } from '../setup/service.ts';
+import type { DepthMode, IngestLimits } from '../ingest/depth.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
 import { switchImageProfile, switchProfile } from '../config/config.ts';
@@ -30,7 +31,7 @@ import { ROUTABLE_ROLES, validateImageSpec, validateSpec, type ConfigService } f
 import { seedConsequences as seedCons, tickConsequences as tickCons, worldTick as wTick } from '../consequence/propagate.ts';
 import { type IllustrationService, NoImageProviderError } from '../illustration/service.ts';
 import { composePortraitPrompt, composeScenePrompt } from '../illustration/composer.ts';
-import type { McpAuth } from '../mcp/auth.ts';
+import { mcpSessionUser, type McpAuth } from '../mcp/auth.ts';
 import { handleMcpRequest, protectedResourceMetadata } from '../mcp/server.ts';
 import type { McpToolContext } from '../mcp/tools.ts';
 import type { AuthConfig, SessionUser } from '../auth/config.ts';
@@ -213,9 +214,27 @@ route('GET', '/api/state', (_req, res, { world }) => {
   });
 });
 
+/**
+ * `minWeight` defaults to 0.5, which excludes `MENTIONS`.
+ *
+ * Measured on a real wiki ingest: 58,170 of 73,854 edges (79%) were untyped
+ * `MENTIONS` at weight 0.15 — raw wikilinks, recorded honestly as weak
+ * evidence — against ~6,100 typed relationships. Drawn together, the typed
+ * structure is invisible inside the mention mesh, which is why a
+ * well-connected graph read as "there are hardly any edges". So the explorer
+ * now opens on the relationships someone asserted, and mentions are opt-in
+ * (`?minWeight=0`) rather than the default view.
+ *
+ * A weight floor rather than a predicate blocklist: weight is already how this
+ * codebase records confidence in an edge (`RELATION_FIELDS` assigns 0.6–0.85,
+ * Pass B defaults to 0.6, mentions 0.15), so one number expresses "assertions,
+ * not co-occurrence" without naming predicates that may change.
+ */
 route('GET', '/api/graph', (_req, res, { world, url }) => {
   const layer = url.searchParams.get('layer');
   const type = url.searchParams.get('type');
+  const minWeightRaw = url.searchParams.get('minWeight');
+  const minWeight = minWeightRaw === null ? 0.5 : Number(minWeightRaw);
   const entities = world.graph.list({
     limit: Number(url.searchParams.get('limit') ?? 400),
     ...(layer === 'canon' || layer === 'chronicle' ? { layer } : {}),
@@ -223,11 +242,12 @@ route('GET', '/api/graph', (_req, res, { world, url }) => {
   });
   const ids = new Set(entities.map((e) => e.id));
   const scene = world.session.get().scene;
-  const edges = world.graph
-    .allEdges(3000)
-    .filter((e) => ids.has(e.subject) && ids.has(e.object))
-    .filter((e) => e.validTo === null || e.validTo > scene);
-  send(res, 200, { entities, edges, scene });
+  const all = world.graph.allEdges(3000).filter((e) => ids.has(e.subject) && ids.has(e.object));
+  const live = all.filter((e) => e.validTo === null || e.validTo > scene);
+  const edges = Number.isFinite(minWeight) && minWeight > 0 ? live.filter((e) => e.weight >= minWeight) : live;
+  // Reported so the view can say "1,204 typed (8,900 mentions hidden)" rather
+  // than leaving the reader to wonder where the rest went.
+  send(res, 200, { entities, edges, scene, hiddenEdges: live.length - edges.length, minWeight });
 });
 
 route('GET', '/api/entity/:id', (_req, res, { world, params }) => {
@@ -1209,13 +1229,20 @@ function requireSetup(res: ServerResponse, setup: SetupService | undefined): Set
   return setup;
 }
 
+/**
+ * The wizard gate. Deliberately does *not* return entity/edge counts: this
+ * route is polled alongside `/api/state` on every UI refresh, and both used to
+ * call `graph.counts()` — a full scan of `entities` and `edges`, since
+ * `story_id = ? OR layer = 'canon'` is unindexable — so a refresh paid for it
+ * three times over (twice here, once there) to render one number that
+ * `/api/state` already carries. `fresh` is now an existence check.
+ */
 route('GET', '/api/setup/status', (_req, res, { setup, world }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const session = world.session.get();
   send(res, 200, {
     fresh: svc.isFresh(),
-    counts: world.graph.counts(),
     playerCharacterId: session.playerCharacterId,
     hasPlayer: !!world.cast.player(),
   });
@@ -1244,10 +1271,24 @@ route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { baseUrl, seeds, mode, excludeCategories, title } = (body ?? {}) as {
-    baseUrl?: string; seeds?: string[]; mode?: 'skim' | 'mid' | 'deep'; excludeCategories?: string[]; title?: string;
+    baseUrl?: string; seeds?: string[]; mode?: DepthMode; excludeCategories?: string[]; title?: string;
   };
   if (!baseUrl || !seeds?.length) return send(res, 400, { error: 'baseUrl and seeds are required' });
-  send(res, 200, await svc.preview(baseUrl, seeds, mode ?? 'mid', excludeCategories ?? [], title ?? ''));
+  // `maxPages`/`hops`/`passBMaxPages` accept a positive integer or "all", and a
+  // bad one is a 400 rather than a silent fallback to the mode's preset — see
+  // `limitsFromWire`/`parseBudget`. An unlimited budget is refused by the
+  // service itself (dump-only), which surfaces here the same way.
+  let limits: IngestLimits;
+  try {
+    limits = limitsFromWire((body ?? {}) as Record<string, unknown>);
+  } catch (e) {
+    return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+  }
+  try {
+    send(res, 200, await svc.preview(baseUrl, seeds, mode ?? 'mid', excludeCategories ?? [], title ?? '', undefined, limits));
+  } catch (e) {
+    send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 /**
@@ -1260,12 +1301,17 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { baseUrl, seeds, mode, excludeCategories, title, character } = (body ?? {}) as {
-    baseUrl?: string; seeds?: string[]; mode?: 'skim' | 'mid' | 'deep'; excludeCategories?: string[]; title?: string;
+    baseUrl?: string; seeds?: string[]; mode?: DepthMode; excludeCategories?: string[]; title?: string;
     character?: never;
   };
   if (!baseUrl || !seeds?.length) return send(res, 400, { error: 'baseUrl and seeds are required' });
   const sketch = character ?? { existing: null, name: '', role: '', goals: [], vows: [] };
-  send(res, 200, svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? ''));
+  try {
+    const limits = limitsFromWire((body ?? {}) as Record<string, unknown>);
+    send(res, 200, svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? '', limits));
+  } catch (e) {
+    send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 /** Commits a previewed scope. Returns a job to poll. */
@@ -1412,10 +1458,15 @@ route('POST', '/api/setup/continue', (_req, res, { setup, body, user, authConfig
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { seeds, mode, excludeCategories } = (body ?? {}) as {
-    seeds?: string[]; mode?: 'skim' | 'mid' | 'deep'; excludeCategories?: string[];
+    seeds?: string[]; mode?: DepthMode; excludeCategories?: string[];
   };
   try {
-    const job = svc.continueIngest({ seeds, mode, excludeCategories });
+    // Raising `maxPages` here is the "keep reading, further out" path: the
+    // crawl re-runs at the wider budget and Pass B skips every page it already
+    // finished, so widening a 600-page world to 20,000 pays only for the new
+    // ones.
+    const limits = limitsFromWire((body ?? {}) as Record<string, unknown>);
+    const job = svc.continueIngest({ seeds, mode, excludeCategories, limits });
     send(res, 200, job);
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -1510,13 +1561,43 @@ export function createApiServer(opts: ServerOptions) {
   } = opts;
   const dataRoot = opts.dataRoot ?? 'data';
   const getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
-  // Built once per server, not per request: the tools themselves are stateless
-  // closures over `getWorld`/`engine`/`dataRoot`, identical to every plain
-  // route's own `ctx` above — only the transport connecting to them is
-  // rebuilt per request (see `src/mcp/server.ts`'s own header comment on why).
-  const mcpToolContext: McpToolContext | undefined = mcpAuth
-    ? { world: getWorld, engine, currentStory, currentWorld, setup, illustrations, dataRoot }
-    : undefined;
+  /**
+   * Built per request, from the identity the bearer token proved.
+   *
+   * The tools are stateless closures, but *which world they resolve* is not:
+   * `worldFor(user)` gives each verified MCP caller their own story, exactly
+   * as every REST route already did for a session cookie. A single shared
+   * context (the previous shape) meant two MCP users read and wrote the same
+   * book, and anything they created was owned by nobody.
+   *
+   * `selected` is this connection's story choice — `switch_story` writes it
+   * rather than moving the process-wide `CurrentStory` pointer, so one client
+   * switching books cannot drag every other reader along. It lives in the
+   * closure, so it lasts for the request that set it and is re-resolved from
+   * "most recently played" afterwards, which is the same durability the web
+   * UI's own `?storyId=` selection has.
+   */
+  const mcpToolContextFor = (verified: { userId: string; raw: Record<string, unknown> }): McpToolContext => {
+    const user = mcpSessionUser(verified, authConfig);
+    let selected: string | undefined;
+    const world = () => {
+      if (!user || !currentStory) return getWorld();
+      return currentStory.worldFor(user, selected);
+    };
+    return {
+      world,
+      user,
+      selectStory: (storyId: string) => {
+        selected = storyId;
+      },
+      engine,
+      currentStory,
+      currentWorld,
+      setup,
+      illustrations,
+      dataRoot,
+    };
+  };
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -1540,10 +1621,10 @@ export function createApiServer(opts: ServerOptions) {
     // fundamentally different credential than the web session cookie below,
     // since the caller is Claude/ChatGPT, not a browser with a cookie jar.
     // It is deliberately reached *before* the session gate, not gated by it.
-    if (mcpAuth && mcpToolContext && mcpResourceUrl && url.pathname === '/mcp') {
+    if (mcpAuth && mcpResourceUrl && url.pathname === '/mcp') {
       try {
         const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
-        await handleMcpRequest(req, res, body, { toolContext: mcpToolContext, auth: mcpAuth, resourceUrl: mcpResourceUrl });
+        await handleMcpRequest(req, res, body, { toolContext: mcpToolContextFor, auth: mcpAuth, resourceUrl: mcpResourceUrl });
       } catch (err) {
         if (!res.headersSent) send(res, 500, { error: err instanceof Error ? err.message : String(err) });
       }

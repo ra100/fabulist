@@ -19,19 +19,45 @@ import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequenc
 import type { IllustrationService } from '../illustration/service.ts';
 import { NoImageProviderError } from '../illustration/service.ts';
 import { assignPlayerCharacter, proposeOpening, type ApplyCustomResult } from '../setup/apply.ts';
-import type { SetupService, IngestJobResult, PreviewResult } from '../setup/service.ts';
+import { limitsFromWire, type SetupService, type IngestJobResult, type PreviewResult } from '../setup/service.ts';
 import type { CharacterSketch, IngestPlan } from '../setup/planner.ts';
 import type { WikiCandidate } from '../setup/directory.ts';
 import type { DepthMode } from '../ingest/depth.ts';
 import type { Job } from '../setup/jobs.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
-import { createStory, listStories } from '../store/world.ts';
+import { createStory, getStory, listStories, listStoriesForUser } from '../store/world.ts';
+import type { SessionUser } from '../auth/config.ts';
 import { listWorlds } from '../store/worlds.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId } from '../domain/types.ts';
 
 export interface McpToolContext {
   /** Resolves fresh per call, exactly like every route in `api.ts` does — a story/world switch must take effect on the next call, not after a restart. */
   world: () => World;
+  /**
+   * Who this connection authenticated as, mapped from the verified bearer
+   * token's subject (`src/mcp/auth.ts`). Non-null whenever `/mcp` is mounted
+   * at all, because the route refuses unauthenticated requests before any tool
+   * runs — but typed nullable so a test or an embedded caller can build a
+   * context with no identity and get the legacy shared-story behaviour.
+   *
+   * This is what makes an MCP-created book *belong* to somebody: `world()`
+   * above resolves through `CurrentStory.worldFor(user)`, the same per-user
+   * resolution every REST route already used, and the story-writing tools
+   * stamp `owner_user_id` with this id. Before it existed the token's verified
+   * `sub` was computed in `handleMcpRequest` and then discarded, so every
+   * story an MCP client created was unowned and invisible to the web UI's
+   * own per-user list.
+   */
+  user?: SessionUser | null;
+  /**
+   * Sets which of this user's stories subsequent `world()` calls resolve to,
+   * for the lifetime of this tool context. Provided by the `/mcp` route, which
+   * builds one context per request and threads the selection through the
+   * connection rather than through the process-wide `CurrentStory` pointer.
+   * Absent in the login-off/legacy shape, where `switch_story` falls back to
+   * that pointer.
+   */
+  selectStory?: (storyId: string) => void;
   engine: Engine;
   currentStory?: CurrentStory;
   currentWorld?: CurrentWorld;
@@ -80,12 +106,31 @@ export function switchWorldTool(ctx: McpToolContext, args: { slug: string }) {
   return { current: ctx.currentWorld.slug() };
 }
 
+/**
+ * `list_stories`. Mirrors `GET /api/stories` exactly, ownership included: an
+ * identified caller sees only the books they own, never the whole file's list,
+ * because that list is other users' story titles and existence.
+ */
 export function listStoriesTool(ctx: McpToolContext) {
   const world = ctx.world();
-  const stories = listStories(world.db);
+  const stories = ctx.user ? listStoriesForUser(world.db, ctx.user.id) : listStories(world.db);
   return {
     stories: stories.map((s) => ({ ...s, current: s.id === world.storyId })),
   };
+}
+
+/**
+ * The one ownership rule, shared by every MCP tool that names a story
+ * explicitly, and identical to `ownsStoryOrRespond` on the REST side: a story
+ * is yours if you own it, or if it is unowned (`owner_user_id IS NULL` — a
+ * legacy save, or one created while login was off). Never "owned by everyone".
+ */
+function assertOwned(world: World, storyId: string, user: SessionUser | null | undefined, tool: string): void {
+  const story = getStory(world.db, storyId);
+  if (!story) throw new Error(`${tool}: no story ${storyId} in this world`);
+  if (user && story.ownerUserId !== null && story.ownerUserId !== user.id) {
+    throw new Error(`${tool}: story ${storyId} belongs to another user`);
+  }
 }
 
 /**
@@ -106,7 +151,12 @@ export function listStoriesTool(ctx: McpToolContext) {
  */
 export function createStoryTool(ctx: McpToolContext, args: { title?: string }) {
   const world = ctx.world();
-  const story = createStory(world.db, { title: args.title?.trim() ?? '' });
+  const story = createStory(world.db, {
+    title: args.title?.trim() ?? '',
+    ...(ctx.user ? { ownerUserId: ctx.user.id } : {}),
+  });
+  // Scene 1 comes with the story now — see `createStory`, which opens it for
+  // every creation path rather than leaving each one to remember.
   return { story };
 }
 
@@ -119,9 +169,16 @@ export function createStoryTool(ctx: McpToolContext, args: { title?: string }) {
  */
 export function forkStoryTool(ctx: McpToolContext, args: { fromStoryId?: string; title?: string; atScene?: number }) {
   const world = ctx.world();
-  const opts: ForkOptions = { fromStoryId: args.fromStoryId || world.storyId };
+  const sourceId = args.fromStoryId || world.storyId;
+  // The *source* must be readable by this caller: forking someone else's book
+  // would hand over every scene of it under a story the forker now owns, the
+  // same leak `assertOwned` prevents on the REST side. The fork itself is
+  // always attributed to the caller, never to the source's owner.
+  assertOwned(world, sourceId, ctx.user, 'fork_story');
+  const opts: ForkOptions = { fromStoryId: sourceId };
   if (args.title !== undefined) opts.title = args.title;
   if (args.atScene !== undefined) opts.atScene = args.atScene;
+  if (ctx.user) opts.ownerUserId = ctx.user.id;
   return forkStory(world, opts);
 }
 
@@ -139,15 +196,33 @@ export function switchStoryTool(ctx: McpToolContext, args: { id: string }) {
   if (!ctx.currentStory) {
     throw new Error('switch_story: this server has no story management enabled (a single fixed world was configured at startup)');
   }
+  const world = ctx.world();
+  assertOwned(world, args.id, ctx.user, 'switch_story');
+  // An identified caller gets a *per-connection* switch, not a server-wide one:
+  // `selectStory` is what later `world()` calls in this session resolve
+  // through, and mutating the shared `CurrentStory` pointer would drag every
+  // other user — and the browser — onto this story too. `switchTo` stays the
+  // login-off path, where there is only one reader by definition.
+  if (ctx.user && ctx.selectStory) {
+    ctx.selectStory(args.id);
+    return { current: args.id, scope: 'this connection' as const };
+  }
   ctx.currentStory.switchTo(args.id);
-  return { current: args.id };
+  return { current: args.id, scope: 'server-wide' as const };
 }
 
 export function getStateTool(ctx: McpToolContext) {
   const world = ctx.world();
   const session = world.session.get();
+  const hasPlayer = !!world.cast.player();
   return {
     session,
+    // The distinction a caller cannot otherwise draw: a world can be full of
+    // canon and still have no protagonist, which is what a freshly created or
+    // freshly ingested book looks like. Without this the only symptom is that
+    // turns read oddly, with nothing saying why.
+    hasPlayer,
+    ...(hasPlayer ? {} : { nextStep: 'This book has no protagonist yet. Call list_characters, then start_story.' }),
     counts: world.graph.counts(),
     pendingConsequences: world.consequences.pending().length,
     hiddenFired: world.consequences.hiddenFiredCount(),
@@ -259,7 +334,13 @@ export function startStoryTool(
     goals: args.goals ?? [],
     vows: args.vows ?? [],
   });
-  return { ...assigned, opening: proposeOpening(world) };
+  return {
+    ...assigned,
+    opening: proposeOpening(world),
+    nextStep: assigned.playerCharacterId
+      ? 'The book is playable now. Offer the opening to the player, then take their first turn with propose_turn.'
+      : 'No protagonist could be placed — the world may have no characters yet. Ingest canon first, or pass name/role to place an original.',
+  };
 }
 
 // ---------------------------------------------------------- the turn tools
@@ -281,14 +362,23 @@ export function startStoryTool(
  * which never run before Narrate — so it is not part of this return type.
  */
 export async function proposeTurnTool(ctx: McpToolContext, args: { text: string; actorId?: string }) {
+  // `world` is passed explicitly rather than left to `Engine`'s own getter:
+  // that getter is the process-wide shared pointer, so without this an
+  // identified caller's turn would be gated and committed against whichever
+  // story happened to be current server-wide instead of their own.
   const outcome = await ctx.engine.takeTurn(args.text, {
     narrateExternally: true,
+    world: ctx.world(),
     ...(args.actorId ? { actorId: args.actorId } : {}),
   });
 
   if (outcome.kind === 'awaiting-narration') {
     return {
       status: 'awaiting-narration' as const,
+      // Stated in the payload, not only in the tool description and the server
+      // instructions: a client that ignored both still gets told, at the exact
+      // moment it matters, that stopping here throws the turn away.
+      nextStep: 'Write the prose from narratorSystemPrompt + sceneFrame, then call commit_narration with it and this resumeToken. Nothing is saved until you do.',
       resumeToken: outcome.resumeToken,
       narratorSystemPrompt: outcome.system,
       sceneFrame: outcome.user,
@@ -298,6 +388,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'interrupted') {
     return {
       status: 'interrupted' as const,
+      nextStep: 'Show the player these options and call resolve_interrupt with the one they pick and this originalText. Do not call commit_narration — no turn is pending.',
       message: outcome.interrupt.message,
       distance: outcome.distance,
       reasoning: outcome.reasoning,
@@ -309,7 +400,11 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
     };
   }
   if (outcome.kind === 'answered') {
-    return { status: 'answered' as const, text: outcome.text };
+    return {
+      status: 'answered' as const,
+      nextStep: 'This was a question about the world, not an action. Relay the answer; there is nothing to narrate or commit.',
+      text: outcome.text,
+    };
   }
   // 'blocked' — unreachable from takeTurn before Narrate, kept for
   // exhaustiveness so a future TurnOutcome addition fails here loudly
@@ -325,10 +420,15 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
  * turn runs after its own Narrator role, shared code either way).
  */
 export async function commitNarrationTool(ctx: McpToolContext, args: { resumeToken: string; prose: string }) {
-  const outcome = await ctx.engine.commitExternalNarration(args.resumeToken, args.prose);
+  // Same reason as `proposeTurnTool`: the pending turn belongs to this user's
+  // story, and `commitExternalNarration` refuses a story mismatch — which,
+  // resolved through the shared pointer, is what any other reader's switch
+  // would have looked like.
+  const outcome = await ctx.engine.commitExternalNarration(args.resumeToken, args.prose, ctx.world());
   if (outcome.kind === 'narrated') {
     return {
       status: 'narrated' as const,
+      nextStep: 'Committed. Show the prose to the player and take the next turn with propose_turn, or close_scene at a scene break.',
       turnId: outcome.turn.id,
       prose: outcome.prose,
       eventsRecorded: outcome.commit.events.length,
@@ -340,6 +440,7 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
     // extract/validate rejected the delta the prose implied.
     return {
       status: 'blocked' as const,
+      nextStep: 'Nothing was committed. Rewrite the prose so it does not imply the rejected change, then call propose_turn again for a fresh token.',
       reason: outcome.reason,
       issues: outcome.validation.issues.filter((i) => !i.repaired),
     };
@@ -381,6 +482,7 @@ export async function resolveInterruptTool(
   const outcome = await ctx.engine.takeTurn(args.originalText, {
     narrateExternally: true,
     overrideIntegrity: true,
+    world: ctx.world(),
     ...(args.actorId ? { actorId: args.actorId } : {}),
   });
   if (outcome.kind === 'awaiting-narration') {
@@ -688,13 +790,35 @@ export async function planWorldTool(ctx: McpToolContext, args: { wish: string; w
  * crawls and reports what an ingest would cost, without writing anything.
  * The returned `previewKey` is what `commit_ingest` needs, so confirming a
  * preview never pays for the crawl twice.
+ *
+ * `maxPages`/`hops`/`passBMaxPages` override the mode's presets: there is no
+ * 3,000-page ceiling any more, and the LLM pass is budgeted separately from
+ * the crawl so "read widely, extract relations from the best N" is one call.
+ * `"all"` is refused on this path (dump-only) — see `assertBudgetIsServable`.
  */
 export async function previewIngestTool(
   ctx: McpToolContext,
-  args: { baseUrl: string; seeds: string[]; mode?: DepthMode; excludeCategories?: string[]; title?: string },
+  args: {
+    baseUrl: string;
+    seeds: string[];
+    mode?: DepthMode;
+    excludeCategories?: string[];
+    title?: string;
+    maxPages?: number | string;
+    hops?: number | string;
+    passBMaxPages?: number | string;
+  },
 ) {
   if (!ctx.setup) throw new Error('preview_ingest: this server has no setup service enabled');
-  return ctx.setup.preview(args.baseUrl, args.seeds, args.mode ?? 'mid', args.excludeCategories ?? [], args.title ?? '');
+  return ctx.setup.preview(
+    args.baseUrl,
+    args.seeds,
+    args.mode ?? 'mid',
+    args.excludeCategories ?? [],
+    args.title ?? '',
+    undefined,
+    limitsFromWire(args),
+  );
 }
 
 /**
@@ -713,11 +837,22 @@ export function discoverWorldTool(
     character?: CharacterSketch;
     excludeCategories?: string[];
     title?: string;
+    maxPages?: number | string;
+    hops?: number | string;
+    passBMaxPages?: number | string;
   },
 ): Job<PreviewResult & { previewKey: string; character: CharacterSketch }> {
   if (!ctx.setup) throw new Error('discover_world: this server has no setup service enabled');
   const sketch = args.character ?? { existing: null, name: '', role: '', goals: [], vows: [] };
-  return ctx.setup.startDiscover(args.baseUrl, args.seeds, args.mode ?? 'mid', sketch, args.excludeCategories ?? [], args.title ?? '');
+  return ctx.setup.startDiscover(
+    args.baseUrl,
+    args.seeds,
+    args.mode ?? 'mid',
+    sketch,
+    args.excludeCategories ?? [],
+    args.title ?? '',
+    limitsFromWire(args),
+  );
 }
 
 /**

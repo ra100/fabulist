@@ -413,6 +413,27 @@ export function createStory(
         forked_from, forked_at_scene, created_at, last_played_at, owner_user_id)
      VALUES (?,?,1,0,'',NULL,'{}','{}',?,?,?,?,?)`,
   ).run(id, opts.title ?? '', opts.forkedFrom ?? null, opts.forkedAtScene ?? null, now, now, opts.ownerUserId ?? null);
+  // Scene 1 exists from the moment the story does.
+  //
+  // The `stories` row already says `scene = 1`, so every other part of the app
+  // believes scene 1 is open; without a matching `scenes` row the chronicle
+  // disagreed, and `GET /api/book`/`GET /api/state` reported zero scenes for a
+  // story that was demonstrably in one. Only the wizard, the packs and the
+  // sample seed used to call `upsertScene(1, ...)` afterwards, so every other
+  // creation path — `POST /api/stories`, `create_story` over MCP, a fork, a
+  // per-user auto-resolve — produced a book the UI could only render as
+  // "untitled, 0 scenes" for its entire life.
+  //
+  // Done here rather than in each caller because "a story has a scene 1" is a
+  // property of a story existing, not of who asked for it; `ChronicleStore`
+  // needs a `World` (a story-bound object) to reach, which is exactly what
+  // does not exist yet at this point, hence the direct insert. `chapter = 1`
+  // matches `Compactor.chapterOf(1)` and `upsertScene`'s own default.
+  db.prepare(
+    `INSERT INTO scenes (story_id, scene, title, summary, location_id, chapter)
+     VALUES (?, 1, '', '', NULL, 1)
+     ON CONFLICT(story_id, scene) DO NOTHING`,
+  ).run(id);
   return getStory(db, id)!;
 }
 

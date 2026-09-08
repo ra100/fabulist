@@ -17,6 +17,7 @@ import {
   parseCategories,
   parseInfobox,
   parseLinks,
+  looksRelational,
   parseQuotes,
   RELATION_FIELDS,
   slugId,
@@ -30,15 +31,48 @@ export interface PassAResult {
   skipped: string[];
   /** Titles where a secondary source's material was kept alongside, not over, existing canon. */
   deferredToCanon: string[];
+  /**
+   * Infobox field names that look like they carry a relation but matched no
+   * rule in `RELATION_FIELDS`, most frequent first. Surfaced so a wiki whose
+   * vocabulary this pass does not understand says so — see `looksRelational`.
+   */
+  unmatchedRelationFields: Array<{ field: string; count: number }>;
 }
 
 export interface PassAOptions {
+  /** The mode's level: the *deepest* any page in this batch may be recorded at. */
   depth?: DepthLevelValue;
+  /**
+   * Per-page depth, keyed by page title — the crawl's own hop distance,
+   * translated into a level by the caller.
+   *
+   * Without this every entity in a batch was stamped with the mode's level, so
+   * a real ingest ended up with all 11,680 entities at level 3 and depth
+   * tiering — the thing `upgradeDepth`, `belowDepth`, `promoteRegion` and
+   * `deepenOnDemand` all exist to act on — could not discriminate between the
+   * seed you are playing in and a page four hops away. DESIGN.md §3.1's
+   * "depth is a property of each subgraph, not one global setting" was true of
+   * the modes and false of the data.
+   *
+   * Falls back to `depth` for any title not in the map.
+   */
+  depthByTitle?: Map<string, DepthLevelValue>;
   wiki?: string;
   /** Record raw wikilinks as low-weight MENTIONS edges. */
   recordMentions?: boolean;
   /** Mine quoted dialogue into voice cards (mid depth and above). */
   voiceCards?: boolean;
+  /**
+   * Reported while the batch is being written, so a caller running this inside
+   * a job can show real progress. Unlike the crawl, this stage has an exact
+   * total from the first line — `pages.length` is known before any work starts
+   * — so it is the one phase of an ingest that can honestly show a percentage.
+   *
+   * Called on a stride rather than per page (see `PASS_A_PROGRESS_STRIDE`):
+   * indexing one page is microseconds, and a callback per page would cost more
+   * than the work it reports on when the batch is 60,000 pages.
+   */
+  onProgress?: (done: number, total: number, phase: 'parsing' | 'writing') => void;
   /**
    * Marks this ingest as a lower-priority source relative to whatever is
    * already in canon — the "canon-first" merge policy for ingesting more
@@ -71,17 +105,35 @@ interface Prepared {
   links: string[];
 }
 
+/**
+ * How often `onProgress` fires, in pages. Small enough that a UI polling every
+ * 700ms always has a fresh number even on a fast local dump, large enough that
+ * the callback is noise next to the parsing itself.
+ */
+export const PASS_A_PROGRESS_STRIDE = 100;
+
 export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {}): PassAResult {
   const depth = opts.depth ?? 1;
+  const depthFor = (title: string): DepthLevelValue => opts.depthByTitle?.get(title) ?? depth;
   const wiki = opts.wiki ?? 'wiki';
-  const result: PassAResult = { entities: 0, edges: 0, sheets: 0, mentions: 0, skipped: [], deferredToCanon: [] };
+  const result: PassAResult = { entities: 0, edges: 0, sheets: 0, mentions: 0, skipped: [], deferredToCanon: [], unmatchedRelationFields: [] };
+  // Each phase reports against its own total: the writing loop iterates the
+  // pages that survived parsing, so counting it against `pages.length` would
+  // leave the bar short of 100% by however many pages were skipped.
+  const report = (done: number, total: number, phase: 'parsing' | 'writing') => {
+    if (!opts.onProgress) return;
+    if (done % PASS_A_PROGRESS_STRIDE === 0 || done === total) opts.onProgress(done, total, phase);
+  };
 
   // First pass: decide every id before writing edges, so a relation to a page in
   // this batch resolves rather than dangling.
   const prepared: Prepared[] = [];
   const byTitle = new Map<string, Prepared>();
 
+  let parsed = 0;
   for (const page of pages) {
+    parsed++;
+    report(parsed, pages.length, 'parsing');
     if (!page.wikitext || page.wikitext.trim().length < 20) {
       result.skipped.push(page.title);
       continue;
@@ -114,7 +166,10 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
 
   // Entities. Canon layer, because ingested material is the source material and
   // must stay pristine at play time.
+  let written = 0;
   for (const p of prepared) {
+    written++;
+    report(written, prepared.length, 'writing');
     const props: Record<string, unknown> = { categories: p.categories };
     if (p.infobox) {
       props.infoboxTemplate = p.infobox.template;
@@ -147,7 +202,7 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
             provenance: existingCanon.provenance,
             confidence: existingCanon.confidence,
             salience: existingCanon.salience,
-            depthLevel: depth,
+            depthLevel: depthFor(p.title),
             props: mergedProps,
             createdScene: existingCanon.createdScene,
           },
@@ -168,7 +223,7 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
           provenance: `${wiki}:${p.title}#${p.page.revision}`,
           confidence: p.infobox ? 0.9 : 0.7,
           salience: 0.3,
-          depthLevel: depth,
+          depthLevel: depthFor(p.title),
           props,
           createdScene: 0,
         },
@@ -185,7 +240,7 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
            revision = excluded.revision, depth = MAX(ingest_pages.depth, excluded.depth),
            fetched_at = excluded.fetched_at`,
       )
-      .run(p.page.pageId, wiki, p.title, p.page.revision, depth, new Date().toISOString());
+      .run(p.page.pageId, wiki, p.title, p.page.revision, depthFor(p.title), new Date().toISOString());
   }
 
   const resolve = (name: string): string | null => {
@@ -199,16 +254,27 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
   // Typed edges from infobox fields only. Guessing predicates from arbitrary
   // field names yields a graph full of wrong edges, which makes the Referee
   // confidently wrong later - worse than having no edge at all.
+  const unmatched = new Map<string, number>();
   for (const p of prepared) {
     if (!p.infobox) continue;
     for (const [field, value] of Object.entries(p.infobox.fields)) {
       const rule = RELATION_FIELDS.find((r) => r.field.test(field));
-      if (!rule) continue;
+      if (!rule) {
+        // Not an error — most fields are attributes — but a relation-looking
+        // name with no rule is exactly how this pass ends up producing almost
+        // nothing on a wiki whose vocabulary nobody checked. Counted and
+        // reported so the gap is visible instead of silent.
+        if (looksRelational(field)) unmatched.set(field, (unmatched.get(field) ?? 0) + 1);
+        continue;
+      }
       for (const raw of fieldValues(value)) {
         const targetId = resolve(raw);
         if (!targetId || targetId === p.id) continue;
+        // `inverse` fields list what the subject *contains*, so the edge runs
+        // the other way. See `RELATION_FIELDS`.
+        const [subject, object] = rule.inverse ? [targetId, p.id] : [p.id, targetId];
         world.graph.assertEdge(
-          { subject: p.id, predicate: rule.predicate, object: targetId, weight: rule.weight, evidence: `infobox ${field}: ${raw}` },
+          { subject, predicate: rule.predicate, object, weight: rule.weight, evidence: `infobox ${field}: ${raw}` },
           0,
           'canon',
           `${wiki}:${p.title}`,
@@ -217,6 +283,10 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
       }
     }
   }
+  result.unmatchedRelationFields = [...unmatched]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([field, count]) => ({ field, count }));
 
   // Raw wikilinks as low-weight MENTIONS. Untyped, but useful for relevance and
   // for the graph explorer, and honest about being weak evidence.

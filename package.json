@@ -31,6 +31,7 @@
     "backup": "node --disable-warning=ExperimentalWarning src/cli/backup.ts",
     "ingest": "node --disable-warning=ExperimentalWarning src/cli/ingest.ts",
     "integrity": "node --disable-warning=ExperimentalWarning src/cli/integrity.ts",
+    "repair-events": "node --disable-warning=ExperimentalWarning src/cli/repairevents.ts",
     "lint:prose": "node --disable-warning=ExperimentalWarning src/cli/lintprose.ts",
     "lint": "biome lint src test web/src",
     "lint:fix": "biome check --write src test web/src",

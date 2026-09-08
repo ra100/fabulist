@@ -198,13 +198,53 @@ export class GraphStore {
     return rows<EntityRow>(this.db.prepare(sql).all(this.storyId, like, like, like, limit)).map(toEntity);
   }
 
-  /** Resolve a loose name to an entity id. Used when extraction returns prose names. */
+  /**
+   * Resolves a name from prose or a wikilink to the entity it refers to, or
+   * nothing.
+   *
+   * Two steps, both exact: the name as written, then the name normalised
+   * (case, punctuation, a leading article, a trailing "(disambiguator)").
+   * There is deliberately no similarity fallback.
+   *
+   * There used to be one — `search(name, 1)`, top hit, no score threshold —
+   * and it was actively harmful, because `search` also matches `summary`.
+   * Pass B mints Event nodes whose `name` is the first 70 characters of an
+   * event sentence and whose summary is the whole thing, so those nodes
+   * matched almost any common proper noun and outranked the real article by
+   * salience. Measured on one wiki ingest: ~15,700 edges, 14,205 of them
+   * wikilink `MENTIONS`, had been attached to synthetic event nodes instead of
+   * the entities they name — wrong edges, and they poison the relevance signal
+   * that decides what the Narrator is shown.
+   *
+   * So an unresolvable name now resolves to nothing, and the caller drops the
+   * edge. Pass B already counts and reports that (`droppedUnknownObject`),
+   * which is a far better outcome than a confident wrong target: a missing
+   * edge is visible, an incorrect one is not.
+   */
   resolveName(name: string): Entity | undefined {
-    const sql = `${this.overlayCte(`lower(name) = ?`)} LIMIT 1`;
-    const exact = row<EntityRow>(this.db.prepare(sql).get(this.storyId, name.toLowerCase()));
+    const raw = name.trim();
+    if (!raw) return undefined;
+
+    const exactSql = `${this.overlayCte(`lower(name) = ?`)} LIMIT 1`;
+    const exact = row<EntityRow>(this.db.prepare(exactSql).get(this.storyId, raw.toLowerCase()));
     if (exact) return toEntity(exact);
-    const hits = this.search(name, 1);
-    return hits[0];
+
+    const norm = normaliseName(raw);
+    if (!norm) return undefined;
+
+    // Candidates by substring on `name` only — never `summary` — and never an
+    // Event: a synthetic event's name is a sentence fragment, so it can only
+    // ever match a referent by accident. A page-derived Event with a real title
+    // ("Battle of the Citadel") still resolves through the exact match above.
+    const candidates = rows<EntityRow>(
+      this.db
+        .prepare(`${this.overlayCte(`lower(name) LIKE ? AND type <> 'Event'`)} ORDER BY salience DESC LIMIT 25`)
+        .all(this.storyId, `%${norm}%`),
+    );
+    for (const c of candidates) {
+      if (normaliseName(c.name) === norm) return toEntity(c);
+    }
+    return undefined;
   }
 
   /**
@@ -410,6 +450,26 @@ export class GraphStore {
     ).map(normEdge);
   }
 
+  /**
+   * Whether this story sees any entity at all — the "is this world fresh?"
+   * question, which is the only thing the setup gate actually needs.
+   *
+   * `EXISTS` with a `LIMIT 1`, not `COUNT(*) > 0`: the predicate is
+   * `story_id = ? OR layer = 'canon'`, which no index can serve (there is no
+   * index on `layer`), so counting it is a full table scan — 141ms cold on a
+   * 30MB world, paid on every UI refresh because `/api/setup/status` asked for
+   * `isFresh()` *and* `counts()` and `/api/state` asked for `counts()` again.
+   * Existence stops at the first row.
+   */
+  isEmpty(): boolean {
+    const hit = row<{ n: number }>(
+      this.db
+        .prepare(`SELECT 1 AS n FROM entities WHERE story_id = ? OR layer = 'canon' LIMIT 1`)
+        .get(this.storyId),
+    );
+    return !hit;
+  }
+
   counts(): { entities: number; edges: number; canon: number; chronicle: number } {
     const q = (sql: string, ...a: unknown[]) =>
       Number((row<{ n: number }>(this.db.prepare(sql).get(...(a as never[])))?.n ?? 0));
@@ -420,6 +480,22 @@ export class GraphStore {
       chronicle: q(`SELECT COUNT(*) n FROM entities WHERE layer = 'chronicle' AND story_id = ?`, this.storyId),
     };
   }
+}
+
+/**
+ * The only latitude `resolveName` allows: case, surrounding punctuation, a
+ * leading article, and a wiki-style "(disambiguator)" suffix. Two names that
+ * normalise to the same string are the same referent; anything else is a guess
+ * and is refused.
+ */
+function normaliseName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .replace(/[\u2019']s\b/g, 's')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/^(the|a|an)\s+/, '');
 }
 
 function normEdge(r: Edge & { valid_from?: number; valid_to?: number | null }): Edge {

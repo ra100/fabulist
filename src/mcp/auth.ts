@@ -29,6 +29,7 @@
  */
 import { timingSafeEqual } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyOptions } from 'jose';
+import type { SessionUser } from '../auth/config.ts';
 
 export interface VerifiedUser {
   /** Stable subject id from the token — an AuthKit user id in OAuth mode, the literal string `dev` in dev-token mode. */
@@ -44,6 +45,51 @@ export interface McpAuth {
   protectedResourceMetadata(resourceUrl: string): { resource: string; authorization_servers: string[]; bearer_methods_supported: string[] };
   /** Human-readable, for the boot log — which mode is active and against what, so a misconfiguration is visible on startup rather than on the first 401. */
   describe(): string;
+}
+
+/**
+ * The verified token's subject, as the same `SessionUser` shape every REST
+ * route and `CurrentStory.worldFor` already take.
+ *
+ * The point is that the ids line up: web login and MCP OAuth both authenticate
+ * against the same AuthKit environment, so a token's `sub` *is* the
+ * `SessionUser.id` a browser session for the same person carries. That single
+ * fact is what makes "log in on the web, connect the connector, same books"
+ * true rather than aspirational — nothing here translates between two id
+ * spaces, because there is only one.
+ *
+ * `email`/`firstName`/`lastName` come from the token when the issuer put them
+ * there and are blank/null otherwise; nothing about story ownership depends on
+ * them, only `id` does. `isAdmin` is resolved against the same `adminEmails`
+ * allowlist the cookie path uses, so an MCP connection cannot become an admin
+ * by a different route — and is `false` whenever the token carries no email to
+ * check, which is the fail-closed direction.
+ *
+ * Returns `null` when this server has no login configured at all, and that is
+ * the load-bearing case rather than an edge one. Story *ownership* only means
+ * something where identities do: on a single-operator box (no `authConfig`,
+ * typically `MCP_DEV_TOKEN`) there is one reader, the shared current story is
+ * the right answer, and minting a per-subject story instead would strand the
+ * world's existing book behind a brand-new empty one. So the whole per-user
+ * mechanism switches on here, once, and every ownership check downstream
+ * no-ops on a null user — exactly the pre-existing behaviour.
+ */
+export function mcpSessionUser(
+  verified: { userId: string; raw: Record<string, unknown> },
+  authConfig?: { adminEmails: Set<string> },
+): SessionUser | null {
+  if (!authConfig) return null;
+  const claims = verified.raw;
+  const email = typeof claims.email === 'string' ? claims.email : '';
+  const firstName = typeof claims.given_name === 'string' ? claims.given_name : null;
+  const lastName = typeof claims.family_name === 'string' ? claims.family_name : null;
+  return {
+    id: verified.userId,
+    email,
+    firstName,
+    lastName,
+    isAdmin: !!email && !!authConfig?.adminEmails.has(email.toLowerCase()),
+  };
 }
 
 class MissingTokenError extends Error {

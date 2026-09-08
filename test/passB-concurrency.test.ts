@@ -58,11 +58,13 @@ class TrackingExtractor implements PassBExtractor {
     await new Promise((r) => setTimeout(r, this.delayFor(page.title)));
     this.inFlight--;
     this.completionOrder.push(page.title);
-    // One event per page: `applyPassB` mints ids from a running counter, so
-    // interleaved commits would collide. The id assertions below depend on this.
+    // One dated event per page. The date matters: an undated statement naming
+    // only its own subject is kept on that entity instead of becoming a node
+    // (see `applyPassB`'s threshold), and this fixture exists to produce nodes
+    // whose write order can be observed.
     return {
       edges: [],
-      events: [{ text: `something happened at ${page.title}` }],
+      events: [{ text: `something happened at ${page.title}`, inWorldDate: '1 Frost' }],
       contradictions: [],
     };
   }
@@ -113,15 +115,23 @@ test('results commit in candidate order even when they finish out of order', asy
 
   assert.notEqual(ex.completionOrder[0], slowest, 'the slow page really did finish late');
 
-  // Event ids encode the commit sequence (`event:<entityId>:<n>`), so reading
-  // them back proves the order writes were applied in.
-  const events = world.graph.list({ limit: 500 }).filter((e) => e.type === 'Event');
-  const bySeq = new Map<number, string>();
-  for (const e of events) {
-    const seq = Number(e.id.split(':').pop());
-    bySeq.set(seq, e.summary);
-  }
-  assert.ok(bySeq.get(0)?.includes(slowest), `the first candidate committed first (got "${bySeq.get(0)}")`);
+  // Insertion order, read off the table's own autoincrement key.
+  //
+  // This used to be read from the event ids themselves, which encoded a commit
+  // counter (`event:<entityId>:<n>`). Event ids are now content-derived so that
+  // the same event found on three pages is one node (see `eventIdFor`), which
+  // is a better graph and a worse ordering probe — hence `rowid_pk`, which is
+  // what "the order rows were written in" actually means.
+  const firstWritten = (
+    world.db
+      .prepare(
+        `SELECT summary FROM entities WHERE type = 'Event' AND provenance LIKE 'passB:%'
+         ORDER BY rowid_pk LIMIT 1`,
+      )
+      .get() as { summary: string } | undefined
+  )?.summary;
+  assert.ok(firstWritten, 'pass B wrote at least one event node');
+  assert.ok(firstWritten!.includes(slowest), `the first candidate committed first (got "${firstWritten}")`);
   world.close();
 });
 
@@ -170,7 +180,10 @@ test('one failing extraction does not abort the pass or shift the others', async
   const flaky: PassBExtractor = {
     async extract(page) {
       if (page.title === doomed) throw new Error('extraction exploded');
-      return { edges: [], events: [{ text: `ok ${page.title}` }], contradictions: [] };
+      // Dated, so it becomes a node: an undated statement naming only its own
+      // subject is deliberately kept on that entity rather than promoted to an
+      // event node (see `applyPassB`), which is not what this test is about.
+      return { edges: [], events: [{ text: `ok ${page.title}`, inWorldDate: '1 Frost' }], contradictions: [] };
     },
   };
 

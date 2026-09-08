@@ -24,6 +24,13 @@ import {
   MODES,
   NullPassBExtractor,
   promoteRegion,
+  depthByHops,
+  runPassB,
+  eventIdFor,
+  specFor,
+  parseBudget,
+  budgetToWire,
+  UNLIMITED,
   upgradeDepth,
   type PassBExtractor,
 } from '../src/ingest/depth.ts';
@@ -613,6 +620,352 @@ test('the mode table matches the design: deep is a superset of mid of skim', () 
   assert.equal(MODES.mid.passB, 'core');
   assert.equal(MODES.deep.passB, 'all');
   assert.equal(MODES.deep.reconcileContradictions, true);
+});
+
+// ------------------------------------------------------------------ budgets
+
+test('"all" is an unlimited crawl with a deliberately finite pass B', () => {
+  assert.equal(MODES.all.maxPages, UNLIMITED, 'every page');
+  assert.equal(MODES.all.hops, UNLIMITED, 'to whatever radius that takes');
+  assert.equal(MODES.all.passB, 'all');
+  assert.ok(
+    Number.isFinite(MODES.all.passBMaxPages),
+    'the LLM pass stays capped: one model call per page over a 127k-page wiki is not something a mode should opt you into silently',
+  );
+  for (const m of ['skim', 'mid', 'deep'] as const) {
+    assert.equal(MODES[m].passBMaxPages, UNLIMITED, `${m} keeps its old pass B selection`);
+  }
+});
+
+test('specFor overrides a preset without a ceiling, and leaves the preset alone otherwise', () => {
+  assert.equal(specFor('deep').maxPages, 3000, 'the preset is still the default');
+  assert.equal(specFor('deep', { maxPages: 50_000 }).maxPages, 50_000, 'well past the old 3000 cap');
+  assert.equal(specFor('deep', { maxPages: 50_000 }).hops, MODES.deep.hops, 'untouched fields keep the preset');
+  assert.equal(specFor('mid', { passBMaxPages: 100 }).passBMaxPages, 100);
+  assert.equal(specFor('skim', {}).maxPages, MODES.skim.maxPages, 'an empty override is exactly today\u2019s behaviour');
+  assert.throws(() => specFor('nonsense' as never), /unknown depth mode/);
+});
+
+test('parseBudget accepts numbers and "all", and refuses anything else loudly', () => {
+  assert.equal(parseBudget(4200), 4200);
+  assert.equal(parseBudget('4200'), 4200);
+  assert.equal(parseBudget('all'), UNLIMITED);
+  assert.equal(parseBudget('unlimited'), UNLIMITED);
+  assert.equal(parseBudget(undefined), undefined, 'absent means "use the preset"');
+  assert.equal(parseBudget(''), undefined);
+  // A mistyped budget that silently became the preset would be the worst
+  // outcome here: the ingest would look like it honoured the request.
+  assert.throws(() => parseBudget('lots', '--max-pages'), /--max-pages/);
+  assert.throws(() => parseBudget(0), /positive integer/);
+  assert.throws(() => parseBudget(-5), /positive integer/);
+  assert.throws(() => parseBudget(1.5), /positive integer/);
+});
+
+test('budgetToWire keeps Infinity out of JSON', () => {
+  assert.equal(budgetToWire(600), 600);
+  assert.equal(budgetToWire(UNLIMITED), 'all');
+  // The reason this exists at all.
+  assert.equal(JSON.stringify({ n: UNLIMITED }), '{"n":null}');
+  assert.equal(JSON.stringify({ n: budgetToWire(UNLIMITED) }), '{"n":"all"}');
+});
+
+test('an unlimited crawl walks until the frontier is exhausted rather than to a fixed radius', async () => {
+  // The fixture wiki is small enough to exhaust, which is the point: with hops
+  // unlimited the crawl must terminate on its own once no new titles appear.
+  const unlimited = await crawl({ client: client(), seeds: ['Duskhollow'], hops: UNLIMITED, maxPages: UNLIMITED });
+  const shallow = await crawl({ client: client(), seeds: ['Duskhollow'], hops: 1, maxPages: 150 });
+  assert.ok(unlimited.pages.size >= shallow.pages.size, 'an unlimited walk reaches at least as far as a 1-hop one');
+  assert.ok(unlimited.pages.size > 0);
+  // prune/discover must not choke on an infinite budget either.
+  const scoped = prune(unlimited, { maxPages: UNLIMITED });
+  assert.equal(scoped.pages.size, unlimited.pages.size, 'an unlimited budget prunes nothing');
+  assert.equal(discover(scoped, { maxPages: UNLIMITED }).candidatePages, scoped.candidates.length);
+});
+
+test('crawl progress counts pages against a real ceiling, and says so only when there is one', async () => {
+  const ticks: Array<{ pagesFetched: number; queued: number; pageTotal: number | null }> = [];
+  // A finite budget is a real ceiling, so a percentage is honest.
+  await crawl({
+    client: client(),
+    seeds: ['Duskhollow'],
+    hops: 2,
+    maxPages: 40,
+    onProgress: (info) => ticks.push({ pagesFetched: info.pagesFetched, queued: info.queued, pageTotal: info.pageTotal }),
+  });
+  assert.ok(ticks.length > 0, 'progress is reported at all');
+  assert.ok(
+    ticks.every((t) => t.pageTotal === 40),
+    'the budget is the ceiling every tick counts against',
+  );
+  assert.ok(
+    ticks.every((t) => t.pagesFetched <= (t.pageTotal ?? Infinity)),
+    'never over 100%',
+  );
+  // Monotonic, or a bar would go backwards.
+  for (let i = 1; i < ticks.length; i++) {
+    assert.ok(ticks[i]!.pagesFetched >= ticks[i - 1]!.pagesFetched);
+  }
+
+  // Unlimited against a source that cannot count itself: no total, so callers
+  // must fall back to the count. `queued` is what makes that count meaningful.
+  const unbounded: Array<number | null> = [];
+  await crawl({
+    client: client(),
+    seeds: ['Duskhollow'],
+    hops: UNLIMITED,
+    maxPages: UNLIMITED,
+    onProgress: (info) => unbounded.push(info.pageTotal),
+  });
+  assert.ok(unbounded.every((t) => t === null), 'no ceiling is reported rather than a guessed one');
+});
+
+test('a source that knows its own size gives the crawl a ceiling to report', async () => {
+  const pages = Object.keys(WIKI);
+  const counted = {
+    ...client(),
+    fetchPages: (titles: string[]) => client().fetchPages(titles),
+    fetchPage: (title: string) => client().fetchPage(title),
+    size: () => pages.length,
+  };
+  const ticks: Array<number | null> = [];
+  await crawl({
+    client: counted,
+    seeds: ['Duskhollow'],
+    hops: UNLIMITED,
+    maxPages: UNLIMITED,
+    onProgress: (info) => ticks.push(info.pageTotal),
+  });
+  assert.ok(ticks.length > 0);
+  assert.ok(
+    ticks.every((t) => t !== null && t >= 1),
+    'an unlimited crawl of a countable source can still show a percentage',
+  );
+});
+
+test('pass A reports progress against an exact total, per phase', async () => {
+  const world = World.open(':memory:');
+  const crawled = await crawl({ client: client(), seeds: ['Duskhollow'], hops: 2, maxPages: 100 });
+  const pages = [...crawled.pages.values()];
+  const seen: Array<{ done: number; total: number; phase: string }> = [];
+  const res = runPassA(world, pages, { depth: 1, wiki: 'vale', onProgress: (done, total, phase) => seen.push({ done, total, phase }) });
+
+  assert.ok(seen.length >= 2, 'both phases report');
+  assert.deepEqual([...new Set(seen.map((s) => s.phase))].sort(), ['parsing', 'writing']);
+  const parsing = seen.filter((s) => s.phase === 'parsing');
+  const writing = seen.filter((s) => s.phase === 'writing');
+  // Each phase must finish on its own total, or the bar stops short of 100%.
+  assert.equal(parsing.at(-1)!.done, pages.length);
+  assert.equal(parsing.at(-1)!.total, pages.length);
+  assert.equal(writing.at(-1)!.done, writing.at(-1)!.total);
+  assert.equal(writing.at(-1)!.total, pages.length - res.skipped.length, 'the writing phase counts the pages that survived parsing');
+  assert.ok(
+    seen.every((s) => s.done <= s.total),
+    'never over 100%',
+  );
+  world.close();
+});
+
+// ------------------------------------------- infobox relations and depth
+
+test('an inverse field points the edge the other way, instead of reversing the geography', () => {
+  const world = World.open(':memory:');
+  // A cluster page listing the planets *inside* it. Emitting LOCATED_IN in the
+  // field's own direction would say the cluster is in each planet.
+  runPassA(
+    world,
+    [
+      {
+        pageId: '1',
+        title: 'Horse Head Nebula',
+        revision: '1',
+        wikitext: '{{Infobox location\n|planets = [[Klencory]]\n}}\nA nebula in the Attican Traverse.',
+        categories: ['Locations'],
+        links: ['Klencory'],
+      },
+      {
+        pageId: '2',
+        title: 'Klencory',
+        revision: '1',
+        wikitext: "{{Infobox location\n|cluster = [[Horse Head Nebula]]\n}}\nA planet claimed by a volus.",
+        categories: ['Locations'],
+        links: ['Horse Head Nebula'],
+      },
+    ],
+    { depth: 2, wiki: 'me' },
+  );
+
+  const edges = world.graph.allEdges(50);
+  const located = edges.find((e) => e.predicate === 'LOCATED_IN');
+  assert.ok(located, 'the inverse field produced an edge');
+  assert.equal(located!.subject, 'loc:klencory', 'the planet is in the nebula');
+  assert.equal(located!.object, 'loc:horse-head-nebula', 'not the other way round');
+  // And the forward `cluster` field agrees rather than contradicting it.
+  const partOf = edges.find((e) => e.predicate === 'PART_OF');
+  assert.equal(partOf?.subject, 'loc:klencory');
+  assert.equal(partOf?.object, 'loc:horse-head-nebula');
+  world.close();
+});
+
+test('a relation-looking field with no rule is reported, not silently dropped', () => {
+  const world = World.open(':memory:');
+  const res = runPassA(
+    world,
+    [
+      {
+        pageId: '1',
+        title: 'Normandy',
+        revision: '1',
+        wikitext: '{{Infobox ship\n|captain = [[Shepard]]\n|mass = 200\n}}\nA frigate.',
+        categories: ['Ships'],
+        links: ['Shepard'],
+      },
+    ],
+    { depth: 1, wiki: 'me' },
+  );
+  const fields = res.unmatchedRelationFields.map((f) => f.field);
+  assert.ok(fields.includes('captain'), 'a relational-looking field with no rule is surfaced');
+  assert.ok(!fields.includes('mass'), 'a plain attribute is not noise in that list');
+  world.close();
+});
+
+test('depth follows crawl distance, so the seed is deeper than the rim', async () => {
+  const world = World.open(':memory:');
+  const crawled = await crawl({ client: client(), seeds: ['Duskhollow'], hops: 2, maxPages: 100 });
+  const scoped = prune(crawled, { maxPages: 100 });
+  const map = depthByHops(scoped, 3);
+
+  assert.equal(map.get('Duskhollow'), 3, 'a seed gets the mode’s full level');
+  const oneHop = scoped.candidates.find((c) => c.hops === 1);
+  if (oneHop) assert.equal(map.get(oneHop.title), 2, 'and each hop out is one level shallower');
+  const twoHop = scoped.candidates.find((c) => c.hops === 2);
+  if (twoHop) assert.equal(map.get(twoHop.title), 1);
+  assert.ok([...map.values()].every((v) => v >= 1 && v <= 3), 'floored at 1, capped at the mode level');
+
+  // The point of it: `belowDepth` has something to find, which is what
+  // upgradeDepth/promoteRegion/deepenOnDemand all act on.
+  runPassA(world, [...scoped.pages.values()], { depth: 3, depthByTitle: map, wiki: 'vale' });
+  const levels = new Set(world.graph.list({ limit: 500 }).map((e) => e.depthLevel));
+  assert.ok(levels.size > 1, `depth actually varies (got ${[...levels].join(',')})`);
+  assert.ok(world.graph.belowDepth(3, 50).length > 0, 'so a later upgrade has work to do');
+  world.close();
+});
+
+// ------------------------------------------------------------ event identity
+
+test('the same event found on three pages is one node with three participants', async () => {
+  const world = World.open(':memory:');
+  const crawled = await crawl({ client: client(), seeds: ['Duskhollow'], hops: 2, maxPages: 100 });
+  const scoped = prune(crawled, { maxPages: 100 });
+  runPassA(world, [...scoped.pages.values()], { depth: 3, wiki: 'vale' });
+
+  // Three different pages reporting the same dated event, each naming the
+  // others. Before content-derived ids this produced three unconnected nodes
+  // with one participant each — 8,140 of exactly that shape in a real ingest.
+  const cast = world.graph.list({ type: 'Character', limit: 3 });
+  assert.ok(cast.length >= 2, 'the fixture has a cast to work with');
+  const names = cast.map((c) => c.name);
+  const extractor: PassBExtractor = {
+    async extract(_page, entity) {
+      if (!names.includes(entity.name)) return { edges: [], events: [], contradictions: [] };
+      return {
+        edges: [],
+        events: [{ text: 'The bridge fell into the gorge.', inWorldDate: '4 Frost', participants: names }],
+        contradictions: [],
+      };
+    },
+  };
+  const res = await runPassB(world, scoped, extractor, MODES.deep, { wiki: 'vale' });
+
+  const events = world.graph.list({ limit: 500 }).filter((e) => e.type === 'Event' && e.summary === 'The bridge fell into the gorge.');
+  assert.equal(events.length, 1, 'one node, not one per reporting page');
+  const participants = world.graph
+    .neighbours(events[0]!.id)
+    .filter((n) => n.edge.predicate === 'INVOLVED_IN');
+  assert.equal(participants.length, names.length, 'every named participant is linked, not just the page subject');
+  assert.ok(res.eventParticipants >= names.length);
+  world.close();
+});
+
+test('event ids are stable across runs, so a re-ingest converges instead of duplicating', () => {
+  const a = eventIdFor('The bridge fell into the gorge.', '4 Frost');
+  const b = eventIdFor('the  bridge   fell into the gorge', '4 Frost');
+  assert.equal(a, b, 'normalised text and date decide identity, not punctuation or spacing');
+  assert.notEqual(a, eventIdFor('The bridge fell into the gorge.', '5 Frost'), 'a different date is a different event');
+  assert.notEqual(a, eventIdFor('The tower fell into the gorge.', '4 Frost'));
+  assert.match(a, /^event:[0-9a-f]{16}$/, 'and no commit counter, which is what made re-runs duplicate');
+});
+
+test('an undated statement about one entity is kept on that entity, not made into a node', async () => {
+  const world = World.open(':memory:');
+  const crawled = await crawl({ client: client(), seeds: ['Duskhollow'], hops: 2, maxPages: 100 });
+  const scoped = prune(crawled, { maxPages: 100 });
+  runPassA(world, [...scoped.pages.values()], { depth: 3, wiki: 'vale' });
+
+  const extractor: PassBExtractor = {
+    async extract() {
+      return { edges: [], events: [{ text: 'She is respected by the garrison.' }], contradictions: [] };
+    },
+  };
+  const res = await runPassB(world, scoped, extractor, MODES.deep, { wiki: 'vale' });
+
+  assert.equal(res.events, 0, 'nothing was promoted to an event node');
+  assert.ok(res.eventsSkipped > 0, 'and the skip is counted rather than silent');
+  const nodes = world.graph.list({ limit: 500 }).filter((e) => e.summary === 'She is respected by the garrison.');
+  assert.equal(nodes.length, 0);
+
+  // Not discarded: it lives on the subject, which is where a statement about
+  // one entity belongs.
+  const withNotes = world.graph
+    .list({ limit: 500 })
+    .filter((e) => Array.isArray(e.props?.pageEvents) && (e.props.pageEvents as string[]).includes('She is respected by the garrison.'));
+  assert.ok(withNotes.length > 0, 'the text is retained on the entity that reported it');
+  world.close();
+});
+
+test('an event node gets a short label, not a sentence, so it cannot act as a name magnet', async () => {
+  const world = World.open(':memory:');
+  const crawled = await crawl({ client: client(), seeds: ['Duskhollow'], hops: 1, maxPages: 40 });
+  const scoped = prune(crawled, { maxPages: 40 });
+  runPassA(world, [...scoped.pages.values()], { depth: 3, wiki: 'vale' });
+  const long = 'The garrison marched out at dawn, crossed the gorge, and burned the mill before noon.';
+  const extractor: PassBExtractor = {
+    async extract() {
+      return { edges: [], events: [{ text: long, inWorldDate: '9 Frost' }], contradictions: [] };
+    },
+  };
+  await runPassB(world, scoped, extractor, MODES.deep, { wiki: 'vale' });
+
+  const node = world.graph.list({ limit: 500 }).find((e) => e.type === 'Event' && e.summary === long);
+  assert.ok(node, 'the event exists');
+  assert.ok(node!.name.length < long.length, 'the label is shorter than the sentence');
+  assert.equal(node!.summary, long, 'while the full text is preserved');
+  world.close();
+});
+
+test('passBMaxPages caps the LLM pass without shrinking the crawl', async () => {
+  const world = World.open(':memory:');
+  const seen: string[] = [];
+  const extractor: PassBExtractor = {
+    async extract(page) {
+      seen.push(page.title);
+      return { edges: [], events: [], contradictions: [] };
+    },
+  };
+  const res = await ingest({
+    world,
+    client: client(),
+    seeds: ['Duskhollow'],
+    mode: 'deep',
+    limits: { passBMaxPages: 2 },
+    wiki: 'vale',
+    extractor,
+  });
+  assert.equal(seen.length, 2, 'pass B stopped at the cap');
+  assert.ok(
+    (res.passA?.entities ?? 0) > 2,
+    'while pass A still read the whole scope \u2014 the entire point of budgeting them separately',
+  );
+  world.close();
 });
 
 test('a skim ingest commits entities at depth 1', async () => {

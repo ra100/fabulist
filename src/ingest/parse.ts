@@ -344,18 +344,70 @@ export function slugId(type: EntityType, title: string): string {
  * Infobox fields that imply a typed relation. Everything else stays an
  * attribute; guessing predicates from arbitrary field names produces a graph
  * full of wrong edges, which is worse than no graph at all.
+ *
+ * `inverse` matters as much as the predicate. A field can point either way: a
+ * character's `homeworld` means *subject* is in that place, while a cluster's
+ * `planets` means each of those places is in the *subject*. Emitting the same
+ * direction for both would reverse half the geography, which is precisely the
+ * class of confident-but-wrong edge the paragraph above is about. So the
+ * direction is declared per field rather than assumed.
+ *
+ * The list was widened against real evidence rather than intuition: 1,591
+ * infobox-bearing pages of the Mass Effect dump, 109 distinct field names, of
+ * which the original nine patterns matched four (`faction`, `capital`,
+ * `location`, `weapons`) and produced only 336 edges across the whole world.
+ * The additions below are the frequent ones whose direction is unambiguous —
+ * `race`/`species` (942 uses), `armament`/`armor` (404), `cluster`/`system`
+ * (236), `locations`/`planets` (450, inverse). Fields that are real-world
+ * metadata (`voiceactor`), pure attributes (`health`, `mass`), or ambiguous in
+ * direction are deliberately still left as attributes.
  */
-export const RELATION_FIELDS: Array<{ field: RegExp; predicate: string; weight: number }> = [
-  { field: /^(affiliation|affiliations|allegiance|organization|organisation|faction|member of)$/i, predicate: 'MEMBER_OF', weight: 0.8 },
+export interface RelationField {
+  field: RegExp;
+  predicate: string;
+  weight: number;
+  /** True when the field lists entities the *subject contains*, so the edge runs target → subject. */
+  inverse?: true;
+}
+
+export const RELATION_FIELDS: RelationField[] = [
+  { field: /^(affiliation|affiliations|allegiance|organization|organisation|faction|factions|member of)$/i, predicate: 'MEMBER_OF', weight: 0.8 },
+  // A species is a group a character belongs to; the wiki files it as a field
+  // like any other, and it is the single most common relation-bearing field on
+  // this kind of wiki (839 `race` + 103 `species`).
+  { field: /^(race|species)$/i, predicate: 'MEMBER_OF', weight: 0.75 },
   { field: /^(relatives|family|parents?|children|siblings?|spouse|father|mother)$/i, predicate: 'KIN_OF', weight: 0.85 },
-  { field: /^(location|home|homeworld|residence|based in|birthplace|capital)$/i, predicate: 'LOCATED_IN', weight: 0.7 },
+  // A numbered suffix is a second field of the same kind, which these wikis use
+  // routinely (`location2` appears 42 times in the Mass Effect dump alone).
+  { field: /^(location|locale|home|homeworld|residence|based in|birthplace|capital|station)\d?$/i, predicate: 'LOCATED_IN', weight: 0.7 },
   { field: /^(allies|ally|allied)$/i, predicate: 'ALLIED_WITH', weight: 0.7 },
   { field: /^(enemies|enemy|rivals?|foes?)$/i, predicate: 'HOSTILE_TO', weight: 0.7 },
   { field: /^(leader|led by|commander|head)$/i, predicate: 'LED_BY', weight: 0.8 },
   { field: /^(members|notable members)$/i, predicate: 'HAS_MEMBER', weight: 0.7 },
-  { field: /^(weapons?|equipment|wields?)$/i, predicate: 'CARRIES', weight: 0.6 },
-  { field: /^(part of|region|located in|within)$/i, predicate: 'PART_OF', weight: 0.75 },
+  { field: /^(weapons?|equipment|wields?|armament|armaments|armor|armour|loadout)$/i, predicate: 'CARRIES', weight: 0.6 },
+  { field: /^(part of|region|located in|within|cluster|system|sector|nebula|galaxy)$/i, predicate: 'PART_OF', weight: 0.75 },
+  // Inverse: these list what is inside the subject, not what contains it.
+  { field: /^(locations|planets|moons|colonies|settlements|worlds)$/i, predicate: 'LOCATED_IN', weight: 0.65, inverse: true },
+  { field: /^(asteroidbelts|asteroid belts|stations|relays|systems|clusters)$/i, predicate: 'PART_OF', weight: 0.6, inverse: true },
 ];
+
+/**
+ * Field names that *look* like they carry a relation but match no rule.
+ *
+ * Reported by Pass A rather than silently ignored: the original nine patterns
+ * matched four of this wiki's 109 field names and nothing said so, so the
+ * cheapest and most reliable half of the extraction was quietly doing almost
+ * nothing. A name here is a candidate for `RELATION_FIELDS`, not a bug.
+ */
+export function looksRelational(field: string): boolean {
+  // `weaponname`, `armourbonus`, `tech_type` and friends contain a relational
+  // word but describe a value, not another entity. Excluded so the report stays
+  // a list of candidates worth adding rather than mostly false positives.
+  if (/(name|class|type|bonus|cost|rating|damage|value|level|count|size|mass|weight)\d?$/i.test(field)) return false;
+  return /(faction|ally|allies|enem|rival|member|leader|kin|family|relative|parent|child|sibling|spouse|home|location|planet|moon|colony|region|cluster|system|sector|weapon|armor|armour|equipment|species|race|creator|owner|crew|captain|founder)/i.test(
+    field,
+  );
+}
 
 /**
  * Splits a normalised multi-value field back into its individual values.

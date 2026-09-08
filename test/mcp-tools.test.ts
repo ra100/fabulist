@@ -940,3 +940,123 @@ test('fetch fails loudly on an unrecognized id rather than returning an empty do
   const { ctx } = setup();
   assert.throws(() => fetchTool(ctx, { id: 'nonsense:does-not-exist' }), /unrecognized id|no /);
 });
+
+// ------------------------------------------------------- per-user ownership
+
+/**
+ * A tool context shaped like the one `/mcp` builds for a verified caller on a
+ * server that *has* login configured: `world()` resolves through
+ * `CurrentStory.worldFor(user)`, and `selectStory` is this connection's own
+ * story pointer rather than the process-wide one.
+ */
+function userCtx(cw: CurrentWorld, engine: Engine, root: string, id: string) {
+  const user = { id, email: `${id}@example.com`, firstName: null, lastName: null, isAdmin: false };
+  let selected: string | undefined;
+  const ctx: McpToolContext = {
+    world: () => cw.stories().worldFor(user, selected),
+    user,
+    selectStory: (storyId: string) => {
+      selected = storyId;
+    },
+    engine,
+    currentStory: cw.stories(),
+    currentWorld: cw,
+    dataRoot: root,
+  };
+  return ctx;
+}
+
+test('an MCP-created story belongs to the caller, and opens with a scene', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fabulist-mcp-own-'));
+  try {
+    createWorldFile('Owned', root);
+    const cw = CurrentWorld.open('owned', root);
+    const engine = new Engine({ world: () => cw.world(), providers: new ProviderRegistry(new MockProvider()) });
+    const ctx = userCtx(cw, engine, root, 'user:alice');
+
+    const { story } = createStoryTool(ctx, { title: 'Alice’s Book' });
+    assert.equal(story.ownerUserId, 'user:alice', 'the verified subject owns it, rather than nobody');
+
+    // The bug this also closes: a story with no scene row renders as "0 scenes"
+    // in the UI forever, because scene 1 is only ever created at setup.
+    const w = cw.world().withStory(story.id);
+    const scenes = w.chronicle.scenes();
+    assert.equal(scenes.length, 1, 'scene 1 exists');
+    assert.equal(scenes[0]!.scene, 1);
+    cw.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('two MCP users never see or reach each other’s books', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fabulist-mcp-own2-'));
+  try {
+    createWorldFile('Shared canon', root);
+    const cw = CurrentWorld.open('shared-canon', root);
+    const engine = new Engine({ world: () => cw.world(), providers: new ProviderRegistry(new MockProvider()) });
+    const alice = userCtx(cw, engine, root, 'user:alice');
+    const bob = userCtx(cw, engine, root, 'user:bob');
+
+    const a = createStoryTool(alice, { title: 'Alice' }).story;
+    const b = createStoryTool(bob, { title: 'Bob' }).story;
+
+    const aliceSees = listStoriesTool(alice).stories.map((s) => s.id);
+    assert.ok(aliceSees.includes(a.id));
+    assert.ok(!aliceSees.includes(b.id), 'not even the existence of another user’s book');
+
+    // Naming it explicitly is refused too, or the list filter would be cosmetic.
+    assert.throws(() => switchStoryTool(alice, { id: b.id }), /belongs to another user/);
+    assert.throws(() => forkStoryTool(alice, { fromStoryId: b.id }), /belongs to another user/);
+    cw.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('switch_story is per-connection for an identified caller, not server-wide', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fabulist-mcp-own3-'));
+  try {
+    createWorldFile('Two books', root);
+    const cw = CurrentWorld.open('two-books', root);
+    const engine = new Engine({ world: () => cw.world(), providers: new ProviderRegistry(new MockProvider()) });
+    const alice = userCtx(cw, engine, root, 'user:alice');
+
+    const first = createStoryTool(alice, { title: 'First' }).story;
+    const second = createStoryTool(alice, { title: 'Second' }).story;
+    const sharedBefore = cw.stories().id();
+
+    const res = switchStoryTool(alice, { id: second.id });
+    assert.equal(res.scope, 'this connection');
+    assert.equal(alice.world().storyId, second.id, 'this caller moved');
+    assert.equal(cw.stories().id(), sharedBefore, 'and nobody else did');
+
+    // The other book is still reachable by the same caller.
+    switchStoryTool(alice, { id: first.id });
+    assert.equal(alice.world().storyId, first.id);
+    cw.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a caller with no identity keeps the legacy shared-story behaviour', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fabulist-mcp-own4-'));
+  try {
+    createWorldFile('Legacy', root);
+    const cw = CurrentWorld.open('legacy', root);
+    const engine = new Engine({ world: () => cw.world(), providers: new ProviderRegistry(new MockProvider()) });
+    // No `user`/`selectStory`: what a dev-token server with no login configured
+    // builds. Ownership must stay unset and switching must stay server-wide.
+    const ctx: McpToolContext = { world: () => cw.world(), engine, currentStory: cw.stories(), currentWorld: cw, dataRoot: root };
+
+    const { story } = createStoryTool(ctx, { title: 'Shared' });
+    assert.equal(story.ownerUserId, null, 'nothing is attributed to a user that does not exist');
+    const res = switchStoryTool(ctx, { id: story.id });
+    assert.equal(res.scope, 'server-wide');
+    assert.equal(cw.stories().id(), story.id);
+    cw.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
