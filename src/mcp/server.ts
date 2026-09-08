@@ -20,6 +20,7 @@ import { z } from 'zod';
 import type { McpAuth } from './auth.ts';
 import {
   commitNarrationTool,
+  fetchTool,
   getBookTool,
   getCastTool,
   getEntityTool,
@@ -31,6 +32,7 @@ import {
   proposeTurnTool,
   resolveInterruptTool,
   searchEntitiesTool,
+  searchTool,
   type McpToolContext,
 } from './tools.ts';
 
@@ -171,6 +173,32 @@ function buildServer(ctx: McpToolContext): McpServer {
       },
     },
     async ({ originalText, effect, actorId }) => toolResult(await resolveInterruptTool(ctx, { originalText, effect, actorId })),
+  );
+
+  // `search` and `fetch`: the two read-only tools OpenAI's MCP guide says a
+  // server should implement for ChatGPT's plugin/deep-research surfaces, which
+  // look them up by these exact names. Registered last because they are a
+  // compatibility adapter over the tools above, not new capability — see
+  // `searchTool`/`fetchTool` in tools.ts for why they exist and what the
+  // required result shapes are.
+  server.registerTool(
+    'search',
+    {
+      description:
+        'Search this world for entities (characters, places, factions, items), established facts, and open narrative threads matching a text query. Returns ids to pass to `fetch` for full detail.',
+      inputSchema: { query: z.string().describe('Free-text search query.') },
+    },
+    async ({ query }) => toolResult(searchTool(ctx, { query })),
+  );
+
+  server.registerTool(
+    'fetch',
+    {
+      description:
+        'Retrieve the full text and metadata of one item returned by `search`, by its id. Also accepts a bare entity id or turn id.',
+      inputSchema: { id: z.string().describe('An id from a `search` result, e.g. "entity:char:brother-anselm" or "thread:...".') },
+    },
+    async ({ id }) => toolResult(fetchTool(ctx, { id })),
   );
 
   return server;

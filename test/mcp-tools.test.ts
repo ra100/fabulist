@@ -28,6 +28,8 @@ import {
   proposeTurnTool,
   resolveInterruptTool,
   searchEntitiesTool,
+  searchTool,
+  fetchTool,
   type McpToolContext,
 } from '../src/mcp/tools.ts';
 
@@ -210,4 +212,77 @@ test('resolveInterruptTool with override proceeds to awaiting-narration and reco
   if (committed.status !== 'narrated') return;
   assert.equal(committed.brokenVows.length, 1);
   world.close();
+});
+
+// ---------------------------------- ChatGPT search/fetch compatibility pair
+
+test('search finds entities by name and returns ids fetch can resolve', () => {
+  const { ctx } = setup();
+  const { results } = searchTool(ctx, { query: 'Anselm' });
+
+  assert.ok(results.length > 0, 'the seeded cast includes Brother Anselm');
+  const hit = results.find((r) => r.title.includes('Anselm'));
+  assert.ok(hit, 'Anselm is among the results');
+  // Ids come back verbatim/native — entities carry their own type prefix.
+  assert.match(hit.id, /^char:/, 'entity ids keep their native type prefix');
+  assert.equal(hit.url, `fabulist://${hit.id}`);
+
+  // The round trip is the actual contract ChatGPT relies on: every id from
+  // search must resolve through fetch.
+  const doc = fetchTool(ctx, { id: hit.id });
+  assert.ok(doc.text.includes('Anselm'));
+  assert.equal(doc.id, hit.id);
+});
+
+test('search returns an empty result list rather than throwing on no match', () => {
+  const { ctx } = setup();
+  const { results } = searchTool(ctx, { query: 'zzzz-nothing-matches-this-zzzz' });
+  assert.deepEqual(results, []);
+});
+
+test('search treats a blank query as no results, not as match-everything', () => {
+  const { ctx } = setup();
+  assert.deepEqual(searchTool(ctx, { query: '   ' }).results, []);
+});
+
+test('every search result id round-trips through fetch', () => {
+  const { world, ctx } = setup();
+  // Give facts and threads something searchable in common with each other, so
+  // this covers the fact:/thread: branches and not just entities.
+  world.chronicle.addFact('The garrison keeps a ledger of the cloister.', 0);
+  const { results } = searchTool(ctx, { query: 'garrison' });
+  assert.ok(results.length > 0);
+
+  for (const r of results) {
+    const doc = fetchTool(ctx, { id: r.id });
+    assert.equal(doc.id, r.id, `fetch echoes the id it was given (${r.id})`);
+    assert.equal(typeof doc.text, 'string');
+    assert.ok(doc.text.length > 0, `fetch returns real text for ${r.id}`);
+    assert.equal(typeof doc.title, 'string');
+    assert.ok(doc.metadata, `fetch returns metadata for ${r.id}`);
+  }
+});
+
+test('fetch accepts a bare entity id, since a model may pass one through from another tool', () => {
+  const { world, ctx } = setup();
+  const anselm = world.graph.resolveName('Brother Anselm');
+  assert.ok(anselm, 'seeded');
+  const doc = fetchTool(ctx, { id: anselm.id });
+  assert.ok(doc.text.includes('Anselm'));
+});
+
+test('fetch accepts a bare turn id and returns that turn’s prose', async () => {
+  const { world, ctx, engine } = setup();
+  await engine.takeTurn('i look around the cloister');
+  const turn = world.chronicle.recentTurns(1)[0];
+  assert.ok(turn, 'a turn was committed');
+
+  const doc = fetchTool(ctx, { id: turn.id });
+  assert.equal(doc.text, turn.bookProse);
+  assert.equal(doc.metadata.scene, turn.scene);
+});
+
+test('fetch fails loudly on an unrecognized id rather than returning an empty document', () => {
+  const { ctx } = setup();
+  assert.throws(() => fetchTool(ctx, { id: 'nonsense:does-not-exist' }), /unrecognized id|no /);
 });
