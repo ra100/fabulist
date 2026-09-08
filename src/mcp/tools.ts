@@ -239,3 +239,152 @@ export async function resolveInterruptTool(
   // engine's own invariant broke, not a normal outcome to report gracefully.
   throw new Error(`resolve_interrupt: unexpected outcome kind ${(outcome as { kind: string }).kind} after override`);
 }
+
+// ------------------------------------------- ChatGPT search/fetch compatibility
+
+/**
+ * `search` and `fetch` — the two read-only tools OpenAI's own MCP guide says a
+ * server "should implement" for ChatGPT's plugin/deep-research surfaces
+ * (confirmed against platform.openai.com/docs/mcp, not inferred only from
+ * `.design/MCP-CONNECTOR.md` §4, which predicted this gap and listed the pair
+ * as not started).
+ *
+ * Why they exist alongside the richer tools above rather than replacing any of
+ * them: ChatGPT looks these up *by name*. Our nearest equivalent is called
+ * `search_entities`, and nothing was named `fetch` at all, so an authenticated
+ * ChatGPT connector discovered zero tools it recognized — the exact symptom
+ * that prompted this. Claude accepts any tool shape and was unaffected either
+ * way; this is purely additive, so it stays unaffected.
+ *
+ * The `{id, title, url}` / `{id, title, text, url, metadata}` shapes are
+ * OpenAI's, not ours.
+ *
+ * Ids are passed through *verbatim*, with no wrapper prefix of our own,
+ * because every id this returns is already self-identifying: facts are
+ * `fact:<uuid>` (`ChronicleStore.addFact`), threads `thread:<uuid>`
+ * (`world.ts`), turns `turn:<uuid>` (`ChronicleStore.addTurn`), and entities
+ * carry a type prefix (`char:`, `place:`, ...). An earlier draft here added its
+ * own `entity:`/`fact:`/... prefix and stripped it again in `fetch`; that
+ * double-prefixed the three that were already prefixed, and — caught by the
+ * round-trip test below rather than by reading it — broke `fetch` on a *bare*
+ * native turn id, since stripping `turn:` left an id `getTurn` cannot match.
+ * Dispatching on the native prefix removes the whole class of bug and makes a
+ * bare id from any other tool work for free.
+ *
+ * `url` is required by the shape but this app has no per-resource public URLs
+ * (the inspector is a SPA with client-side routing, and a deployment may be
+ * IP-allowlisted or not public at all — see `deploy/README.md`). A stable
+ * `fabulist://` URI is honest about being an identifier rather than inventing
+ * an `https://` link that would 404 for whoever clicked it.
+ */
+function searchUri(id: string): string {
+  return `fabulist://${id}`;
+}
+
+export function searchTool(ctx: McpToolContext, args: { query: string }) {
+  const world = ctx.world();
+  const query = args.query.trim();
+  const results: Array<{ id: string; title: string; url: string }> = [];
+
+  if (!query) return { results };
+
+  for (const entity of world.graph.search(query, 20)) {
+    results.push({ id: entity.id, title: `${entity.name} — ${entity.type}`, url: searchUri(entity.id) });
+  }
+
+  // Facts and threads have no store-level text search (unlike `graph.search`),
+  // so they are filtered here. Case-insensitive substring, deliberately the
+  // same crude match the rest of this app uses for prose-ish text; anything
+  // smarter belongs in the store, shared with the web UI, not bolted on here.
+  const needle = query.toLowerCase();
+
+  for (const fact of world.chronicle.facts(500)) {
+    if (!fact.text.toLowerCase().includes(needle)) continue;
+    results.push({
+      id: fact.id,
+      title: fact.text.length > 80 ? `${fact.text.slice(0, 77)}...` : fact.text,
+      url: searchUri(fact.id),
+    });
+  }
+
+  for (const thread of world.threads.all()) {
+    if (!`${thread.title} ${thread.stakes}`.toLowerCase().includes(needle)) continue;
+    results.push({
+      id: thread.id,
+      title: `${thread.title} (tension ${thread.tension})`,
+      url: searchUri(thread.id),
+    });
+  }
+
+  return { results };
+}
+
+/**
+ * `fetch`. Resolves any id `search` returned — or any id a calling model saw
+ * from one of the other tools — to full text plus metadata.
+ */
+export function fetchTool(ctx: McpToolContext, args: { id: string }) {
+  const world = ctx.world();
+  const id = args.id.trim();
+
+  if (id.startsWith('fact:')) {
+    const fact = world.chronicle.facts(1000).find((f) => f.id === id);
+    if (!fact) throw new Error(`fetch: no fact ${id}`);
+    return { id, title: 'Fact', text: fact.text, url: searchUri(id), metadata: { scene: fact.scene, layer: fact.layer } };
+  }
+
+  if (id.startsWith('thread:')) {
+    const thread = world.threads.all().find((t) => t.id === id);
+    if (!thread) throw new Error(`fetch: no thread ${id}`);
+    const text = [
+      thread.title,
+      `Stakes: ${thread.stakes}`,
+      `Possible resolutions:\n${thread.resolutions.map((r) => `- ${r}`).join('\n')}`,
+    ].join('\n');
+    return {
+      id,
+      title: thread.title,
+      text,
+      url: searchUri(id),
+      metadata: { tension: thread.tension, status: thread.status, parties: thread.parties, createdScene: thread.createdScene },
+    };
+  }
+
+  if (id.startsWith('turn:')) {
+    const turn = world.chronicle.getTurn(id);
+    if (!turn) throw new Error(`fetch: no turn ${id}`);
+    return {
+      id,
+      title: `Scene ${turn.scene}, turn ${turn.turn}`,
+      text: turn.bookProse,
+      url: searchUri(id),
+      metadata: { scene: turn.scene, turn: turn.turn, rawInput: turn.rawInput, pinned: turn.pinned },
+    };
+  }
+
+  // Anything else is an entity id (`char:`, `place:`, ...) or a plain name a
+  // model passed through from get_cast.
+  const entity = world.graph.get(id) ?? world.graph.resolveName(id);
+  if (!entity) {
+    throw new Error(`fetch: unrecognized id '${id}' (expected an id from search, or an entity name)`);
+  }
+  const sheet = world.cast.get(entity.id) ?? null;
+  const neighbours = world.graph
+    .neighbours(entity.id)
+    .map((n) => `${n.edge.predicate} → ${world.graph.get(n.otherId)?.name ?? n.otherId}`);
+  const text = [
+    `${entity.name} (${entity.type})`,
+    entity.summary,
+    neighbours.length ? `\nRelations:\n${neighbours.map((l) => `- ${l}`).join('\n')}` : '',
+    sheet ? `\nSheet:\n${JSON.stringify(sheet, null, 2)}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return {
+    id: entity.id,
+    title: entity.name,
+    text,
+    url: searchUri(entity.id),
+    metadata: { type: entity.type, layer: entity.layer, provenance: entity.provenance, confidence: entity.confidence },
+  };
+}
