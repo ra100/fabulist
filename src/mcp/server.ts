@@ -67,6 +67,8 @@ import {
   updateStyleTool,
   updateThreadTool,
   useSampleWorldTool,
+  listWorldPacksTool,
+  useWorldPackTool,
   type McpToolContext,
 } from './tools.ts';
 
@@ -619,6 +621,25 @@ function buildServer(ctx: McpToolContext): McpServer {
     'use_sample_world',
     { description: 'Load the built-in example world, for trying the engine with no setup at all.' },
     async () => toolResult(useSampleWorldTool(ctx)),
+  );
+
+  server.registerTool(
+    'list_world_packs',
+    {
+      description:
+        'List the shipped original worlds (science fiction, fantasy, historical, contemporary) and the scenarios each one offers.',
+    },
+    async () => toolResult(listWorldPacksTool(ctx)),
+  );
+
+  server.registerTool(
+    'use_world_pack',
+    {
+      description:
+        'Install one of the shipped original worlds and open one of its scenarios. Omit scenarioId to take the first. Call list_world_packs first to see the choices.',
+      inputSchema: { packId: z.string(), scenarioId: z.string().optional() },
+    },
+    async ({ packId, scenarioId }) => toolResult(useWorldPackTool(ctx, { packId, scenarioId })),
   );
 
   server.registerTool(

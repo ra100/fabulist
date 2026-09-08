@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { World, CurrentWorld } from '../src/store/index.ts';
+import { World, CurrentStory, CurrentWorld } from '../src/store/index.ts';
 import { createWorldFile } from '../src/store/worlds.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
@@ -70,6 +70,8 @@ import {
   updateStyleTool,
   updateThreadTool,
   useSampleWorldTool,
+  listWorldPacksTool,
+  useWorldPackTool,
   type McpToolContext,
 } from '../src/mcp/tools.ts';
 
@@ -774,6 +776,52 @@ test('useSampleWorldTool loads the built-in example', () => {
   const out = useSampleWorldTool(ctx);
   assert.ok(out.playerCharacterId.length > 0);
   assert.ok(out.opening.length > 0);
+  world.close();
+});
+
+test('listWorldPacksTool lists the shipped worlds and their scenarios', () => {
+  const { world, ctx } = setupWizardCtx();
+  const out = listWorldPacksTool(ctx);
+  assert.ok(out.packs.length >= 1);
+  for (const pack of out.packs) {
+    assert.ok(pack.id.length > 0);
+    assert.ok(pack.scenarios.length >= 1);
+    // The summary has to be usable by a caller that cannot see the pack file, so
+    // it names the player rather than exposing an entity id.
+    for (const s of pack.scenarios) assert.ok(!s.playerName.includes(':'));
+  }
+  world.close();
+});
+
+test('useWorldPackTool installs a pack and rebinds the current story', () => {
+  // The rebind is the part worth testing: a pack creates one story per scenario,
+  // so a caller left pointing at the story the file opened with would install a
+  // world and then go on playing a different one.
+  const world = World.open(':memory:');
+  const mock = new MockProvider();
+  const currentStory = new CurrentStory(world.db, world.storyId);
+  const engine = new Engine({ world: () => currentStory.world(), providers: new ProviderRegistry(mock) });
+  const svc = new SetupService({ world: () => currentStory.world(), providers: new ProviderRegistry(mock) });
+  const ctx: McpToolContext = {
+    world: () => currentStory.world(),
+    engine,
+    setup: svc,
+    currentStory,
+    dataRoot: 'data',
+  };
+
+  const pack = listWorldPacksTool(ctx).packs[0];
+  assert.ok(pack);
+  const wanted = pack.scenarios[pack.scenarios.length - 1];
+  assert.ok(wanted);
+
+  const out = useWorldPackTool(ctx, { packId: pack.id, scenarioId: wanted.id });
+  assert.equal(out.scenarioId, wanted.id);
+  assert.deepEqual(out.warnings, []);
+  assert.equal(currentStory.world().storyId, out.storyId, 'current story was not rebound');
+  assert.equal(currentStory.world().session.get().playerCharacterId, out.playerCharacterId);
+
+  assert.throws(() => useWorldPackTool(ctx, { packId: 'nope' }), /no such world pack/);
   world.close();
 });
 

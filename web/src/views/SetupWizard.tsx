@@ -15,6 +15,7 @@ import {
   type DiscoverResult,
   type IngestPlan,
   type Job,
+  type PackSummary,
   type PreviewResult,
   type ProvidersReport,
   type StyleContract,
@@ -24,7 +25,19 @@ import {
 import { ProvidersEditor } from './ConfigPanels.tsx';
 import { Mark } from '../Mark.tsx';
 
-type Step = 'source' | 'models' | 'universe' | 'wish' | 'plan' | 'discovering' | 'preview' | 'running' | 'cast' | 'ready';
+type Step =
+  | 'source'
+  | 'models'
+  | 'packs'
+  | 'scenario'
+  | 'universe'
+  | 'wish'
+  | 'plan'
+  | 'discovering'
+  | 'preview'
+  | 'running'
+  | 'cast'
+  | 'ready';
 
 const blankSketch = (): CharacterSketch => ({ existing: null, name: '', role: '', goals: [], vows: [] });
 
@@ -40,11 +53,22 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   const [plan, setPlan] = useState<IngestPlan | null>(null);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [refined, setRefined] = useState(false);
+  // Blank means "use the mode's preset", which is what most runs want. Kept as
+  // strings because these are text inputs and an empty box has to stay
+  // distinguishable from a 0 the user typed.
+  const [pageBudget, setPageBudget] = useState('');
+  const [passBBudget, setPassBBudget] = useState('');
   const [job, setJob] = useState<Job | null>(null);
   const [customDesc, setCustomDesc] = useState('');
   const [cast, setCast] = useState<CandidateCharacter[]>([]);
   const [castSketch, setCastSketch] = useState<CharacterSketch | null>(null);
   const [opening, setOpening] = useState('');
+
+  // The shipped original worlds. Fetched when the gallery is first opened rather
+  // than on mount: most sessions never reach this step, and the list is static
+  // content that cannot go stale within a session.
+  const [packs, setPacks] = useState<PackSummary[] | null>(null);
+  const [pack, setPack] = useState<PackSummary | null>(null);
 
   // Half-closed already: settings can switch profile live, but the wizard used
   // to build the world silently on the mock regardless. A first-time visitor
@@ -200,10 +224,30 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               </p>
             ) : null}
             <div className="choices">
+              {/*
+                Ours first, deliberately. The previous version led with a wiki
+                ingest and offered a single "built-in example" third, which framed
+                the only content we actually own as an apology for the other two.
+                It is also the one route that needs no model, no network and no
+                waiting, and the only one whose output is the same everywhere.
+              */}
               <button
                 className="choice"
-                onClick={() => setStep('universe')}
+                disabled={busy}
+                onClick={() =>
+                  void guard(async () => {
+                    if (!packs) setPacks((await api.setup.packs()).packs);
+                    setStep('packs');
+                  })
+                }
               >
+                <b>One of our worlds</b>
+                <span>
+                  Original settings built for this engine — science fiction, fantasy, historical, contemporary. Ready to
+                  play, nothing to read or spend.
+                </span>
+              </button>
+              <button className="choice" onClick={() => setStep('universe')}>
                 <b>An existing world</b>
                 <span>A book, film, game or show. I'll find its wiki and read enough of it to run a game there.</span>
               </button>
@@ -211,19 +255,75 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 <b>A world I describe</b>
                 <span>Tell me the premise and I'll invent the places, factions and cast, with tensions already running.</span>
               </button>
-              <button
-                className="choice"
-                disabled={busy}
-                onClick={() =>
-                  void guard(async () => {
-                    const res = await api.setup.sample();
-                    setOpening(res.opening);
-                    setStep('ready');
-                  })
-                }
-              >
-                <b>Use the built-in example</b>
-                <span>Saint Verrow: a monastery under a secular garrison. Fastest way to see how this plays.</span>
+            </div>
+          </>
+        ) : null}
+
+        {/* ----------------------------------------------------------- packs */}
+        {step === 'packs' ? (
+          <>
+            <p className="small dim">
+              Settings written for this engine. Each holds seventy-odd places, factions and people with the pressure
+              already on, and two or three ways in.
+            </p>
+            <div className="choices">
+              {(packs ?? []).map((p) => (
+                <button
+                  key={p.id}
+                  className="choice"
+                  onClick={() => {
+                    setPack(p);
+                    setStep('scenario');
+                  }}
+                >
+                  <b>{p.title}</b>
+                  <span>{p.blurb}</span>
+                  <span className="small dim">
+                    {p.genre.replace('-', ' ')} · {p.entities} entities · {p.scenarios.length}{' '}
+                    {p.scenarios.length === 1 ? 'way in' : 'ways in'}
+                  </span>
+                </button>
+              ))}
+              {packs && !packs.length ? <p className="small dim">No worlds are installed.</p> : null}
+            </div>
+          </>
+        ) : null}
+
+        {/* -------------------------------------------------------- scenario */}
+        {/*
+          A scenario is not a difficulty setting: it picks who you are, where you
+          start, which threads are live and who knows what. The canon underneath
+          is the same in all of them, which is why each card leads with the
+          character rather than the title.
+        */}
+        {step === 'scenario' && pack ? (
+          <>
+            <h3>{pack.title}</h3>
+            <p className="small dim wizard-premise">{pack.premise}</p>
+            <div className="choices">
+              {pack.scenarios.map((s) => (
+                <button
+                  key={s.id}
+                  className="choice"
+                  disabled={busy}
+                  onClick={() =>
+                    void guard(async () => {
+                      const res = await api.setup.pack(pack.id, s.id);
+                      setOpening(res.opening);
+                      if (res.warnings.length) setError(res.warnings.join(' · '));
+                      setStep('ready');
+                    })
+                  }
+                >
+                  <b>{s.title}</b>
+                  <span className="small dim">you play {s.playerName}</span>
+                  <span>{s.premise}</span>
+                </button>
+              ))}
+            </div>
+            <div className="row">
+              <button className="link" onClick={() => setStep('packs')}>
+                ← other worlds
               </button>
             </div>
           </>

@@ -19,6 +19,11 @@ import type {
 } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
 import { commitOffscreenEvent } from '../loop/commit.ts';
+// The predicate vocabulary lives with the packs because that is where it is
+// authored against, but it is *enforced* here — an edge whose predicate has no
+// stance summons no reactor at all. See `packs/predicates.ts` for why that is
+// worth a shared table rather than a local regex ladder.
+import { FACTION_PREDICATES, type PropagationStance, stanceForPredicate } from '../packs/predicates.ts';
 
 /** Reactions available to a consequence actor. Constrained, like the GM moves. */
 export const REACTIONS = [
@@ -105,7 +110,7 @@ interface Reactor {
   entityId: EntityId;
   strength: number;
   /** Why they care, used to choose a fitting reaction. */
-  stance: 'loyal' | 'hostile' | 'kin' | 'factional' | 'observer';
+  stance: PropagationStance;
 }
 
 /**
@@ -139,11 +144,12 @@ function findReactors(world: World, subjectId: EntityId, scene: number): Reactor
   }
 
   // Factions the subject belongs to respond per their agenda, not sentiment.
+  const factional: readonly string[] = FACTION_PREDICATES;
   for (const edge of world.graph.edgesFrom(subjectId, scene)) {
-    if (edge.predicate !== 'MEMBER_OF' && edge.predicate !== 'LEADS') continue;
+    if (!factional.includes(edge.predicate)) continue;
     for (const member of world.graph.edgesTo(edge.object, scene)) {
       if (member.subject === subjectId) continue;
-      if (member.predicate !== 'MEMBER_OF' && member.predicate !== 'LEADS') continue;
+      if (!factional.includes(member.predicate)) continue;
       keep({ entityId: member.subject, strength: edge.weight * member.weight * 0.5, stance: 'factional' });
     }
   }
@@ -151,18 +157,6 @@ function findReactors(world: World, subjectId: EntityId, scene: number): Reactor
   byId.delete(subjectId);
   byId.delete(world.session.get().playerCharacterId);
   return [...byId.values()].sort((a, b) => b.strength - a.strength).slice(0, 5);
-}
-
-function stanceForPredicate(p: string): Reactor['stance'] | null {
-  const up = p.toUpperCase();
-  if (/KIN|PARENT|CHILD|SIBLING|MARRIED/.test(up)) return 'kin';
-  if (/LOYAL|SERVES|MENTORS|TRUSTS|PROTECTS|OWES/.test(up)) return 'loyal';
-  if (/HOSTILE|RIVAL|HATES|HUNTS|SUSPECTS/.test(up)) return 'hostile';
-  if (/INFORMS|WATCHES/.test(up)) return 'observer';
-  // Transactional ties react out of self-interest, which is reason enough:
-  // harming someone's supplier or client is very much their business.
-  if (/DEALS_WITH|TRADES|EMPLOYS|PAYS|SUPPLIES|SMUGGLES/.test(up)) return 'factional';
-  return null;
 }
 
 function pickReaction(r: Reactor, event: StoryEvent): string {
