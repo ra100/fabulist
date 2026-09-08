@@ -1302,6 +1302,38 @@ route('POST', '/api/setup/sample', (_req, res, { setup }) => {
   send(res, 200, svc.useSample());
 });
 
+/**
+ * The shipped original worlds. Summaries only — a pack is seventy-odd entities
+ * with full character sheets, and the picker needs a title, a blurb and the list
+ * of scenarios, not the canon.
+ */
+route('GET', '/api/setup/packs', (_req, res, { setup }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  send(res, 200, { packs: svc.packs() });
+});
+
+/**
+ * Installs a shipped world and opens one of its scenarios.
+ *
+ * Rebinds `currentStory` for the same reason `POST /api/setup/reset` does: a pack
+ * install creates one story per scenario, and the story this server was bound to
+ * beforehand is not the one the player just chose.
+ */
+route('POST', '/api/setup/pack', (_req, res, { setup, currentStory, body }) => {
+  const svc = requireSetup(res, setup);
+  if (!svc) return;
+  const { packId, scenarioId } = (body ?? {}) as { packId?: string; scenarioId?: string };
+  if (!packId) return send(res, 400, { error: 'packId is required' });
+  try {
+    const result = svc.usePack(packId, scenarioId);
+    currentStory?.switchTo(result.storyId);
+    send(res, 200, result);
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 route('GET', '/api/setup/job/:id', (_req, res, { setup, params }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
@@ -1483,7 +1515,7 @@ export function createApiServer(opts: ServerOptions) {
   // route's own `ctx` above — only the transport connecting to them is
   // rebuilt per request (see `src/mcp/server.ts`'s own header comment on why).
   const mcpToolContext: McpToolContext | undefined = mcpAuth
-    ? { world: getWorld, engine, currentStory, currentWorld, dataRoot }
+    ? { world: getWorld, engine, currentStory, currentWorld, setup, illustrations, dataRoot }
     : undefined;
 
   const server = createServer(async (req, res) => {

@@ -19,20 +19,54 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { z } from 'zod';
 import type { McpAuth } from './auth.ts';
 import {
+  addAnchorTool,
+  addDirectiveTool,
+  branchStoryToFileTool,
+  cancelSetupJobTool,
+  closeSceneTool,
+  commitIngestTool,
   commitNarrationTool,
+  compactTool,
+  createCustomWorldTool,
+  createStoryTool,
+  deleteDirectiveTool,
+  deleteIllustrationTool,
+  discoverWorldTool,
   fetchTool,
+  forkStoryTool,
+  generatePortraitTool,
+  generateSceneIllustrationTool,
   getBookTool,
   getCastTool,
   getEntityTool,
   getFactsTool,
+  getSetupJobTool,
   getStateTool,
   getThreadsTool,
+  lockSheetFieldTool,
+  listCharactersTool,
   listStoriesTool,
   listWorldsTool,
+  pinTurnTool,
+  planWorldTool,
+  playTool,
+  previewIngestTool,
   proposeTurnTool,
+  regenerateTurnTool,
+  resetWorldTool,
   resolveInterruptTool,
+  resolveWikiTool,
   searchEntitiesTool,
   searchTool,
+  startStoryTool,
+  switchStoryTool,
+  switchWorldTool,
+  tickTool,
+  updateKnobsTool,
+  updateSheetTool,
+  updateStyleTool,
+  updateThreadTool,
+  useSampleWorldTool,
   type McpToolContext,
 } from './tools.ts';
 
@@ -60,9 +94,57 @@ function buildServer(ctx: McpToolContext): McpServer {
   );
 
   server.registerTool(
+    'switch_world',
+    {
+      description:
+        'Switch which world every subsequent tool call operates on (list_stories, get_cast, get_facts, propose_turn, ...). ' +
+        'Takes effect immediately, no restart \u2014 use the slug from list_worlds.',
+      inputSchema: { slug: z.string().describe("A world's slug, from list_worlds.") },
+    },
+    async ({ slug }) => toolResult(switchWorldTool(ctx, { slug })),
+  );
+
+  server.registerTool(
     'list_stories',
     { description: 'List every story (an independent playthrough) in the currently open world, marking which one is current.' },
     async () => toolResult(listStoriesTool(ctx)),
+  );
+
+  server.registerTool(
+    'create_story',
+    {
+      description:
+        'Start a fresh, non-overlapping story in the currently open world, sharing only its canon (no chronicle copied). ' +
+        'Does not switch to it \u2014 call switch_story with the returned id to open it.',
+      inputSchema: { title: z.string().optional().describe('A title for the new story; omit for untitled.') },
+    },
+    async ({ title }) => toolResult(createStoryTool(ctx, { title })),
+  );
+
+  server.registerTool(
+    'fork_story',
+    {
+      description:
+        'Branch a story: omit atScene for a fresh copy sharing canon only (a parallel "what if"), or pass it to copy that ' +
+        "story's chronicle up to that scene boundary first (a continuation from an earlier point). Does not switch to the fork.",
+      inputSchema: {
+        fromStoryId: z.string().optional().describe('The story to fork from; defaults to whichever story is current.'),
+        title: z.string().optional(),
+        atScene: z.number().int().positive().optional().describe('Copy the source story\u2019s chronicle up to (not including) this scene.'),
+      },
+    },
+    async ({ fromStoryId, title, atScene }) => toolResult(forkStoryTool(ctx, { fromStoryId, title, atScene })),
+  );
+
+  server.registerTool(
+    'switch_story',
+    {
+      description:
+        'Switch which story, within the currently open world, every subsequent tool call operates on (get_state, get_cast, propose_turn, ...). ' +
+        'Takes effect immediately \u2014 use an id from list_stories, create_story, or fork_story.',
+      inputSchema: { id: z.string().describe("A story's id, from list_stories, create_story, or fork_story.") },
+    },
+    async ({ id }) => toolResult(switchStoryTool(ctx, { id })),
   );
 
   server.registerTool(
@@ -129,6 +211,50 @@ function buildServer(ctx: McpToolContext): McpServer {
   );
 
   server.registerTool(
+    'list_characters',
+    {
+      description:
+        'Candidate protagonists in the current story\u2019s world, ranked by connectedness, each flagged with whether it already ' +
+        'has vows. Use this to find who is available before calling start_story \u2014 most useful right after an ingest, when ' +
+        'the world has entities but no protagonist yet.',
+    },
+    async () => toolResult(listCharactersTool(ctx)),
+  );
+
+  server.registerTool(
+    'start_story',
+    {
+      description:
+        'Set (or replace) the current story\u2019s protagonist and get an opening line to play from. Pass existing (a name from ' +
+        'list_characters) to adopt a wiki character as-is, or name/role/goals/vows with existing omitted to place an original ' +
+        'character instead. This is the tool that turns a freshly ingested world into a playable one.',
+      inputSchema: {
+        existing: z.string().optional().describe('A character name from list_characters to adopt as the protagonist.'),
+        name: z.string().optional().describe('Name for an original character; ignored if existing is set.'),
+        role: z.string().optional().describe('A one-line role/summary for an original character.'),
+        goals: z.array(z.string()).optional(),
+        vows: z.array(z.object({ text: z.string(), rank: z.number() })).optional(),
+      },
+    },
+    async ({ existing, name, role, goals, vows }) => toolResult(startStoryTool(ctx, { existing, name, role, goals, vows })),
+  );
+
+  server.registerTool(
+    'play',
+    {
+      description:
+        'Play one turn with this server writing the prose itself (billed to this server\u2019s own configured Narrator provider, not you). ' +
+        'The finished turn comes back in one call \u2014 the alternative to propose_turn/commit_narration for a caller that would rather ' +
+        'not implement the two-step split, or whose own model should not be the one writing this world\u2019s prose style.',
+      inputSchema: {
+        input: z.string().describe("The player's turn, in their own words."),
+        overrideIntegrity: z.boolean().optional().describe('Bypass the character-integrity gate, same as resolve_interrupt\u2019s "override".'),
+      },
+    },
+    async ({ input, overrideIntegrity }) => toolResult(await playTool(ctx, { input, overrideIntegrity })),
+  );
+
+  server.registerTool(
     'propose_turn',
     {
       description:
@@ -173,6 +299,351 @@ function buildServer(ctx: McpToolContext): McpServer {
       },
     },
     async ({ originalText, effect, actorId }) => toolResult(await resolveInterruptTool(ctx, { originalText, effect, actorId })),
+  );
+
+  // ------------------------------------------ other turn/session write tools
+
+  server.registerTool(
+    'pin_turn',
+    {
+      description: 'Pin (or unpin) a turn\u2019s prose so it survives regenerate_turn/compaction untouched.',
+      inputSchema: { id: z.string().describe('A turn id.'), pinned: z.boolean().optional().describe('Defaults to true.') },
+    },
+    async ({ id, pinned }) => toolResult(pinTurnTool(ctx, { id, pinned })),
+  );
+
+  server.registerTool(
+    'regenerate_turn',
+    {
+      description:
+        'Re-render one turn\u2019s prose in place \u2014 nothing about what happened changes, only how it reads. Refuses a pinned turn.',
+      inputSchema: { id: z.string().describe('A turn id.'), note: z.string().optional().describe('Guidance for the re-render, e.g. "shorter" or "more tension".') },
+    },
+    async ({ id, note }) => toolResult(await regenerateTurnTool(ctx, { id, note })),
+  );
+
+  server.registerTool(
+    'update_sheet',
+    {
+      description:
+        'Edit a character\u2019s sheet: identity, contract (vows/drives), voice, condition, appearance, or field locks. ' +
+        'Each field replaces the sheet\u2019s current value for that section when provided; omit a field to leave it untouched. ' +
+        'appearance never touches referenceImagePath/seed through this tool \u2014 those are set only by generate_portrait.',
+      inputSchema: {
+        id: z.string().describe('A character entity id, e.g. "char:brother-anselm".'),
+        identity: z.record(z.string(), z.unknown()).optional(),
+        contract: z.record(z.string(), z.unknown()).optional(),
+        voice: z.record(z.string(), z.unknown()).optional(),
+        condition: z.record(z.string(), z.unknown()).optional(),
+        appearance: z.record(z.string(), z.unknown()).optional(),
+        locks: z.array(z.string()).optional(),
+      },
+    },
+    async ({ id, identity, contract, voice, condition, appearance, locks }) =>
+      toolResult(updateSheetTool(ctx, { id, identity, contract, voice, condition, appearance, locks })),
+  );
+
+  server.registerTool(
+    'lock_sheet_field',
+    {
+      description: 'Mark (or unmark) one field path on a character sheet as author-locked, exempt from future auto-drift.',
+      inputSchema: {
+        id: z.string().describe('A character entity id.'),
+        path: z.string().describe('A field path on the sheet, e.g. "identity.arc".'),
+        locked: z.boolean().optional().describe('Defaults to true; pass false to unlock.'),
+      },
+    },
+    async ({ id, path, locked }) => toolResult(lockSheetFieldTool(ctx, { id, path, locked })),
+  );
+
+  server.registerTool(
+    'update_thread',
+    {
+      description: 'Edit a narrative thread\u2019s tension, status, title, or stakes.',
+      inputSchema: {
+        id: z.string().describe('A thread id.'),
+        tension: z.number().optional(),
+        status: z.string().optional(),
+        title: z.string().optional(),
+        stakes: z.string().optional(),
+      },
+    },
+    async ({ id, tension, status, title, stakes }) => toolResult(updateThreadTool(ctx, { id, tension, status, title, stakes })),
+  );
+
+  server.registerTool(
+    'add_directive',
+    {
+      description:
+        'Steer the future: a scene/chapter/campaign-scoped nudge the world model bends toward. Reports the recalculation it ' +
+        'triggers (which threads rose or fell), because silent recalculation is how you stop trusting the machinery.',
+      inputSchema: {
+        text: z.string().describe('The directive itself, in plain language.'),
+        scope: z.enum(['scene', 'chapter', 'campaign']).optional().describe('Defaults to "chapter".'),
+        strength: z.enum(['hint', 'push', 'mandate']).optional().describe('Defaults to "push".'),
+        lifetimeScenes: z.number().int().positive().optional().describe('Defaults to 5.'),
+      },
+    },
+    async ({ text, scope, strength, lifetimeScenes }) => toolResult(addDirectiveTool(ctx, { text, scope, strength, lifetimeScenes })),
+  );
+
+  server.registerTool(
+    'delete_directive',
+    { description: 'Retire a directive (never hard-deleted).', inputSchema: { id: z.string() } },
+    async ({ id }) => toolResult(deleteDirectiveTool(ctx, { id })),
+  );
+
+  server.registerTool(
+    'update_style',
+    {
+      description:
+        'Merge a partial patch over the current story\u2019s style contract \u2014 POV, tense, register, density, pacing, comparables, ' +
+        'visual style, and so on. Only the fields provided change; the rest are left as they are.',
+      inputSchema: {
+        pov: z.enum(['first', 'third-limited', 'third-omniscient', 'second']).optional(),
+        tense: z.enum(['past', 'present']).optional(),
+        register: z.enum(['plain', 'clipped', 'lyrical', 'ornate', 'archaic']).optional(),
+        density: z.enum(['sparse', 'balanced', 'rich']).optional(),
+        dialogueRatio: z.number().optional(),
+        genreLens: z.string().optional(),
+        humor: z.enum(['none', 'dry', 'absurd']).optional(),
+        pacing: z.enum(['languid', 'steady', 'breakneck']).optional(),
+        sceneTarget: z.number().int().positive().optional(),
+        comparables: z.array(z.string()).optional(),
+        forbidden: z.array(z.string()).optional(),
+        contentBounds: z.array(z.string()).optional(),
+        visualStyle: z.enum(['realistic', 'drawing', 'sketch', 'draft', 'animation']).optional(),
+        visualAnchor: z.string().optional(),
+      },
+    },
+    async (patch) => toolResult(updateStyleTool(ctx, patch)),
+  );
+
+  server.registerTool(
+    'update_knobs',
+    {
+      description:
+        'Merge a partial patch over the current story\u2019s dials \u2014 canon fidelity, character strictness, pacing, danger, ' +
+        'NPC agency, propagation depth, ignorance budget, prose density. Only the fields provided change.',
+      inputSchema: {
+        canonFidelity: z.enum(['strict', 'flexible', 'au']).optional(),
+        characterStrictness: z.enum(['permissive', 'coaching', 'strict', 'iron']).optional(),
+        pacing: z.number().optional(),
+        danger: z.number().optional(),
+        npcAgency: z.number().optional(),
+        propagationDepth: z.number().optional(),
+        ignoranceBudget: z.number().optional(),
+        proseDensity: z.number().optional(),
+      },
+    },
+    async (patch) => toolResult(updateKnobsTool(ctx, patch)),
+  );
+
+  server.registerTool(
+    'add_anchor',
+    {
+      description: 'Record a style-anchor passage \u2014 prose the player liked, to steer future generation toward.',
+      inputSchema: { text: z.string(), note: z.string().optional() },
+    },
+    async ({ text, note }) => toolResult(addAnchorTool(ctx, { text, note })),
+  );
+
+  server.registerTool(
+    'generate_portrait',
+    {
+      description: 'Generate or regenerate a character\u2019s portrait. Sets appearance.referenceImagePath on success.',
+      inputSchema: {
+        entityId: z.string().describe('A character entity id.'),
+        visualStyle: z.enum(['realistic', 'drawing', 'sketch', 'draft', 'animation']).optional(),
+      },
+    },
+    async ({ entityId, visualStyle }) => toolResult(await generatePortraitTool(ctx, { entityId, visualStyle })),
+  );
+
+  server.registerTool(
+    'generate_scene_illustration',
+    {
+      description: 'Illustrate an already-committed turn, from the cast and location its own delta recorded.',
+      inputSchema: {
+        turnId: z.string().describe('A turn id.'),
+        visualStyle: z.enum(['realistic', 'drawing', 'sketch', 'draft', 'animation']).optional(),
+      },
+    },
+    async ({ turnId, visualStyle }) => toolResult(await generateSceneIllustrationTool(ctx, { turnId, visualStyle })),
+  );
+
+  server.registerTool(
+    'delete_illustration',
+    { description: 'Delete a generated illustration.', inputSchema: { id: z.string() } },
+    async ({ id }) => toolResult(deleteIllustrationTool(ctx, { id })),
+  );
+
+  server.registerTool(
+    'tick',
+    { description: 'Advance seeded consequences toward firing and run whatever else the world clock does per tick.' },
+    async () => toolResult(tickTool(ctx)),
+  );
+
+  server.registerTool(
+    'compact',
+    {
+      description: 'Summarise one closed scene on demand (pass scene), or catch up everything that closed unsummarised (omit it).',
+      inputSchema: { scene: z.number().int().positive().optional(), force: z.boolean().optional() },
+    },
+    async ({ scene, force }) => toolResult(await compactTool(ctx, { scene, force })),
+  );
+
+  server.registerTool(
+    'close_scene',
+    {
+      description:
+        'Close the current scene by hand. Without this, scene stays 1 forever unless the extractor happens to advance it, ' +
+        'and hierarchical compaction never runs.',
+    },
+    async () => toolResult(await closeSceneTool(ctx)),
+  );
+
+  server.registerTool(
+    'branch_story_to_file',
+    {
+      description:
+        'Fork the save *file* at a scene into a different path on disk, leaving the source completely untouched \u2014 a ' +
+        'genuinely separate save to hand off or archive independently. Different from fork_story, which branches within ' +
+        'the same world file.',
+      inputSchema: {
+        atScene: z.number().int().positive().describe('The branch resumes at the start of this scene.'),
+        toPath: z.string().describe('Filesystem path for the new save.'),
+        overwrite: z.boolean().optional(),
+      },
+    },
+    async ({ atScene, toPath, overwrite }) => toolResult(branchStoryToFileTool(ctx, { atScene, toPath, overwrite })),
+  );
+
+  // -------------------------------------------------------- setup wizard tools
+
+  server.registerTool(
+    'resolve_wiki',
+    {
+      description: 'Resolve free text (a franchise/setting name) to candidate wikis, for plan_world/preview_ingest.',
+      inputSchema: { query: z.string() },
+    },
+    async ({ query }) => toolResult(await resolveWikiTool(ctx, { query })),
+  );
+
+  server.registerTool(
+    'plan_world',
+    {
+      description: 'Turn free text plus a resolved wiki (from resolve_wiki) into an editable ingest plan.',
+      inputSchema: {
+        wish: z.string().describe('What kind of story the player wants.'),
+        wiki: z.object({
+          name: z.string(),
+          baseUrl: z.string(),
+          articles: z.number(),
+          language: z.string(),
+          via: z.enum(['directory', 'slug', 'search', 'explicit']),
+          confidence: z.number(),
+        }),
+      },
+    },
+    async ({ wish, wiki }) => toolResult(await planWorldTool(ctx, { wish, wiki })),
+  );
+
+  server.registerTool(
+    'preview_ingest',
+    {
+      description:
+        'Crawl and report what an ingest would cost (page count, estimated time), without writing anything. The returned ' +
+        'previewKey is what commit_ingest needs \u2014 confirming a preview never re-pays for the crawl.',
+      inputSchema: {
+        baseUrl: z.string().describe('Wiki base URL, e.g. "https://memory-alpha.fandom.com".'),
+        seeds: z.array(z.string()).describe('Seed page titles to crawl from.'),
+        mode: z.enum(['skim', 'mid', 'deep']).optional().describe('Defaults to "mid".'),
+        excludeCategories: z.array(z.string()).optional(),
+        title: z.string().optional(),
+      },
+    },
+    async ({ baseUrl, seeds, mode, excludeCategories, title }) =>
+      toolResult(await previewIngestTool(ctx, { baseUrl, seeds, mode, excludeCategories, title })),
+  );
+
+  server.registerTool(
+    'discover_world',
+    {
+      description:
+        'Same crawl as preview_ingest, run as a background job (poll with get_setup_job) so a slow mid/deep crawl reports ' +
+        'real progress. Also refines a character sketch against what the crawl actually found.',
+      inputSchema: {
+        baseUrl: z.string(),
+        seeds: z.array(z.string()),
+        mode: z.enum(['skim', 'mid', 'deep']).optional(),
+        character: z
+          .object({ existing: z.string().nullable(), name: z.string(), role: z.string(), goals: z.array(z.string()), vows: z.array(z.object({ text: z.string(), rank: z.number() })) })
+          .optional(),
+        excludeCategories: z.array(z.string()).optional(),
+        title: z.string().optional(),
+      },
+    },
+    async ({ baseUrl, seeds, mode, character, excludeCategories, title }) =>
+      toolResult(discoverWorldTool(ctx, { baseUrl, seeds, mode, character, excludeCategories, title })),
+  );
+
+  server.registerTool(
+    'commit_ingest',
+    {
+      description:
+        'Commit a previewed scope (previewKey from preview_ingest/discover_world) as a background job (poll with ' +
+        'get_setup_job). This is the step that actually writes canon.',
+      inputSchema: {
+        previewKey: z.string(),
+        character: z
+          .object({ existing: z.string().nullable(), name: z.string(), role: z.string(), goals: z.array(z.string()), vows: z.array(z.object({ text: z.string(), rank: z.number() })) })
+          .optional(),
+        style: z.record(z.string(), z.unknown()).optional(),
+        opening: z.string().optional(),
+      },
+    },
+    async ({ previewKey, character, style, opening }) => toolResult(commitIngestTool(ctx, { previewKey, character, style, opening })),
+  );
+
+  server.registerTool(
+    'create_custom_world',
+    {
+      description: 'Build an authored world from a plain-language description, no wiki involved. Runs as a background job (poll with get_setup_job).',
+      inputSchema: { description: z.string(), style: z.record(z.string(), z.unknown()).optional() },
+    },
+    async ({ description, style }) => toolResult(createCustomWorldTool(ctx, { description, style })),
+  );
+
+  server.registerTool(
+    'use_sample_world',
+    { description: 'Load the built-in example world, for trying the engine with no setup at all.' },
+    async () => toolResult(useSampleWorldTool(ctx)),
+  );
+
+  server.registerTool(
+    'get_setup_job',
+    {
+      description: 'Poll a job started by discover_world, commit_ingest, or create_custom_world.',
+      inputSchema: { id: z.string() },
+    },
+    async ({ id }) => toolResult(getSetupJobTool(ctx, { id })),
+  );
+
+  server.registerTool(
+    'cancel_setup_job',
+    { description: 'Cooperatively cancel a running setup job; keeps whatever it already wrote.', inputSchema: { id: z.string() } },
+    async ({ id }) => toolResult(cancelSetupJobTool(ctx, { id })),
+  );
+
+  server.registerTool(
+    'reset_world',
+    {
+      description:
+        'Wipe the whole world file (canon included, every story dropped, one blank story created to replace them) so the ' +
+        'wizard can be run again. Genuinely destructive \u2014 there is no undo.',
+    },
+    async () => toolResult(resetWorldTool(ctx)),
   );
 
   // `search` and `fetch`: the two read-only tools OpenAI's MCP guide says a
