@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
   checkServerFreshness,
+  setSelectedStoryId,
   type BookTurn,
   type Consequence,
   type Edge,
@@ -1820,6 +1821,16 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                       title={s.current ? 'already reading this book' : 'open this book'}
                       onClick={() => void run(s.id, 'switch', async () => {
                         await api.stories.switchTo(s.id);
+                        // Client-side selection, not just the server-side
+                        // call above: once login is on, `world.storyId`
+                        // resolution happens per-request from *this user's*
+                        // own stories (`worldFor`, `src/store/index.ts`),
+                        // not from the legacy shared pointer `switchTo`
+                        // still updates for login-off compatibility. Without
+                        // this, every request after a successful switch
+                        // would keep resolving back to "my most recently
+                        // played" rather than the one just picked.
+                        setSelectedStoryId(s.id);
                         await load();
                         onSwitched();
                       })}

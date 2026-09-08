@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { World } from '../src/store/index.ts';
 import { checkpoint, openDb } from '../src/db/db.ts';
-import { createStory, resolveDefaultStory } from '../src/store/world.ts';
+import { createStory, getStory, listStoriesForUser, resolveDefaultStory, resolveOrCreateStoryForUser } from '../src/store/world.ts';
 
 function w() {
   return World.open(':memory:');
@@ -394,6 +394,96 @@ test('createStory records lineage when forked, and leaves it null for a fresh st
   const forked = createStory(world.db, { title: 'forked', forkedFrom: world.storyId, forkedAtScene: 4 });
   assert.equal(forked.forkedFrom, world.storyId);
   assert.equal(forked.forkedAtScene, 4);
+  world.close();
+});
+
+test('createStory leaves ownerUserId null unless a user is given', () => {
+  const world = w();
+  const noOwner = createStory(world.db, { title: 'no owner' });
+  assert.equal(noOwner.ownerUserId, null);
+
+  const owned = createStory(world.db, { title: 'owned', ownerUserId: 'user_abc' });
+  assert.equal(owned.ownerUserId, 'user_abc');
+  world.close();
+});
+
+test('listStoriesForUser only ever returns that user\u2019s own stories, never another\u2019s or an unowned one', () => {
+  const world = w();
+  // world.storyId's own auto-created story is unowned (created by w()'s setup, no user) — it must not leak into either user's list.
+  createStory(world.db, { title: 'alice 1', ownerUserId: 'user_alice' });
+  createStory(world.db, { title: 'alice 2', ownerUserId: 'user_alice' });
+  createStory(world.db, { title: 'bob 1', ownerUserId: 'user_bob' });
+
+  const aliceStories = listStoriesForUser(world.db, 'user_alice');
+  assert.equal(aliceStories.length, 2);
+  assert.ok(aliceStories.every((s) => s.ownerUserId === 'user_alice'));
+
+  const bobStories = listStoriesForUser(world.db, 'user_bob');
+  assert.equal(bobStories.length, 1);
+  assert.equal(bobStories[0]?.title, 'bob 1');
+
+  assert.deepEqual(listStoriesForUser(world.db, 'user_nobody'), []);
+  world.close();
+});
+
+test('listStoriesForUser orders most recently played first, same as listStories', async () => {
+  const world = w();
+  const first = createStory(world.db, { title: 'first', ownerUserId: 'user_carol' });
+  const second = createStory(world.db, { title: 'second', ownerUserId: 'user_carol' });
+  // A real sleep, not just op-sequencing: `last_played_at`/`created_at` are
+  // millisecond-resolution `toISOString()` (checked directly — two
+  // createStory/session.set calls in quick succession land the same
+  // millisecond often enough that this test flaked on ordering alone before
+  // this existed), so without a genuine time gap the DESC ordering has no
+  // deterministic tiebreaker to rely on.
+  await new Promise((r) => setTimeout(r, 5));
+  // Touch the first one's last_played_at so it sorts after the second despite being created earlier.
+  world.withStory(first.id).session.set({ turn: 1 });
+
+  const stories = listStoriesForUser(world.db, 'user_carol');
+  assert.equal(stories[0]?.id, first.id, 'the one just played sorts first');
+  assert.equal(stories[1]?.id, second.id);
+  world.close();
+});
+
+test('resolveOrCreateStoryForUser creates on first call and returns the same story on repeat calls', () => {
+  const world = w();
+  const first = resolveOrCreateStoryForUser(world.db, 'user_dave');
+  const second = resolveOrCreateStoryForUser(world.db, 'user_dave');
+  assert.equal(first, second, 'no duplicate story created for a user who already has one');
+  assert.equal(listStoriesForUser(world.db, 'user_dave').length, 1);
+  world.close();
+});
+
+test('resolveOrCreateStoryForUser picks the most recently played when a user has several, rather than erroring', async () => {
+  const world = w();
+  const first = createStory(world.db, { title: 'first', ownerUserId: 'user_erin' });
+  const second = createStory(world.db, { title: 'second', ownerUserId: 'user_erin' });
+  // Explicit touch, not creation order — and a real sleep first, not just
+  // op-sequencing: two createStory calls in quick succession can land the
+  // same millisecond timestamp (checked directly — `new Date().toISOString()`
+  // is millisecond-resolution and ties often enough in practice), so this
+  // proves the *most recently played* rule specifically, the same way the
+  // listStoriesForUser ordering test above does.
+  await new Promise((r) => setTimeout(r, 5));
+  world.withStory(first.id).session.set({ turn: 1 });
+
+  // Unlike resolveDefaultStory (file-wide, throws on >1), this must not
+  // throw: "a user has multiple stories" is the ordinary case here.
+  const resolved = resolveOrCreateStoryForUser(world.db, 'user_erin');
+  assert.equal(resolved, first.id, 'the one just played, even though it was created first');
+  assert.notEqual(resolved, second.id);
+  world.close();
+});
+
+test('resolveOrCreateStoryForUser never returns another user\u2019s story or an unowned one', () => {
+  const world = w();
+  createStory(world.db, { title: 'unowned' }); // no ownerUserId — must be invisible
+  createStory(world.db, { title: 'frank\u2019s', ownerUserId: 'user_frank' });
+
+  const resolved = resolveOrCreateStoryForUser(world.db, 'user_grace');
+  const graceStory = getStory(world.db, resolved);
+  assert.equal(graceStory?.ownerUserId, 'user_grace', 'a fresh story was created for grace, not borrowed from frank or the unowned one');
   world.close();
 });
 

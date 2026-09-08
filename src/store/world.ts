@@ -342,6 +342,7 @@ interface StoryRow {
   forked_at_scene: number | null;
   created_at: string;
   last_played_at: string;
+  owner_user_id: string | null;
 }
 
 function toStory(r: StoryRow): Story {
@@ -358,6 +359,7 @@ function toStory(r: StoryRow): Story {
     forkedAtScene: r.forked_at_scene,
     createdAt: r.created_at,
     lastPlayedAt: r.last_played_at,
+    ownerUserId: r.owner_user_id,
   };
 }
 
@@ -366,6 +368,21 @@ export function listStories(db: Db): Story[] {
   return rows<StoryRow>(db.prepare(`SELECT * FROM stories ORDER BY last_played_at DESC, created_at DESC`).all()).map(
     toStory,
   );
+}
+
+/**
+ * Every story owned by one user, most recently played first — the
+ * login-on analogue of `listStories`, which stays file-wide (used by
+ * `deleteStory`'s "don't delete the last story in the file" check, a
+ * property of the file, not of any one user). A story with `owner_user_id
+ * IS NULL` (created before this column existed, or during a login-off
+ * session) is never returned here: `null` means unowned, not "owned by
+ * everyone" — see this file's `owner_user_id` migration comment in `db.ts`.
+ */
+export function listStoriesForUser(db: Db, ownerUserId: string): Story[] {
+  return rows<StoryRow>(
+    db.prepare(`SELECT * FROM stories WHERE owner_user_id = ? ORDER BY last_played_at DESC, created_at DESC`).all(ownerUserId),
+  ).map(toStory);
 }
 
 export function getStory(db: Db, id: StoryId): Story | undefined {
@@ -377,16 +394,25 @@ export function getStory(db: Db, id: StoryId): Story | undefined {
  * Creates a fresh story against this file's canon — the "non-overlapping new
  * story in an existing world" case. No chronicle is copied; the story starts
  * exactly like a brand-new ingest would, minus re-ingesting.
+ *
+ * `ownerUserId` omitted (or explicitly `undefined`/absent) writes `NULL` —
+ * the login-off path, and any internal caller with no session user in
+ * scope. Never inferred or defaulted to "whoever is asking" here; the
+ * caller (a route with an already-verified `SessionUser`, or nothing) is
+ * the only place that knows who that is.
  */
-export function createStory(db: Db, opts: { title?: string; forkedFrom?: StoryId; forkedAtScene?: number } = {}): Story {
+export function createStory(
+  db: Db,
+  opts: { title?: string; forkedFrom?: StoryId; forkedAtScene?: number; ownerUserId?: string } = {},
+): Story {
   const id = `story:${randomUUID()}`;
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO stories
        (id, title, scene, turn, player_character_id, current_location_id, style, knobs,
-        forked_from, forked_at_scene, created_at, last_played_at)
-     VALUES (?,?,1,0,'',NULL,'{}','{}',?,?,?,?)`,
-  ).run(id, opts.title ?? '', opts.forkedFrom ?? null, opts.forkedAtScene ?? null, now, now);
+        forked_from, forked_at_scene, created_at, last_played_at, owner_user_id)
+     VALUES (?,?,1,0,'',NULL,'{}','{}',?,?,?,?,?)`,
+  ).run(id, opts.title ?? '', opts.forkedFrom ?? null, opts.forkedAtScene ?? null, now, now, opts.ownerUserId ?? null);
   return getStory(db, id)!;
 }
 
@@ -423,6 +449,24 @@ export function resolveDefaultStory(db: Db): StoryId {
   throw new Error(
     `this world has ${existing.length} stories; World.open needs an explicit storyId (see listStories)`,
   );
+}
+
+/**
+ * The per-user analogue of `resolveDefaultStory`, and the resolution
+ * `CurrentStory.worldFor` (`src/store/index.ts`) calls on every request once
+ * a session user is known. Deliberately not an error when several stories
+ * exist for this user — unlike the file-wide version, "this user has
+ * several stories" is the ordinary, expected case (anyone who has forked or
+ * started a second story), not a configuration problem needing a human to
+ * disambiguate. Picks the most recently played one; a caller wanting a
+ * *specific* other story passes its id explicitly (see the `?storyId=`
+ * override on the story routes in `src/server/api.ts`) rather than this
+ * function guessing differently.
+ */
+export function resolveOrCreateStoryForUser(db: Db, ownerUserId: string): StoryId {
+  const existing = listStoriesForUser(db, ownerUserId);
+  if (existing.length > 0) return existing[0]!.id;
+  return createStory(db, { title: '', ownerUserId }).id;
 }
 
 export class StoryStore {

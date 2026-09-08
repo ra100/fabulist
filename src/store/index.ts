@@ -24,8 +24,10 @@ import {
   ThreadStore,
   getStory,
   resolveDefaultStory,
+  resolveOrCreateStoryForUser,
 } from './world.ts';
 import { isWorldDir, pathsFor } from './worlds.ts';
+import type { SessionUser } from '../auth/config.ts';
 
 export class World {
   readonly graph: GraphStore;
@@ -103,6 +105,36 @@ export class CurrentStory {
 
   /** A fresh `World` bound to whichever story is current right now. */
   world = (): World => new World(this.db, this.storyId, this.imagesDir);
+
+  /**
+   * The per-request story resolution: when `user` is a verified session
+   * (`src/auth/config.ts`), resolves fresh, every call, to *that user's own*
+   * story — never the shared `this.storyId` pointer, and never cached on
+   * this instance, because caching per-user resolution on a single
+   * process-wide object is exactly the bug this method exists to avoid (two
+   * concurrent users must never be able to see or influence each other's
+   * resolution). `storyIdOverride`, when given, must belong to `user` — see
+   * `src/server/api.ts`'s `?storyId=` handling for why a user with more
+   * than one story needs a way to pick one *other than* their most recently
+   * played, without that becoming server-wide shared state the way
+   * `switchTo` below is.
+   *
+   * `user` absent (login off, today's only mode until this existed) falls
+   * straight through to `world()` — completely unchanged behavior, the
+   * legacy shared-pointer model, on purpose: a local single-user server has
+   * no story-ownership question to answer at all.
+   */
+  worldFor(user: SessionUser | null, storyIdOverride?: string): World {
+    if (!user) return this.world();
+    if (storyIdOverride) {
+      const story = getStory(this.db, storyIdOverride);
+      if (!story) throw new Error(`no story ${storyIdOverride} in this world`);
+      if (story.ownerUserId !== user.id) throw new Error(`story ${storyIdOverride} does not belong to this user`);
+      return new World(this.db, storyIdOverride, this.imagesDir);
+    }
+    const storyId = resolveOrCreateStoryForUser(this.db, user.id);
+    return new World(this.db, storyId, this.imagesDir);
+  }
 
   id(): StoryId {
     return this.storyId;

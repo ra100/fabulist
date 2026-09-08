@@ -88,6 +88,16 @@ function migrate(db: Db): void {
   // `exec()` before `migrate()` — an index built there against a column added
   // here would be building against nothing on every pre-existing save.
   db.exec('CREATE INDEX IF NOT EXISTS idx_ingest_pages_wiki_status ON ingest_pages(wiki, passb_status)');
+
+  // NULL, not a default: NULL means "no owner" (every story created before
+  // this column existed, and every story created while login is off — see
+  // src/auth/config.ts). A story a logged-in user creates gets their WorkOS
+  // user id written explicitly by createStory; nothing here claims an
+  // existing NULL row on anyone's behalf, since silently attributing a
+  // stranger's old local save to whoever logs in first would be a real
+  // privacy bug, not a convenience.
+  addColumnIfMissing(db, 'stories', 'owner_user_id', 'TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_stories_owner ON stories(owner_user_id)');
 }
 
 function addColumnIfMissing(db: Db, table: string, column: string, ddl: string): void {

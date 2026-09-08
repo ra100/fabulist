@@ -11,7 +11,7 @@ import { extname, join, normalize } from 'node:path';
 import type { Engine } from '../loop/engine.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { forkStory } from '../loop/branch.ts';
-import { createStory, deleteStory, listStories } from '../store/world.ts';
+import { createStory, deleteStory, getStory, listStories, listStoriesForUser } from '../store/world.ts';
 import { createWorldFile, deleteWorldFile, listWorlds, renameWorldFile } from '../store/worlds.ts';
 import {
   applyDirectiveRecalc,
@@ -326,11 +326,13 @@ route('POST', '/api/turn/:id/pin', (_req, res, { world, params, body }) => {
  * so the UI has something concrete to show instead of a passage that just
  * didn't move.
  */
-route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, params, body }) => {
+route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
   const { note } = (body ?? {}) as { note?: string };
   try {
-    const turn = await engine.regenerateProse(id, note?.trim() ? { note: note.trim() } : {});
+    // `world` explicit: the per-request (per-user, when login is on) world
+    // — see `TakeTurnOptions.world`'s own doc comment for why.
+    const turn = await engine.regenerateProse(id, { ...(note?.trim() ? { note: note.trim() } : {}), world });
     send(res, 200, turn);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -342,7 +344,11 @@ route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
   const { input, overrideIntegrity } = (body ?? {}) as { input?: string; overrideIntegrity?: boolean };
   if (!input?.trim()) return send(res, 400, { error: 'input required' });
 
-  const outcome = await engine.takeTurn(input, { overrideIntegrity: overrideIntegrity === true });
+  // `world` explicit: the per-request (per-user, when login is on) world —
+  // see `TakeTurnOptions.world`'s own doc comment for why this must not be
+  // left to the engine's own captured getter once two users can each be
+  // mid-turn on their own story at the same time.
+  const outcome = await engine.takeTurn(input, { overrideIntegrity: overrideIntegrity === true, world });
 
   // Consequence seeding and the world tick run after the turn commits, so the
   // response can report what the act set in motion.
@@ -570,13 +576,19 @@ route('GET', '/api/illustrate/scene/:turnId/prompt', (_req, res, { world, params
 });
 
 /** Generates or regenerates a character's portrait. Sets `appearance.referenceImagePath` on success (see `IllustrationService`). */
-route('POST', '/api/illustrate/portrait/:id', async (_req, res, { illustrations, params, body }) => {
+route('POST', '/api/illustrate/portrait/:id', async (_req, res, { world, illustrations, params, body }) => {
   const svc = requireIllustrations(res, illustrations);
   if (!svc) return;
   const entityId = decodeURIComponent(params.id ?? '');
   const style = parseVisualStyle((body as { visualStyle?: unknown } | undefined)?.visualStyle);
   try {
-    send(res, 200, await svc.illustratePortrait(entityId, style));
+    // `world` explicitly, not the service's own captured getter: this is
+    // the per-request world (per-user when login is on, via
+    // `currentStory.worldFor(user, ...)` above) — see
+    // `IllustrationService.illustratePortrait`'s own doc comment for why
+    // that distinction matters once two users can be generating against
+    // two different stories at once.
+    send(res, 200, await svc.illustratePortrait(entityId, style, world));
   } catch (err) {
     send(res, err instanceof NoImageProviderError ? 400 : 500, { error: err instanceof Error ? err.message : String(err) });
   }
@@ -599,7 +611,8 @@ route('POST', '/api/illustrate/scene/:turnId', async (_req, res, { world, illust
   const presentIds = firstEvent?.participants ?? [];
 
   try {
-    send(res, 200, await svc.illustrateScene(turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style));
+    // `world` explicitly here too, same reasoning as the portrait route above.
+    send(res, 200, await svc.illustrateScene(turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style, world));
   } catch (err) {
     send(res, err instanceof NoImageProviderError ? 400 : 500, { error: err instanceof Error ? err.message : String(err) });
   }
@@ -720,15 +733,42 @@ function requireCurrentStory(res: ServerResponse, currentStory: CurrentStory | u
 }
 
 /**
- * Every story in this world file, most recently played first.
+ * True when `user` may act on `storyId` — either login is off (`user` is
+ * `null`, the legacy no-ownership-concept mode, unchanged) or the story's
+ * `owner_user_id` is either this user's own id or `null` (a story from
+ * before ownership existed, or created during a login-off session; see
+ * `db.ts`'s migration comment for why an unowned row is never silently
+ * reassigned to whoever happens to ask first — it stays reachable, not
+ * exclusively theirs, until a real claim mechanism exists). Sends the 403
+ * itself and returns `false` so every call site is a one-line early return.
+ */
+function ownsStoryOrRespond(res: ServerResponse, world: World, storyId: string, user: SessionUser | null): boolean {
+  if (!user) return true;
+  const story = getStory(world.db, storyId);
+  if (!story) {
+    send(res, 404, { error: `no story ${storyId} in this world` });
+    return false;
+  }
+  if (story.ownerUserId !== null && story.ownerUserId !== user.id) {
+    send(res, 403, { error: 'this story belongs to another user' });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Every story in this world file, most recently played first — or, when
+ * login is on, every story *this user* owns. Never the whole file's list
+ * for a logged-in user: that would leak every other user's story titles
+ * and existence, not just their content.
  *
  * `current` is included per row rather than left for the client to work out.
  * Without it every row rendered identically, each with an equally live "open"
  * button and nothing marking the one already being read — which made the
  * feature look missing rather than merely unlabelled.
  */
-route('GET', '/api/stories', (_req, res, { world }) => {
-  const stories = listStories(world.db).sort((a, b) => b.lastPlayedAt.localeCompare(a.lastPlayedAt));
+route('GET', '/api/stories', (_req, res, { world, user }) => {
+  const stories = user ? listStoriesForUser(world.db, user.id) : listStories(world.db);
   send(res, 200, stories.map((s) => ({ ...s, current: s.id === world.storyId })));
 });
 
@@ -738,9 +778,9 @@ route('GET', '/api/stories', (_req, res, { world }) => {
  * caller decides whether to open it immediately or leave the current story
  * as it is.
  */
-route('POST', '/api/stories', (_req, res, { world, body }) => {
+route('POST', '/api/stories', (_req, res, { world, body, user }) => {
   const { title } = (body ?? {}) as { title?: string };
-  const story = createStory(world.db, { title: title?.trim() ?? '' });
+  const story = createStory(world.db, { title: title?.trim() ?? '', ownerUserId: user?.id });
   send(res, 201, story);
 });
 
@@ -753,21 +793,31 @@ route('POST', '/api/stories', (_req, res, { world, body }) => {
  * switch-then-fork-then-switch-back round trip, so an explicit id in the
  * body is honoured too — `forkStory` only ever reads that story's own rows,
  * never mutates it, so this is safe regardless of which story is current.
+ *
+ * Ownership: when login is on, the *source* story must belong to the
+ * caller (or be unowned) — forking someone else's story would let a user
+ * read every scene of it under a story they now own, which is exactly the
+ * leak `ownsStoryOrRespond` exists to prevent. The new forked story is
+ * always attributed to the caller, never to the source's owner — see
+ * `ForkOptions.ownerUserId`'s own doc comment for why that is not a bug.
  */
-route('POST', '/api/stories/fork', (_req, res, { world, body }) => {
+route('POST', '/api/stories/fork', (_req, res, { world, body, user }) => {
   const { title, atScene, fromStoryId } = (body ?? {}) as { title?: string; atScene?: number; fromStoryId?: string };
+  const sourceId = fromStoryId || world.storyId;
+  if (!ownsStoryOrRespond(res, world, sourceId, user)) return;
   try {
-    send(res, 201, forkStory(world, { fromStoryId: fromStoryId || world.storyId, title: title?.trim(), atScene }));
+    send(res, 201, forkStory(world, { fromStoryId: sourceId, title: title?.trim(), atScene, ownerUserId: user?.id }));
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
 });
 
 /** Switches which story every subsequent request operates on. Takes effect immediately, no restart. */
-route('POST', '/api/stories/:id/switch', (_req, res, { currentStory, params }) => {
+route('POST', '/api/stories/:id/switch', (_req, res, { world, currentStory, params, user }) => {
   const cs = requireCurrentStory(res, currentStory);
   if (!cs) return;
   const id = decodeURIComponent(params.id ?? '');
+  if (!ownsStoryOrRespond(res, world, id, user)) return;
   try {
     cs.switchTo(id);
     send(res, 200, { current: id });
@@ -776,10 +826,11 @@ route('POST', '/api/stories/:id/switch', (_req, res, { currentStory, params }) =
   }
 });
 
-route('PUT', '/api/stories/:id/title', (_req, res, { world, params, body }) => {
+route('PUT', '/api/stories/:id/title', (_req, res, { world, params, body, user }) => {
   const id = decodeURIComponent(params.id ?? '');
   const { title } = (body ?? {}) as { title?: string };
   if (typeof title !== 'string') return send(res, 400, { error: 'title is required' });
+  if (!ownsStoryOrRespond(res, world, id, user)) return;
   // Renaming works on any story in the file, not only the current one — the
   // save browser needs to rename an entry without switching to it first.
   world.withStory(id).session.rename(title.trim());
@@ -793,9 +844,10 @@ route('PUT', '/api/stories/:id/title', (_req, res, { world, params, body }) => {
  * story in a file (that is `POST /api/setup/reset`'s job — a deliberately
  * more destructive, whole-file operation).
  */
-route('DELETE', '/api/stories/:id', (_req, res, { world, params }) => {
+route('DELETE', '/api/stories/:id', (_req, res, { world, params, user }) => {
   const id = decodeURIComponent(params.id ?? '');
   if (id === world.storyId) return send(res, 409, { error: 'cannot delete the story that is currently open; switch to another one first' });
+  if (!ownsStoryOrRespond(res, world, id, user)) return;
   try {
     deleteStory(world.db, id);
     send(res, 200, { ok: true });
@@ -956,6 +1008,7 @@ route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => 
       overrideIntegrity: overrideIntegrity === true,
       onStage: (stage) => emit('stage', { stage }),
       onToken: (chunk) => emit('token', { chunk }),
+      world,
     });
 
     let seeded = 0;
@@ -1379,7 +1432,20 @@ export function createApiServer(opts: ServerOptions) {
     // point of these three routes — so they sit ahead of the gate below,
     // not behind it. Unauthenticated by design, the same reasoning as the
     // MCP metadata route just above.
-    if (authConfig && url.pathname === '/auth/login') {
+    //
+    // `/login` is accepted as a bare alias for `/auth/login`, not just the
+    // real route: WorkOS's own hosted AuthKit page redirects a sign-in
+    // request it decided "did not originate at your app" to the
+    // dashboard-configured Initiate Login URI — and, confirmed directly
+    // against the real AuthKit domain, it kept redirecting to `/login`
+    // (bare) even after that dashboard field was corrected to `/auth/login`
+    // and then cleared entirely, on both the *default* redirect_uri path
+    // AuthKit falls back to and repeated tries minutes apart. Whatever is
+    // actually driving that choice on WorkOS's side, this app answering at
+    // the bare path too turns an infinite redirect loop into a working
+    // login, at zero cost — one alias, no new logic, nothing to keep in
+    // sync since it calls the exact same handler.
+    if (authConfig && (url.pathname === '/auth/login' || url.pathname === '/login')) {
       await handleLogin(authConfig, req, res);
       return;
     }
@@ -1422,7 +1488,18 @@ export function createApiServer(opts: ServerOptions) {
         // story switch must take effect on the very next request, not after
         // a restart. Every route body still just reads `world` as a plain
         // value — the getter is dereferenced exactly once, here.
-        const world = getWorld();
+        //
+        // When login is on, this is where per-user story isolation actually
+        // happens: `currentStory.worldFor(user, ...)` resolves to *this
+        // user's own* story on every request rather than the shared
+        // process-wide pointer `getWorld()` reads — see `worldFor`'s own
+        // doc comment in `store/index.ts` for why that distinction matters.
+        // `?storyId=` lets a user with more than one story pick a specific
+        // one for this request rather than always getting "my most
+        // recent" — `worldFor` verifies it actually belongs to them before
+        // honouring it.
+        const world =
+          currentStory && user ? currentStory.worldFor(user, url.searchParams.get('storyId') ?? undefined) : getWorld();
         await match.handler(req, res, {
           world,
           engine,

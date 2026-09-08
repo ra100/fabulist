@@ -1,5 +1,49 @@
 /** Typed API client for the inspector. */
 
+/**
+ * Which of *this user's own* stories the current browser tab is looking at,
+ * when a user has more than one and login is on. Server-side story
+ * selection is now per-user (`worldFor`, `src/store/index.ts`) rather than
+ * the old shared `CurrentStory` pointer every tab used to mutate for every
+ * other tab and every other user — so "switch story" can no longer be a
+ * server-side mutation with no request context. This is the client half of
+ * that: a plain per-tab value (`sessionStorage`, not `localStorage` — a new
+ * tab should land on "my most recently played," not inherit whichever
+ * story an old tab happened to leave selected), appended as `?storyId=` to
+ * every request once set. Reading it costs nothing when unset (the server
+ * then falls back to "most recently played," exactly today's behaviour)
+ * and nothing at all in login-off mode, where the server ignores the
+ * parameter entirely.
+ */
+const STORY_ID_KEY = 'fabulist_story_id';
+
+export function getSelectedStoryId(): string | null {
+  try {
+    return sessionStorage.getItem(STORY_ID_KEY);
+  } catch {
+    // Storage can throw in a locked-down embed/private-browsing context;
+    // "no story selected" (the most-recently-played fallback) is a safe
+    // default to fall back to, not a reason to break every request.
+    return null;
+  }
+}
+
+export function setSelectedStoryId(id: string | null): void {
+  try {
+    if (id) sessionStorage.setItem(STORY_ID_KEY, id);
+    else sessionStorage.removeItem(STORY_ID_KEY);
+  } catch {
+    // Same reasoning as the read side above.
+  }
+}
+
+/** Appends `?storyId=`/`&storyId=` to a path when one is selected, otherwise returns the path unchanged. */
+function withStoryId(path: string): string {
+  const id = getSelectedStoryId();
+  if (!id) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}storyId=${encodeURIComponent(id)}`;
+}
+
 export interface Entity {
   id: string;
   type: string;
@@ -416,7 +460,7 @@ export interface CandidateCharacter {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`/api${withStoryId(path)}`, {
     ...init,
     headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
   });
@@ -560,7 +604,7 @@ export const api = {
     forEntity: (entityId: string) => req<Illustration[]>(`/illustrations/entity/${encodeURIComponent(entityId)}`),
     remove: (id: string) => req(`/illustration/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     /** The bytes live behind this URL; components hand it straight to an `<img src>`. */
-    imageUrl: (id: string) => `/api/illustration/${encodeURIComponent(id)}/image`,
+    imageUrl: (id: string) => withStoryId(`/api/illustration/${encodeURIComponent(id)}/image`),
   },
   images: {
     providers: () => req<ImageProvidersReport>('/images/providers'),
@@ -581,7 +625,7 @@ export const api = {
       onError?: (message: string) => void;
     },
   ): Promise<void> => {
-    const res = await fetch('/api/play/stream', {
+    const res = await fetch(`/api${withStoryId('/play/stream')}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ input, overrideIntegrity }),
