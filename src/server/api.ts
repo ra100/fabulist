@@ -1523,18 +1523,23 @@ export function createApiServer(opts: ServerOptions) {
     // not behind it. Unauthenticated by design, the same reasoning as the
     // MCP metadata route just above.
     //
-    // `/login` is accepted as a bare alias for `/auth/login`, not just the
-    // real route: WorkOS's own hosted AuthKit page redirects a sign-in
-    // request it decided "did not originate at your app" to the
-    // dashboard-configured Initiate Login URI — and, confirmed directly
-    // against the real AuthKit domain, it kept redirecting to `/login`
-    // (bare) even after that dashboard field was corrected to `/auth/login`
-    // and then cleared entirely, on both the *default* redirect_uri path
-    // AuthKit falls back to and repeated tries minutes apart. Whatever is
-    // actually driving that choice on WorkOS's side, this app answering at
-    // the bare path too turns an infinite redirect loop into a working
-    // login, at zero cost — one alias, no new logic, nothing to keep in
-    // sync since it calls the exact same handler.
+    // `/login` is a deliberate convenience alias for `/auth/login`: it is the
+    // path people type and bookmark, and pointing it at the same handler
+    // costs one condition.
+    //
+    // It is *not* load-bearing, and the record is worth correcting because an
+    // earlier version of this comment claimed otherwise. It was added while
+    // chasing an infinite redirect loop, on the theory that AuthKit was
+    // bouncing sign-in requests to a bare `/login` for reasons unknown "on
+    // WorkOS's side". That theory was wrong, and the alias did not fix the
+    // loop. The actual cause was a WorkOS setting: Connect → Configuration →
+    // "External Sign-in URI" was set to `https://fabulist.rast.io/login`,
+    // which is WorkOS's Standalone Connect feature — it makes AuthKit skip
+    // its own sign-in page and delegate to your app, expecting the app to
+    // authenticate the user itself and then call AuthKit's completion API.
+    // `handleLogin` does the opposite (it redirects *to* AuthKit), so every
+    // attempt looped. Clearing that setting fixed it; this alias is only
+    // still here because it is independently useful.
     if (authConfig && (url.pathname === '/auth/login' || url.pathname === '/login')) {
       await handleLogin(authConfig, req, res);
       return;
