@@ -28,6 +28,8 @@ export interface PassAResult {
   sheets: number;
   mentions: number;
   skipped: string[];
+  /** Titles where a secondary source's material was kept alongside, not over, existing canon. */
+  deferredToCanon: string[];
 }
 
 export interface PassAOptions {
@@ -37,6 +39,25 @@ export interface PassAOptions {
   recordMentions?: boolean;
   /** Mine quoted dialogue into voice cards (mid depth and above). */
   voiceCards?: boolean;
+  /**
+   * Marks this ingest as a lower-priority source relative to whatever is
+   * already in canon — the "canon-first" merge policy for ingesting more
+   * than one wiki into the same world. Two wikis sharing a fictional universe
+   * (Memory Alpha and Memory Beta both being Star Trek, say) routinely share
+   * thousands of titles for the same characters and places, each telling it
+   * slightly differently; without this, whichever wiki happened to be
+   * ingested second would silently overwrite the first entity-for-entity via
+   * `graph.upsert`'s ON CONFLICT (name, summary, props all replaced).
+   *
+   * With `secondary: true`, an id that already resolves to a canon entity
+   * from a *different* wiki's provenance keeps that entity's name, summary,
+   * type and props; this page only adds props keys canon does not already
+   * have, and a diverging summary is kept as a `multi-source` divergence
+   * rather than discarded. An id with no existing entity (this wiki alone
+   * covers that title) ingests normally — "secondary" is about collisions,
+   * not about this source's material being second-class everywhere.
+   */
+  secondary?: boolean;
 }
 
 interface Prepared {
@@ -53,7 +74,7 @@ interface Prepared {
 export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {}): PassAResult {
   const depth = opts.depth ?? 1;
   const wiki = opts.wiki ?? 'wiki';
-  const result: PassAResult = { entities: 0, edges: 0, sheets: 0, mentions: 0, skipped: [] };
+  const result: PassAResult = { entities: 0, edges: 0, sheets: 0, mentions: 0, skipped: [], deferredToCanon: [] };
 
   // First pass: decide every id before writing edges, so a relation to a page in
   // this batch resolves rather than dangling.
@@ -99,28 +120,68 @@ export function runPassA(world: World, pages: WikiPage[], opts: PassAOptions = {
       props.infoboxTemplate = p.infobox.template;
       for (const [k, v] of Object.entries(p.infobox.fields)) props[k] = v;
     }
-    world.graph.upsert(
-      {
-        id: p.id,
-        type: p.type,
-        name: p.title,
-        summary: p.summary,
-        provenance: `${wiki}:${p.title}#${p.page.revision}`,
-        confidence: p.infobox ? 0.9 : 0.7,
-        salience: 0.3,
-        depthLevel: depth,
-        props,
-        createdScene: 0,
-      },
-      'canon',
-    );
-    result.entities++;
+
+    // Canon-first merge: a secondary source whose title already resolves to
+    // a canon entity from a *different* wiki keeps that entity's identity —
+    // this page only fills prop keys the primary source never supplied, and
+    // a genuinely different summary is kept as a divergence rather than
+    // silently replacing what the primary wiki said. A title unique to this
+    // wiki, or a page this same wiki already contributed earlier, ingests
+    // normally below: "secondary" is a collision policy, not a source-wide
+    // demotion.
+    const existingCanon = opts.secondary ? world.graph.getCanon(p.id) : undefined;
+    const foreignPrimary = existingCanon && !existingCanon.provenance.startsWith(`${wiki}:`);
+
+    if (existingCanon && foreignPrimary) {
+      const existingCategories = Array.isArray(existingCanon.props.categories) ? (existingCanon.props.categories as string[]) : [];
+      const mergedProps: Record<string, unknown> = { ...props, ...existingCanon.props };
+      mergedProps.categories = [...new Set([...existingCategories, ...p.categories])];
+      const propsChanged = JSON.stringify(mergedProps) !== JSON.stringify(existingCanon.props);
+      if (propsChanged) {
+        world.graph.upsert(
+          {
+            id: p.id,
+            type: existingCanon.type,
+            name: existingCanon.name,
+            summary: existingCanon.summary,
+            provenance: existingCanon.provenance,
+            confidence: existingCanon.confidence,
+            salience: existingCanon.salience,
+            depthLevel: depth,
+            props: mergedProps,
+            createdScene: existingCanon.createdScene,
+          },
+          'canon',
+        );
+      }
+      if (p.summary.trim() && p.summary.trim() !== existingCanon.summary.trim()) {
+        world.chronicle.addDivergence(0, 'multi-source', `${wiki} says: ${p.summary.slice(0, 300)}`, existingCanon.provenance);
+      }
+      result.deferredToCanon.push(p.title);
+    } else {
+      world.graph.upsert(
+        {
+          id: p.id,
+          type: p.type,
+          name: p.title,
+          summary: p.summary,
+          provenance: `${wiki}:${p.title}#${p.page.revision}`,
+          confidence: p.infobox ? 0.9 : 0.7,
+          salience: 0.3,
+          depthLevel: depth,
+          props,
+          createdScene: 0,
+        },
+        'canon',
+      );
+      result.entities++;
+    }
 
     world.db
       .prepare(
         `INSERT INTO ingest_pages (page_id, wiki, title, revision, depth, hops, score, fetched_at)
          VALUES (?,?,?,?,?,0,0,?)
-         ON CONFLICT(page_id) DO UPDATE SET
+         ON CONFLICT(wiki, page_id) DO UPDATE SET
            revision = excluded.revision, depth = MAX(ingest_pages.depth, excluded.depth),
            fetched_at = excluded.fetched_at`,
       )

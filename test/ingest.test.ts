@@ -430,6 +430,180 @@ test('ingested pages are logged with their revision', async () => {
   world.close();
 });
 
+test('opening a save with the old page-id-only key widens it to (wiki, page_id) without losing rows', async () => {
+  // `openDb` only knows a file path, so this seeds a real file with the
+  // pre-migration shape (bypassing schema.sql, which now declares the wide
+  // key from the start) — the same code path a genuine pre-existing world.db
+  // that predates multi-wiki ingest hits on its next open.
+  //
+  // Only one row is seeded, deliberately: the old schema's `page_id PRIMARY
+  // KEY` could never actually hold two wikis' rows for a colliding id in the
+  // first place — a second wiki's insert would have silently overwritten the
+  // first via `ON CONFLICT(page_id)`, which is the bug this migration exists
+  // to stop happening *from now on*, not something that can be un-happened
+  // for a save that already lost a row that way.
+  const { DatabaseSync } = await import('node:sqlite');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'fabulist-migrate-'));
+  const path = join(dir, 'world.db');
+
+  const seed = new DatabaseSync(path);
+  seed.exec(`
+    CREATE TABLE ingest_pages (
+      page_id      TEXT PRIMARY KEY,
+      wiki         TEXT NOT NULL,
+      title        TEXT NOT NULL,
+      revision     TEXT NOT NULL DEFAULT '',
+      depth        INTEGER NOT NULL DEFAULT 0,
+      hops         INTEGER NOT NULL DEFAULT 0,
+      score        REAL NOT NULL DEFAULT 0,
+      fetched_at   TEXT NOT NULL DEFAULT '',
+      passb_status TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  seed.exec(`INSERT INTO ingest_pages (page_id, wiki, title, passb_status) VALUES ('1', 'vale', 'Duskhollow', 'done')`);
+  seed.exec(`INSERT INTO ingest_pages (page_id, wiki, title, passb_status) VALUES ('2', 'vale', 'Warden Ilsa Crowe', 'done')`);
+  seed.close();
+
+  const { openDb, rows } = await import('../src/db/db.ts');
+  const db = openDb(path); // runs migrate(), including widenIngestPagesKey
+  try {
+    const cols = rows<{ name: string; pk: number }>(db.prepare(`SELECT name, pk FROM pragma_table_info('ingest_pages')`).all());
+    const pkCols = cols.filter((c) => c.pk > 0).map((c) => c.name).sort();
+    assert.deepEqual(pkCols, ['page_id', 'wiki'], 'the key now covers both columns');
+
+    const before = rows<{ wiki: string; title: string }>(db.prepare(`SELECT wiki, title FROM ingest_pages ORDER BY page_id`).all());
+    assert.deepEqual(before, [
+      { wiki: 'vale', title: 'Duskhollow' },
+      { wiki: 'vale', title: 'Warden Ilsa Crowe' },
+    ], 'the pre-existing rows survived the rebuild');
+
+    // The whole point of the wider key: a second wiki reusing page_id '1'
+    // now lands as its own row instead of overwriting vale's.
+    db.prepare(`INSERT INTO ingest_pages (page_id, wiki, title) VALUES ('1', 'other-wiki', 'Some Other Place')`).run();
+    const rowsForId1 = rows<{ wiki: string; title: string }>(
+      db.prepare(`SELECT wiki, title FROM ingest_pages WHERE page_id = '1' ORDER BY wiki`).all(),
+    );
+    assert.deepEqual(rowsForId1, [
+      { wiki: 'other-wiki', title: 'Some Other Place' },
+      { wiki: 'vale', title: 'Duskhollow' },
+    ], 'post-migration, colliding page ids from different wikis coexist');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two wikis reusing the same numeric page id do not clobber each other', async () => {
+  const world = World.open(':memory:');
+  runPassA(world, await client().fetchPages(['Duskhollow']), { wiki: 'vale' }); // pageId '1', revision '101'
+  // A second, unrelated wiki whose own page-id sequence happens to reuse '1' —
+  // exactly the collision Fandom's per-wiki auto-increment makes routine.
+  runPassA(
+    world,
+    [{ pageId: '1', title: 'Some Other Place', revision: '9', wikitext: 'A city with nothing to do with Duskhollow.', categories: [], links: [] }],
+    { wiki: 'other-wiki' },
+  );
+
+  const rowsForId1 = world.db.prepare(`SELECT wiki, title, revision FROM ingest_pages WHERE page_id = '1' ORDER BY wiki`).all() as Array<{
+    wiki: string;
+    title: string;
+    revision: string;
+  }>;
+  assert.equal(rowsForId1.length, 2, 'both wikis kept their own row for the colliding id');
+  assert.deepEqual(
+    rowsForId1.map((r) => [r.wiki, r.title, r.revision]),
+    [
+      ['other-wiki', 'Some Other Place', '9'],
+      ['vale', 'Duskhollow', '101'],
+    ],
+  );
+  world.close();
+});
+
+// ---------------------------------------------------- multi-wiki merge policy
+
+test('a secondary wiki filling a title canon already has keeps canon as the entity of record', async () => {
+  const world = World.open(':memory:');
+  runPassA(world, await client().fetchPages(['Warden Ilsa Crowe']), { wiki: 'vale' });
+  const canonBefore = world.graph.getCanon('char:warden-ilsa-crowe')!;
+
+  const res = runPassA(
+    world,
+    [
+      {
+        pageId: '9001',
+        title: 'Warden Ilsa Crowe',
+        revision: '1',
+        wikitext: 'A completely different telling of the same name from a rival wiki.',
+        categories: ['Characters'],
+        links: [],
+      },
+    ],
+    { wiki: 'vale-beta', secondary: true },
+  );
+
+  const canonAfter = world.graph.getCanon('char:warden-ilsa-crowe')!;
+  assert.equal(canonAfter.provenance, canonBefore.provenance, 'the primary source stays the entity of record');
+  assert.equal(canonAfter.name, canonBefore.name);
+  assert.equal(canonAfter.summary, canonBefore.summary, 'the secondary source did not overwrite the summary');
+  assert.equal(res.entities, 0, 'nothing new was created for a title canon already has');
+  assert.deepEqual(res.deferredToCanon, ['Warden Ilsa Crowe']);
+
+  const divergences = world.chronicle.divergences();
+  assert.ok(
+    divergences.some((d) => d.kind === 'multi-source' && d.detail.includes('vale-beta says')),
+    'the secondary account is kept as a divergence rather than discarded',
+  );
+  world.close();
+});
+
+test('a secondary wiki still creates entities for titles the primary source never had', async () => {
+  const world = World.open(':memory:');
+  runPassA(world, await client().fetchPages(['Warden Ilsa Crowe']), { wiki: 'vale' });
+
+  const res = runPassA(
+    world,
+    [{ pageId: '9002', title: 'Only In Beta', revision: '1', wikitext: 'A character only Memory Beta has an article on.', categories: ['Characters'], links: [] }],
+    { wiki: 'vale-beta', secondary: true },
+  );
+
+  assert.equal(res.entities, 1, 'a title unique to the secondary source ingests normally');
+  assert.deepEqual(res.deferredToCanon, []);
+  assert.ok(world.graph.getCanon('char:only-in-beta'), 'the new entity landed in canon');
+  world.close();
+});
+
+test('secondary props fill gaps in canon without overwriting fields canon already set', async () => {
+  const world = World.open(':memory:');
+  runPassA(world, await client().fetchPages(['Warden Ilsa Crowe']), { wiki: 'vale' });
+  const before = world.graph.getCanon('char:warden-ilsa-crowe')!;
+  assert.equal(before.props.species, 'Human', 'sanity: the primary source did set species');
+
+  runPassA(
+    world,
+    [
+      {
+        pageId: '9003',
+        title: 'Warden Ilsa Crowe',
+        revision: '1',
+        wikitext: `{{Infobox character\n| species = Elf\n| eyecolor = Green\n}}\nA rival account.`,
+        categories: ['Characters', 'Rival Continuity'],
+        links: [],
+      },
+    ],
+    { wiki: 'vale-beta', secondary: true },
+  );
+
+  const after = world.graph.getCanon('char:warden-ilsa-crowe')!;
+  assert.equal(after.props.species, 'Human', "canon's own field is never overwritten by a secondary source");
+  assert.equal(after.props.eyecolor, 'Green', "a field canon never had is filled in from the secondary source");
+  assert.ok((after.props.categories as string[]).includes('Rival Continuity'), 'categories merge from both sources');
+  world.close();
+});
+
 // -------------------------------------------------------------------- depth
 
 test('the mode table matches the design: deep is a superset of mid of skim', () => {
