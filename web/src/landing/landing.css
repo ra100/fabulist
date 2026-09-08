@@ -1,0 +1,725 @@
+/* ============================================================================
+   The landing page — the chronicle and the instrument, applied to a title page.
+
+   Lineage and its refusals: .design/LINEAGE.md. Tokens: .design/TOKENS.md.
+   Everything here reads tier 2 only. No raw colour, no colour named.
+
+   Three structural decisions, all inherited rather than invented:
+
+     1. The ruled column with a marginal gutter. Section numbers hang in it, in
+        roman, the way the app numbers its scenes and a psalter numbers its
+        verses. They are sticky, so the number behaves like a running head.
+     2. Reading copy is set in the serif — the lede, the body, the captions —
+        and only machine chrome is sans: nav, tabs, buttons, table heads, tags.
+        Values are mono. Same three registers as the app, same domains.
+     3. One rule-break, once: the hero specimen bleeds off the right edge of
+        the viewport. Every other element obeys the column, which is the only
+        reason the break reads as a decision.
+   ========================================================================= */
+
+.lp {
+  /* clip, not hidden: the hero's negative right margin must not create a
+     horizontal scrollbar, and `clip` does that without making the element a
+     scroll container (which would break `position: sticky` on the folios). */
+  overflow-x: clip;
+  /* Narrower than the app's `--gutter` (5rem): the app's gutter has to clear a
+     dropped initial, this one holds two roman numerals. */
+  --lp-gutter: 4.5rem;
+  --lp-bar-h: 56px;
+  /* The container's own inline padding, as a token, because the plate's bleed
+     has to subtract exactly this and guessing it wrong is what cut the plate's
+     padding off against the viewport in the first draft. */
+  --lp-pad: var(--s5);
+}
+
+/* --------------------------------------------------------------- masthead */
+
+.lp-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+  height: var(--lp-bar-h);
+  /* The same inline padding as `.lp-main`, so the wordmark stands on the same
+     vertical line the folios hang against. */
+  padding: 0 var(--lp-pad);
+  max-width: 84rem;
+  margin: 0 auto;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--rule);
+  box-shadow: var(--elev-panel);
+}
+/* A sticky bar inside a centred max-width block still needs the ground behind
+   it to be opaque across the full viewport width. */
+.lp-bar::before {
+  content: "";
+  position: absolute;
+  inset: 0 calc(50% - 50vw);
+  z-index: -1;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--rule);
+}
+
+.lp-word {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  text-decoration: none;
+}
+.lp-word .mark { color: var(--accent-muted); }
+
+.lp-nav {
+  display: flex;
+  gap: var(--s5);
+  margin-left: auto;
+}
+/* Real small caps in the text serif — a book sets a label this way, and it is
+   why the serif owns the apparatus and not only the prose. */
+.lp-nav a {
+  font-family: var(--serif);
+  font-size: 14px;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.085em;
+  color: var(--ink-3);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.lp-nav a:hover { color: var(--ink); }
+
+/* ------------------------------------------------------------------- calls */
+
+/* An anchor wearing the app's button. Kept in one place so the two never drift. */
+.lp-cta {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  padding: 8px 13px;
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: var(--elev-raised);
+  transition: color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard);
+}
+.lp-cta:hover {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+  background: var(--surface-3);
+}
+.lp-cta.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+  font-weight: 600;
+  box-shadow: inset 0 1px 0 var(--edge-light-strong);
+}
+.lp-cta.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: var(--on-accent);
+}
+.lp-cta.lg { font-size: 14.5px; padding: 12px 22px; }
+
+.lp-quiet {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--ink-3);
+  text-decoration: none;
+}
+.lp-quiet:hover { color: var(--ink-2); }
+
+/* ------------------------------------------------------------------ column */
+
+.lp-main {
+  max-width: 84rem;
+  margin: 0 auto;
+  padding: 0 var(--lp-pad);
+}
+
+.lp-sec {
+  display: grid;
+  grid-template-columns: var(--lp-gutter) minmax(0, 1fr);
+  padding-block: var(--s7) 0;
+}
+/* Rhythm varies on purpose: a large gap between movements, tight gaps inside
+   them. Uniform section spacing says no section matters more than another. */
+.lp-sec + .lp-sec { padding-top: calc(var(--s7) * 1.75); }
+
+/* The section number as marginalia.
+   Static, not sticky. Sticky was the first version and it read as a running
+   head for most of a scroll, but a sticky element is constrained to its own
+   containing block — so at every section boundary the outgoing number was
+   pinned a few pixels above the incoming one and two numerals sat on screen at
+   once, which looks like a bug rather than like page furniture. A folio sits
+   beside the first line of its section; that is all it has ever done. */
+/* ink-3, never ink-4. `--ink-4` measures 2.5–3.0:1 in every preset by design —
+   correct for a strikethrough rule, wrong for anything anyone reads, including
+   a folio number. .design/palettes.mjs enforces this; the guard originally only
+   greppped styles.css, so this file was checked by hand and then added to it. */
+.lp-folio {
+  align-self: start;
+  padding-right: var(--s5);
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  line-height: 1.9;
+  color: var(--ink-3);
+}
+
+.lp-body { max-width: var(--measure-tool); }
+.lp-body.wide { max-width: 72rem; }
+
+/* --------------------------------------------------------------- headings */
+
+.lp-h1 {
+  margin: var(--s3) 0 var(--s5);
+  font-family: var(--serif);
+  /* The scale jump. Body is 14px; this reaches 68px, which is the hierarchy —
+     a 1.25× ramp through six near-identical sizes is the version with no
+     author. Tracking tightens as size grows, as it must. */
+  font-size: clamp(2.05rem, 4.4vw, 3.3rem);
+  font-weight: 600;
+  line-height: 1.03;
+  letter-spacing: -0.024em;
+  color: var(--ink);
+  text-wrap: pretty;
+}
+
+/* A title with a hairline running out from it, rather than a title in a box.
+   The rule is the section boundary; there is no border above as well, because
+   two rules for one boundary is one rule too many. */
+.lp-h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  margin: 0 0 var(--s4);
+  font-family: var(--serif);
+  font-size: clamp(1.35rem, 2.4vw, 1.75rem);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.014em;
+  color: var(--ink);
+}
+.lp-h2 > i {
+  flex: 1 0 var(--s6);
+  height: 1px;
+  background: var(--rule);
+}
+
+/* Measure, not container width. At 17px the comfortable line is 60–70
+   characters; 38rem gave 80 and the eye lost its place on the return sweep. */
+.lp-kicker { max-width: 36rem; }
+.lp-kicker,
+.lp-lede {
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.62;
+  letter-spacing: -0.002em;
+  color: var(--ink-2);
+  max-width: 33rem;
+  text-wrap: pretty;
+}
+.lp-kicker { margin: 0 0 var(--s5); max-width: 36rem; }
+.lp-lede { margin: 0 0 var(--s3); }
+
+.lp-p {
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  max-width: var(--measure-prose);
+  margin: 0 0 var(--s3);
+  text-wrap: pretty;
+}
+.lp-p.sm { font-size: 14.5px; }
+.lp-p b { color: var(--ink); font-weight: 600; }
+
+/* An aside, not a paragraph: quieter, ruled at the left like a marginal note. */
+.lp-note {
+  font-family: var(--serif);
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--ink-3);
+  max-width: 42rem;
+  margin: var(--s4) 0 0;
+  padding-left: var(--s4);
+  border-left: 1px solid var(--rule);
+}
+.lp-note.caveat { border-left-color: var(--divergent-line); }
+.lp-mt { margin-top: var(--s6); display: flex; }
+
+code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  font-variant-ligatures: none;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-hair);
+  padding: 0 4px;
+}
+
+/* -------------------------------------------------------------------- hero */
+
+.lp-hero {
+  display: grid;
+  grid-template-columns: var(--lp-gutter) minmax(0, 36rem) minmax(0, 1fr);
+  gap: var(--s7);
+  align-items: start;
+  padding-block: calc(var(--s7) * 1.5) calc(var(--s7) * 1.75);
+}
+
+/* THE break, and the only one: the plate touches the screen edge while every
+   other element obeys the column. Content that reaches an edge reads
+   differently from content floating inside symmetric padding, and one element
+   is allowed to.
+
+   The negative margin is the container's padding plus whatever the centred
+   container leaves outside itself. It lives on the plate rather than on the
+   grid, which was the first version: widening the *grid* also widened the
+   column the copy shares with the plate below 1080px, and two lines of the
+   lede ran off the right of a phone screen. */
+.lp-hero-plate {
+  margin-right: calc(-1 * (var(--lp-pad) + max(0px, (100vw - 84rem) / 2)));
+}
+/* The hero's gutter cell is empty — the hero is the title page and carries no
+   folio — but it must still be *rendered*: `display: none` on an empty grid
+   item promotes every later item one column left, which put the lede in a 72px
+   gutter and the plate on top of it. */
+.lp-hero .lp-folio { line-height: 1; padding-top: 6px; }
+.lp-hero-copy { padding-top: var(--s5); }
+
+.lp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s4);
+  margin-top: var(--s6);
+}
+
+/* ---- the specimen plate -------------------------------------------------- */
+
+.lp-plate {
+  /* Inside the plate the gutter only has to hold a folio, and the plate is
+     narrower than the book pane it borrows from. */
+  --gutter: 3.5rem;
+  background: var(--surface-1);
+  border: 1px solid var(--rule);
+  /* No right border and no right radius: the plate is cut by the viewport,
+     the way a plate bleeds off a printed page. */
+  border-right: none;
+  border-radius: var(--r-lg) 0 0 var(--r-lg);
+  padding: var(--s4) var(--s5) var(--s5) var(--s4);
+  box-shadow: var(--elev-raised);
+}
+.lp-plate-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--rule);
+}
+.lp-plate-head .eyebrow { margin: 0; }
+.lp-plate-head .mono { margin-left: auto; font-size: 10.5px; }
+
+/* the app's own `.book`, unboxed: it centres itself inside a pane, and here it
+   is the pane */
+.lp-plate .turn.book { max-width: none; margin: 0; border-bottom: none; }
+.lp-plate .book .prose { font-size: 17.5px; }
+.lp-plate .turn { padding-bottom: var(--s3); }
+
+.lp-delta { margin-top: var(--s4); }
+.lp-delta-rows {
+  margin: var(--s3) 0 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  font-variant-ligatures: none;
+}
+.lp-delta-rows > div {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  gap: var(--s3);
+  padding: 5px 0;
+  border-top: 1px solid var(--rule-soft);
+}
+.lp-delta-rows dt {
+  color: var(--ink-3);
+  letter-spacing: 0.06em;
+}
+.lp-delta-rows dd { margin: 0; color: var(--ink-2); }
+/* A state change is status, not decoration — which is why it may take a status
+   colour without spending any of the accent's three appearances. */
+.lp-add { color: var(--ok); }
+
+.lp-plate-foot {
+  margin: var(--s4) 0 0;
+  font-family: var(--serif);
+  font-size: 13.5px;
+  font-style: italic;
+  line-height: 1.55;
+  color: var(--ink-3);
+  max-width: 30rem;
+}
+
+/* ---- the instrument half --------------------------------------------------
+   Ruled scales with the value beside them, not filled progress bars. The label
+   column is fixed width so all four tracks share one left edge — comparability
+   is the only reason to draw four of anything. */
+
+.lp-budget { margin-top: var(--s5); }
+.lp-budget-row {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr) 2.5rem;
+  align-items: center;
+  gap: var(--s3);
+  padding: 5px 0;
+}
+.lp-budget-row > span:first-child {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+}
+.lp-budget-row .mono {
+  font-size: 10.5px;
+  text-align: right;
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------------- roles */
+
+/* Hairline rules between the columns, not three cards. A card grid is the
+   arrangement that gets chosen when nothing is chosen. */
+.lp-roles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s5);
+  margin-bottom: var(--s3);
+}
+.lp-role + .lp-role {
+  border-left: 1px solid var(--rule);
+  padding-left: var(--s5);
+}
+.lp-role .name { margin-bottom: 2px; }
+.lp-role-q {
+  margin: 0 0 var(--s3);
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 15px;
+  color: var(--ink-3);
+}
+.lp-role .lp-p { max-width: none; margin: 0; }
+
+/* -------------------------------------------------------------------- gate */
+
+.lp-gate { max-width: 42rem; margin-bottom: var(--s5); }
+.lp-gate .raw { margin-bottom: var(--s3); }
+/* A specimen, so the options are not controls. Same shape as the real ones,
+   without a focus stop or a promise that clicking does something. */
+.lp-gate .opt {
+  font-family: var(--sans);
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  color: var(--ink-2);
+}
+.lp-gate .opt b {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--warn);
+  margin-right: var(--s2);
+}
+/* the override is the one that costs something, so it is marked as divergence */
+.lp-gate .opt:last-child { border-color: var(--divergent-line); }
+.lp-gate .opt:last-child b { color: var(--divergent); }
+
+/* -------------------------------------------------------------- your chat */
+
+.lp-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 21rem;
+  gap: var(--s6);
+  align-items: start;
+  margin-bottom: var(--s6);
+}
+.lp-split .lp-p { max-width: none; }
+
+.lp-lamp-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  position: relative;
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-lg);
+  padding: var(--s4);
+  box-shadow: var(--elev-raised);
+}
+.lp-lamp-box .eyebrow { margin: 0; }
+.lp-lamp-box .mono { font-size: 10px; letter-spacing: 0.04em; }
+/* The one indicator lamp. Exactly one, and it means the endpoint is live. */
+.lp-lamp {
+  position: absolute;
+  top: var(--s4);
+  right: var(--s4);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-veil);
+}
+/* A recessed well you can copy from — the light inverts, dark at the top, the
+   same way every input in the app does. */
+.lp-endpoint {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  width: 100%;
+  text-align: left;
+  padding: var(--s2) var(--s3);
+  background: var(--ground);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+  box-shadow: var(--elev-well);
+}
+.lp-endpoint:hover:not(:disabled) { background: var(--ground); border-color: var(--rule-strong); }
+.lp-endpoint code {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  background: none;
+  border: none;
+  padding: 0;
+  word-break: break-all;
+}
+.lp-endpoint-copy {
+  flex: none;
+  font-family: var(--sans);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--ink-3);
+}
+.lp-endpoint:hover .lp-endpoint-copy { color: var(--ink-2); }
+
+.lp-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--rule);
+}
+.lp-tabs button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 8px 14px 9px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+.lp-tabs button:first-child { padding-left: 0; }
+.lp-tabs button:hover:not(:disabled) { background: none; color: var(--ink); }
+.lp-tabs button.active { color: var(--ink); border-bottom-color: var(--accent); }
+
+/* Partly reserved height, so switching tabs mostly does not shift the table
+   below it. Measured: the four panels are 154–355px, so reserving the tallest
+   would leave a 130px hole under the shortest — this splits the difference,
+   trading a small shift for no hole. */
+.lp-panel { padding-top: var(--s5); min-height: 19rem; }
+
+.lp-steps {
+  list-style: none;
+  counter-reset: step;
+  margin: 0 0 var(--s4);
+  padding: 0;
+  max-width: 42rem;
+}
+.lp-steps li {
+  counter-increment: step;
+  position: relative;
+  padding-left: 2.1rem;
+  margin-bottom: var(--s3);
+  font-family: var(--serif);
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.lp-steps li::before {
+  content: counter(step) ".";
+  position: absolute;
+  left: 0;
+  top: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+.lp-steps b { color: var(--ink); font-weight: 600; }
+
+.lp-tools { max-width: 62rem; }
+.lp-tools td:first-child { white-space: nowrap; }
+.lp-tools td { font-size: 12.5px; }
+.lp-tools.compact td { font-size: 13px; }
+
+/* --------------------------------------------------------------- snippets */
+
+/* A snippet is a specimen of a command, not a column of text: capped so a
+   one-line `pnpm providers` does not stretch a 960px rule across the page. */
+.lp-snip { margin: var(--s4) 0 0; max-width: 44rem; }
+.lp-two .lp-snip { max-width: none; margin-top: 0; }
+.lp-snip figcaption {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--rule);
+}
+.lp-snip figcaption .eyebrow { margin: 0; }
+.lp-snip pre {
+  margin: 0;
+  padding: var(--s3) var(--s4);
+  overflow-x: auto;
+  background: var(--ground);
+  border: 1px solid var(--rule);
+  border-top: none;
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  box-shadow: var(--elev-well);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--ink-2);
+  tab-size: 2;
+}
+.lp-copy {
+  margin-left: auto;
+  padding: 2px 6px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  font-family: var(--sans);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--ink-3);
+}
+.lp-copy:hover:not(:disabled) { background: none; color: var(--ink-2); }
+
+.lp-two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s5);
+  align-items: start;
+  /* The two blocks are different heights by nature, so the prose after them
+     needs its own clearance rather than butting against the taller one. */
+  margin: var(--s4) 0 var(--s5);
+}
+
+/* -------------------------------------------------------------- palettes */
+
+.lp-body .palettes { grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); }
+
+/* --------------------------------------------------------------- colophon */
+
+.lp-foot {
+  display: grid;
+  grid-template-columns: var(--lp-gutter) minmax(0, 1fr);
+  max-width: 84rem;
+  margin: calc(var(--s7) * 2) auto 0;
+  padding: var(--s6) var(--lp-pad) var(--s7);
+  border-top: 1px solid var(--rule);
+}
+.lp-foot .lp-folio { position: static; color: var(--ink-3); line-height: 1; padding-top: 2px; }
+.lp-foot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s5);
+  margin-top: var(--s4);
+}
+.lp-foot-grid .lp-p { max-width: 26rem; margin: 0; }
+.lp-foot-links {
+  display: flex;
+  gap: var(--s5);
+  margin-top: var(--s5);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* ------------------------------------------------------------- responsive */
+
+@media (max-width: 1080px) {
+  .lp-hero {
+    grid-template-columns: var(--lp-gutter) minmax(0, 1fr);
+    gap: var(--s5);
+  }
+  /* The plate keeps its bleed and moves under the copy — it is still the one
+     element touching an edge, so the break survives the breakpoint. */
+  .lp-hero-plate { grid-column: 2; }
+  .lp-split { grid-template-columns: minmax(0, 1fr); gap: var(--s5); }
+  .lp-lamp-box { max-width: 26rem; }
+}
+
+@media (max-width: 860px) {
+  .lp { --lp-gutter: 2.75rem; }
+  .lp-roles { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .lp-role + .lp-role {
+    border-left: none;
+    border-top: 1px solid var(--rule);
+    padding-left: 0;
+    padding-top: var(--s4);
+    margin-top: var(--s4);
+  }
+  .lp-two,
+  .lp-foot-grid { grid-template-columns: minmax(0, 1fr); }
+  .lp-nav { display: none; }
+  .lp-panel { min-height: 0; }
+}
+
+@media (max-width: 620px) {
+  .lp { --lp-gutter: 0rem; --lp-pad: var(--s4); }
+  /* With no gutter the number would sit on top of the title; it becomes a line
+     above it instead of a marginal, which is what a book does when it runs out
+     of margin too. */
+  .lp-folio {
+    position: static;
+    text-align: left;
+    padding: 0 0 var(--s2);
+    grid-column: 1 / -1;
+  }
+  .lp-sec, .lp-hero, .lp-foot { grid-template-columns: minmax(0, 1fr); }
+  .lp-hero-plate, .lp-sec > .lp-body, .lp-foot > .lp-body { grid-column: 1; }
+  .lp-hero { gap: var(--s6); padding-block: var(--s6) var(--s7); }
+  .lp-hero-copy { padding-top: 0; }
+  .lp-plate { padding: var(--s3) var(--s4) var(--s4) var(--s3); }
+  .lp-actions { gap: var(--s3); }
+  /* Scoped to the hero: the masthead's own call must not stretch across the
+     bar, which it did while this selector was unscoped. */
+  .lp-actions .lp-cta { flex: 1 1 auto; text-align: center; }
+  .lp-quiet { flex-basis: 100%; }
+  .lp-tabs { overflow-x: auto; scrollbar-width: none; }
+  .lp-tabs::-webkit-scrollbar { display: none; }
+  .lp-tabs button { flex: none; }
+  .lp-note { padding-left: var(--s3); }
+}

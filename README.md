@@ -19,6 +19,11 @@ pnpm build:web
 pnpm serve                # http://127.0.0.1:4317
 ```
 
+`/welcome` is the public landing page — what this is, how to connect a chat client to it,
+and how to run it yourself. When login is required it is what a signed-out browser gets at
+`/` instead of a redirect to the identity provider, because a visitor should be able to read
+what the thing does before being asked who they are. Design notes: `.design/LANDING.md`.
+
 An empty save opens a setup wizard. It asks three things — where are we playing, where and
 when in it, and who are you — and turns the answers into a world. Nothing is read or spent
 until you have seen a page count and a cost.
