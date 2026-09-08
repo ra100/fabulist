@@ -108,6 +108,8 @@ interface RouteContext {
   params: Record<string, string>;
   /** The signed-in user, once the session gate already verified them for this request — `null` when login is off entirely (see `src/auth/config.ts`), never re-verified here since the gate above already paid that cost. */
   user: SessionUser | null;
+  /** Present whenever login is configured at all — `undefined` in login-off mode. `requireAdmin` reads this alongside `user` to distinguish "login is off" from "login is on, but not an admin." */
+  authConfig: AuthConfig | undefined;
 }
 
 const MIME: Record<string, string> = {
@@ -510,8 +512,9 @@ function parseVisualStyle(v: unknown): VisualStyle | undefined {
   return typeof v === 'string' && (VISUAL_STYLES as string[]).includes(v) ? (v as VisualStyle) : undefined;
 }
 
-/** Which image providers are usable here, mirroring `/api/providers` for text. */
-route('GET', '/api/images/providers', async (_req, res, { imageRegistry, config }) => {
+/** Which image providers are usable here, mirroring `/api/providers` for text. Admin-only: this reports and lets a caller act on server-wide provider config, not anything scoped to a story. */
+route('GET', '/api/images/providers', async (_req, res, { imageRegistry, config, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   // Configured overrides must be included, or a custom host saved through
   // `PUT /api/config/image-provider/:key` would never appear in the picker and
   // an edited preset would still be probed at its loopback default — the panel
@@ -527,8 +530,9 @@ route('GET', '/api/images/providers', async (_req, res, { imageRegistry, config 
   });
 });
 
-/** Same refuse-and-explain contract as `/api/providers/profile`. `profile: null` (or omitted) turns illustration off. */
-route('POST', '/api/images/profile', (_req, res, { imageRegistry, body, config }) => {
+/** Same refuse-and-explain contract as `/api/providers/profile`. `profile: null` (or omitted) turns illustration off. Admin-only, same reasoning as `GET /api/images/providers` above. */
+route('POST', '/api/images/profile', (_req, res, { imageRegistry, body, config, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   if (!imageRegistry) return send(res, 503, { error: 'no swappable image registry on this server' });
   const { profile } = (body ?? {}) as { profile?: string | null };
   // Same reason as `/api/providers/profile`: write to the config this server was
@@ -964,9 +968,11 @@ route('DELETE', '/api/worlds/:slug', (_req, res, { currentWorld, dataRoot, param
 /**
  * What is usable on this machine. Read-only and slightly slow (it touches local
  * servers and credential helpers), so the UI fetches it on demand rather than
- * with the rest of the state.
+ * with the rest of the state. Admin-only: this probes and reports on the
+ * server's own machine-level credentials, not anything scoped to a story.
  */
 route('GET', '/api/providers', async (_req, res, ctx) => {
+  if (!requireAdmin(res, ctx.authConfig, ctx.user)) return;
   const [{ probeAll, usableProfiles }, { PROFILES }, { loadConfig }] = await Promise.all([
     import('../providers/probe.ts'),
     import('../providers/http.ts'),
@@ -1031,6 +1037,29 @@ route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => 
 // per field, so a bad value comes back pointing at itself rather than breaking
 // the engine several turns later.
 
+/**
+ * Gates a route to admins only, per `src/auth/config.ts`'s `AuthConfig
+ * .adminEmails`. `user` is `null` in exactly two cases that must be told
+ * apart: login is off entirely (every route already unrestricted, so this
+ * lets the request through — a bare `pnpm serve` must not suddenly need an
+ * admin allowlist it never asked for) versus login is on and this specific
+ * request has no valid session (already 401'd by the dispatch loop before
+ * any route body runs, so this branch is unreachable in practice — kept
+ * anyway so this function's own logic does not depend on that upstream
+ * ordering to be correct). A signed-in non-admin gets a 403, distinct from
+ * the 401 an unauthenticated request gets, so the two failure reasons
+ * ("you are nobody" vs. "you are somebody, but not this") stay
+ * distinguishable to the client.
+ */
+function requireAdmin(res: ServerResponse, authConfig: AuthConfig | undefined, user: SessionUser | null): boolean {
+  if (!authConfig) return true; // login is off — unrestricted, unchanged from before this existed
+  if (!user?.isAdmin) {
+    send(res, 403, { error: 'this setting is restricted to administrators' });
+    return false;
+  }
+  return true;
+}
+
 function requireConfig(res: ServerResponse, config: ConfigService | undefined): ConfigService | null {
   if (!config) {
     send(res, 503, { error: 'configuration editing is not enabled on this server' });
@@ -1039,7 +1068,8 @@ function requireConfig(res: ServerResponse, config: ConfigService | undefined): 
   return config;
 }
 
-route('GET', '/api/config', (_req, res, { config }) => {
+route('GET', '/api/config', (_req, res, { config, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireConfig(res, config);
   if (!svc) return;
   send(res, 200, {
@@ -1051,27 +1081,31 @@ route('GET', '/api/config', (_req, res, { config }) => {
   });
 });
 
-route('PUT', '/api/config', (_req, res, { config, body }) => {
+route('PUT', '/api/config', (_req, res, { config, body, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireConfig(res, config);
   if (!svc) return;
   send(res, 200, svc.patch((body ?? {}) as never));
 });
 
-route('PUT', '/api/config/provider/:key', (_req, res, { config, params, body }) => {
+route('PUT', '/api/config/provider/:key', (_req, res, { config, params, body, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireConfig(res, config);
   if (!svc) return;
   const key = decodeURIComponent(params.key ?? '');
   send(res, 200, svc.putProvider(key, (body ?? {}) as never));
 });
 
-route('DELETE', '/api/config/provider/:key', (_req, res, { config, params }) => {
+route('DELETE', '/api/config/provider/:key', (_req, res, { config, params, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireConfig(res, config);
   if (!svc) return;
   send(res, 200, svc.removeProvider(decodeURIComponent(params.key ?? '')));
 });
 
-/** Validates and probes one spec without saving it, so "test" precedes "keep". */
-route('POST', '/api/config/provider/test', async (_req, res, { body }) => {
+/** Validates and probes one spec without saving it, so "test" precedes "keep". Admin-only, same reasoning as the rest of `/api/config/*`. */
+route('POST', '/api/config/provider/test', async (_req, res, { body, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const { key, spec } = (body ?? {}) as { key?: string; spec?: unknown };
   const name = (key ?? 'candidate').trim() || 'candidate';
   const checked = validateSpec(name, spec);
@@ -1088,14 +1122,16 @@ route('POST', '/api/config/provider/test', async (_req, res, { body }) => {
  * always carried a `baseUrl`, but nothing could write one, so both were pinned
  * to their loopback preset defaults.
  */
-route('PUT', '/api/config/image-provider/:key', (_req, res, { config, params, body }) => {
+route('PUT', '/api/config/image-provider/:key', (_req, res, { config, params, body, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireConfig(res, config);
   if (!svc) return;
   const key = decodeURIComponent(params.key ?? '');
   send(res, 200, svc.putImageProvider(key, (body ?? {}) as never));
 });
 
-route('DELETE', '/api/config/image-provider/:key', (_req, res, { config, params }) => {
+route('DELETE', '/api/config/image-provider/:key', (_req, res, { config, params, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireConfig(res, config);
   if (!svc) return;
   send(res, 200, svc.removeImageProvider(decodeURIComponent(params.key ?? '')));
@@ -1107,7 +1143,8 @@ route('DELETE', '/api/config/image-provider/:key', (_req, res, { config, params 
  * whole point of a custom `baseUrl` is that it may be wrong or unreachable, and
  * finding that out at illustration time costs a turn.
  */
-route('POST', '/api/config/image-provider/test', async (_req, res, { body }) => {
+route('POST', '/api/config/image-provider/test', async (_req, res, { body, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const { key, spec } = (body ?? {}) as { key?: string; spec?: unknown };
   const name = (key ?? 'candidate').trim() || 'candidate';
   const checked = validateImageSpec(name, spec);
@@ -1122,7 +1159,8 @@ route('POST', '/api/config/image-provider/test', async (_req, res, { body }) => 
   send(res, 200, { ...(result ?? { status: 'unknown', detail: 'no probe result' }), issues: checked.issues });
 });
 
-route('POST', '/api/config/blocklist', (_req, res, { config, body }) => {
+route('POST', '/api/config/blocklist', (_req, res, { config, body, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireConfig(res, config);
   if (!svc) return;
   const { phrase, remove } = (body ?? {}) as { phrase?: string; remove?: boolean };
@@ -1130,8 +1168,9 @@ route('POST', '/api/config/blocklist', (_req, res, { config, body }) => {
   send(res, 200, remove === true ? svc.removeBlocked(phrase) : svc.addBlocked(phrase));
 });
 
-/** Switches provider profile without a restart. */
+/** Switches provider profile without a restart. Admin-only: this changes which LLM every user of this server talks to next, not anything scoped to the caller's own story. */
 route('POST', '/api/providers/profile', (_req, res, ctx) => {
+  if (!requireAdmin(res, ctx.authConfig, ctx.user)) return;
   const { registry, body } = ctx;
   if (!registry) return send(res, 503, { error: 'profile switching is not enabled on this server' });
   const { profile } = (body ?? {}) as { profile?: string };
@@ -1316,8 +1355,14 @@ route('POST', '/api/setup/player', async (_req, res, { setup, world, body }) => 
  * Whether this world came from a wiki, and how much of the last ingest's
  * scope Pass B has actually finished — what a Settings panel shows so
  * "continue reading" is an informed choice rather than a leap of faith.
+ * Admin-only: this reports on and lets a caller act on canon shared by
+ * every user of this world, not anything scoped to the caller's own story
+ * — unlike the first-run setup wizard's own ingest (`POST /api/setup/ingest`,
+ * above), which stays open to any signed-in user since starting a *fresh*
+ * world is a per-user action, not a mutation of an existing shared one.
  */
-route('GET', '/api/setup/ingest-health', (_req, res, { setup }) => {
+route('GET', '/api/setup/ingest-health', (_req, res, { setup, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireSetup(res, setup);
   if (!svc) return;
   send(res, 200, svc.ingestHealth());
@@ -1327,9 +1372,11 @@ route('GET', '/api/setup/ingest-health', (_req, res, { setup }) => {
  * Finishes an interrupted ingest, or extends one with a wider seed set or a
  * deeper mode. Needs no wiki/seeds/mode in the body at all for a plain
  * resume — `ingestHealth`'s persisted context already has them; the body's
- * fields exist only to widen the scope for "read more".
+ * fields exist only to widen the scope for "read more". Admin-only, same
+ * reasoning as `GET /api/setup/ingest-health` above.
  */
-route('POST', '/api/setup/continue', (_req, res, { setup, body }) => {
+route('POST', '/api/setup/continue', (_req, res, { setup, body, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { seeds, mode, excludeCategories } = (body ?? {}) as {
@@ -1370,6 +1417,49 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
   res.end(readFileSync(target));
   return true;
 }
+
+/**
+ * The same thing without the SPA fallback.
+ *
+ * `serveStatic` answers an unknown path with `index.html`, which is right for the app's
+ * client-side routes and wrong for everything the unauthenticated branch below serves: a
+ * request for `/landing.html` against a `dist/` built before the landing page existed
+ * would otherwise hand an anonymous visitor the *app* shell, which then 401s every call it
+ * makes and looks like a broken product rather than a missing build.
+ */
+function serveStaticExact(res: ServerResponse, webRoot: string, pathname: string): boolean {
+  const rel = normalize(pathname).replace(/^(\.\.[/\\])+/, '');
+  const file = join(webRoot, rel);
+  if (!file.startsWith(normalize(webRoot))) return false;
+  if (!existsSync(file) || !statSync(file).isFile()) return false;
+
+  res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' });
+  res.end(readFileSync(file));
+  return true;
+}
+
+/**
+ * Which page navigations an anonymous visitor may have, and which files those pages need.
+ *
+ * Deliberately a small allowlist rather than "everything except /api". The landing page is
+ * the public face of the project; the app is not, and the difference has to be a list
+ * somebody has to edit, not a rule somebody has to remember.
+ *
+ * The hashed bundle under `/assets/` is public because it is not a secret — the app's own
+ * JavaScript was always readable by anyone who had signed in once, every route it calls is
+ * still gated, and withholding it would only have stopped the landing page from booting.
+ */
+const PUBLIC_PAGES = new Set(['/', '/welcome']);
+const PUBLIC_FILES = new Set([
+  '/landing.html',
+  '/favicon.svg',
+  '/apple-touch-icon.png',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/manifest.webmanifest',
+]);
+const isPublicAsset = (pathname: string): boolean =>
+  PUBLIC_FILES.has(pathname) || (pathname.startsWith('/assets/') && !pathname.includes('..'));
 
 export function createApiServer(opts: ServerOptions) {
   const {
@@ -1460,16 +1550,25 @@ export function createApiServer(opts: ServerOptions) {
 
     // The session gate. Everything below this line — every /api/ route and
     // every static asset — requires a verified session when login is
-    // required at all. A browser with no valid session gets redirected to
-    // /auth/login for a page navigation, or a plain 401 for an API call
-    // (redirecting a fetch() is rarely what the caller wants — it would
-    // "succeed" with the login page's HTML as the body, which is a worse
-    // failure than an honest 401 the client can actually detect).
+    // required at all, with one carve-out above it: the public landing page.
+    //
+    // A browser with no valid session lands on the pitch rather than on
+    // somebody else's login form, because a visitor has to be able to read
+    // what this is, and how to run it themselves, before being asked for an
+    // identity. An API call still gets a plain 401 (redirecting a fetch() is
+    // rarely what the caller wants — it would "succeed" with the login page's
+    // HTML as the body, which is a worse failure than an honest 401 the client
+    // can actually detect). `/api/auth/me` is one of those 401s, and it is how
+    // the landing page decides between "Sign in" and "Open the chronicle".
     let user: SessionUser | null = null;
     if (authConfig) {
       user = await verifySession(authConfig, req);
       if (!user) {
         const wantsHtml = (req.headers.accept ?? '').includes('text/html') && !url.pathname.startsWith('/api/') && url.pathname !== '/mcp';
+        if (webRoot) {
+          if (wantsHtml && PUBLIC_PAGES.has(url.pathname) && serveStaticExact(res, webRoot, '/landing.html')) return;
+          if (isPublicAsset(url.pathname) && serveStaticExact(res, webRoot, url.pathname)) return;
+        }
         if (wantsHtml) {
           res.writeHead(302, { location: '/auth/login' });
           return res.end();
@@ -1515,6 +1614,7 @@ export function createApiServer(opts: ServerOptions) {
           body,
           params,
           user,
+          authConfig,
         });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
@@ -1523,6 +1623,13 @@ export function createApiServer(opts: ServerOptions) {
       }
       return;
     }
+
+    // `/welcome` is the landing page at a stable address, reachable whether or
+    // not login is configured and whether or not you are already signed in.
+    // Without it the pitch would be visible only to people who do not have an
+    // account, which is exactly backwards for the person developing it and for
+    // anyone who wants to send someone else the link.
+    if (webRoot && url.pathname === '/welcome' && serveStaticExact(res, webRoot, '/landing.html')) return;
 
     if (webRoot && serveStatic(res, webRoot, url.pathname)) return;
     send(res, 404, { error: 'not found' });

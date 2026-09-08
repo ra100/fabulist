@@ -27,6 +27,12 @@ import {
   slugify,
   uniqueSlug,
 } from '../src/store/worlds.ts';
+import type { SessionUser } from '../src/auth/config.ts';
+
+/** A plain, non-admin `SessionUser` for tests that only care about per-user story isolation, not the admin allowlist. */
+function testUser(id: string, email: string): SessionUser {
+  return { id, email, firstName: null, lastName: null, isAdmin: false };
+}
 
 function withRoot(fn: (root: string) => void): void {
   const root = mkdtempSync(join(tmpdir(), 'fabulist-worlds-'));
@@ -372,12 +378,12 @@ test('worldFor resolves each user to their own story, never the shared pointer o
     const cw = CurrentWorld.open('a', root);
     try {
       const cs = cw.stories();
-      const aliceWorld = cs.worldFor({ id: 'user_alice', email: 'a@x.com', firstName: null, lastName: null });
-      const bobWorld = cs.worldFor({ id: 'user_bob', email: 'b@x.com', firstName: null, lastName: null });
+      const aliceWorld = cs.worldFor(testUser('user_alice', 'a@x.com'));
+      const bobWorld = cs.worldFor(testUser('user_bob', 'b@x.com'));
       assert.notEqual(aliceWorld.storyId, bobWorld.storyId, 'two different users never land on the same auto-created story');
 
       // Calling again for the same user resolves to the same story, not a new one each time.
-      const aliceAgain = cs.worldFor({ id: 'user_alice', email: 'a@x.com', firstName: null, lastName: null });
+      const aliceAgain = cs.worldFor(testUser('user_alice', 'a@x.com'));
       assert.equal(aliceAgain.storyId, aliceWorld.storyId);
     } finally {
       cw.close();
@@ -392,7 +398,7 @@ test('worldFor never mutates the shared storyId pointer \u2014 concurrent-safe b
     try {
       const cs = cw.stories();
       const before = cs.id();
-      cs.worldFor({ id: 'user_alice', email: 'a@x.com', firstName: null, lastName: null });
+      cs.worldFor(testUser('user_alice', 'a@x.com'));
       assert.equal(cs.id(), before, 'resolving a per-user world must never change what the legacy pointer itself sees');
     } finally {
       cw.close();
@@ -406,8 +412,8 @@ test('worldFor with an explicit storyId override uses it, but only when it belon
     const cw = CurrentWorld.open('a', root);
     try {
       const cs = cw.stories();
-      const alice = { id: 'user_alice', email: 'a@x.com', firstName: null, lastName: null };
-      const bob = { id: 'user_bob', email: 'b@x.com', firstName: null, lastName: null };
+      const alice = testUser('user_alice', 'a@x.com');
+      const bob = testUser('user_bob', 'b@x.com');
 
       const aliceSecond = createStory(cw.world().db, { title: 'alice second', ownerUserId: 'user_alice' });
       const resolved = cs.worldFor(alice, aliceSecond.id);
@@ -457,5 +463,57 @@ test('closing a world checkpoints it, leaving one tidy file', () => {
     const reopened = World.open(pathsFor('a', root).dbPath);
     assert.equal(reopened.graph.getCanon('char:q')?.name, 'Q');
     reopened.close();
+  });
+});
+
+/**
+ * The exact production failure this pair of tests exists for: the deployed
+ * world had two stories, so `CurrentWorld.open` threw
+ * "this world has 2 stories; World.open needs an explicit storyId" during
+ * startup, the container crash-looped under `restart: unless-stopped`, and the
+ * reverse proxy served 502s. Per-user stories (each logged-in user gets their
+ * own) make multi-story worlds ordinary, so boot has to resolve one rather
+ * than demand a human disambiguate.
+ */
+test('a world with several stories still opens at boot, picking the most recently played', () => {
+  withRoot((root) => {
+    const w = createWorldFile('Two Stories', root);
+    const paths = pathsFor(w.slug, root);
+
+    // A second story in the same file — what a second logged-in user, or one
+    // fork, produces.
+    const world = World.open(paths.dbPath, undefined, paths.imagesDir);
+    const second = createStory(world.db, { title: 'the later one' });
+    world.db.prepare(`UPDATE stories SET last_played_at = ? WHERE id = ?`).run('2030-01-01T00:00:00.000Z', second.id);
+    world.close();
+
+    const cw = CurrentWorld.open(w.slug, root);
+    try {
+      assert.equal(cw.world().storyId, second.id, 'boot lands on the most recently played story, not an error');
+    } finally {
+      cw.close();
+    }
+  });
+});
+
+test('switching to a world with several stories works too, and does not lose the open session', () => {
+  withRoot((root) => {
+    createWorldFile('One', root);
+    const many = createWorldFile('Many', root);
+    const paths = pathsFor(many.slug, root);
+
+    const world = World.open(paths.dbPath, undefined, paths.imagesDir);
+    const second = createStory(world.db, { title: 'second' });
+    world.db.prepare(`UPDATE stories SET last_played_at = ? WHERE id = ?`).run('2030-01-01T00:00:00.000Z', second.id);
+    world.close();
+
+    const cw = CurrentWorld.open('one', root);
+    try {
+      cw.switchTo(many.slug);
+      assert.equal(cw.slug(), many.slug);
+      assert.equal(cw.world().storyId, second.id);
+    } finally {
+      cw.close();
+    }
   });
 });

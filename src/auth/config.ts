@@ -5,13 +5,16 @@
  * one is a session cookie for a human sitting at a browser, set once at
  * login and read on every request after.
  *
- * Access model, deliberately the simplest one that's still real: any
- * WorkOS-verified identity is let in, with full access to whatever
- * world/story this server has open — this app has no per-user data scoping
- * yet (one shared world per server, same as it always was; see
- * `.design/SAAS-MULTIUSER.md` for the plan to change that). Login here
- * answers "is this a real, verified person," not "which of several users'
- * worlds should they see" — there is only one world to see.
+ * Two-tier access, not one: any WorkOS-verified identity may sign in and
+ * gets their own stories, fully isolated from every other user's (per-story
+ * data — `stories`, chronicle, `style_anchors` — is scoped by
+ * `owner_user_id`/`story_id`; see `CurrentStory.worldFor` in
+ * `src/store/index.ts`). Separately, `AuthConfig.adminEmails` names who may
+ * also see and change *system-wide* settings — LLM/image provider config,
+ * canon ingest — which are not per-story at all and would otherwise let any
+ * signed-in stranger repoint the whole server's model or spend its ingest
+ * budget. "Signed in" answers "is this a real person"; "admin" answers "may
+ * this person touch things every user shares."
  *
  * Off by default, on for a real deployment: see `resolveAuthConfig` below.
  */
@@ -25,6 +28,18 @@ export interface AuthConfig {
   clientId: string;
   /** 32+ chars, required by the SDK's own session-sealing (`sealData`/`unsealData`) — this is the AES key the session cookie is encrypted with, not a login password anyone types. */
   cookiePassword: string;
+  /**
+   * Lowercased emails allowed to see and change system-wide settings — LLM
+   * provider config, image provider config, and canon ingest — none of
+   * which is scoped to any one story or user, unlike style/knobs/palette
+   * (already per-story, hence per-user; see `stories.knobs`/`.style` and
+   * `style_anchors`'s own `story_id` scoping in `schema.sql`). Empty means
+   * nobody is an admin — deliberately fail closed rather than treat an
+   * unset allowlist as "everyone," since the whole point is that a public
+   * deployment must not let an arbitrary signed-in stranger repoint the
+   * server's LLM provider or spend its ingest budget.
+   */
+  adminEmails: Set<string>;
 }
 
 /**
@@ -65,7 +80,27 @@ export function resolveAuthConfig(config: Config, env: Record<string, string | u
     throw new Error(`WORKOS_COOKIE_PASSWORD must be at least 32 characters (WorkOS's own session-sealing minimum); got ${cookiePassword!.length}.`);
   }
 
-  return { requireLogin: true, workos: new WorkOS(apiKey!, { clientId: clientId! }), clientId: clientId!, cookiePassword: cookiePassword! };
+  // Comma-separated, matching the shape every other multi-value env var in
+  // this codebase already uses (e.g. `.dockerignore`-adjacent conventions
+  // elsewhere are single-value, but a *list* of emails has no single-value
+  // precedent to follow, so comma-separated + trim + lowercase is the
+  // plainest thing that could work). Unset means no admins at all — see
+  // `AuthConfig.adminEmails`'s own doc comment for why that is the safe
+  // default, not "everyone."
+  const adminEmails = new Set(
+    (env.AUTH_ADMIN_EMAILS ?? '')
+      .split(',')
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  return {
+    requireLogin: true,
+    workos: new WorkOS(apiKey!, { clientId: clientId! }),
+    clientId: clientId!,
+    cookiePassword: cookiePassword!,
+    adminEmails,
+  };
 }
 
 /** The sealed session cookie's name. `httpOnly`/`sameSite=lax`/`secure` (when the request looks like it arrived over TLS) — a plain server-set cookie, not a client-readable token. */
@@ -118,6 +153,8 @@ export interface SessionUser {
   email: string;
   firstName: string | null;
   lastName: string | null;
+  /** True when `email` (case-insensitively) is in `AuthConfig.adminEmails`. See that field's own doc comment for what "admin" actually gates — system-wide settings, not per-story data every user already only sees their own copy of. */
+  isAdmin: boolean;
 }
 
 /**
@@ -135,5 +172,11 @@ export async function verifySession(auth: AuthConfig, req: IncomingMessage): Pro
   const result = await session.authenticate();
   if (!result.authenticated) return null;
   const { user } = result;
-  return { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName };
+  return {
+    id: user.id,
+    email: user.email,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    isAdmin: auth.adminEmails.has(user.email.toLowerCase()),
+  };
 }

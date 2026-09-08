@@ -534,11 +534,12 @@ test('DELETE /api/stories/:id refuses to delete the last story in a world', asyn
  * that added `src/auth/`) — a real `sealData`/`unsealData` round trip would
  * only re-prove code this codebase doesn't own and already trusts.
  */
-function fakeAuthConfig(usersByCookie: Record<string, { id: string; email: string }>): AuthConfig {
+function fakeAuthConfig(usersByCookie: Record<string, { id: string; email: string }>, adminEmails: string[] = []): AuthConfig {
   return {
     requireLogin: true,
     clientId: 'client_test',
     cookiePassword: 'x'.repeat(32),
+    adminEmails: new Set(adminEmails.map((e) => e.toLowerCase())),
     workos: {
       userManagement: {
         loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
@@ -560,12 +561,13 @@ function cookieHeader(value: string): Record<string, string> {
 async function withLoginServer(
   usersByCookie: Record<string, { id: string; email: string }>,
   fn: (base: string, world: World, currentStory: CurrentStory) => Promise<void>,
+  adminEmails: string[] = [],
 ) {
   const world = World.open(':memory:');
   seedWorld(world);
   const currentStory = new CurrentStory(world.db, world.storyId);
   const engine = new Engine({ world: () => currentStory.world(), providers: new ProviderRegistry(new MockProvider()) });
-  const authConfig = fakeAuthConfig(usersByCookie);
+  const authConfig = fakeAuthConfig(usersByCookie, adminEmails);
   const server = createApiServer({ world: () => currentStory.world(), engine, currentStory, authConfig });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address() as AddressInfo;
@@ -749,6 +751,109 @@ test('two logged-in users playing a turn each land on their own separate story, 
     },
   );
 });
+
+// -------------------------------------------------- admin-only system settings
+
+/**
+ * Every route that touches server-wide state — which LLM/image provider is
+ * configured, which profile is active, canon ingest for an existing world —
+ * rather than anything scoped to the caller's own story. Style, knobs, and
+ * palette are deliberately absent from this list: they live on `stories`
+ * (`style`/`knobs` columns) or `style_anchors` (`story_id`-scoped), so they
+ * are already per-story, hence already per-user once login is on — nothing
+ * about them needed gating. This list exists so the coverage below can
+ * assert "these specific routes, and only these" rather than drifting
+ * silently if a future route is added to one of these panels and the author
+ * forgets `requireAdmin`.
+ *
+ * `:key`/`:id` placeholders are filled with `x` — none of these need to
+ * resolve to a real provider/job for the *admin check itself* to fire,
+ * since `requireAdmin` runs before any of that lookup in every route it
+ * guards.
+ */
+const ADMIN_ONLY_ROUTES: Array<[method: string, path: string, body?: unknown]> = [
+  ['GET', '/api/images/providers'],
+  ['POST', '/api/images/profile', {}],
+  ['GET', '/api/providers'],
+  ['POST', '/api/providers/profile', { profile: 'mock' }],
+  ['GET', '/api/config'],
+  ['PUT', '/api/config', {}],
+  ['PUT', '/api/config/provider/x', {}],
+  ['DELETE', '/api/config/provider/x'],
+  ['POST', '/api/config/provider/test', {}],
+  ['PUT', '/api/config/image-provider/x', {}],
+  ['DELETE', '/api/config/image-provider/x'],
+  ['POST', '/api/config/image-provider/test', {}],
+  ['POST', '/api/config/blocklist', { phrase: 'x' }],
+  ['GET', '/api/setup/ingest-health'],
+  ['POST', '/api/setup/continue', {}],
+];
+
+test('every system-settings route 403s a signed-in non-admin', async () => {
+  await withLoginServer({ 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } }, async (base) => {
+    for (const [method, path, body] of ADMIN_ONLY_ROUTES) {
+      const res = await fetch(`${base}${path}`, {
+        method,
+        headers: { ...cookieHeader('alice-cookie'), 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      assert.equal(res.status, 403, `${method} ${path} should 403 a non-admin, got ${res.status}`);
+    }
+  });
+});
+
+test('every system-settings route lets an admin past the gate (to whatever the route does next, never a 403)', async () => {
+  await withLoginServer(
+    { 'admin-cookie': { id: 'user_admin', email: 'admin@x.com' } },
+    async (base) => {
+      for (const [method, path, body] of ADMIN_ONLY_ROUTES) {
+        const res = await fetch(`${base}${path}`, {
+          method,
+          headers: { ...cookieHeader('admin-cookie'), 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        assert.notEqual(res.status, 403, `${method} ${path} should not 403 an admin, got ${res.status}`);
+      }
+    },
+    ['admin@x.com'],
+  );
+});
+
+test('the admin allowlist matches case-insensitively', async () => {
+  await withLoginServer(
+    { 'admin-cookie': { id: 'user_admin', email: 'Admin@X.com' } },
+    async (base) => {
+      const res = await fetch(`${base}/api/providers`, { headers: cookieHeader('admin-cookie') });
+      assert.notEqual(res.status, 403, 'the allowlist entry "admin@x.com" must still match "Admin@X.com"');
+    },
+    ['admin@x.com'],
+  );
+});
+
+test('a request with no session at all still 401s on a system-settings route, distinct from the 403 a signed-in non-admin gets', async () => {
+  await withLoginServer({ 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } }, async (base) => {
+    const res = await fetch(`${base}/api/providers`);
+    assert.equal(res.status, 401);
+  });
+});
+
+test('with login off, system-settings routes are unrestricted \u2014 no admin allowlist needed for a local, single-user server', async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/providers`);
+    assert.notEqual(res.status, 403);
+    assert.notEqual(res.status, 401);
+  });
+});
+
+test('knobs and style, unlike system settings, are never admin-gated \u2014 they are already per-story, hence per-user', async () => {
+  await withLoginServer({ 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } }, async (base) => {
+    const knobs = await fetch(`${base}/api/knobs`, { headers: cookieHeader('alice-cookie') });
+    assert.equal(knobs.status, 200);
+    const style = await fetch(`${base}/api/style`, { headers: cookieHeader('alice-cookie') });
+    assert.equal(style.status, 200);
+  });
+});
+
 
 /**
  * `/api/meta` exists so a stale server is diagnosable. The web client is a
