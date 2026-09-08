@@ -2039,6 +2039,25 @@ button.link:hover { background: none; color: var(--ink); }
 .choice.small { padding: var(--s2) var(--s3); }
 .choice.small b { font-size: 13.5px; }
 
+/*
+ * Pack cards stack several lines: title, blurb, then a dim metadata line. The
+ * gap keeps the metadata from reading as part of the blurb, which it did when
+ * the three lines were flush against each other.
+ */
+.choice span + span { margin-top: var(--s1); }
+
+/*
+ * A pack premise is two or three paragraphs of prose rather than a one-line
+ * blurb, so it needs the newlines the source authored. `pre-line` rather than
+ * `pre`: the text is wrapped in the file at whatever width was comfortable to
+ * write, and hard-wrapping it again at that width would leave ragged short lines.
+ */
+.wizard-premise {
+  white-space: pre-line;
+  max-width: 62ch;
+  margin: 0 0 var(--s4);
+}
+
 .field { display: block; margin-bottom: var(--s4); }
 .field > span {
   display: block;

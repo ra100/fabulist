@@ -753,6 +753,27 @@ export function useSampleWorldTool(ctx: McpToolContext) {
   return ctx.setup.useSample();
 }
 
+/** `list_world_packs`. The MCP-side counterpart of `GET /api/setup/packs` \u2014 the shipped original worlds and the scenarios each one offers. */
+export function listWorldPacksTool(ctx: McpToolContext) {
+  if (!ctx.setup) throw new Error('list_world_packs: this server has no setup service enabled');
+  return { packs: ctx.setup.packs() };
+}
+
+/**
+ * `use_world_pack`. The MCP-side counterpart of `POST /api/setup/pack`.
+ *
+ * Rebinds `currentStory` for the same reason the HTTP route does: installing a
+ * pack creates one story per scenario, so the story this server was bound to
+ * beforehand is not the one that was just chosen. Without the rebind the caller
+ * would install a world and then keep playing a different one.
+ */
+export function useWorldPackTool(ctx: McpToolContext, args: { packId: string; scenarioId?: string }) {
+  if (!ctx.setup) throw new Error('use_world_pack: this server has no setup service enabled');
+  const result = ctx.setup.usePack(args.packId, args.scenarioId);
+  ctx.currentStory?.switchTo(result.storyId);
+  return result;
+}
+
 /** `get_setup_job`. Polls a job started by discover_world/commit_ingest/create_custom_world. The MCP-side counterpart of `GET /api/setup/job/:id`. */
 export function getSetupJobTool(ctx: McpToolContext, args: { id: string }) {
   if (!ctx.setup) throw new Error('get_setup_job: this server has no setup service enabled');

@@ -20,6 +20,7 @@ import { SetupPlanner, type IngestPlan, type CharacterSketch } from './planner.t
 import { applyCustomWorld, applyStyle, assignPlayerCharacter, proposeOpening, type ApplyCustomResult } from './apply.ts';
 import { JobRegistry, type Job, type JobHandle } from './jobs.ts';
 import { seedWorld } from '../seed/verrow.ts';
+import { installPack, packById, packSummaries, type PackSummary } from '../packs/index.ts';
 
 export type WorldSource = 'fandom' | 'custom' | 'sample';
 
@@ -539,6 +540,62 @@ export class SetupService {
       playerCharacterId: world.session.get().playerCharacterId,
       opening: proposeOpening(world),
     };
+  }
+
+  /**
+   * Installs one of the shipped original worlds and returns the story to bind to.
+   *
+   * Unlike every other route in this service, this one creates *several* stories
+   * — one per scenario in the pack — because the canon is shared and the
+   * scenarios are chronicle overlays on top of it (see `packs/apply.ts`). That
+   * makes the return value load-bearing: the caller must rebind its
+   * `CurrentStory` to `storyId`, or the next request resolves against whichever
+   * story the file happened to open with rather than the scenario the player
+   * just chose.
+   *
+   * Warnings are returned rather than thrown. A shipped pack should produce none
+   * — `test/packs.test.ts` asserts exactly that for every registered pack — so
+   * anything here means a pack regressed, and the player is better served by a
+   * playable world plus a note than by a failed setup.
+   */
+  usePack(packId: string, scenarioId?: string): {
+    storyId: StoryId;
+    scenarioId: string;
+    title: string;
+    playerCharacterId: string;
+    opening: string;
+    scenarios: Array<{ id: string; title: string; storyId: StoryId }>;
+    warnings: string[];
+  } {
+    const pack = packById(packId);
+    if (!pack) throw new Error(`no such world pack: ${packId}`);
+
+    const world = this.getWorld();
+    const result = installPack(world, pack);
+    if (!result.scenarios.length) throw new Error(`${packId} installed no playable scenario`);
+
+    const chosen = scenarioId ? result.scenarios.find((s) => s.id === scenarioId) : result.scenarios[0];
+    if (!chosen) throw new Error(`${packId} has no scenario "${scenarioId}"`);
+
+    // `proposeOpening` reads the *current* story, and this service's world is
+    // still bound to whatever the file opened with — not to the scenario just
+    // chosen. Resolve the opening against the scenario's own story so the first
+    // line describes the scene the player is about to be in.
+    const scenarioWorld = world.withStory(chosen.storyId);
+    return {
+      storyId: chosen.storyId,
+      scenarioId: chosen.id,
+      title: pack.title,
+      playerCharacterId: chosen.playerCharacterId,
+      opening: chosen.opening || proposeOpening(scenarioWorld),
+      scenarios: result.scenarios.map((s) => ({ id: s.id, title: s.title, storyId: s.storyId })),
+      warnings: result.warnings,
+    };
+  }
+
+  /** The shipped worlds, for the picker. Static data; no world access needed. */
+  packs(): PackSummary[] {
+    return packSummaries();
   }
 
   /**

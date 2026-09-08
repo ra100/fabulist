@@ -30,12 +30,14 @@ until you have seen a page count and a cost.
 
 Three routes through it:
 
+- **One of our worlds.** Original settings written for this engine — science fiction,
+  fantasy, historical, contemporary. Seventy-odd places, factions and people each, with the
+  pressure already on and two or three ways in. No model call, no network, no waiting, and
+  the same on every machine.
 - **An existing world.** Name a franchise; it finds the wiki, proposes which corner of it
   to read, and shows what that costs before committing.
 - **A world you describe.** No wiki. Describe a premise and it invents the places,
   factions and cast, with a tension already under strain.
-- **The built-in example.** Saint Verrow, a monastery under a secular garrison. Fastest
-  way to see how this plays.
 
 Everything runs offline on a deterministic mock provider by default — no API keys, no
 network. The mock writes deliberately plain prose; it exists to prove the machinery, not to
@@ -112,6 +114,51 @@ off-key.
 
 World facts get the opposite default. Mention a tavern that does not exist and it is
 quietly created and real from then on.
+
+---
+
+## Our own worlds
+
+Four original settings ship with the engine, under `src/packs/`. They exist because the
+other two routes both have a cost: a wiki ingest is somebody else's IP, and a described
+world is different every time you ask for it. A pack is content we own, hand-tuned, and
+byte-identical on every machine — which makes it the only kind of world that is safe to
+screenshot, distribute, illustrate and demo.
+
+Each pack is one **canon** plus two or three **scenarios**, and that split follows the
+storage layer rather than taste:
+
+- Canon is the shared half: entities, relations, and the slow part of a character sheet
+  (identity, contract, voice, appearance). Canon rows carry no story id, so every scenario
+  in the file sees them.
+- A scenario is a chronicle overlay: who is standing where, the relationship values, which
+  facts exist and who believes them, the open threads, the style contract. Every one of
+  those tables is story-scoped — relationships have no canon layer at all — so per-scenario
+  values are the natural grain rather than a workaround.
+
+The practical effect is that one seventy-entity world carries several genuinely different
+openings without duplicating an entity, and a character who is peripheral in one scenario
+can be the protagonist of the next.
+
+Two things in a pack are load-bearing and easy to get wrong:
+
+**Salience.** The Narrator's frame shows at most twelve entities per turn, ordered by
+salience, and ties break on name. A world where everything sits at the same value therefore
+hands the model whichever dozen sort first alphabetically. Packs declare a tier per entity
+(`focal`, `principal`, `supporting`, `background`) and each scenario promotes its own set
+on top; `background` sits deliberately below the frame's floor, so scenery exists for the
+Referee to say yes to without ever spending budget.
+
+**Predicates.** Consequence propagation asks each edge for a *stance*, and an unrecognised
+predicate yields none — so a relation outside the vocabulary is not a weak edge, it is an
+edge nothing can travel. `src/packs/predicates.ts` is the list, with the structural ones
+(`PART_OF`, `KEPT_IN`) marked inert on purpose rather than by accident.
+
+`test/packs.test.ts` runs the whole guardrail suite against every registered pack: no
+dangling references, no unknown predicates, salience actually tiered, every player holding
+at least one vow so the integrity gate has something to defend, every scenario opening into
+a distinct story, and a real Narrator frame containing the cast rather than an alphabetical
+slice of the map. Add a pack to `PACKS` and it inherits all of it.
 
 ---
 
@@ -615,6 +662,7 @@ src/consequence/  propagation queue, rumours, world tick
 src/lint/         rule engine, two profiles, the prose gate
 src/ingest/       mediawiki client, parsers, scope, pass A, pass B, depth modes
 src/setup/        wiki discovery, planner, jobs, world building
+src/packs/        the four original worlds, the pack applier, the predicate vocabulary
 src/seed/         hand-authored canon for Saint Verrow
 src/cli/          play, seed, serve, ingest, script, lintprose, integrity, backup
 src/server/       http api

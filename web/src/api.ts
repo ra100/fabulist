@@ -347,6 +347,31 @@ export interface SetupStatus {
   hasPlayer: boolean;
 }
 
+/**
+ * One shipped original world, as the picker sees it. Deliberately not the whole
+ * pack: canon is seventy-odd entities with full sheets, and the gallery needs a
+ * card rather than a world.
+ */
+export interface PackSummary {
+  id: string;
+  title: string;
+  genre: 'science-fiction' | 'fantasy' | 'historical' | 'contemporary';
+  blurb: string;
+  premise: string;
+  entities: number;
+  scenarios: Array<{ id: string; title: string; premise: string; playerName: string }>;
+}
+
+export interface PackInstalled {
+  storyId: string;
+  scenarioId: string;
+  title: string;
+  playerCharacterId: string;
+  opening: string;
+  scenarios: Array<{ id: string; title: string; storyId: string }>;
+  warnings: string[];
+}
+
 export interface ProbeResult {
   key: string;
   kind: string;
@@ -730,6 +755,8 @@ export const api = {
       post<Job>('/setup/ingest', { previewKey, character, style, opening }),
     custom: (description: string, style?: Partial<StyleContract>) => post<Job>('/setup/custom', { description, style }),
     sample: () => post<{ playerCharacterId: string; opening: string }>('/setup/sample'),
+    packs: () => req<{ packs: PackSummary[] }>('/setup/packs'),
+    pack: (packId: string, scenarioId?: string) => post<PackInstalled>('/setup/pack', { packId, scenarioId }),
     job: (id: string) => req<Job>(`/setup/job/${encodeURIComponent(id)}`),
     cancel: (id: string) => post<{ cancelled: boolean }>(`/setup/job/${encodeURIComponent(id)}/cancel`),
     characters: () => req<CandidateCharacter[]>('/setup/characters'),
