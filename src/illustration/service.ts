@@ -46,8 +46,8 @@ export class IllustrationService {
     this.providers = opts.providers;
   }
 
-  private resolveStyle(overrideStyle?: VisualStyle): StyleContract {
-    const style = this.getWorld().session.get().style;
+  private resolveStyle(world: World, overrideStyle?: VisualStyle): StyleContract {
+    const style = world.session.get().style;
     return overrideStyle ? { ...style, visualStyle: overrideStyle } : style;
   }
 
@@ -56,7 +56,7 @@ export class IllustrationService {
     const world = this.getWorld();
     const entity = world.graph.get(entityId);
     if (!entity) throw new Error(`no such entity: ${entityId}`);
-    return composePortraitPrompt(entity, world.cast.getOrBlank(entityId), this.resolveStyle(overrideStyle));
+    return composePortraitPrompt(entity, world.cast.getOrBlank(entityId), this.resolveStyle(world, overrideStyle));
   }
 
   /** Same split for scenes, reading present cast the same way `illustrateScene` does. */
@@ -67,7 +67,7 @@ export class IllustrationService {
       .map((id) => world.graph.get(id))
       .filter((e): e is Entity => !!e)
       .map((entity) => ({ entity, sheet: world.cast.get(entity.id) }));
-    return composeScenePrompt(location, present, this.resolveStyle(overrideStyle), sceneDetail);
+    return composeScenePrompt(location, present, this.resolveStyle(world, overrideStyle), sceneDetail);
   }
 
   /**
@@ -76,16 +76,23 @@ export class IllustrationService {
    * makes every later portrait and every scene this character appears in
    * conditionable on this specific image, which is the actual mechanism
    * behind the character-consistency claim, not just a stored artifact.
+   *
+   * `world`, when given, overrides the captured `getWorld()` for this call
+   * only — the seam `src/server/api.ts` uses to generate against *this
+   * request's own* per-user story (`currentStory.worldFor(user, ...)`)
+   * rather than whichever world this service happened to be constructed
+   * against. Omitted means the legacy captured-getter behaviour, unchanged
+   * — every caller that predates per-user stories keeps working exactly as
+   * it did.
    */
-  async illustratePortrait(entityId: EntityId, overrideStyle?: VisualStyle): Promise<Illustration> {
-    const world = this.getWorld();
+  async illustratePortrait(entityId: EntityId, overrideStyle?: VisualStyle, world: World = this.getWorld()): Promise<Illustration> {
     const provider = this.providers.get();
     if (!provider) throw new NoImageProviderError();
 
     const entity = world.graph.get(entityId);
     if (!entity) throw new Error(`no such entity: ${entityId}`);
     const sheet = world.cast.getOrBlank(entityId);
-    const style = this.resolveStyle(overrideStyle);
+    const style = this.resolveStyle(world, overrideStyle);
 
     const { prompt, negativePrompt } = composePortraitPrompt(entity, sheet, style);
     // A portrait reuses its own previous seed when one exists and the model
@@ -134,6 +141,9 @@ export class IllustrationService {
    * `turnId` is required — a scene illustration with no turn to hang off is
    * not distinguishable from a portrait's "no context" case, which is exactly
    * the ambiguity `IllustrationSubject`'s tagged union exists to rule out.
+   *
+   * `world`, when given, overrides the captured getter for this call only —
+   * see `illustratePortrait`'s own doc comment for why.
    */
   async illustrateScene(
     turnId: string,
@@ -141,8 +151,8 @@ export class IllustrationService {
     presentIds: EntityId[],
     sceneDetail: string,
     overrideStyle?: VisualStyle,
+    world: World = this.getWorld(),
   ): Promise<Illustration> {
-    const world = this.getWorld();
     const provider = this.providers.get();
     if (!provider) throw new NoImageProviderError();
 
@@ -152,7 +162,7 @@ export class IllustrationService {
       .filter((e): e is Entity => !!e)
       .map((entity) => ({ entity, sheet: world.cast.get(entity.id) }));
 
-    const style = this.resolveStyle(overrideStyle);
+    const style = this.resolveStyle(world, overrideStyle);
     const { prompt, negativePrompt } = composeScenePrompt(location, present, style, sceneDetail);
 
     // Place consistency's second lever (composer.ts §3): if this location has

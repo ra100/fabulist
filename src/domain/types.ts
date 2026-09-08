@@ -580,6 +580,15 @@ export interface Story extends SessionState {
   forkedAtScene: number | null;
   createdAt: string;
   lastPlayedAt: string;
+  /**
+   * The WorkOS user id that created this story, or `null` for every story
+   * created before this column existed and every story created while login
+   * is off (`src/auth/config.ts`). Not a foreign key — there is no `users`
+   * table, this is a plain string copied from the session at creation time.
+   * `null` means "unowned," not "owned by nobody in particular but still
+   * visible to everyone" — see `src/store/world.ts`'s `listStoriesForUser`.
+   */
+  ownerUserId: string | null;
 }
 
 export interface Knobs {

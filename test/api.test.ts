@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { WorkOS } from '@workos-inc/node';
 import { CurrentStory, CurrentWorld, World } from '../src/store/index.ts';
 import { createWorldFile } from '../src/store/worlds.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
@@ -11,6 +12,8 @@ import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine.ts';
 import { createApiServer } from '../src/server/api.ts';
+import type { AuthConfig } from '../src/auth/config.ts';
+import { SESSION_COOKIE } from '../src/auth/config.ts';
 
 async function withServer(fn: (base: string, world: World) => Promise<void>) {
   const world = World.open(':memory:');
@@ -516,6 +519,235 @@ test('DELETE /api/stories/:id refuses to delete the last story in a world', asyn
     assert.equal(del.status, 400);
     assert.match((del.body as { error: string }).error, /last story/);
   });
+});
+
+// ------------------------------------------------------ per-user stories
+
+/**
+ * A minimal fake shaped exactly like the one seam `verifySession`
+ * (`src/auth/config.ts`) calls through — `workos.userManagement
+ * .loadSealedSession(...).authenticate()` — mapping a request's raw
+ * session-cookie *value* directly to a `SessionUser`, keyed by a plain
+ * lookup table rather than any real cryptography. This tests the ownership
+ * branching these routes now do, not WorkOS's own cookie-sealing (already
+ * verified against a real account and a real browser login in the session
+ * that added `src/auth/`) — a real `sealData`/`unsealData` round trip would
+ * only re-prove code this codebase doesn't own and already trusts.
+ */
+function fakeAuthConfig(usersByCookie: Record<string, { id: string; email: string }>): AuthConfig {
+  return {
+    requireLogin: true,
+    clientId: 'client_test',
+    cookiePassword: 'x'.repeat(32),
+    workos: {
+      userManagement: {
+        loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
+          authenticate: async () => {
+            const found = usersByCookie[sessionData];
+            if (!found) return { authenticated: false as const, reason: 'invalid_session_cookie' as const };
+            return { authenticated: true as const, user: { ...found, firstName: null, lastName: null } };
+          },
+        }),
+      },
+    } as unknown as WorkOS,
+  };
+}
+
+function cookieHeader(value: string): Record<string, string> {
+  return { cookie: `${SESSION_COOKIE}=${encodeURIComponent(value)}` };
+}
+
+async function withLoginServer(
+  usersByCookie: Record<string, { id: string; email: string }>,
+  fn: (base: string, world: World, currentStory: CurrentStory) => Promise<void>,
+) {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const currentStory = new CurrentStory(world.db, world.storyId);
+  const engine = new Engine({ world: () => currentStory.world(), providers: new ProviderRegistry(new MockProvider()) });
+  const authConfig = fakeAuthConfig(usersByCookie);
+  const server = createApiServer({ world: () => currentStory.world(), engine, currentStory, authConfig });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await fn(`http://127.0.0.1:${port}`, world, currentStory);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    world.close();
+  }
+}
+
+test('GET /api/stories with login on returns only the calling user\u2019s own stories, never another\u2019s', async () => {
+  await withLoginServer(
+    { 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' }, 'bob-cookie': { id: 'user_bob', email: 'bob@x.com' } },
+    async (base) => {
+      // Each user's first request auto-creates their own story (worldFor -> resolveOrCreateStoryForUser).
+      const aliceHeaders = cookieHeader('alice-cookie');
+      const bobHeaders = cookieHeader('bob-cookie');
+      await fetch(`${base}/api/state`, { headers: aliceHeaders }); // touches/creates alice's story
+      await fetch(`${base}/api/state`, { headers: bobHeaders }); // touches/creates bob's story
+
+      const aliceList = await fetch(`${base}/api/stories`, { headers: aliceHeaders });
+      const aliceStories = (await aliceList.json()) as Array<{ ownerUserId: string | null }>;
+      assert.equal(aliceStories.length, 1);
+      assert.equal(aliceStories[0]?.ownerUserId, 'user_alice');
+
+      const bobList = await fetch(`${base}/api/stories`, { headers: bobHeaders });
+      const bobStories = (await bobList.json()) as Array<{ ownerUserId: string | null }>;
+      assert.equal(bobStories.length, 1);
+      assert.equal(bobStories[0]?.ownerUserId, 'user_bob');
+    },
+  );
+});
+
+test('a request with no session gets 401 on an API route when login is required', async () => {
+  await withLoginServer({ 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } }, async (base) => {
+    const res = await fetch(`${base}/api/stories`);
+    assert.equal(res.status, 401);
+  });
+});
+
+test('POST /api/stories with login on attributes the new story to the calling user', async () => {
+  await withLoginServer({ 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } }, async (base) => {
+    const res = await fetch(`${base}/api/stories`, {
+      method: 'POST',
+      headers: { ...cookieHeader('alice-cookie'), 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'alice\u2019s new story' }),
+    });
+    const body = (await res.json()) as { ownerUserId: string | null };
+    assert.equal(body.ownerUserId, 'user_alice');
+  });
+});
+
+test('renaming, deleting, or switching to another user\u2019s story is refused with 403', async () => {
+  await withLoginServer(
+    { 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' }, 'bob-cookie': { id: 'user_bob', email: 'bob@x.com' } },
+    async (base) => {
+      const aliceHeaders = { ...cookieHeader('alice-cookie'), 'content-type': 'application/json' };
+      const bobHeaders = { ...cookieHeader('bob-cookie'), 'content-type': 'application/json' };
+      const bobHeadersNoContentType = cookieHeader('bob-cookie');
+
+      const created = await fetch(`${base}/api/stories`, { method: 'POST', headers: aliceHeaders, body: JSON.stringify({ title: 'alice only' }) });
+      const alicesStory = (await created.json()) as { id: string };
+
+      const renameAttempt = await fetch(`${base}/api/stories/${encodeURIComponent(alicesStory.id)}/title`, {
+        method: 'PUT',
+        headers: bobHeaders,
+        body: JSON.stringify({ title: 'hijacked' }),
+      });
+      assert.equal(renameAttempt.status, 403);
+
+      const deleteAttempt = await fetch(`${base}/api/stories/${encodeURIComponent(alicesStory.id)}`, {
+        method: 'DELETE',
+        headers: bobHeadersNoContentType,
+      });
+      assert.equal(deleteAttempt.status, 403);
+
+      const switchAttempt = await fetch(`${base}/api/stories/${encodeURIComponent(alicesStory.id)}/switch`, {
+        method: 'POST',
+        headers: bobHeadersNoContentType,
+      });
+      assert.equal(switchAttempt.status, 403);
+
+      // Alice herself, meanwhile, may do all three.
+      const aliceRename = await fetch(`${base}/api/stories/${encodeURIComponent(alicesStory.id)}/title`, {
+        method: 'PUT',
+        headers: aliceHeaders,
+        body: JSON.stringify({ title: 'still alice\u2019s' }),
+      });
+      assert.equal(aliceRename.status, 200);
+    },
+  );
+});
+
+test('forking another user\u2019s story is refused with 403, forking one\u2019s own succeeds and is owned by the forker', async () => {
+  await withLoginServer(
+    { 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' }, 'bob-cookie': { id: 'user_bob', email: 'bob@x.com' } },
+    async (base) => {
+      const aliceHeaders = { ...cookieHeader('alice-cookie'), 'content-type': 'application/json' };
+      const bobHeaders = { ...cookieHeader('bob-cookie'), 'content-type': 'application/json' };
+
+      const created = await fetch(`${base}/api/stories`, { method: 'POST', headers: aliceHeaders, body: JSON.stringify({ title: 'alice source' }) });
+      const alicesStory = (await created.json()) as { id: string };
+
+      const bobForkAttempt = await fetch(`${base}/api/stories/fork`, {
+        method: 'POST',
+        headers: bobHeaders,
+        body: JSON.stringify({ fromStoryId: alicesStory.id }),
+      });
+      assert.equal(bobForkAttempt.status, 403);
+
+      const aliceForkOwn = await fetch(`${base}/api/stories/fork`, {
+        method: 'POST',
+        headers: aliceHeaders,
+        body: JSON.stringify({ fromStoryId: alicesStory.id, title: 'alice\u2019s fork' }),
+      });
+      assert.equal(aliceForkOwn.status, 201);
+      const forkBody = (await aliceForkOwn.json()) as { story: { ownerUserId: string | null } };
+      assert.equal(forkBody.story.ownerUserId, 'user_alice');
+    },
+  );
+});
+
+test('an unowned story (created before login existed) is invisible to a logged-in user\u2019s list, but ownsStoryOrRespond still allows acting on it', async () => {
+  await withLoginServer({ 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } }, async (base, world) => {
+    const { createStory } = await import('../src/store/world.ts');
+    const unowned = createStory(world.db, { title: 'pre-login save' }); // no ownerUserId
+
+    const list = await fetch(`${base}/api/stories`, { headers: cookieHeader('alice-cookie') });
+    const stories = (await list.json()) as Array<{ id: string }>;
+    assert.ok(!stories.some((s) => s.id === unowned.id), 'an unowned story never appears in a logged-in user\u2019s own list');
+
+    // Not exclusively anyone's, so not yet a 403 either — see ownsStoryOrRespond's own doc comment.
+    const rename = await fetch(`${base}/api/stories/${encodeURIComponent(unowned.id)}/title`, {
+      method: 'PUT',
+      headers: { ...cookieHeader('alice-cookie'), 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'renamed' }),
+    });
+    assert.equal(rename.status, 200);
+  });
+});
+
+/**
+ * The actual claim this whole feature makes, proven directly: two logged-in
+ * users each play a turn through the real turn-taking route — not the
+ * story-management routes above — and end up with completely separate
+ * chronicles, on separate auto-created stories, sharing only canon. This is
+ * what `engine.takeTurn`'s `world` override (`TakeTurnOptions.world`,
+ * wired in `/api/play`) actually exists for: without it, both of these
+ * calls would have landed on whichever story `CurrentStory`'s legacy shared
+ * pointer happened to resolve to, and alice's turn could have been written
+ * into bob's story or vice versa depending on request order.
+ */
+test('two logged-in users playing a turn each land on their own separate story, never each other\u2019s', async () => {
+  await withLoginServer(
+    { 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' }, 'bob-cookie': { id: 'user_bob', email: 'bob@x.com' } },
+    async (base, world) => {
+      const aliceHeaders = { ...cookieHeader('alice-cookie'), 'content-type': 'application/json' };
+      const bobHeaders = { ...cookieHeader('bob-cookie'), 'content-type': 'application/json' };
+
+      const aliceTurn = await fetch(`${base}/api/play`, { method: 'POST', headers: aliceHeaders, body: JSON.stringify({ input: 'i warm the ink and keep copying' }) });
+      assert.equal(aliceTurn.status, 200);
+      const bobTurn = await fetch(`${base}/api/play`, { method: 'POST', headers: bobHeaders, body: JSON.stringify({ input: 'i wait for the captain' }) });
+      assert.equal(bobTurn.status, 200);
+
+      const aliceStories = (await (await fetch(`${base}/api/stories`, { headers: cookieHeader('alice-cookie') })).json()) as Array<{ id: string }>;
+      const bobStories = (await (await fetch(`${base}/api/stories`, { headers: cookieHeader('bob-cookie') })).json()) as Array<{ id: string }>;
+      assert.equal(aliceStories.length, 1);
+      assert.equal(bobStories.length, 1);
+      assert.notEqual(aliceStories[0]?.id, bobStories[0]?.id, 'each landed on their own auto-created story');
+
+      // Read the chronicle directly, at the store level, for both stories —
+      // the one place that can prove no cross-contamination happened, since
+      // the API's own per-request resolution is exactly the mechanism under test.
+      const aliceWorld = world.withStory(aliceStories[0]!.id);
+      const bobWorld = world.withStory(bobStories[0]!.id);
+      assert.equal(aliceWorld.chronicle.turns().length, 1);
+      assert.equal(bobWorld.chronicle.turns().length, 1);
+      assert.equal(aliceWorld.chronicle.turns()[0]?.rawInput, 'i warm the ink and keep copying');
+      assert.equal(bobWorld.chronicle.turns()[0]?.rawInput, 'i wait for the captain');
+    },
+  );
 });
 
 /**

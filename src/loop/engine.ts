@@ -107,6 +107,16 @@ export interface TakeTurnOptions {
    * because prose-writing moved elsewhere.
    */
   narrateExternally?: boolean;
+  /**
+   * Overrides the captured `getWorld()` for this one call — the seam
+   * `src/server/api.ts` uses to run a turn against *this request's own*
+   * per-user story (`currentStory.worldFor(user, ...)`) rather than
+   * whichever world this `Engine` happened to be constructed with. Omitted
+   * means the legacy captured-getter behaviour: every caller from before
+   * per-user stories existed keeps working unchanged, including every test
+   * in `test/engine.test.ts`.
+   */
+  world?: World;
 }
 
 /**
@@ -215,11 +225,13 @@ export class Engine {
    * Resolves `world` exactly once, before the first gate, and passes that same
    * reference through every step — a switch requested mid-turn is expected to
    * see `busy` and wait, not race a commit against a story that changed underneath it.
+   * `opts.world`, when given, is that resolution — see its own doc comment on
+   * `TakeTurnOptions` for why a per-request override exists at all.
    */
   async takeTurn(rawInput: string, opts: TakeTurnOptions = {}): Promise<TurnOutcome> {
     this.busy = true;
     try {
-      return await this.takeTurnOn(this.getWorld(), rawInput, opts);
+      return await this.takeTurnOn(opts.world ?? this.getWorld(), rawInput, opts);
     } finally {
       this.busy = false;
     }
@@ -507,8 +519,11 @@ export class Engine {
    * into the beat the narrator sees, for the common case of "reroll, but fix
    * this one thing" rather than a blind retry hoping for a better roll.
    */
-  async regenerateProse(turnId: string, opts: { note?: string; onToken?: (chunk: string) => void } = {}): Promise<Turn> {
-    const world = this.getWorld();
+  async regenerateProse(
+    turnId: string,
+    opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
+  ): Promise<Turn> {
+    const world = opts.world ?? this.getWorld();
     const turn = world.chronicle.getTurn(turnId);
     if (!turn) throw new Error(`no turn ${turnId}`);
     if (turn.pinned) throw new Error('this passage is pinned and will not be re-rendered');

@@ -353,6 +353,75 @@ test('CurrentWorld exposes a CurrentStory that still switches stories', () => {
   });
 });
 
+test('worldFor with no user falls straight through to the legacy shared-pointer world(), unchanged', () => {
+  withRoot((root) => {
+    createWorldFile('A', root);
+    const cw = CurrentWorld.open('a', root);
+    try {
+      const cs = cw.stories();
+      assert.equal(cs.worldFor(null).storyId, cs.world().storyId, 'login-off mode is untouched by this method existing');
+    } finally {
+      cw.close();
+    }
+  });
+});
+
+test('worldFor resolves each user to their own story, never the shared pointer or each other\u2019s', () => {
+  withRoot((root) => {
+    createWorldFile('A', root);
+    const cw = CurrentWorld.open('a', root);
+    try {
+      const cs = cw.stories();
+      const aliceWorld = cs.worldFor({ id: 'user_alice', email: 'a@x.com', firstName: null, lastName: null });
+      const bobWorld = cs.worldFor({ id: 'user_bob', email: 'b@x.com', firstName: null, lastName: null });
+      assert.notEqual(aliceWorld.storyId, bobWorld.storyId, 'two different users never land on the same auto-created story');
+
+      // Calling again for the same user resolves to the same story, not a new one each time.
+      const aliceAgain = cs.worldFor({ id: 'user_alice', email: 'a@x.com', firstName: null, lastName: null });
+      assert.equal(aliceAgain.storyId, aliceWorld.storyId);
+    } finally {
+      cw.close();
+    }
+  });
+});
+
+test('worldFor never mutates the shared storyId pointer \u2014 concurrent-safe by construction', () => {
+  withRoot((root) => {
+    createWorldFile('A', root);
+    const cw = CurrentWorld.open('a', root);
+    try {
+      const cs = cw.stories();
+      const before = cs.id();
+      cs.worldFor({ id: 'user_alice', email: 'a@x.com', firstName: null, lastName: null });
+      assert.equal(cs.id(), before, 'resolving a per-user world must never change what the legacy pointer itself sees');
+    } finally {
+      cw.close();
+    }
+  });
+});
+
+test('worldFor with an explicit storyId override uses it, but only when it belongs to that user', () => {
+  withRoot((root) => {
+    createWorldFile('A', root);
+    const cw = CurrentWorld.open('a', root);
+    try {
+      const cs = cw.stories();
+      const alice = { id: 'user_alice', email: 'a@x.com', firstName: null, lastName: null };
+      const bob = { id: 'user_bob', email: 'b@x.com', firstName: null, lastName: null };
+
+      const aliceSecond = createStory(cw.world().db, { title: 'alice second', ownerUserId: 'user_alice' });
+      const resolved = cs.worldFor(alice, aliceSecond.id);
+      assert.equal(resolved.storyId, aliceSecond.id, 'the explicit override wins over "most recently played"');
+
+      assert.throws(() => cs.worldFor(bob, aliceSecond.id), /does not belong/, 'bob may not read alice\u2019s story by id');
+      assert.throws(() => cs.worldFor(alice, 'story:does-not-exist'), /no story/);
+    } finally {
+      cw.close();
+    }
+  });
+});
+
+
 test('each world keeps its own images directory', () => {
   withRoot((root) => {
     createWorldFile('A', root);

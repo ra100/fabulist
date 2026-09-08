@@ -203,6 +203,17 @@ export interface ForkOptions {
    * that scene — a continuation / "branch from here".
    */
   atScene?: number;
+  /**
+   * Who owns the *new* forked story — the calling user, when login is on
+   * (`src/auth/config.ts`). Deliberately not inherited from the source
+   * story: forking is authoring a new story for yourself, and a fork
+   * someone else's story produces is theirs, not a shared or
+   * jointly-owned copy — see `src/server/api.ts`'s own ownership check on
+   * `POST /api/stories/fork`, which refuses to fork a story that is not
+   * the caller's own *source* in the first place, so this field only ever
+   * needs to name the one person doing the forking.
+   */
+  ownerUserId?: string;
 }
 
 export interface ForkResult {
@@ -232,6 +243,7 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
       title: opts.title ?? (source.title ? `${source.title} (fork)` : ''),
       forkedFrom: opts.atScene === undefined ? undefined : opts.fromStoryId,
       forkedAtScene: opts.atScene,
+      ownerUserId: opts.ownerUserId,
     });
 
     if (opts.atScene === undefined) {
