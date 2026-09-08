@@ -46,30 +46,56 @@ jobs:
   # look like a successful no-op release.
   #
   # The VPS side of this trusts nothing about *what* SSH asks it to run: the
-  # deploy key's `authorized_keys` entry carries a forced `command=` (see
-  # deploy/README.md), so this step's actual ssh command is a formality —
-  # the server always runs deploy/deploy.sh regardless, and that key can do
-  # nothing else on the box even if it leaked.
+  # deploy key's `authorized_keys` entry carries a forced `command=` pointing
+  # at deploy/deploy.sh (see deploy/README.md). sshd still passes through the
+  # client's original request as $SSH_ORIGINAL_COMMAND, which deploy.sh reads
+  # to pick exactly one of two fixed actions (`upload-env` / `deploy`) — a
+  # leaked key can reach only those two, nothing else on the box.
   deploy:
     needs: docker
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - name: Deploy over SSH (forced remote command)
+      - name: Render app.env and deploy over SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SSH_DOMAIN: ${{ vars.SSH_DOMAIN }}
           SSH_PORT: ${{ vars.SSH_PORT }}
           SSH_USER: ${{ vars.SSH_USER }}
+          MCP_OAUTH_ISSUER: ${{ vars.MCP_OAUTH_ISSUER }}
+          MCP_OAUTH_AUDIENCE: ${{ vars.MCP_OAUTH_AUDIENCE }}
+          MCP_RESOURCE_URL: ${{ vars.MCP_RESOURCE_URL }}
         run: |
           set -euo pipefail
           install -m 600 -D /dev/null "$HOME/.ssh/deploy_key"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
           ssh-keyscan -p "$SSH_PORT" "$SSH_DOMAIN" >> "$HOME/.ssh/known_hosts" 2>/dev/null
-          # The string passed here is irrelevant when the key's
-          # authorized_keys entry carries a forced `command=` — sshd runs
-          # that fixed command regardless of what the client asks for. Kept
-          # non-empty and descriptive only for readable server-side logs.
+
+          # Non-secret only, by construction: every value here is a repo
+          # *variable* (vars.*), never a secret — WorkOS's own API key never
+          # leaves GitHub, only the public issuer/audience/resource-url the
+          # running server needs to verify a bearer token against, per
+          # src/mcp/auth.ts. Skips any var left unset entirely rather than
+          # writing e.g. "MCP_OAUTH_ISSUER=" — an empty-but-present value
+          # would make buildMcpAuth() try OAuth mode with a blank issuer
+          # instead of correctly treating it as "not configured".
+          render_env() {
+            for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL; do
+              value="${!name:-}"
+              [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
+            done
+            # Without this, `[ -n "$value" ]` on the *last* unset variable in
+            # the loop returns 1, which becomes render_env's own exit code —
+            # and `set -e` upstream would then fail the whole step on the
+            # exact case this function exists to handle gracefully (a var
+            # that's legitimately not configured). Verified this actually
+            # reproduces before adding the fix, not assumed.
+            return 0
+          }
+
+          render_env | ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            "$SSH_USER@$SSH_DOMAIN" "upload-env"
+
           ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
             "$SSH_USER@$SSH_DOMAIN" "deploy fabulist ${{ github.ref_name }}"
