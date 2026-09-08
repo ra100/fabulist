@@ -34,6 +34,7 @@ export const passBSchema: JsonSchema = {
     properties: {
       relations: {
         type: 'array',
+        maxItems: 3,
         items: {
           type: 'object',
           additionalProperties: false,
@@ -48,6 +49,7 @@ export const passBSchema: JsonSchema = {
       },
       events: {
         type: 'array',
+        maxItems: 1,
         items: {
           type: 'object',
           additionalProperties: false,
@@ -65,12 +67,13 @@ export const passBSchema: JsonSchema = {
         properties: {
           diction: { type: 'string' },
           tics: { type: 'array', items: { type: 'string' } },
-          samples: { type: 'array', items: { type: 'string' } },
+          samples: { type: 'array', maxItems: 2, items: { type: 'string' } },
           never: { type: 'array', items: { type: 'string' } },
         },
       },
       contradictions: {
         type: 'array',
+        maxItems: 1,
         items: {
           type: 'object',
           additionalProperties: false,
@@ -131,7 +134,9 @@ Rules that matter more than completeness:
 6. Report a contradiction only when the page states something that conflicts with
    the supplied existing facts. Different wording is not a contradiction.
 
-Prefer three well-evidenced relations to twelve guesses. Reply with JSON only.`;
+Return at most three relations, one event, two voice samples, and one
+contradiction. Prefer three well-evidenced relations to twelve guesses. Reply
+with JSON only.`;
 
 export interface LlmPassBOptions {
   provider: Provider;

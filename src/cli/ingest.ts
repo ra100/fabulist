@@ -6,11 +6,13 @@
  *   pnpm ingest --wiki=https://x.fandom.com --seed="A Page" --seed="Another"
  *   pnpm ingest ... --mode=mid --commit
  *   pnpm ingest ... --dump --commit          # offline-first: dump backbone, live fallback
+ *   pnpm ingest ... --world=empyrean-series --dump --commit
  *   pnpm ingest --upgrade=deep
  */
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { World } from '../store/index.ts';
+import { pathsFor } from '../store/worlds.ts';
 import { loadConfig } from '../config/config.ts';
 import { WikiClient, type PageSource } from '../ingest/client.ts';
 import { DumpSource, HybridSource, ensureDumpXml } from '../ingest/dump.ts';
@@ -40,6 +42,7 @@ const mode = (flag('mode') ?? 'skim') as DepthMode;
 const commit = args.includes('--commit');
 const upgrade = flag('upgrade') as DepthMode | undefined;
 const exclude = all('exclude');
+const worldSlug = flag('world');
 // See docs/legal-briefing-fandom-ingest.md §6.1 and src/ingest/dump.ts: reads
 // Fandom's own XML database dump first (one bounded download, no repeated
 // querying) and only calls the live api.php crawler for titles the dump
@@ -78,8 +81,9 @@ if (!MODES[mode]) {
 }
 
 const cfg = loadConfig();
-mkdirSync(dirname(cfg.dbPath), { recursive: true });
-const world = World.open(cfg.dbPath);
+const dbPath = worldSlug ? pathsFor(worldSlug).dbPath : cfg.dbPath;
+mkdirSync(dirname(dbPath), { recursive: true });
+const world = World.open(dbPath);
 
 if (upgrade) {
   if (!wikiUrl) {
@@ -104,6 +108,7 @@ if (!wikiUrl || seeds.length === 0) {
   --hops=N|all               override the mode's crawl radius
   --passb-max-pages=N|all    cap the LLM pass independently of --max-pages
   --exclude="Page Title"     repeatable
+  --world=<slug>              write to data/worlds/<slug>/world.db
   --commit                   write to the graph (otherwise discovery only)
   --upgrade=mid|deep|all     deepen what is already ingested
   --dump                     read from Fandom's XML database dump first, live api.php only as fallback
@@ -291,4 +296,3 @@ async function buildDumpSource(url: string, live?: PageSource): Promise<PageSour
   console.log(`dump loaded: ${dump.size().toLocaleString()} main-namespace pages`);
   return live ? new HybridSource(dump, live) : dump;
 }
-

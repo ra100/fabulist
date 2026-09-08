@@ -41,7 +41,19 @@ export function defaultDesktopSecretPath(env: Record<string, string | undefined>
     : join(homedir(), '.unsloth', 'studio', 'auth', '.desktop_secret');
 }
 
-export type UnslothAuthSource = 'api-key' | 'desktop-secret' | 'password' | 'none';
+/**
+ * Current Unsloth Studio releases keep locally minted agent keys here. They
+ * are scoped to the loopback Studio URL that minted them, so they are a local
+ * credential fallback just like the older desktop secret above.
+ */
+export function defaultAgentApiKeyPath(env: Record<string, string | undefined> = process.env): string {
+  const root = env.UNSLOTH_STUDIO_HOME?.trim();
+  return root
+    ? join(root, 'auth', 'agent_api_key.json')
+    : join(homedir(), '.unsloth', 'studio', 'auth', 'agent_api_key.json');
+}
+
+export type UnslothAuthSource = 'api-key' | 'desktop-secret' | 'agent-cache' | 'password' | 'none';
 
 export interface UnslothAuthOptions {
   baseUrl: string;
@@ -49,6 +61,8 @@ export interface UnslothAuthOptions {
   apiKey?: string;
   /** Overridable for tests; defaults to the desktop install location. */
   desktopSecretPath?: string;
+  /** Overridable for tests; defaults to Unsloth Studio's local agent-key cache. */
+  agentApiKeyPath?: string;
   /** Documented fallback for a non-desktop install. */
   username?: string;
   password?: string;
@@ -73,6 +87,7 @@ export class UnslothAuth {
   readonly baseUrl: string;
   private apiKey: string;
   private desktopSecretPath: string;
+  private agentApiKeyPath: string;
   private username: string | undefined;
   private password: string | undefined;
   private fetcher: typeof fetch;
@@ -86,6 +101,7 @@ export class UnslothAuth {
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');
     this.apiKey = opts.apiKey?.trim() ?? '';
     this.desktopSecretPath = opts.desktopSecretPath ?? defaultDesktopSecretPath();
+    this.agentApiKeyPath = opts.agentApiKeyPath ?? defaultAgentApiKeyPath();
     this.username = opts.username;
     this.password = opts.password;
     this.fetcher = opts.fetcher ?? fetch;
@@ -124,6 +140,13 @@ export class UnslothAuth {
       if (token) return this.cache(token, 'desktop-secret');
     }
 
+    // Studio 2026+ mints an API key for its local coding-agent client and
+    // stores it in this private, per-server cache. Reuse it only for the exact
+    // loopback URL it is scoped to, and verify it before handing it to callers.
+    for (const key of await this.readAgentApiKeys()) {
+      if (await this.acceptsApiKey(key)) return this.cache(key, 'agent-cache');
+    }
+
     if (this.username && this.password) {
       const token = await this.exchange('/api/auth/login', { username: this.username, password: this.password });
       if (token) return this.cache(token, 'password');
@@ -158,6 +181,29 @@ export class UnslothAuth {
     }
   }
 
+  private async readAgentApiKeys(): Promise<string[]> {
+    if (!isLoopbackUrl(this.baseUrl)) return [];
+    try {
+      const raw = await this.readFileFn(this.agentApiKeyPath);
+      const parsed = JSON.parse(raw) as { servers?: Record<string, { saved?: unknown; minted?: unknown }> };
+      const entry = parsed.servers?.[this.baseUrl];
+      if (!entry) return [];
+      const strings = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : []);
+      return [...strings(entry.saved), ...strings(entry.minted)];
+    } catch {
+      return [];
+    }
+  }
+
+  private async acceptsApiKey(key: string): Promise<boolean> {
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/v1/models`, { headers: { authorization: `Bearer ${key}` } });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   private async exchange(path: string, body: Record<string, string>): Promise<string | null> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -176,5 +222,14 @@ export class UnslothAuth {
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  } catch {
+    return false;
   }
 }
