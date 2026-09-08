@@ -26,7 +26,7 @@ mixing pip into the apt install breaks). Renews unattended via its own
 | `docker-compose.yml` | The one service, pinned to `ra100/fabulist:latest`, `/data` as a named volume, `app.env` as an optional (`required: false`) env file |
 | `nginx/fabulist.conf` | Reference openresty/nginx server block — **not necessarily the live config**; the operator manages that directly |
 | `vps-setup.sh` | One-time: installs Docker, copies the compose file + `deploy.sh`, starts the app. Does **not** touch openresty or certbot |
-| `deploy.sh` | Runs on the VPS as the CI deploy key's forced `command=`. Dispatches on `$SSH_ORIGINAL_COMMAND` between exactly two actions — `upload-env` (writes `app.env` from stdin) and `deploy` (`docker compose pull && up -d`) — a leaked key can reach only those two, nothing else |
+| `deploy.sh` | Runs on the VPS, invoked over SSH with a real argument (`deploy/deploy.sh upload-env` / `deploy/deploy.sh deploy`) — **not** an `authorized_keys` forced command (see "Known gaps" below for why, and the security tradeoff that follows from it) |
 
 ## Already done (as of this doc)
 
@@ -47,60 +47,45 @@ mixing pip into the apt install breaks). Renews unattended via its own
 
 ## What's left to actually make it run
 
-1. **Restrict the deploy key on the VPS**, if not already done — the public
-   half of the generated key in `~/.ssh/authorized_keys` for the `ra100` user:
+Nothing — this is live as of `v0.2.1`. `git tag vX.Y.Z && git push --tags`
+builds+pushes the Docker image, uploads the rendered `app.env`, and redeploys,
+end to end.
 
-   ```bash
-   echo 'command="/home/ra100/Development/fabulist/deploy.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...your-pubkey... fabulist-deploy@github-actions' >> ~/.ssh/authorized_keys
-   ```
+## Known gaps, called out on purpose
 
-   The path in `command=` must match exactly where `deploy.sh` lives —
-   `/home/ra100/Development/fabulist/deploy.sh`.
-
-2. **Re-copy `deploy.sh` and `docker-compose.yml` to the VPS.** If you ran
-   `vps-setup.sh` before this doc's update, the VPS still has the *old*
-   single-purpose `deploy.sh` (no `upload-env` action) and the *old*
-   `docker-compose.yml` (no `app.env` reference) — `vps-setup.sh` only copies
-   these once, on first setup, and does not re-sync them on its own:
-
-   ```bash
-   scp -P 25 deploy/deploy.sh deploy/docker-compose.yml ra100@omnius.rast.io:~/Development/fabulist/
-   ssh -p 25 ra100@omnius.rast.io 'chmod +x ~/Development/fabulist/deploy.sh'
-   ```
-
-   (First-ever setup, instead: run `vps-setup.sh` per its own header comment.)
-
-3. **Confirm `/mcp` mounts**, from an allowlisted vantage point (whatever the
-   operator's own nginx/openresty config permits):
-
-   ```bash
-   curl -s https://fabulist.rast.io/api/meta   # confirms the server itself is up
-   ```
-
-   `docker compose logs` on the VPS should show `/mcp mounted at
-   https://fabulist.rast.io/mcp` on the next boot after `app.env` lands — see
-   `src/cli/serve.ts`'s boot log for the exact line.
-
-4. **Test the restricted deploy key's two actions work and nothing else
-   does**, from your Mac, using the private key file (not through GitHub
-   Actions yet):
-
-   ```bash
-   echo "MCP_RESOURCE_URL=https://fabulist.rast.io/mcp" | \
-     ssh -i fabulist_deploy_key -p 25 ra100@omnius.rast.io "upload-env"
-   ssh -i fabulist_deploy_key -p 25 ra100@omnius.rast.io "deploy fabulist test"
-   ssh -i fabulist_deploy_key -p 25 ra100@omnius.rast.io "whoami; ls /"
-   ```
-
-   The first two should succeed (`app.env updated (...)`, then a normal
-   `docker compose pull/up` run); the third should refuse — printing
-   `deploy.sh: unknown action 'whoami'`, never actually running `whoami`/`ls`.
-   If it *does* run them, the `command=` restriction in step 1 isn't taking
-   effect and needs a look before trusting it with a real secret.
-
-Once these are done, the pipeline is live end-to-end: `git tag vX.Y.Z && git
-push --tags` builds+pushes the Docker image, uploads the rendered `app.env`,
-and redeploys.
+- **The deploy key has no `authorized_keys` restriction.** The original design
+  had `deploy.sh` read `$SSH_ORIGINAL_COMMAND` under a forced
+  `command="/path/deploy.sh"` entry, so a leaked key could only ever run one
+  of two fixed actions. That restriction was never actually added to the
+  key's `authorized_keys` line (confirmed directly: `v0.2.0`'s deploy run
+  failed with `fish: Unknown command: upload-env` — sshd was running the
+  account's own login shell, `fish`, on the raw command string, because
+  there was no forced command overriding it). Rather than block the whole
+  pipeline on fixing that immediately, `deploy.sh` now takes its action as a
+  real `$1` (`deploy/deploy.sh upload-env`), which works under any login
+  shell with no `authorized_keys` change required — at the cost that this
+  key can currently run *any* SSH command on the box, not just these two.
+  To close this gap: add
+  `command="/home/ra100/Development/fabulist/deploy.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty`
+  before the `ssh-ed25519 ...` on this key's line in `~/.ssh/authorized_keys`,
+  then switch `deploy.sh` back to reading `$SSH_ORIGINAL_COMMAND` (git
+  history has the exact prior version) and the workflow back to sending bare
+  `upload-env`/`deploy` instead of the full path.
+- **Provider auth**: the deployed instance boots with no `fabulist.config.json`
+  in the fresh volume, so `loadConfig()` defaults to `profile: "mock"` —
+  offline, deterministic, no credentials needed. This deployment
+  deliberately does **not** wire up a real LLM provider (no AWS profile, no
+  API key) for the REST/web-UI path — that's expected to come from whoever
+  calls `/mcp` supplying their own model (`.design/MCP-CONNECTOR.md` §3). If
+  someone drives the plain web UI/REST API against this deployment expecting
+  real prose, it will narrate only with the mock provider until someone SSHes
+  in and edits `/data/fabulist.config.json` by hand (or uses the Settings UI,
+  which persists to the same file).
+- **`/mcp`'s own exposure**: `MCP_RESOURCE_URL` being set makes `/mcp` mount
+  and enforce its own OAuth check, but whether that path is actually
+  *reachable* from the public internet (as a remote MCP connector needs) is
+  entirely a function of the operator's own nginx/openresty config, which
+  this repo does not manage.
 
 ## Continuous deployment from GitHub Actions
 
@@ -110,13 +95,15 @@ and redeploys.
    repo variables into an `app.env`-shaped stream (skipping any that are
    unset, rather than writing an empty value that `buildMcpAuth()` would
    misread as "configured").
-2. Pipes that over SSH to `upload-env`, which writes it to
-   `/home/ra100/Development/fabulist/app.env` atomically.
-3. SSHes again to run `deploy`, which does `docker compose pull && up -d`.
-   Compose recreates the container automatically because `app.env`'s
-   *contents* changed (confirmed directly — this needs no explicit restart
-   step), so the new env vars take effect on this same deploy, not the next
-   one.
+2. Pipes that over SSH, running `<DEPLOY_PATH>/deploy.sh upload-env` on the
+   VPS, which writes it to `<DEPLOY_PATH>/app.env` atomically.
+   `DEPLOY_PATH` is a repo variable, falling back to
+   `/home/ra100/Development/fabulist` if unset.
+3. SSHes again to run `<DEPLOY_PATH>/deploy.sh deploy`, which does
+   `docker compose pull && up -d`. Compose recreates the container
+   automatically because `app.env`'s *contents* changed (confirmed
+   directly — this needs no explicit restart step), so the new env vars
+   take effect on this same deploy, not the next one.
 
 Add or change a repo variable (`gh variable set NAME --repo ra100/fabulist
 --body "value"`) any time; it takes effect on the next tag push, no code
@@ -137,22 +124,4 @@ Watch it with `gh run watch --repo ra100/fabulist` or
 ssh -p 25 ra100@omnius.rast.io 'cd Development/fabulist && docker compose ps && docker compose logs --tail 20'
 curl -s https://fabulist.rast.io/api/meta
 ```
-
-## Known gaps, called out on purpose
-
-- **Provider auth**: the deployed instance boots with no `fabulist.config.json`
-  in the fresh volume, so `loadConfig()` defaults to `profile: "mock"` —
-  offline, deterministic, no credentials needed. This deployment
-  deliberately does **not** wire up a real LLM provider (no AWS profile, no
-  API key) for the REST/web-UI path — that's expected to come from whoever
-  calls `/mcp` supplying their own model (`.design/MCP-CONNECTOR.md` §3). If
-  someone drives the plain web UI/REST API against this deployment expecting
-  real prose, it will narrate only with the mock provider until someone SSHes
-  in and edits `/data/fabulist.config.json` by hand (or uses the Settings UI,
-  which persists to the same file).
-- **`/mcp`'s own exposure**: `MCP_RESOURCE_URL` being set makes `/mcp` mount
-  and enforce its own OAuth check, but whether that path is actually
-  *reachable* from the public internet (as a remote MCP connector needs) is
-  entirely a function of the operator's own nginx/openresty config, which
-  this repo does not manage.
 

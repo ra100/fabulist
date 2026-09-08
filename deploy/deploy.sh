@@ -1,22 +1,31 @@
 #!/usr/bin/env bash
-# Runs on the VPS. This is the *only* command the CI deploy key is allowed to
-# execute (enforced by a `command=` restriction in authorized_keys — see
-# deploy/README.md) — a leaked CI key can only ever reach the two actions
-# below, and nothing else on the box.
+# Runs on the VPS, invoked by GitHub Actions over SSH with a real argument:
+#   ssh ... "/home/ra100/Development/fabulist/deploy.sh upload-env"
+#   ssh ... "/home/ra100/Development/fabulist/deploy.sh deploy"
 #
-# sshd's `command=` restriction replaces whatever the client asked to run,
-# but still exposes the client's *original* request via
-# $SSH_ORIGINAL_COMMAND (this script's own $1/$2/etc. are always empty —
-# sshd invokes the forced command with no arguments of its own). This script
-# reads that variable to pick one of exactly two fixed actions; anything
-# else is rejected outright rather than guessed at.
+# Uses a real $1, not $SSH_ORIGINAL_COMMAND — this account's login shell is
+# fish (confirmed directly: an earlier version of this script relied on an
+# authorized_keys `command=` restriction that turned out to never actually
+# be in place, so sshd ran the *login shell* on the client's raw command
+# string instead of this script, and fish has no `upload-env` builtin,
+# which is exactly the error that surfaced). Passing the full invocation —
+# interpreter, path, and argument — as one explicit command works under any
+# login shell, fish included, because it's a plain external-command
+# invocation with a real argv, not shell syntax fish has to understand.
+#
+# SECURITY NOTE, stated plainly rather than glossed over: without an
+# authorized_keys `command=` restriction, this SSH key can run *anything* on
+# the box, not just these two actions — this script restricts nothing on its
+# own once invoked with an arbitrary command instead of this fixed one.
+# Add `command="/home/ra100/Development/fabulist/deploy.sh"` (plus
+# no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty) to this
+# key's authorized_keys line when there's time to also switch the workflow
+# back to reading $SSH_ORIGINAL_COMMAND — deploy/README.md has the exact
+# line. Tracked as a known gap, not silently dropped.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# shellcheck disable=SC2086 # deliberately unquoted: splits "upload-env foo"
-# into ($action $rest) the same way $1/$2 would from real argv; there is no
-# array/glob here for word-splitting to misbehave on.
-read -r action rest <<< "${SSH_ORIGINAL_COMMAND:-}"
+action="${1:-}"
 
 case "$action" in
   upload-env)
