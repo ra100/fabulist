@@ -629,7 +629,7 @@ pnpm serve            # http://127.0.0.1:4317`}
             <Snippet
               label="or docker"
               code={`docker run -p 4317:4317 \\
-  -v fabulist-data:/data \\
+  -v ./fabulist-data:/data \\
   ra100/fabulist:latest`}
             />
           </div>

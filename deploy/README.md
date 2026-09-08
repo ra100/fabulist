@@ -23,7 +23,7 @@ mixing pip into the apt install breaks). Renews unattended via its own
 
 | File | Purpose |
 |---|---|
-| `docker-compose.yml` | The one service, pinned to `ra100/fabulist:latest`, `/data` as a named volume, `app.env` as an optional (`required: false`) env file |
+| `docker-compose.yml` | The one service, pinned to `ra100/fabulist:latest`, `/data` as a bind mount to an ordinary directory on the VPS's own disk (`scp`/`rsync`/`ls` work on it directly, no `docker cp` needed) — defaults to `./fabulist-data` next to this file, override with `FABULIST_DATA_DIR` if you want it elsewhere; deliberately relative so this repo never discloses the operator's real host layout — `app.env` as an optional (`required: false`) env file |
 | `nginx/fabulist.conf` | Reference openresty/nginx server block — **not necessarily the live config**; the operator manages that directly |
 | `vps-setup.sh` | One-time: installs Docker, copies the compose file + `deploy.sh`, starts the app. Does **not** touch openresty or certbot |
 | `deploy.sh` | Runs on the VPS, invoked over SSH with a real argument (`deploy/deploy.sh upload-env` / `deploy/deploy.sh deploy`) — **not** an `authorized_keys` forced command (see "Known gaps" below for why, and the security tradeoff that follows from it) |
@@ -47,9 +47,34 @@ mixing pip into the apt install breaks). Renews unattended via its own
 
 ## What's left to actually make it run
 
-Nothing — this is live as of `v0.2.1`. `git tag vX.Y.Z && git push --tags`
-builds+pushes the Docker image, uploads the rendered `app.env`, and redeploys,
-end to end.
+Nothing for a fresh box — `git tag vX.Y.Z && git push --tags` builds+pushes the
+Docker image, uploads the rendered `app.env`, and redeploys, end to end.
+
+**One-time, manual, on the existing VPS only**: this deployment originally used a
+named Docker volume (`fabulist-data`) instead of the bind mount above. If that
+volume already has real world data in it, moving to the bind mount needs one
+manual copy before the next `docker compose up -d`, done once, with the container
+stopped so nothing is mid-write. Run this from `$DEPLOY_PATH` (wherever
+`docker-compose.yml` actually lives on that box), substituting your own
+`FABULIST_DATA_DIR` if you set one:
+
+```bash
+ssh -p 25 <your-user>@<your-host>
+cd <deploy-path>   # wherever this compose file's copy actually lives
+docker compose down
+target="${FABULIST_DATA_DIR:-./fabulist-data}"
+mkdir -p "$target"
+docker run --rm \
+  -v fabulist-data:/from \
+  -v "$(realpath "$target")":/to \
+  alpine sh -c 'cp -a /from/. /to/.'
+docker compose up -d
+# once "$target" looks right (worlds/, fabulist.config.json):
+docker volume rm fabulist-data
+```
+
+A fresh VPS that has never run the old compose file needs none of this — the
+bind-mount directory is created automatically on first `docker compose up -d`.
 
 ## Known gaps, called out on purpose
 
