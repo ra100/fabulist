@@ -2,6 +2,8 @@
 
 *A state-first fiction engine: the prose is a view, the world is the graph underneath.*
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/D4I523F8EW)
+
 A creative-writing / role-play system where an AI game master runs a story inside an
 existing fictional universe, keeps a real world-model behind the scenes, and stays
 consistent when you do something unplanned.

@@ -73,7 +73,15 @@
   color: var(--ink);
   text-decoration: none;
 }
-.lp-word .mark { color: var(--accent-muted); }
+/* The shipped icon file itself, same as the app's masthead badge — a static
+   colour, since nine palette presets cannot share one favicon, and pointing
+   at the real file means the tab and this header cannot drift apart. */
+.lp-badge {
+  display: block;
+  flex: none;
+  border-radius: 5px; /* matches the tile's own corner at this size */
+}
+.lp-foot .lp-badge { border-radius: 4px; }
 
 .lp-nav {
   display: flex;

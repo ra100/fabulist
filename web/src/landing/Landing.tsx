@@ -21,11 +21,11 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { Mark } from '../Mark.tsx';
 import { PRESETS, resolvePalette, savePalette } from '../palette.ts';
 
 const MCP_URL = 'https://fabulist.rast.io/mcp';
 const REPO = 'https://github.com/ra100/fabulist';
+const KOFI = 'https://ko-fi.com/D4I523F8EW';
 
 /* -------------------------------------------------------------------- pieces */
 
@@ -400,7 +400,7 @@ export function Landing() {
     <div className="lp">
       <header className="lp-bar">
         <a className="lp-word" href="#top">
-          <Mark size={17} />
+          <img className="lp-badge" src="/favicon.svg" width={22} height={22} alt="" />
           <span>Fabulist</span>
         </a>
         <nav className="lp-nav">
@@ -773,7 +773,7 @@ dropped: 18 unevidenced, 12 off-vocabulary, 11 unknown target`}
 
       <footer className="lp-foot">
         <div className="lp-folio" aria-hidden="true">
-          <Mark size={15} />
+          <img className="lp-badge" src="/favicon.svg" width={20} height={20} alt="" />
         </div>
         <div className="lp-body">
           <span className="eyebrow rule">colophon</span>
@@ -791,6 +791,7 @@ dropped: 18 unevidenced, 12 off-vocabulary, 11 unknown target`}
           </div>
           <div className="lp-foot-links">
             <a href={REPO}>github.com/ra100/fabulist</a>
+            <a href={KOFI}>ko-fi</a>
             <a href="#top">back to top</a>
           </div>
         </div>
