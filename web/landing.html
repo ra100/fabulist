@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fabulist — a state-first fiction engine</title>
+
+    <meta
+      name="description"
+      content="An AI game master that keeps a real world-model behind the prose. Play it in the browser, or connect it to Claude, ChatGPT or any MCP client and let your own chat write the prose."
+    />
+
+    <!--
+      The public face. Served before the session gate (see src/server/api.ts), so this is
+      the one page an unauthenticated visitor can reach — everything else redirects to
+      /auth/login. Separate Vite entry rather than a route inside the app: the app bundle
+      pulls in the graph view, the wizard and the whole API client, none of which a pitch
+      page has any use for.
+    -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Fabulist — a state-first fiction engine" />
+    <meta
+      property="og:description"
+      content="The prose is a view. The world is the graph underneath."
+    />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#0c0a07" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/landing/main.tsx"></script>
+  </body>
+</html>

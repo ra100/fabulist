@@ -475,15 +475,25 @@ for (const [key, p] of Object.entries(PRESETS)) {
  * `--ink-4` is a decoration step: it measures 2.5–3.0:1 in every preset, which is
  * right for a strikethrough rule and wrong for anything anyone has to read. A
  * browser contrast sweep missed this once, so the rule is enforced here instead.
+ *
+ * Every stylesheet, not just the app's. `landing.css` was written against these
+ * tokens and used `--ink-4` for folio numbers, step numbers and copy labels —
+ * seven times — because the guard named one file and so only covered one file. A
+ * rule that applies to the token layer has to be checked wherever the token
+ * layer is read.
  */
 try {
   const { readFileSync } = await import('node:fs');
-  const sheet = readFileSync(new URL('../web/src/styles.css', import.meta.url), 'utf8');
-  sheet.split('\n').forEach((line, i) => {
-    if (/(^|[^-])color:\s*var\(--ink-4\)/.test(line) && !/text-decoration-color/.test(line)) {
-      failures.push(`styles.css:${i + 1} uses --ink-4 as a text colour; it is a decoration step only`);
-    }
-  });
+  const sheets = ['../web/src/styles.css', '../web/src/landing/landing.css'];
+  for (const rel of sheets) {
+    const name = rel.split('/').pop();
+    const sheet = readFileSync(new URL(rel, import.meta.url), 'utf8');
+    sheet.split('\n').forEach((line, i) => {
+      if (/(^|[^-])color:\s*var\(--ink-4\)/.test(line) && !/text-decoration-color/.test(line)) {
+        failures.push(`${name}:${i + 1} uses --ink-4 as a text colour; it is a decoration step only`);
+      }
+    });
+  }
 } catch {
   // Running the script outside the repo is fine; the guard is a convenience.
 }
