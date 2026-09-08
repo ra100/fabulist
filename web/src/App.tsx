@@ -6,6 +6,7 @@ import {
   type BookTurn,
   type Consequence,
   type CurrentUser,
+  type DepthMode,
   type Edge,
   type Entity,
   type EntityDetail,
@@ -64,6 +65,13 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   // null while unknown, so the wizard does not flash before the check returns.
   const [fresh, setFresh] = useState<boolean | null>(null);
+  /**
+   * null while unknown. `false` means this book has canon but no protagonist —
+   * what a freshly ingested world or an MCP-created story looks like. The
+   * server has always reported it (`/api/setup/status`) and nothing rendered
+   * it, so the symptom was an ordinary-looking empty book with no explanation.
+   */
+  const [hasPlayer, setHasPlayer] = useState<boolean | null>(null);
   // Non-null when the server predates this bundle. See `checkServerFreshness`.
   const [stale, setStale] = useState<StaleServer | null>(null);
   // null while unknown, `{ user: null }` when login is off or this browser
@@ -88,7 +96,10 @@ export function App() {
       setState(nextState);
       // Null means the setup routes are disabled; leave the current answer
       // alone rather than guessing a world exists.
-      if (status) setFresh(status.fresh);
+      if (status) {
+        setFresh(status.fresh);
+        setHasPlayer(status.hasPlayer);
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -192,7 +203,7 @@ export function App() {
 
       {error ? <div className="card warn" style={{ margin: 12 }}>{error}</div> : null}
 
-      {tab === 'book' ? <BookTab state={state} onChanged={refresh} /> : null}
+      {tab === 'book' ? <BookTab state={state} hasPlayer={hasPlayer} onChanged={refresh} /> : null}
       {tab === 'graph' ? <GraphTab /> : null}
       {tab === 'cast' ? <CastTab /> : null}
       {tab === 'threads' ? <ThreadsTab state={state} onChanged={refresh} /> : null}
@@ -213,9 +224,60 @@ export function App() {
   );
 }
 
+/**
+ * How often views re-read server state they did not change themselves.
+ *
+ * The app was built as "the browser is the only writer": every view reloaded
+ * after its own action and never otherwise. That stopped being true the moment
+ * the MCP connector could play turns — a story being written by a connected
+ * model appeared nowhere until the tab was manually reloaded, which reads as
+ * the app being broken rather than merely stale. 3s is slow enough to be free
+ * against a local SQLite read and fast enough that a turn arriving from
+ * elsewhere feels live.
+ */
+const LIVE_POLL_MS = 3000;
+
+/**
+ * Runs `tick` on an interval while the tab is actually visible and nothing
+ * local is mid-flight.
+ *
+ * `paused` is what keeps this from fighting the optimistic UI: a poll landing
+ * between "the player pressed send" and "the committed turn arrived" would
+ * replace the streaming prose with a book that does not contain it yet.
+ * `document.hidden` is honoured because a backgrounded tab polling forever is
+ * how a local tool ends up on a battery-usage list.
+ */
+function useLivePoll(tick: () => void | Promise<void>, paused: boolean): void {
+  const latest = useRef(tick);
+  latest.current = tick;
+  useEffect(() => {
+    if (paused) return;
+    let stop = false;
+    const id = window.setInterval(() => {
+      if (stop || document.hidden) return;
+      void latest.current();
+    }, LIVE_POLL_MS);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [paused]);
+}
+
+/**
+ * A job's completion percentage, or null when the server reported no real
+ * total — a live crawl with no page ceiling has an honest count but no honest
+ * fraction, and inventing one is worse than showing a spinner.
+ */
+function jobPercent(job: Job): number | null {
+  const { current, total } = job.progress;
+  if (!total || total <= 0) return null;
+  return Math.min(100, Math.floor((current / total) * 100));
+}
+
 // ---------------------------------------------------------------------- book
 
-function BookTab({ state, onChanged }: { state: State | null; onChanged: () => void }) {
+function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlayer: boolean | null; onChanged: () => void }) {
   const [turns, setTurns] = useState<BookTurn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -268,6 +330,16 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Turns can arrive from outside this browser — the MCP connector plays into
+  // the same story — so the book re-reads itself on a timer as well as after
+  // its own actions. Paused while a local turn is in flight (`busy`), or the
+  // poll would overwrite the streaming prose with a book that does not have it
+  // yet, and while a reroll is running for the same reason.
+  useLivePoll(() => {
+    void load();
+    onChanged();
+  }, busy || regeneratingId !== null || closingScene);
 
   // The first render is history, not an arrival, so it does not animate.
   useEffect(() => {
@@ -391,7 +463,17 @@ function BookTab({ state, onChanged }: { state: State | null; onChanged: () => v
       <div className="pane" style={{ display: 'flex', flexDirection: 'column', padding: 0 }}>
         <div className="pane" style={{ flex: 1 }}>
           <div className="book">
-            {turns.length === 0 ? (
+            {hasPlayer === false ? (
+              <div className="notice" role="status">
+                <b>This book has no protagonist yet.</b>{' '}
+                {state?.counts.entities
+                  ? 'The world has canon, but nobody to play as — which is what a story created outside the setup wizard looks like.'
+                  : 'There is no canon here yet either.'}{' '}
+                Open <b>Library → start a new book</b> to run the wizard, or call <code>start_story</code> over MCP after
+                picking someone with <code>list_characters</code>.
+              </div>
+            ) : null}
+            {turns.length === 0 && hasPlayer !== false ? (
               <p className="empty">Nothing written yet. Describe what you do below.</p>
             ) : null}
             {turns.map((t, i) => {
@@ -704,9 +786,15 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
 // --------------------------------------------------------------------- graph
 
 function GraphTab() {
-  const [data, setData] = useState<{ entities: Entity[]; edges: Edge[] } | null>(null);
+  const [data, setData] = useState<{ entities: Entity[]; edges: Edge[]; hiddenEdges: number } | null>(null);
   const [layer, setLayer] = useState('');
   const [type, setType] = useState('');
+  /**
+   * Off by default: mentions are ~79% of the edges in a wiki ingest and
+   * drowned the typed relationships completely, which made a dense graph look
+   * empty of structure. See `GET /api/graph`'s own note on the weight floor.
+   */
+  const [showMentions, setShowMentions] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<EntityDetail | null>(null);
   const [query, setQuery] = useState('');
@@ -714,8 +802,10 @@ function GraphTab() {
   const [searching, setSearching] = useState(false);
 
   useEffect(() => {
-    void api.graph({ layer: layer || undefined, type: type || undefined }).then(setData);
-  }, [layer, type]);
+    void api
+      .graph({ layer: layer || undefined, type: type || undefined, ...(showMentions ? { minWeight: 0 } : {}) })
+      .then(setData);
+  }, [layer, type, showMentions]);
 
   useEffect(() => {
     if (!selected) return void setDetail(null);
@@ -782,8 +872,15 @@ function GraphTab() {
               <option key={t} value={t}>{t}</option>
             ))}
           </select>
+          <label className="row small dimmer" style={{ alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+            <input type="checkbox" checked={showMentions} onChange={(e) => setShowMentions(e.target.checked)} />
+            wikilink mentions
+          </label>
           <span className="dimmer small grow">
-            {data ? `${data.entities.length} entities, ${data.edges.length} live edges` : 'loading'}
+            {data
+              ? `${data.entities.length} entities, ${data.edges.length} live edges` +
+                (data.hiddenEdges ? ` (${data.hiddenEdges.toLocaleString()} mentions hidden)` : '')
+              : 'loading'}
           </span>
         </div>
         {data ? (
@@ -2026,6 +2123,8 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
   const [error, setError] = useState<string | null>(null);
   const [moreSeeds, setMoreSeeds] = useState('');
   const [deeper, setDeeper] = useState(false);
+  // Blank leaves this world's stored budget alone; a number re-crawls wider.
+  const [morePages, setMorePages] = useState('');
 
   const refresh = useCallback(async () => {
     try {
@@ -2062,7 +2161,10 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
     };
   }, [job, refresh, onChanged]);
 
-  const nextMode = (current: 'skim' | 'mid' | 'deep'): 'skim' | 'mid' | 'deep' =>
+  // The escalation ladder stops at deep: "all" is a whole-wiki budget and is
+  // only servable from an offline dump ingest, so it is never something this
+  // one-click widen can put a world into.
+  const nextMode = (current: DepthMode): DepthMode =>
     current === 'skim' ? 'mid' : current === 'mid' ? 'deep' : 'deep';
 
   const start = (widen: boolean) =>
@@ -2070,11 +2172,14 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
       setBusy(true);
       setError(null);
       try {
-        const overrides: { seeds?: string[]; mode?: string } = {};
+        const overrides: { seeds?: string[]; mode?: string; maxPages?: number } = {};
         if (widen) {
           const added = moreSeeds.split(',').map((s) => s.trim()).filter(Boolean);
           if (added.length && health?.context) overrides.seeds = [...health.context.seeds, ...added];
           if (deeper && health?.context) overrides.mode = nextMode(health.context.mode);
+          // Re-crawls at the wider budget; every page Pass B already finished
+          // is skipped, so widening only pays for what is new.
+          if (morePages) overrides.maxPages = Number(morePages);
         }
         setJob(await api.setup.continue(overrides));
       } catch (e) {
@@ -2119,12 +2224,17 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
 
       {job ? (
         <div className="progress" style={{ padding: 'var(--s2) 0' }}>
-          <div className="progress-stage">{job.progress.stage}</div>
+          <div className="progress-stage">
+            {job.progress.stage}
+            {jobPercent(job) === null ? null : (
+              <span className="dimmer mono" style={{ marginLeft: 8 }}>{jobPercent(job)}%</span>
+            )}
+          </div>
           {job.progress.detail ? <div className="dim small">{job.progress.detail}</div> : null}
           {job.status === 'running' ? (
-            job.progress.total ? (
+            jobPercent(job) !== null ? (
               <div className="bar">
-                <i style={{ width: `${Math.min(100, (job.progress.current / job.progress.total) * 100)}%` }} />
+                <i style={{ width: `${jobPercent(job)}%` }} />
               </div>
             ) : (
               <div className="spinner" />
@@ -2156,7 +2266,22 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
               onChange={(e) => setMoreSeeds(e.target.value)}
             />
           </label>
-          {context && context.mode !== 'deep' ? (
+          <label className="field-row">
+            <span>page budget</span>
+            <input
+              inputMode="numeric"
+              value={morePages}
+              placeholder={
+                context?.budgets?.maxPages === 'all'
+                  ? 'all'
+                  : context?.budgets?.maxPages
+                    ? String(context.budgets.maxPages)
+                    : 'the mode default'
+              }
+              onChange={(e) => setMorePages(e.target.value.replace(/[^0-9]/g, ''))}
+            />
+          </label>
+          {context && context.mode !== 'deep' && context.mode !== 'all' ? (
             <label className="field-row">
               <span>go deeper</span>
               <span className="row" style={{ alignItems: 'center', gap: 'var(--s2)' }}>
@@ -2166,7 +2291,7 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
             </label>
           ) : null}
           <div className="row" style={{ marginTop: 'var(--s2)' }}>
-            <button disabled={busy || job?.status === 'running' || (!moreSeeds.trim() && !deeper)} onClick={() => start(true)}>
+            <button disabled={busy || job?.status === 'running' || (!moreSeeds.trim() && !deeper && !morePages)} onClick={() => start(true)}>
               read more
             </button>
           </div>

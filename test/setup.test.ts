@@ -8,7 +8,7 @@ import { WikiDirectory, directoryFixture } from '../src/setup/directory.ts';
 import { SetupPlanner } from '../src/setup/planner.ts';
 import { applyCustomWorld, assignPlayerCharacter, proposeOpening } from '../src/setup/apply.ts';
 import { JobRegistry } from '../src/setup/jobs.ts';
-import { SetupService } from '../src/setup/service.ts';
+import { SetupService, budgetsToLimits, limitsFromWire, progressDetail } from '../src/setup/service.ts';
 import { checkIntegrity, formatIntegrityReport } from '../src/store/integrity.ts';
 import { fixtureFetcher } from '../src/ingest/client.ts';
 import { WIKI } from './fixtures/wiki.ts';
@@ -295,6 +295,64 @@ test('a preview reports scope and cost without writing anything', async () => {
   world.close();
 });
 
+test('a preview honours a page budget past the old 3000 ceiling, and reports what it ran with', async () => {
+  const { world, svc } = service();
+  const res = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid', [], '', undefined, {
+    maxPages: 25_000,
+    passBMaxPages: 10,
+  });
+  assert.equal(res.budgets.maxPages, 25_000, 'no ceiling, and the caller can verify it took');
+  assert.equal(res.budgets.passBMaxPages, 10);
+  assert.equal(res.budgets.hops, 2, 'unset budgets stay on the mode preset');
+  // The estimate has to follow the pass B cap, or the number the wizard shows
+  // is for a run that will not happen.
+  const uncapped = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid', [], '', undefined, { maxPages: 25_000 });
+  assert.ok(res.estimatedSeconds <= uncapped.estimatedSeconds, 'capping pass B cannot make the estimate grow');
+  assert.notEqual(res.previewKey, uncapped.previewKey, 'different budgets are different crawls, not one cache entry');
+  world.close();
+});
+
+test('progressDetail shows a percentage only against a real total', () => {
+  assert.equal(progressDetail(3502, 4323), '3,502 of 4,323 pages · 81%');
+  assert.equal(progressDetail(120, null), '120 pages', 'no total means no fraction, not 0%');
+  assert.equal(progressDetail(120, 0), '120 pages', 'and neither does a zero total');
+  assert.equal(progressDetail(5000, 4000), '5,000 of 4,000 pages · 100%', 'clamped rather than showing 125%');
+  assert.equal(progressDetail(3, 10, 'entries'), '3 of 10 entries · 30%');
+});
+
+test('an unlimited budget is refused on the server crawl path, pointing at the dump ingest', async () => {
+  const { world, svc } = service();
+  // Not clamped to 3000 and not attempted: walking a live api.php until the
+  // frontier runs dry is an unbounded request storm against a third party.
+  await assert.rejects(() => svc.preview('https://vale.fandom.com', ['Duskhollow'], 'all'), /dump/i);
+  await assert.rejects(
+    () => svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid', [], '', undefined, { maxPages: Number.POSITIVE_INFINITY }),
+    /dump/i,
+  );
+  // A large finite budget on the same path is fine — that is the difference.
+  const ok = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid', [], '', undefined, { maxPages: 100_000 });
+  assert.equal(ok.budgets.maxPages, 100_000);
+  world.close();
+});
+
+test('a bad budget is a thrown error, never a silent fall back to the preset', () => {
+  assert.throws(() => limitsFromWire({ maxPages: 'lots' }), /maxPages/);
+  assert.throws(() => limitsFromWire({ passBMaxPages: -3 }), /positive integer/);
+  assert.deepEqual(limitsFromWire({}), {}, 'nothing given means nothing overridden');
+  assert.deepEqual(limitsFromWire({ maxPages: 12_000, hops: 'all' }), { maxPages: 12_000, hops: Number.POSITIVE_INFINITY });
+});
+
+test('a world remembers the budget it was ingested with, so continuing resumes at that breadth', () => {
+  // Stored in wire form; `budgetsToLimits` is what a resume reads it back with.
+  assert.deepEqual(budgetsToLimits({ maxPages: 9000, hops: 3, passBMaxPages: 'all' }), {
+    maxPages: 9000,
+    hops: 3,
+    passBMaxPages: Number.POSITIVE_INFINITY,
+  });
+  assert.deepEqual(budgetsToLimits(undefined), {}, 'a world ingested before budgets existed falls back to its mode preset');
+  assert.deepEqual(budgetsToLimits({ maxPages: 0 } as never), {}, 'and so does a malformed stored value, rather than throwing');
+});
+
 // -------------------------------------------------------- discover (job)
 
 test('discover runs the same crawl as preview, but as a pollable job with progress', async () => {
@@ -496,6 +554,36 @@ test('naming a character who is not in the world falls back to an original', () 
   assert.equal(res.created, true);
   assert.match(res.warnings.join(' '), /not in this world/);
   assert.equal(world.graph.get(res.playerCharacterId)?.provenance, 'emergent:0', 'an invented protagonist is not source material');
+  world.close();
+});
+
+test('an ingest job reports countable progress, and its pass B honours the page cap', async () => {
+  const { world, svc } = service();
+  const preview = await svc.preview('https://vale.fandom.com', ['Duskhollow'], 'mid', [], '', undefined, { passBMaxPages: 1 });
+
+  // Every stage the job logs must be countable: this is what the bar is drawn
+  // from, and a stage that never sets a total is a spinner the user reads as a
+  // hang. Captured by polling rather than after the fact, because `count`
+  // overwrites as it goes.
+  const totals: Array<{ stage: string; total: number | null }> = [];
+  const job = svc.startIngest(preview.previewKey, {
+    character: { existing: 'Warden Ilsa Crowe', name: '', role: '', goals: [], vows: [] }, style: {}, opening: '',
+  });
+  const watch = setInterval(() => {
+    const j = svc.jobs.get(job.id);
+    if (j) totals.push({ stage: j.progress.stage, total: j.progress.total });
+  }, 1);
+  await settle(svc.jobs, job.id);
+  clearInterval(watch);
+
+  const settled = svc.jobs.get(job.id)!;
+  assert.equal(settled.status, 'done', settled.error ?? '');
+  const result = settled.result as { passB: { pages: number } | null };
+  assert.ok(result.passB, 'pass B ran');
+  assert.ok(result.passB.pages <= 1, `the service path honours passBMaxPages (extracted ${result.passB.pages})`);
+  assert.match(settled.log.join('\n'), /capped at 1 of/, 'and says so, rather than silently reading fewer pages');
+  // The graph still got the whole scope — pass A is not what was capped.
+  assert.ok(world.graph.counts().entities > 1);
   world.close();
 });
 

@@ -251,6 +251,14 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
     }
 
     const scene = opts.atScene;
+    // `createStory` opens scene 1 for every new story (see its own comment on
+    // why that is a property of a story existing). A fork is the one caller
+    // that then copies the *source's* scene rows over the same range, so the
+    // placeholder is dropped first rather than colliding with the real scene 1
+    // on the way in. Cheap and explicit, and it keeps the copy loop below a
+    // plain INSERT with no conflict policy to reason about.
+    world.db.prepare(`DELETE FROM scenes WHERE story_id = ?`).run(story.id);
+
     // Old id -> new id, per table that needed a fresh one. Built table by
     // table, in the dependency order CHRONICLE_TABLES already lists, so a
     // ref column can always find its target's remap already populated.

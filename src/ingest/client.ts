@@ -26,6 +26,16 @@ export type FetchLike = (url: string) => Promise<{ ok: boolean; status: number; 
 export interface PageSource {
   fetchPages(titles: string[]): Promise<WikiPage[]>;
   fetchPage(title: string): Promise<WikiPage | null>;
+  /**
+   * How many pages this source can serve in total, when that is knowable.
+   *
+   * A dump is a fixed set and can answer exactly (`DumpSource.size`); a live
+   * `api.php` cannot answer without a separate query and must not guess.
+   * `crawl` uses this only to give progress an honest ceiling — "3,502 of at
+   * most 4,323 pages" instead of a bare spinner — so leaving it unimplemented
+   * costs nothing but the percentage.
+   */
+  size?(): number;
 }
 
 

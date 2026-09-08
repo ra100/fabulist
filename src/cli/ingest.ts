@@ -15,7 +15,18 @@ import { loadConfig } from '../config/config.ts';
 import { WikiClient, type PageSource } from '../ingest/client.ts';
 import { DumpSource, HybridSource, ensureDumpXml } from '../ingest/dump.ts';
 import { crawl, discover, prune } from '../ingest/scope.ts';
-import { ingest, MODES, upgradeDepth, DEFAULT_PASSB_CONCURRENCY, type DepthMode, type PassBExtractor } from '../ingest/depth.ts';
+import {
+  ingest,
+  MODES,
+  specFor,
+  parseBudget,
+  budgetLabel,
+  upgradeDepth,
+  DEFAULT_PASSB_CONCURRENCY,
+  type DepthMode,
+  type IngestLimits,
+  type PassBExtractor,
+} from '../ingest/depth.ts';
 import { LlmPassBExtractor } from '../ingest/passB.ts';
 import { buildRegistry } from '../config/config.ts';
 
@@ -39,6 +50,22 @@ const useDump = args.includes('--dump');
 // 3000 at deep — so the pool size is worth exposing rather than burying.
 const concurrencyRaw = flag('concurrency');
 const passBConcurrency = concurrencyRaw ? Number(concurrencyRaw) : undefined;
+
+// Budget overrides on top of the mode's preset. Each accepts a positive
+// integer or "all"; absent leaves the preset alone. See `IngestLimits`.
+let limits: IngestLimits;
+try {
+  limits = {
+    ...(parseBudget(flag('max-pages'), '--max-pages') !== undefined ? { maxPages: parseBudget(flag('max-pages'), '--max-pages')! } : {}),
+    ...(parseBudget(flag('hops'), '--hops') !== undefined ? { hops: parseBudget(flag('hops'), '--hops')! } : {}),
+    ...(parseBudget(flag('passb-max-pages'), '--passb-max-pages') !== undefined
+      ? { passBMaxPages: parseBudget(flag('passb-max-pages'), '--passb-max-pages')! }
+      : {}),
+  };
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}
 
 if (passBConcurrency !== undefined && (!Number.isFinite(passBConcurrency) || passBConcurrency < 1)) {
   console.error(`--concurrency must be a positive integer, got "${concurrencyRaw}"`);
@@ -72,12 +99,24 @@ if (!wikiUrl || seeds.length === 0) {
   console.log(`usage:
   --wiki=<fandom url>        e.g. https://elderscrolls.fandom.com
   --seed="Page Title"        repeatable; the arc, era or region to play in
-  --mode=skim|mid|deep       default skim
+  --mode=skim|mid|deep|all   default skim; "all" is the whole wiki (needs --dump)
+  --max-pages=N|all          override the mode's page budget
+  --hops=N|all               override the mode's crawl radius
+  --passb-max-pages=N|all    cap the LLM pass independently of --max-pages
   --exclude="Page Title"     repeatable
   --commit                   write to the graph (otherwise discovery only)
-  --upgrade=mid|deep         deepen what is already ingested
+  --upgrade=mid|deep|all     deepen what is already ingested
   --dump                     read from Fandom's XML database dump first, live api.php only as fallback
   --concurrency=N            pass B extractions in flight (default ${DEFAULT_PASSB_CONCURRENCY})
+
+Budgets: pass A (entities, infobox edges, wikilinks) is an offline parse and
+scales to a whole wiki for free. Pass B is one model call per page, so
+--max-pages and --passb-max-pages are separate knobs on purpose: "crawl
+everything, extract relations from the best 3,000" is the intended shape of a
+full-wiki run, and is what --mode=all does.
+
+Unlimited budgets require --dump: walking a live api.php until the frontier
+runs dry is tens of thousands of requests against someone else's server.
 
 Discovery runs by default and commits nothing: a crawl that silently pulls
 3,000 pages of a continuity you do not care about is the likeliest way this
@@ -87,17 +126,60 @@ step goes wrong.`);
 }
 
 const base = wikiUrl.replace(/\/$/, '').replace(/\/api\.php$/, '');
+const spec = specFor(mode, limits);
+
+// Unlimited means "walk until the frontier is exhausted", which is only a
+// bounded operation against a source with a bounded page set. Against live
+// api.php it is an unbounded request storm aimed at a third party, so this
+// refuses rather than warns — see docs/legal-briefing-fandom-ingest.md §6.1.
+if ((!Number.isFinite(spec.maxPages) || !Number.isFinite(spec.hops)) && !useDump) {
+  console.error(
+    `an unlimited budget (mode=${mode}, max-pages=${budgetLabel(spec.maxPages)}, hops=${budgetLabel(spec.hops)}) needs --dump:\n` +
+      `crawling a live wiki until the frontier is exhausted would be tens of thousands of api.php requests.\n` +
+      `add --dump to read the XML database dump instead, or give a finite --max-pages/--hops.`,
+  );
+  world.close();
+  process.exit(1);
+}
+
 const liveClient = new WikiClient({ baseUrl: base, delayMs: 200 });
 const client: PageSource = useDump ? await buildDumpSource(wikiUrl, liveClient) : liveClient;
-const spec = MODES[mode];
 
-console.log(`crawling ${seeds.length} seed(s) at ${mode} (${spec.hops} hops, up to ${spec.maxPages} pages)…`);
+console.log(
+  `crawling ${seeds.length} seed(s) at ${mode} (${budgetLabel(spec.hops)} hops, up to ${budgetLabel(spec.maxPages)} pages, ` +
+    `pass B on up to ${spec.passB === 'none' ? 0 : budgetLabel(spec.passBMaxPages)})…`,
+);
 
-const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages, exclude });
+const crawled = await crawl({
+  client,
+  seeds,
+  hops: spec.hops,
+  maxPages: spec.maxPages,
+  exclude,
+  onProgress: ({ pagesFetched, queued, pageTotal }) => {
+    // Counted in pages against a real ceiling when there is one (a dump knows
+    // its own size; a finite --max-pages is one too), and as "fetched + queued"
+    // when there is not. Never a percentage of a guess.
+    process.stdout.write(`\r  crawling: ${pageProgress(pagesFetched, queued, pageTotal)}`.padEnd(72));
+  },
+});
+process.stdout.write('\n');
 const scoped = prune(crawled, { maxPages: spec.maxPages });
 const preview = discover(scoped, { maxPages: spec.maxPages });
 
-console.log(`\n${preview.candidatePages} pages, ${liveClient.requests} api request(s)${useDump ? ' (dump-backed; live requests are fallback only)' : ''}`);
+console.log(`\n${preview.candidatePages.toLocaleString()} pages, ${liveClient.requests} api request(s)${useDump ? ' (dump-backed; live requests are fallback only)' : ''}`);
+// A crawl ends when the frontier runs dry, which on a full-wiki run is usually
+// short of the source's total: the remainder is not reachable by links from
+// these seeds. Saying so explicitly stops "88%" reading as a failure, and is
+// real feedback on the seed choice.
+const sourceSize = typeof client.size === 'function' ? client.size() : null;
+if (sourceSize && crawled.pages.size < sourceSize) {
+  const missed = sourceSize - crawled.pages.size;
+  console.log(
+    `  ${missed.toLocaleString()} of the source's ${sourceSize.toLocaleString()} pages were not reachable by links from these seeds` +
+      `${Number.isFinite(spec.maxPages) ? '' : ' (the crawl stopped because the frontier ran dry, not because of a budget)'}`,
+  );
+}
 console.log(`by hop: ${Object.entries(preview.byHop).map(([h, n]) => `${h}=${n}`).join(' ')}`);
 console.log(`by type: ${Object.entries(preview.byType).map(([t, n]) => `${t}=${n}`).join(' ')}`);
 console.log(`seed categories: ${preview.seedCategories.slice(0, 8).join(', ')}`);
@@ -134,7 +216,15 @@ const res = await ingest({
   client,
   seeds,
   mode,
+  limits,
   wiki: hostOf(wikiUrl),
+  // Pass A over tens of thousands of pages is otherwise a long silence, and its
+  // total is exact before it starts — so this one is a true percentage.
+  onPassAProgress: (done, total, phase) => {
+    const pct = Math.min(100, Math.floor((done / total) * 100));
+    process.stdout.write(`\r  ${phase === 'parsing' ? 'reading' : 'indexing'}: ${done.toLocaleString()}/${total.toLocaleString()} (${pct}%)`.padEnd(72));
+    if (done === total) process.stdout.write('\n');
+  },
   exclude,
   extractor,
   ...(passBConcurrency !== undefined ? { passBConcurrency } : {}),
@@ -147,6 +237,20 @@ const res = await ingest({
 });
 console.log(`\ncommitted: ${res.passA?.entities} entities, ${res.passA?.edges} typed edges, ${res.passA?.mentions} mentions, ${res.passA?.sheets} sheets`);
 if (res.passA?.skipped.length) console.log(`skipped ${res.passA.skipped.length} page(s): ${res.passA.skipped.slice(0, 5).join(', ')}`);
+if (res.passA?.unmatchedRelationFields.length) {
+  console.log(
+    `\ninfobox fields that look relational but matched no rule in RELATION_FIELDS:\n  ${res.passA.unmatchedRelationFields
+      .slice(0, 12)
+      .map((f) => `${f.field} (${f.count})`)
+      .join(', ')}`,
+  );
+}
+if (res.passB) {
+  console.log(
+    `events: ${res.passB.events} node(s), ${res.passB.eventParticipants} participant link(s), ` +
+      `${res.passB.eventsSkipped} undated single-subject statement(s) kept on their entity instead`,
+  );
+}
 
 if (res.passB && extractor instanceof LlmPassBExtractor) {
   const st = extractor.stats;
@@ -156,6 +260,15 @@ if (res.passB && extractor instanceof LlmPassBExtractor) {
   console.log(`dropped: ${st.droppedNoEvidence} unevidenced, ${st.droppedBadPredicate} off-vocabulary, ${st.droppedUnknownObject} unknown target`);
 }
 world.close();
+
+/** "3,502 of 4,323 pages · 81%", or "3,502 pages, 1,900 queued" when nothing bounds it. */
+function pageProgress(done: number, queued: number, total: number | null): string {
+  if (total && total > 0) {
+    const pct = Math.min(100, Math.floor((done / total) * 100));
+    return `${done.toLocaleString()} of ${total.toLocaleString()} pages · ${pct}%`;
+  }
+  return `${done.toLocaleString()} pages, ${queued.toLocaleString()} queued`;
+}
 
 function hostOf(url: string): string {
   try {

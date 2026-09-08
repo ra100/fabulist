@@ -184,13 +184,63 @@ Depth is **per-subgraph, not global** — you play in a small corner of a univer
 | `skim` | ~150 | 1 | no | no |
 | `mid` | ~600 | 2 | core entities | main cast |
 | `deep` | ~3000 | 3 | everything | all speakers |
+| `all` | every page | until exhausted | best 3000 | all speakers |
 
 Deep is a strict superset of mid, so `--upgrade=deep` is a diff over nodes below target.
 Nothing is re-extracted.
 
+The presets are defaults, not ceilings. `--max-pages=N|all`, `--hops=N|all` and
+`--passb-max-pages=N|all` override any of them, and the same three fields exist on
+`POST /api/setup/preview`, `/discover`, `/continue` and on the `preview_ingest` /
+`discover_world` MCP tools.
+
+**Why pages and pass B are budgeted separately.** Reading pages is a parse: Pass A over a
+whole wiki is minutes of CPU and free. Pass B is one ~7k-token model call *per page*, so it
+is the entire cost of an ingest. Tying them together would make "read everything" unusable,
+so `--max-pages=all --passb-max-pages=3000` — which is exactly what `--mode=all` is — builds
+the complete structural graph while paying for deep extraction only on the pages that
+scored highest. Measured on the Mass Effect dump: 3,823 pages reached in 7 passes, ~$4.70 of
+pass B. Memory Alpha is ~66,000 articles, where the difference between the old 3,000-page
+cap and `all` is a factor of twenty.
+
+**Unlimited budgets require `--dump`.** An unbounded crawl of a live `api.php` is tens of
+thousands of requests against somebody else's server, so `all` is refused there rather than
+clamped — the server-side wizard/API/MCP path accepts any *finite* budget you ask for, and
+whole-wiki ingest is an offline dump operation:
+
+```sh
+pnpm ingest --wiki=https://memory-alpha.fandom.com --seed="James T. Kirk" \
+  --dump --mode=all --commit
+```
+
 Pass A (infoboxes, categories, links) needs no model and produces a playable cast on its
 own. Pass B adds what only prose contains — typed relations, timeline events, and voice
 cards — and runs automatically at `mid` and `deep`.
+
+### Events are shared nodes, not one per sentence
+
+Pass B extracts "things that happened". An event's identity is its *content* —
+`event:<hash of normalised text + in-world date>` — so the same battle described
+on three pages is one node with three `INVOLVED_IN` participants rather than
+three unconnected nodes with one each, and a re-ingest converges on the same ids
+instead of duplicating. A statement that is neither dated nor shared by two known
+entities is not an event: it is kept on the subject's own `props.pageEvents`,
+where a statement about one entity belongs.
+
+Worlds ingested before this can be fixed in place, without paying for Pass B
+again:
+
+```sh
+pnpm repair-events --world=<slug>                  # report only
+pnpm repair-events --world=<slug> --write --prune
+```
+
+Measured on a real 11,680-entity Mass Effect ingest: 8,799 events → 1,154,
+dangling (single-participant) event nodes 8,140 → 919, entities 11,680 → 4,035,
+and the integrity checker reports no dangling references afterwards. `--prune`
+is what deletes the single-participant undated nodes after moving their text onto
+the entity that reported them; without it nothing is deleted, ids are only
+re-keyed and labels shortened.
 
 Pass B refuses more than it accepts, on purpose. Every relation must carry a verbatim
 quote that is then checked against the page; predicates come from a closed vocabulary; and

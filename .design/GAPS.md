@@ -226,6 +226,61 @@ Appears in the book sidebar only when non-empty, nowhere else. It is the record 
 how far this playthrough has left canon, and it deserves a real view — most likely
 inside the timeline.
 
+### 3.6 No way to roll back a scene, chapter or part in place · M
+
+**TODO.** You can go forward and you can branch sideways. You cannot go back.
+
+Every reason an author wants to: the last chapter went somewhere you did not
+mean, a model wrote three turns of drift before you noticed, an override you
+allowed turned out to break the character after all, a consequence fired that
+you want to un-fire, or you simply want to replay a stretch differently without
+carrying a second save around.
+
+**The engine for this already exists and is tested.** `truncateToScene(world,
+scene)` in `src/loop/branch.ts` deletes every chronicle row at or after a scene
+boundary — turns, events, consequences, facts, threads, directives, divergences,
+illustrations — restores edges retired after that point, and resets the session
+to that scene. `test/branch.test.ts` covers it directly (a dozen assertions) and
+`checkIntegrity` is run against the result, because it deletes rows other tables
+reference.
+
+What is missing is only that **nothing can reach it on the story you are
+reading**. Its two callers are `forkStory` and `branchSave`, and both call it on
+a *copy*: the semantics on offer today are always "leave this playthrough
+intact, make a shorter one beside it". There is no route, no MCP tool, no CLI
+command and no UI for "shorten this one".
+
+What it needs:
+
+1. **Chapter/part granularity, not just scene.** The user-facing unit is "undo
+   the last chapter", and chapters already exist —
+   `Compactor.chapterOf(scene)` and `chronicle.chapters()`. Rolling back
+   chapter *n* is `truncateToScene(world, firstSceneOf(n))`, so this is a
+   mapping over machinery that is already there rather than new deletion logic.
+   Same for "back to the start of this part" if parts ever become a real level.
+2. **A reachable surface.** `POST /api/rollback` with a scene or chapter, a
+   `rollback` MCP tool (the connector needs it more than the browser does — a
+   model that has just written a bad turn has no way to take it back), and a
+   control in the book view next to the existing scene-close button.
+3. **Ownership and confirmation.** It destroys committed prose, so: the same
+   `assertOwned`/`ownsStoryOrRespond` check the other story-scoped writes use,
+   an explicit confirmation in the UI, and a return value that says exactly
+   what was removed — `truncateToScene` already reports per-table counts.
+4. **A decision on whether it should be recoverable.** Two honest options, and
+   this is the only real design question here: either rollback is destructive
+   and the answer to "I want it back" is "you should have forked first", or
+   rollback *is* a fork under the hood — branch the current story at the target
+   scene, switch to the branch, keep the long version as a sibling save. The
+   second is strictly safer, costs a story row plus a chronicle copy, and needs
+   no new deletion path at all; the first is what people usually mean by undo.
+   Leaning toward the second, defaulting to keeping the discarded tail, with a
+   "discard permanently" option — but it is not decided.
+
+Related but not the same: **1.3** (branching is unreachable) exposes
+fork-at-scene, which is the sideways move. Doing 1.3 first would make option 4's
+second variant nearly free, since the branch half would already be built and
+routed.
+
 ---
 
 ## Tier 4 — the honest ones
@@ -330,6 +385,67 @@ Inbound counts come only from crawled pages. Fixing it properly needs the
 `linkshere` API, one request per page. The hub penalty covers the pathology that
 actually bit. Wait for evidence.
 
+### 4.8 Ingest pulls in distribution metadata as if it were world canon · M
+
+**TODO.** A fandom wiki documents two different things under one namespace: the
+fictional world, and the products the world shipped in. The crawl cannot tell
+them apart, so authors, publishers, episode lists, issue numbers, release dates,
+voice actors, box sets, cut content and "making of" pages all become canon
+entities with canon edges — and then compete with the world for salience, for
+frame budget, and for the player's own character list.
+
+Not hypothetical. Measured on the Mass Effect ingest in this repo's own
+`data/worlds/mass-effect-wiki`:
+
+- The highest-yield source pages were **Bonus Content Disc** (164 entities),
+  **Mass Effect Cut Content** (123), **Mass Effect: Foundation** (a comic, 79),
+  **The Final Hours of…** (77), **Shadow Broker Dossiers** (49), plus
+  **Redemption** / **Invasion** / **Evolution** (comics) and **ME2 Cut Content**.
+  Nine of the top twelve provenances by entity count were distribution, not world.
+- A DVD became a **Faction**: `fac:bonus-content-disc`, with `MENTIONS` edges
+  radiating out of it into real canon.
+- `appearances` (580 pages) and `voiceactor` (208) are among the most common
+  infobox fields on the wiki. Both are pure distribution metadata. They are
+  currently ignored by `RELATION_FIELDS`, which is right, but the *pages* they
+  point at are still crawled and ingested as entities.
+- The discovery preview's `topEntities` for a Shepard-seeded crawl included
+  `Mass Effect 2`, `Mass Effect Trilogy` and `Mass Effect 3 Multiplayer`
+  scoring above most actual characters — see also the note at the end of §4.1
+  about "real-world pages as character candidates", which this is the concrete
+  form of.
+
+What it costs: the Director and Referee are shown a world in which a game
+edition is an entity of the same kind as a person; `list_characters` offers
+products as protagonists; and pass B spends a model call per page on pages that
+describe a print run.
+
+Sketch, cheapest first, none of it committed to yet:
+
+1. **Category-based exclusion at scope time.** These pages are almost always
+   categorised as such (`Category:Comics`, `Category:Cut content`,
+   `Category:Real-world articles`, `Category:Voice actors`, `Category:Media`).
+   `prune`'s `excludeCategories` already exists and is already plumbed through
+   the wizard, the REST routes and the MCP tools — this may be mostly a matter
+   of shipping a sensible default list per wiki family rather than new code.
+2. **A hub-penalty sibling for out-of-world pages.** The existing penalty
+   catches index pages by title shape and outbound breadth. A "distribution"
+   signal is similar in kind: an infobox template like `Infobox media`/`game`/
+   `comic`, a `released`/`publisher`/`isbn`/`developer`/`writer` field, a title
+   matching a known product naming pattern.
+3. **Drop the fields too, not just the pages.** `appearances`, `voiceactor`,
+   `released`, `publisher`, `developer`, `issue`, `runtime` should be excluded
+   from `props` as well, so they never reach a prompt. Today they are kept as
+   attributes and `renderProps` can put them in front of the Narrator.
+
+The one thing to be careful about, and the reason this is M and not S: **an
+in-world book, film or record is legitimate canon.** *The Codex*, a Shadow
+Broker dossier as an in-fiction document, a play a character performs — these
+must survive. The filter has to key on "this page describes how the fiction was
+published" and not on "this page mentions a book". Getting that backwards
+deletes real world material, which is worse than the current noise. So: needs a
+measured pass over a real ingest with the filter on and off, counting what each
+rule removes, before any of it becomes a default.
+
 ---
 
 ## Sequence
@@ -348,9 +464,12 @@ token total after a played turn.
 Editing what the AI wrote: prose, sheets, knowledge, threads. This is the "inspect
 and nudge" half of §11 that is currently mostly inspect.
 
-**Slice C — worlds and continuity.** 2.3, 1.3, 2.2, 3.1, 3.5.
+**Slice C — worlds and continuity.** 2.3, 1.3, 3.6, 2.2, 3.1, 3.5.
 Save management first, because branching and export both need it. Then the timeline,
-which needs 1.2 from Slice A to have scenes worth showing.
+which needs 1.2 from Slice A to have scenes worth showing. 3.6 (rollback) sits
+directly after 1.3 (branching) on purpose: they are the sideways and backwards
+halves of the same "move around in this playthrough" surface, and 1.3 built first
+makes the safe, non-destructive form of 3.6 almost free.
 
 **Slice D — depth.** 1.6, 3.2.
 Play-time deepening and the panel that shows it. Deliberately last of the build
@@ -380,4 +499,11 @@ into Pass A first — the two bugs it found are fixed, and the two ingest-qualit
 issues it found degrade the character list, not play. 4.2 (interrupt copy)
 remains genuinely open: the 4.1 session never triggered one, so it needs either
 a deliberately provocative session or targeted testing, not a repeat of this one.
+
+**Added since:** 4.8, distribution metadata ingested as canon. It is the
+concrete, measured form of the "real-world pages as character candidates" note
+two paragraphs up, and it belongs with the ingest-quality work rather than in a
+play slice. Worth doing before any further real-wiki session, because it changes
+what a crawl of the same seeds produces — and therefore what such a session is
+actually testing.
 

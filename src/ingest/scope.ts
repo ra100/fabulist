@@ -21,10 +21,23 @@ export interface Candidate {
   categoryOverlap: number;
 }
 
+/** One crawl progress tick. See `CrawlOptions.onProgress` for what each field promises. */
+export interface CrawlProgress {
+  hop: number;
+  hops: number;
+  pagesFetched: number;
+  /** Titles waiting in the frontier — a true "still to come" even with no ceiling. */
+  queued: number;
+  /** Honest page ceiling, or null when neither a budget nor the source gives one. */
+  pageTotal: number | null;
+}
+
 export interface CrawlOptions {
   client: PageSource;
   seeds: string[];
+  /** Crawl radius. `UNLIMITED` (Infinity) walks until the frontier is exhausted — see `crawl`. */
   hops: number;
+  /** Pages to keep in scope. `UNLIMITED` (Infinity) keeps everything the crawl reaches. */
   maxPages: number;
   /** Categories that mark a page as relevant even at distance. */
   seedCategories?: string[];
@@ -37,8 +50,20 @@ export interface CrawlOptions {
    * count, not a page count — the honest total during a crawl is "how many
    * more passes", not "how many more pages", which is not known until the
    * crawl stops discovering new links.
+   *
+   * `hops` is `Infinity` for an unlimited crawl, where there is no total to
+   * report at all: consumers must render progress without one (and must not
+   * put it in a JSON response, where it would become `null`) rather than
+   * printing "pass 3 of Infinity".
+   *
+   * `pageTotal` is the honest ceiling on pages, when one exists: the smaller of
+   * `maxPages` and whatever the source says it holds (`PageSource.size`). It is
+   * `null` for an unlimited crawl of a source that cannot count itself, which
+   * is the only case where no percentage can be shown. `queued` is how many
+   * titles are waiting in the frontier, so a caller can say "3,502 fetched,
+   * 1,900 queued" and be telling the truth even when `pageTotal` is null.
    */
-  onProgress?: (info: { hop: number; hops: number; pagesFetched: number }) => void;
+  onProgress?: (info: CrawlProgress) => void;
 }
 
 export interface CrawlResult {
@@ -95,11 +120,31 @@ export async function crawl(opts: CrawlOptions): Promise<CrawlResult> {
   const hopOf = new Map<string, number>();
   const linkGraph = new Map<string, string[]>();
 
+  // Fetch headroom over the kept-page budget, so ranking has more candidates
+  // to choose from than it will keep. `Infinity * 3` is still `Infinity`, but
+  // saying it once here makes the unlimited case an explicit branch rather
+  // than an accident of IEEE arithmetic.
+  const fetchCap = Number.isFinite(maxPages) ? maxPages * 3 : Number.POSITIVE_INFINITY;
+
   let frontier = seeds.filter((t) => !exclude.has(t.toLowerCase()));
   for (const t of frontier) hopOf.set(t, 0);
 
+  // `hop <= hops` with `hops === Infinity` (see `UNLIMITED` in depth.ts) means
+  // breadth-first until the frontier stops producing new titles, which is what
+  // an unlimited crawl is. It terminates because `hopOf` never re-queues a
+  // title, so the walk is bounded by the source's own page set — finite for a
+  // dump, not for a live api.php, which is why callers gate unlimited budgets
+  // on a dump-backed source rather than this loop trying to.
+  // The honest ceiling for progress: whichever of "the budget" and "everything
+  // this source holds" is smaller. Null when neither is known, rather than a
+  // guess — a percentage that turns out to have been against a made-up total is
+  // worse than a count (see `JobProgress`'s own note on fake percentages).
+  const sourceSize = typeof client.size === 'function' ? client.size() : null;
+  const ceilings = [maxPages, sourceSize ?? Number.POSITIVE_INFINITY].filter((n) => Number.isFinite(n));
+  const pageTotal = ceilings.length ? Math.min(...ceilings) : null;
+
   for (let hop = 0; hop <= hops && frontier.length; hop++) {
-    const fetched = await client.fetchPages(frontier.slice(0, Math.max(0, maxPages * 3 - pages.size)));
+    const fetched = await client.fetchPages(frontier.slice(0, Math.max(0, fetchCap - pages.size)));
     const next: string[] = [];
 
     for (const page of fetched) {
@@ -119,7 +164,16 @@ export async function crawl(opts: CrawlOptions): Promise<CrawlResult> {
       }
     }
     frontier = next;
-    opts.onProgress?.({ hop: hop + 1, hops: hops + 1, pagesFetched: pages.size });
+    opts.onProgress?.({
+      hop: hop + 1,
+      hops: hops + 1,
+      pagesFetched: pages.size,
+      queued: next.length,
+      // A hybrid source can serve a few pages the dump does not have, so the
+      // ceiling is held at or above what has actually been fetched rather than
+      // being allowed to imply 104%.
+      pageTotal: pageTotal === null ? null : Math.max(pageTotal, pages.size),
+    });
   }
 
   // Seed categories anchor the relevance signal for the whole crawl.

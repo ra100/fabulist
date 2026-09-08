@@ -60,6 +60,12 @@ async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   }
 }
 
+/** A tool result's JSON payload, read the way every test here already does. */
+function payload(res: unknown): Record<string, unknown> {
+  const content = (res as { content: Array<{ type: string; text?: string }> }).content;
+  return JSON.parse(content.find((c) => c.type === 'text')!.text!) as Record<string, unknown>;
+}
+
 function connect(baseUrl: string, token = DEV_TOKEN) {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
     requestInit: { headers: { authorization: `Bearer ${token}` } },
@@ -184,6 +190,62 @@ test('propose_turn on a vow-breaching action surfaces status interrupted, resolv
       assert.equal(resolved.status, 'awaiting-narration');
     } finally {
       await client.close();
+    }
+  });
+});
+
+test('the server tells a client how to use it before any tool is called', async () => {
+  await withServer(async (baseUrl) => {
+    const { client, transport } = connect(baseUrl);
+    await client.connect(transport);
+    try {
+      // `instructions` is what a client surfaces to the model on initialize.
+      // Its absence is why a connector can create a book and never commit a
+      // turn into it: the two-step turn loop is not guessable from a flat tool
+      // list, so the contract is asserted here rather than left to prose.
+      const instructions = client.getInstructions();
+      assert.ok(instructions, 'the server advertises instructions at all');
+      assert.match(instructions!, /commit_narration/, 'names the call that actually saves a turn');
+      assert.match(instructions!, /NOTHING IS SAVED UNTIL THIS CALL/, 'and says so unmissably');
+      assert.match(instructions!, /start_story/, 'and how a canon-rich book with no protagonist gets one');
+      assert.match(instructions!, /close_scene/);
+
+      // A prompt, so "play this world" is a one-click entry point rather than
+      // something the user has to phrase correctly.
+      const { prompts } = await client.listPrompts();
+      const play = prompts.find((p) => p.name === 'play');
+      assert.ok(play, 'a play prompt is registered');
+      const got = await client.getPrompt({ name: 'play', arguments: { wish: 'a heist' } });
+      const text = got.messages.map((m) => (m.content.type === 'text' ? m.content.text : '')).join('\n');
+      assert.match(text, /a heist/, 'the wish is threaded in');
+      assert.match(text, /commit_narration/);
+    } finally {
+      await transport.close();
+    }
+  });
+});
+
+test('a proposed turn tells the caller, in the payload, that it must be committed', async () => {
+  await withServer(async (baseUrl) => {
+    const { client, transport } = connect(baseUrl);
+    await client.connect(transport);
+    try {
+      const res = await client.callTool({ name: 'propose_turn', arguments: { text: 'I read quietly at my desk.' } });
+      const out = payload(res);
+      assert.equal(out.status, 'awaiting-narration');
+      assert.ok(out.resumeToken);
+      assert.match(String(out.nextStep ?? ''), /commit_narration/, 'the next call is named in the result itself');
+      assert.match(String(out.nextStep ?? ''), /[Nn]othing is saved/);
+
+      const committed = await client.callTool({
+        name: 'commit_narration',
+        arguments: { resumeToken: out.resumeToken, prose: 'He turned the page, and the lamp guttered.' },
+      });
+      const done = payload(committed);
+      assert.equal(done.status, 'narrated');
+      assert.match(String(done.nextStep ?? ''), /propose_turn|close_scene/, 'and so is the one after that');
+    } finally {
+      await transport.close();
     }
   });
 });

@@ -11,10 +11,10 @@ import { createStory } from '../store/world.ts';
 import type { StoryId } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
 import { WikiClient } from '../ingest/client.ts';
-import { crawl, discover, prune, type CrawlResult, type DiscoveryPreview } from '../ingest/scope.ts';
+import { crawl, discover, prune, type CrawlProgress, type CrawlResult, type DiscoveryPreview } from '../ingest/scope.ts';
 import { runPassA } from '../ingest/passA.ts';
 import { LlmPassBExtractor } from '../ingest/passB.ts';
-import { MODES, type DepthMode, type DepthSpec } from '../ingest/depth.ts';
+import { applyPassB, depthByHops, emptyPassBCounters, specFor, parseBudget, budgetToWire, budgetLabel, UNLIMITED, type DepthMode, type DepthSpec, type IngestLimits } from '../ingest/depth.ts';
 import { WikiDirectory, type DirectoryOptions, type WikiCandidate } from './directory.ts';
 import { SetupPlanner, type IngestPlan, type CharacterSketch } from './planner.ts';
 import { applyCustomWorld, applyStyle, assignPlayerCharacter, proposeOpening, type ApplyCustomResult } from './apply.ts';
@@ -39,6 +39,14 @@ export interface PreviewResult {
   seeds: string[];
   /** Time estimate in seconds, so "deep" is an informed choice. */
   estimatedSeconds: number;
+  /**
+   * The budgets this preview actually ran with, mode preset plus any
+   * overrides, in JSON-safe form (`'all'` rather than `Infinity`). Returned
+   * because a caller that passed no overrides still needs to know what it is
+   * about to commit to, and because "the preview said 3,000 pages" should be
+   * checkable against what the run does.
+   */
+  budgets: { maxPages: number | 'all'; hops: number | 'all'; passBMaxPages: number | 'all' };
 }
 
 export interface IngestJobResult {
@@ -65,9 +73,60 @@ export interface IngestContext {
   excludeCategories: string[];
   title: string;
   wikiName: string;
+  /**
+   * Budget overrides this world was built with, so "continue reading this
+   * wiki" resumes at the same breadth instead of silently falling back to the
+   * mode preset. Stored in wire form (`'all'`, never `Infinity`) because this
+   * blob is JSON in a `meta` row. Absent on every world ingested before
+   * budgets were overridable, which reads as "use the preset" — the behaviour
+   * those worlds already had.
+   */
+  budgets?: { maxPages?: number | 'all'; hops?: number | 'all'; passBMaxPages?: number | 'all' };
 }
 
 const INGEST_CONTEXT_META_KEY = 'ingestContext';
+
+/**
+ * Refuses an unlimited budget on the server-side ingest path.
+ *
+ * This service crawls live `api.php` (see `SetupService.client`) — it has no
+ * dump-backed `PageSource` wired into it. An unlimited crawl there is a walk
+ * until the link frontier runs dry: tens of thousands of requests against
+ * somebody else's wiki, and unbounded rather than merely slow. So the
+ * *budget* is uncapped (any finite page count you ask for is honoured, the
+ * old 3,000 ceiling is gone) while *unlimited* stays a dump-only operation,
+ * which today means `pnpm ingest --dump --mode=all`.
+ *
+ * Thrown rather than clamped: silently turning "all" into 3,000 pages is
+ * exactly the kind of quiet substitution that makes an ingest look complete
+ * when it is not.
+ */
+function assertBudgetIsServable(mode: DepthMode, spec: DepthSpec): void {
+  if (Number.isFinite(spec.maxPages) && Number.isFinite(spec.hops)) return;
+  throw new Error(
+    `an unlimited ingest budget (mode "${mode}": maxPages=${budgetLabel(spec.maxPages)}, hops=${budgetLabel(spec.hops)}) ` +
+      `is only supported against a wiki XML dump, which this server does not load. ` +
+      `Run it offline instead — pnpm ingest --wiki=<url> --seed="…" --dump --mode=all --commit — ` +
+      `or give a finite page budget here (any size; there is no 3,000-page ceiling any more).`,
+  );
+}
+
+/**
+ * One place that turns a phase's counters into the stage detail every ingest
+ * path shows, so the wizard, the API and MCP all report progress identically.
+ *
+ * A percentage appears only when the total is real. During a crawl that means
+ * a dump-backed source or a finite page budget; the live-crawl-with-no-budget
+ * case falls back to "3,502 fetched, 1,900 queued", which is a true statement
+ * about a moving target rather than a percentage against a guess — the
+ * distinction `JobProgress`'s own header comment insists on.
+ */
+export function progressDetail(done: number, total: number | null, noun = 'pages'): string {
+  const n = done.toLocaleString();
+  if (!total || total <= 0) return `${n} ${noun}`;
+  const pct = Math.min(100, Math.floor((done / total) * 100));
+  return `${n} of ${total.toLocaleString()} ${noun} \u00b7 ${pct}%`;
+}
 
 function saveIngestContext(world: World, ctx: IngestContext): void {
   world.chronicle.setMeta(INGEST_CONTEXT_META_KEY, JSON.stringify(ctx));
@@ -81,6 +140,50 @@ function loadIngestContext(world: World): IngestContext | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The stored wire form of a world's budgets back into `IngestLimits`.
+ * Tolerant on purpose: this is JSON that an older build wrote (no `budgets`
+ * key at all) or that a hand-edited `meta` row could malform, and the right
+ * answer to anything unreadable is "fall back to the mode preset", not a
+ * thrown error that makes the world un-continuable.
+ */
+export function budgetsToLimits(budgets: IngestContext['budgets']): IngestLimits {
+  if (!budgets) return {};
+  const one = (v: number | 'all' | undefined): number | undefined => {
+    if (v === 'all') return UNLIMITED;
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+  };
+  const maxPages = one(budgets.maxPages);
+  const hops = one(budgets.hops);
+  const passBMaxPages = one(budgets.passBMaxPages);
+  return {
+    ...(maxPages !== undefined ? { maxPages } : {}),
+    ...(hops !== undefined ? { hops } : {}),
+    ...(passBMaxPages !== undefined ? { passBMaxPages } : {}),
+  };
+}
+
+/**
+ * Parses the three budget fields off a request body / MCP argument object into
+ * `IngestLimits`. One place, so the REST routes and the MCP tools cannot drift
+ * on what `"all"` or a bad value means — `parseBudget` throws on anything that
+ * is neither a positive integer nor `"all"`.
+ */
+export function limitsFromWire(input: {
+  maxPages?: unknown;
+  hops?: unknown;
+  passBMaxPages?: unknown;
+}): IngestLimits {
+  const maxPages = parseBudget(input.maxPages, 'maxPages');
+  const hops = parseBudget(input.hops, 'hops');
+  const passBMaxPages = parseBudget(input.passBMaxPages, 'passBMaxPages');
+  return {
+    ...(maxPages !== undefined ? { maxPages } : {}),
+    ...(hops !== undefined ? { hops } : {}),
+    ...(passBMaxPages !== undefined ? { passBMaxPages } : {}),
+  };
 }
 
 export interface IngestHealth {
@@ -111,7 +214,10 @@ export class SetupService {
   private wikiFetcher: SetupServiceOptions['wikiFetcher'];
   readonly jobs: JobRegistry;
   /** Cached crawl per preview, so committing does not re-fetch every page. */
-  private crawls = new Map<string, { crawl: CrawlResult; baseUrl: string; mode: DepthMode; title: string; seeds: string[]; excludeCategories: string[] }>();
+  private crawls = new Map<
+    string,
+    { crawl: CrawlResult; baseUrl: string; mode: DepthMode; limits: IngestLimits; title: string; seeds: string[]; excludeCategories: string[] }
+  >();
 
   constructor(opts: SetupServiceOptions) {
     this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
@@ -125,9 +231,13 @@ export class SetupService {
     this.jobs = opts.jobs ?? new JobRegistry();
   }
 
-  /** True when this save has no canon yet, which is what the UI gates the wizard on. */
+  /**
+   * True when this save has no canon yet, which is what the UI gates the wizard
+   * on. An existence check rather than a count: see `GraphStore.isEmpty` for
+   * why the difference is worth a method.
+   */
   isFresh(): boolean {
-    return this.getWorld().graph.counts().entities === 0;
+    return this.getWorld().graph.isEmpty();
   }
 
   async resolveWiki(query: string): Promise<WikiCandidate[]> {
@@ -162,6 +272,10 @@ export class SetupService {
    * stage/count during the crawl; called directly, `preview` stays a plain
    * async call with no job involved, which is what the test suite and any
    * caller not wired to `JobRegistry` still expect.
+   *
+   * `limits` raises or lowers the mode's page/hop budgets for this run. An
+   * *unlimited* budget is refused here rather than attempted — see
+   * `assertBudgetIsServable`.
    */
   async preview(
     baseUrl: string,
@@ -169,22 +283,39 @@ export class SetupService {
     mode: DepthMode,
     excludeCategories: string[] = [],
     title = '',
-    onProgress?: (info: { hop: number; hops: number; pagesFetched: number }) => void,
+    onProgress?: (info: CrawlProgress) => void,
+    limits: IngestLimits = {},
   ): Promise<PreviewResult & { previewKey: string }> {
-    const spec = MODES[mode];
+    const spec = specFor(mode, limits);
+    assertBudgetIsServable(mode, spec);
     const client = this.client(baseUrl);
     const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages, onProgress });
     const scoped = prune(crawled, { maxPages: spec.maxPages, excludeCategories });
     const preview = discover(scoped, { maxPages: spec.maxPages });
 
-    const previewKey = `${baseUrl}|${seeds.join(',')}|${mode}`;
-    this.crawls.set(previewKey, { crawl: scoped, baseUrl, mode, title, seeds, excludeCategories });
+    // The budgets are part of the key: two previews of the same wiki and seeds
+    // at different page budgets are different crawls, and sharing one cache
+    // entry would let a commit run against the other one's scope.
+    const previewKey = `${baseUrl}|${seeds.join(',')}|${mode}|${budgetToWire(spec.maxPages)}|${budgetToWire(spec.hops)}|${budgetToWire(spec.passBMaxPages)}`;
+    this.crawls.set(previewKey, { crawl: scoped, baseUrl, mode, limits, title, seeds, excludeCategories });
 
     // Pass A is fast; Pass B is one model call per page and dominates everything.
-    const passBPages = spec.passB === 'all' ? preview.candidatePages : Math.floor(preview.candidatePages * 0.25);
-    const estimatedSeconds = Math.round(preview.candidatePages * 0.15 + (spec.passB === 'none' ? 0 : passBPages * 3));
+    const selected = spec.passB === 'all' ? preview.candidatePages : Math.floor(preview.candidatePages * 0.25);
+    const passBPages = spec.passB === 'none' ? 0 : Math.min(selected, spec.passBMaxPages);
+    const estimatedSeconds = Math.round(preview.candidatePages * 0.15 + passBPages * 3);
 
-    return { preview, mode, seeds, estimatedSeconds, previewKey };
+    return {
+      preview,
+      mode,
+      seeds,
+      estimatedSeconds,
+      budgets: {
+        maxPages: budgetToWire(spec.maxPages),
+        hops: budgetToWire(spec.hops),
+        passBMaxPages: budgetToWire(spec.passBMaxPages),
+      },
+      previewKey,
+    };
   }
 
   /**
@@ -206,13 +337,29 @@ export class SetupService {
     character: CharacterSketch,
     excludeCategories: string[] = [],
     title = '',
+    limits: IngestLimits = {},
   ): Job<PreviewResult & { previewKey: string; character: CharacterSketch }> {
     return this.jobs.start('discover', async (handle) => {
       handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
-      const result = await this.preview(baseUrl, seeds, mode, excludeCategories, title, (info) => {
-        handle.stage('crawling', `pass ${info.hop} of ${info.hops} \u00b7 ${info.pagesFetched} pages so far`);
-        handle.count(info.hop, info.hops);
-      });
+      const result = await this.preview(
+        baseUrl,
+        seeds,
+        mode,
+        excludeCategories,
+        title,
+        (info) => {
+          // Counted in *pages*, not hops: a hop is a meaningless unit to watch
+          // (hop 3 of 4 can be 90% of the work) and an unlimited crawl has no
+          // hop total at all. Pages have an honest ceiling whenever the source
+          // can count itself or a budget was given — see `info.pageTotal`.
+          const detail = info.pageTotal
+            ? progressDetail(info.pagesFetched, info.pageTotal)
+            : `${info.pagesFetched.toLocaleString()} pages, ${info.queued.toLocaleString()} queued`;
+          handle.stage('crawling', detail);
+          handle.count(info.pagesFetched, info.pageTotal);
+        },
+        limits,
+      );
 
       handle.stage('sharpening your character', 'matching it against what was actually found');
       const refined = await this.planner.refineCharacter(character, {
@@ -240,8 +387,8 @@ export class SetupService {
     const cached = this.crawls.get(previewKey);
     if (!cached) throw new Error('no preview for that key; run a preview first');
 
-    const { crawl: scoped, baseUrl, mode, title, seeds, excludeCategories } = cached;
-    const spec = MODES[mode];
+    const { crawl: scoped, baseUrl, mode, limits, title, seeds, excludeCategories } = cached;
+    const spec = specFor(mode, limits);
     const wikiName = new URL(baseUrl).hostname.split('.')[0] ?? 'wiki';
 
     return this.jobs.start<IngestJobResult>('ingest', async (handle) => {
@@ -255,16 +402,49 @@ export class SetupService {
       // Persisted so a later session can offer "continue reading this wiki"
       // without asking the player to re-enter the universe, seeds and mode —
       // the whole reason a resume needs no return trip through the wizard.
-      saveIngestContext(world, { baseUrl, mode, seeds, excludeCategories, title, wikiName });
+      saveIngestContext(world, {
+        baseUrl,
+        mode,
+        seeds,
+        excludeCategories,
+        title,
+        wikiName,
+        budgets: {
+          maxPages: budgetToWire(spec.maxPages),
+          hops: budgetToWire(spec.hops),
+          passBMaxPages: budgetToWire(spec.passBMaxPages),
+        },
+      });
       const warnings: string[] = [];
       const pages = [...scoped.pages.values()];
 
-      handle.stage('reading pages', `${pages.length} pages`);
-      handle.count(pages.length, pages.length);
-
       handle.stage('building the graph', 'infoboxes, categories, links');
-      const passA = runPassA(world, pages, { depth: spec.level, wiki: wikiName, voiceCards: spec.voiceCards !== 'none' });
+      const passA = runPassA(world, pages, {
+        depth: spec.level,
+        // Crawl distance becomes depth, so the corner the player is in is
+        // recorded as deeper than the rim — see `depthByHops`.
+        depthByTitle: depthByHops(scoped, spec.level),
+        wiki: wikiName,
+        voiceCards: spec.voiceCards !== 'none',
+        // Pass A knows its total from the first line, so this is the one phase
+        // that can show a true percentage throughout. Over tens of thousands of
+        // pages it is also long enough that silence reads as a hang.
+        onProgress: (done, total, phase) => {
+          handle.stage(phase === 'parsing' ? 'reading pages' : 'building the graph', progressDetail(done, total));
+          handle.count(done, total);
+        },
+      });
       handle.log(`${passA.entities} entities, ${passA.edges} typed edges, ${passA.sheets} sheets`);
+      if (passA.unmatchedRelationFields.length) {
+        // Visible rather than silent: this is how you find out that a wiki
+        // files its relations under names `RELATION_FIELDS` has never seen.
+        handle.log(
+          `infobox fields that look relational but matched no rule: ${passA.unmatchedRelationFields
+            .slice(0, 8)
+            .map((f) => `${f.field} (${f.count})`)
+            .join(', ')}`,
+        );
+      }
       if (passA.skipped.length) handle.log(`skipped ${passA.skipped.length} thin or malformed page(s)`);
 
       const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
@@ -328,10 +508,20 @@ export class SetupService {
       onError: (title, err) => handle.log(`pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
     });
 
-    const targets =
+    const selected =
       spec.passB === 'all'
         ? scoped.candidates
         : scoped.candidates.slice(0, Math.max(20, Math.floor(scoped.candidates.length * 0.25)));
+    // The same cap `runPassB` applies (see `DepthSpec.passBMaxPages`). This
+    // path duplicates target selection rather than calling `runPassB`, because
+    // it needs per-page job progress and cooperative cancellation — so the cap
+    // has to be applied here too, or a large crawl would quietly bill for one
+    // model call per page on the server path while the CLI honoured the limit.
+    // Candidates are score-sorted, so this keeps the best pages.
+    const targets = Number.isFinite(spec.passBMaxPages) ? selected.slice(0, spec.passBMaxPages) : selected;
+    if (targets.length < selected.length) {
+      handle.log(`relation extraction capped at ${targets.length.toLocaleString()} of ${selected.length.toLocaleString()} pages, highest-scoring first`);
+    }
 
     const already = new Set(
       (world.db.prepare(`SELECT page_id FROM ingest_pages WHERE wiki = ? AND passb_status = 'done'`).all(wikiName) as Array<{
@@ -344,12 +534,10 @@ export class SetupService {
     });
     if (already.size) handle.log(`resuming: ${already.size} page(s) already extracted, ${pending.length} left`);
 
-    handle.stage('reading the prose', `${pending.length} pages`);
+    handle.stage('reading the prose', progressDetail(0, pending.length));
     let done = 0;
-    let edges = 0;
-    let events = 0;
-    let voice = 0;
     let failed = 0;
+    const counters = emptyPassBCounters();
 
     for (const candidate of pending) {
       if (handle.cancelled()) {
@@ -368,41 +556,37 @@ export class SetupService {
         world.db.prepare(`UPDATE ingest_pages SET passb_status = 'failed' WHERE page_id = ? AND wiki = ?`).run(page.pageId, wikiName);
         failed++;
         handle.count(done + failed, pending.length);
+        handle.stage('reading the prose', progressDetail(done + failed, pending.length));
         continue;
       }
-      for (const e of out.edges) {
-        const target = world.graph.resolveName(e.objectName);
-        if (!target || target.id === entity.id) continue;
-        world.graph.assertEdge(
-          { subject: entity.id, predicate: e.predicate, object: target.id, weight: e.weight ?? 0.6, evidence: e.evidence },
-          0, 'canon', `passB:${candidate.title}`,
-        );
-        edges++;
-      }
-      if (out.voiceCard) {
-        const sheet = world.cast.getOrBlank(entity.id);
-        sheet.voice = {
-          diction: out.voiceCard.diction || sheet.voice.diction,
-          tics: [...new Set([...sheet.voice.tics, ...(out.voiceCard.tics ?? [])])],
-          samples: [...new Set([...sheet.voice.samples, ...(out.voiceCard.samples ?? [])])].slice(0, 8),
-          never: [...new Set([...sheet.voice.never, ...(out.voiceCard.never ?? [])])],
-        };
-        world.cast.put(sheet);
-        voice++;
-      }
-      events += out.events.length;
-      for (const c of out.contradictions ?? []) {
-        world.chronicle.addDivergence(0, 'canon-contradiction', `${c.claim} (conflicts with: ${c.conflictsWith})`, candidate.title);
-      }
+      // One writer, shared with the CLI path. This loop used to carry its own
+      // copy of the apply logic, which handled relations, voice and
+      // contradictions but silently never created event nodes at all — so the
+      // same pages produced a different graph depending on whether the ingest
+      // came through the wizard or the CLI. See `applyPassB`.
+      applyPassB(world, spec, candidate.title, entity, out, counters);
       world.db.prepare(`UPDATE ingest_pages SET passb_status = 'done' WHERE page_id = ? AND wiki = ?`).run(page.pageId, wikiName);
       done++;
       handle.count(done + failed, pending.length);
+      // Re-stated per page: this is the phase that runs for hours, so the
+      // detail line is the only thing telling you it is still moving.
+      handle.stage('reading the prose', progressDetail(done + failed, pending.length));
     }
 
     const st = extractor.stats;
     const dropped = st.droppedNoEvidence + st.droppedBadPredicate + st.droppedUnknownObject;
-    const passB = { pages: done, relations: edges, events, voiceCards: voice, dropped };
-    handle.log(`kept ${edges} relations, dropped ${dropped} unevidenced or unresolvable${failed ? `, ${failed} page(s) failed and can be resumed later` : ''}`);
+    const passB = {
+      pages: done,
+      relations: counters.edges,
+      events: counters.events,
+      voiceCards: counters.voiceCards,
+      dropped,
+    };
+    handle.log(`kept ${counters.edges} relations, dropped ${dropped} unevidenced or unresolvable${failed ? `, ${failed} page(s) failed and can be resumed later` : ''}`);
+    handle.log(
+      `${counters.events} event(s) with ${counters.eventParticipants} participant link(s); ` +
+        `${counters.eventsSkipped} undated single-subject statement(s) kept on their entity instead of becoming nodes`,
+    );
     if (failed) warnings.push(`${failed} page(s) could not be read (a dead token or rate limit, most likely) — this ingest can be continued later from Settings without re-reading what already succeeded`);
 
     return { passB, warnings };
@@ -448,11 +632,15 @@ export class SetupService {
    * and mode this world was built from.
    *
    * `overrides` lets a caller widen the scope for "read more" rather than
-   * just "finish what was started" — a larger seed list, added exclusions, or
-   * a deeper mode, all still resuming rather than re-paying for pages already
-   * `done`.
+   * just "finish what was started" — a larger seed list, added exclusions, a
+   * deeper mode, or a bigger page budget, all still resuming rather than
+   * re-paying for pages already `done`. Raising `limits.maxPages` on a world
+   * that was first read at 600 pages is the intended way to say "keep going,
+   * further out" without starting over.
    */
-  continueIngest(overrides: { seeds?: string[]; mode?: DepthMode; excludeCategories?: string[] } = {}): Job<IngestJobResult> {
+  continueIngest(
+    overrides: { seeds?: string[]; mode?: DepthMode; excludeCategories?: string[]; limits?: IngestLimits } = {},
+  ): Job<IngestJobResult> {
     const world = this.getWorld();
     const context = loadIngestContext(world);
     if (!context) throw new Error('this world has no wiki ingest to continue — it was not built from a wiki, or predates this feature');
@@ -461,34 +649,71 @@ export class SetupService {
     const mode = overrides.mode ?? context.mode;
     const seeds = overrides.seeds?.length ? overrides.seeds : context.seeds;
     const excludeCategories = overrides.excludeCategories ?? context.excludeCategories;
-    const spec = MODES[mode];
+    // Budgets resolve newest-first: this call's overrides, else whatever this
+    // world was last ingested with, else the mode preset.
+    const limits: IngestLimits = { ...budgetsToLimits(context.budgets), ...(overrides.limits ?? {}) };
+    const spec = specFor(mode, limits);
+    assertBudgetIsServable(mode, spec);
     const wikiName = context.wikiName;
 
     return this.jobs.start<IngestJobResult>('continue-ingest', async (handle) => {
       handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
       const client = this.client(baseUrl);
       const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages, onProgress: (info) => {
-        handle.stage('crawling', `pass ${info.hop} of ${info.hops} \u00b7 ${info.pagesFetched} pages so far`);
-        handle.count(info.hop, info.hops);
+        const detail = info.pageTotal
+          ? progressDetail(info.pagesFetched, info.pageTotal)
+          : `${info.pagesFetched.toLocaleString()} pages, ${info.queued.toLocaleString()} queued`;
+        handle.stage('crawling', detail);
+        handle.count(info.pagesFetched, info.pageTotal);
       } });
       const scoped = prune(crawled, { maxPages: spec.maxPages, excludeCategories });
 
       // Re-persist: a "read more" call may have widened seeds/mode/exclusions,
       // and the next resume should pick those up rather than the narrower
       // scope the very first ingest started from.
-      saveIngestContext(world, { baseUrl, mode, seeds, excludeCategories, title: context.title, wikiName });
+      saveIngestContext(world, {
+        baseUrl,
+        mode,
+        seeds,
+        excludeCategories,
+        title: context.title,
+        wikiName,
+        budgets: {
+          maxPages: budgetToWire(spec.maxPages),
+          hops: budgetToWire(spec.hops),
+          passBMaxPages: budgetToWire(spec.passBMaxPages),
+        },
+      });
 
       const warnings: string[] = [];
       const pages = [...scoped.pages.values()];
-      handle.stage('reading pages', `${pages.length} pages`);
-      handle.count(pages.length, pages.length);
-
       handle.stage('building the graph', 'infoboxes, categories, links');
       // Idempotent by construction (`passA.ts`'s doc comment): entity ids are
       // deterministic slugs, so re-running over pages already ingested
       // updates in place rather than duplicating.
-      const passA = runPassA(world, pages, { depth: spec.level, wiki: wikiName, voiceCards: spec.voiceCards !== 'none' });
+      const passA = runPassA(world, pages, {
+        depth: spec.level,
+        // Crawl distance becomes depth, so the corner the player is in is
+        // recorded as deeper than the rim — see `depthByHops`.
+        depthByTitle: depthByHops(scoped, spec.level),
+        wiki: wikiName,
+        voiceCards: spec.voiceCards !== 'none',
+        onProgress: (done, total, phase) => {
+          handle.stage(phase === 'parsing' ? 'reading pages' : 'building the graph', progressDetail(done, total));
+          handle.count(done, total);
+        },
+      });
       handle.log(`${passA.entities} entities, ${passA.edges} typed edges, ${passA.sheets} sheets`);
+      if (passA.unmatchedRelationFields.length) {
+        // Visible rather than silent: this is how you find out that a wiki
+        // files its relations under names `RELATION_FIELDS` has never seen.
+        handle.log(
+          `infobox fields that look relational but matched no rule: ${passA.unmatchedRelationFields
+            .slice(0, 8)
+            .map((f) => `${f.field} (${f.count})`)
+            .join(', ')}`,
+        );
+      }
 
       const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
       warnings.push(...passBWarnings);

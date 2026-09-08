@@ -17,7 +17,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { z } from 'zod';
-import type { McpAuth } from './auth.ts';
+import type { McpAuth, VerifiedUser } from './auth.ts';
 import {
   addAnchorTool,
   addDirectiveTool,
@@ -86,8 +86,63 @@ function toolResult(value: unknown) {
  * statelessness) — cheap, since this only registers closures, it does not
  * open anything.
  */
+/**
+ * What the client is told about this server on `initialize`, before it has
+ * called anything.
+ *
+ * Not decoration. Fifty-odd tools with good individual descriptions still do
+ * not tell a model the *order*, and two of the orderings here are not
+ * guessable: that `propose_turn` writes nothing until `commit_narration`
+ * follows it, and that a world with canon can still have no protagonist. A
+ * client that guesses wrong produces exactly the failure this server was
+ * observed in — a book that reads beautifully in the chat transcript and is
+ * empty on disk, because the prose was never committed.
+ *
+ * Kept as prose rather than a tool list: clients surface this verbatim to the
+ * model, so it competes with the tool descriptions for attention and should
+ * say only what those cannot.
+ */
+const INSTRUCTIONS = `Fabulist is a state-first fiction engine: the world is a graph in a database, and
+prose is a view over it. Your job is to write the prose; the server owns the world model.
+
+Getting oriented
+1. \`list_worlds\`, then \`switch_world\` to pick one. Worlds hold canon (a wiki ingest or an authored
+   setting) and are shared; books are the playthroughs inside them.
+2. \`list_stories\` shows the books you own here. \`create_story\` makes a new one, \`switch_story\`
+   opens it. A new book is empty by design — it shares the world's canon and nothing else.
+3. \`get_state\` tells you where you are. If it reports no player character, the book is not
+   playable yet: \`list_characters\` to see who is available, then \`start_story\` to become one of
+   them (or to place an original). \`start_story\` returns a proposed opening line to play from.
+
+Playing a turn — the part worth reading twice
+The normal loop is two calls, and skipping the second one loses the turn:
+  a. \`propose_turn\` with what the player does, in their words. The server runs its gates
+     (does this fit the character, does it fit the world, what happens next) and stops before any
+     prose exists. It returns \`narratorSystemPrompt\` + \`sceneFrame\`.
+  b. You write the prose from that frame, then call \`commit_narration\` with it and the
+     \`resumeToken\`. NOTHING IS SAVED UNTIL THIS CALL. Prose you only put in the chat is not in
+     the book; the world model never sees it, and the next turn will not know it happened.
+Two other outcomes from (a): \`interrupted\` means the action breaks something the character has
+established about themselves — show the player the options and call \`resolve_interrupt\`, not
+\`commit_narration\`. \`answered\` means the input was a question about the world, not an action;
+there is nothing to narrate.
+Prefer \`play\` instead of (a)+(b) only if you want this server's own model to write the prose.
+
+Keeping the book shaped
+• \`close_scene\` at a real scene break. Otherwise the whole book stays scene 1 forever, and the
+  summarisation that keeps long stories coherent never runs.
+• \`get_book\` is the committed text. Read it back if you are unsure whether a turn landed.
+• \`update_style\`/\`update_knobs\` change how it is written; \`add_directive\` steers what happens
+  next; \`add_anchor\` pins a passage as a style reference.
+
+Ingesting a world
+\`resolve_wiki\` → \`plan_world\` → \`preview_ingest\` (or \`discover_world\` for progress) →
+\`commit_ingest\`. Previews cost nothing and report page counts and money; commit is the step that
+writes canon. \`maxPages\`/\`passBMaxPages\` are separate budgets — reading pages is cheap, relation
+extraction is one model call per page.`;
+
 function buildServer(ctx: McpToolContext): McpServer {
-  const server = new McpServer({ name: 'fabulist', version: '0.1.0' });
+  const server = new McpServer({ name: 'fabulist', version: '0.1.0' }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     'list_worlds',
@@ -551,22 +606,49 @@ function buildServer(ctx: McpToolContext): McpServer {
     async ({ wish, wiki }) => toolResult(await planWorldTool(ctx, { wish, wiki })),
   );
 
+  // Shared by preview_ingest/discover_world: the budget knobs are identical on
+  // both, and a model that learns them on one should not find a different
+  // spelling on the other.
+  const budgetSchema = {
+    maxPages: z
+      .union([z.number().int().positive(), z.literal('all')])
+      .optional()
+      .describe(
+        'Pages to keep in scope, overriding the mode preset (skim 150, mid 600, deep 3000). Any size is allowed — there is no ' +
+          '3000-page ceiling. "all" means the whole wiki and is only supported for offline dump ingest, not this server-side crawl.',
+      ),
+    hops: z
+      .union([z.number().int().positive(), z.literal('all')])
+      .optional()
+      .describe('Crawl radius from the seeds, overriding the mode preset (skim 1, mid 2, deep 3).'),
+    passBMaxPages: z
+      .union([z.number().int().positive(), z.literal('all')])
+      .optional()
+      .describe(
+        'Cap on how many pages the LLM relation-extraction pass runs on, budgeted separately from maxPages because it is one ' +
+          'model call per page and dominates both cost and wall-clock. Pages are chosen by crawl score, best first. ' +
+          'Use a large maxPages with a small passBMaxPages to build the whole structural graph cheaply.',
+      ),
+  };
+
   server.registerTool(
     'preview_ingest',
     {
       description:
         'Crawl and report what an ingest would cost (page count, estimated time), without writing anything. The returned ' +
-        'previewKey is what commit_ingest needs \u2014 confirming a preview never re-pays for the crawl.',
+        'previewKey is what commit_ingest needs \u2014 confirming a preview never re-pays for the crawl. The response\u2019s ' +
+        '`budgets` field reports the page/hop/pass-B limits the crawl actually ran with.',
       inputSchema: {
         baseUrl: z.string().describe('Wiki base URL, e.g. "https://memory-alpha.fandom.com".'),
         seeds: z.array(z.string()).describe('Seed page titles to crawl from.'),
-        mode: z.enum(['skim', 'mid', 'deep']).optional().describe('Defaults to "mid".'),
+        mode: z.enum(['skim', 'mid', 'deep', 'all']).optional().describe('Defaults to "mid". "all" is the whole wiki, and needs an offline dump ingest.'),
         excludeCategories: z.array(z.string()).optional(),
         title: z.string().optional(),
+        ...budgetSchema,
       },
     },
-    async ({ baseUrl, seeds, mode, excludeCategories, title }) =>
-      toolResult(await previewIngestTool(ctx, { baseUrl, seeds, mode, excludeCategories, title })),
+    async ({ baseUrl, seeds, mode, excludeCategories, title, maxPages, hops, passBMaxPages }) =>
+      toolResult(await previewIngestTool(ctx, { baseUrl, seeds, mode, excludeCategories, title, maxPages, hops, passBMaxPages })),
   );
 
   server.registerTool(
@@ -578,16 +660,17 @@ function buildServer(ctx: McpToolContext): McpServer {
       inputSchema: {
         baseUrl: z.string(),
         seeds: z.array(z.string()),
-        mode: z.enum(['skim', 'mid', 'deep']).optional(),
+        mode: z.enum(['skim', 'mid', 'deep', 'all']).optional(),
         character: z
           .object({ existing: z.string().nullable(), name: z.string(), role: z.string(), goals: z.array(z.string()), vows: z.array(z.object({ text: z.string(), rank: z.number() })) })
           .optional(),
         excludeCategories: z.array(z.string()).optional(),
         title: z.string().optional(),
+        ...budgetSchema,
       },
     },
-    async ({ baseUrl, seeds, mode, character, excludeCategories, title }) =>
-      toolResult(discoverWorldTool(ctx, { baseUrl, seeds, mode, character, excludeCategories, title })),
+    async ({ baseUrl, seeds, mode, character, excludeCategories, title, maxPages, hops, passBMaxPages }) =>
+      toolResult(discoverWorldTool(ctx, { baseUrl, seeds, mode, character, excludeCategories, title, maxPages, hops, passBMaxPages })),
   );
 
   server.registerTool(
@@ -693,11 +776,65 @@ function buildServer(ctx: McpToolContext): McpServer {
     async ({ id }) => toolResult(fetchTool(ctx, { id })),
   );
 
+  // A prompt, not another tool: this is the "where do I start" entry point a
+  // client shows the user as a slash command, and it is the one place that can
+  // hand the model the whole loop at once rather than relying on it to have
+  // read the server instructions. Registered last so the tool list above reads
+  // in dependency order.
+  server.registerPrompt(
+    'play',
+    {
+      title: 'Play this world',
+      description: 'Open a book in this world and play it, following the propose/commit turn loop correctly.',
+      argsSchema: {
+        world: z.string().optional().describe('World slug to open. Omit to use whichever is already open.'),
+        wish: z.string().optional().describe('What kind of story the player wants, in their own words.'),
+      },
+    },
+    ({ world, wish }) => ({
+      messages: [
+        {
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: [
+              wish ? `The player wants: ${wish}` : 'Ask the player what kind of story they want.',
+              '',
+              'Then, in this order:',
+              world ? `1. switch_world to "${world}".` : '1. list_worlds, and ask which one — or use the one already open.',
+              '2. list_stories. Open an existing book with switch_story, or create_story for a new one.',
+              '3. get_state. If there is no player character, list_characters and then start_story.',
+              '4. Play turns: propose_turn, write the prose from the frame it returns, then commit_narration',
+              '   with that prose and the resumeToken. The turn is not saved until commit_narration returns —',
+              '   prose that only appears in this conversation is not in the book.',
+              '5. On an "interrupted" result, show the player the options and use resolve_interrupt.',
+              '6. Call close_scene at scene breaks.',
+              '',
+              'Write in the style the frame asks for, not your own. Keep the player in the fiction:',
+              'do not narrate the tool calls.',
+            ].join('\n'),
+          },
+        },
+      ],
+    }),
+  );
+
   return server;
 }
 
 export interface McpRouteOptions {
-  toolContext: McpToolContext;
+  /**
+   * Builds the tool context for one request, given the identity the bearer
+   * token proved.
+   *
+   * A factory rather than a value because the context is now per-*caller*:
+   * `world()` inside it resolves through `CurrentStory.worldFor(user)`, so two
+   * MCP clients authenticated as two people must not share one context. The
+   * previous shape handed every request the same server-wide context, which is
+   * why an MCP-created story ended up owned by nobody while the verified `sub`
+   * sat unused in `AuthInfo`.
+   */
+  toolContext: (user: VerifiedUser) => McpToolContext;
   auth: McpAuth;
   /** The canonical URL of this MCP endpoint, e.g. `https://fabulist.example.com/mcp` \u2014 what `WWW-Authenticate` and the protected-resource metadata point back at (MCP spec's own resource-indicator requirement, RFC 8707; see `.design/MCP-CONNECTOR.md` \u00a71). */
   resourceUrl: string;
@@ -749,7 +886,7 @@ export async function handleMcpRequest(
   };
   const reqWithAuth = Object.assign(req, { auth: authInfo });
 
-  const server = buildServer(opts.toolContext);
+  const server = buildServer(opts.toolContext(verified));
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   try {
     await server.connect(transport);

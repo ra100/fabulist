@@ -518,6 +518,45 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               </p>
             </div>
 
+            {/*
+              The two budgets are separate fields rather than one "depth" dial
+              because they cost wildly different things: reading pages is a
+              parse (cheap, fast, scales to a whole wiki), while the relation
+              pass is one model call per page. Blank means the preset above —
+              150 / 600 / 3,000 pages — and there is no ceiling on either.
+            */}
+            <div className="field">
+              <span>Or set your own budget</span>
+              <div className="row">
+                <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  pages
+                  <input
+                    inputMode="numeric"
+                    style={{ width: 110 }}
+                    placeholder={plan.mode === 'skim' ? '150' : plan.mode === 'mid' ? '600' : '3000'}
+                    value={pageBudget}
+                    onChange={(e) => setPageBudget(e.target.value.replace(/[^0-9]/g, ''))}
+                  />
+                </label>
+                <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  of those, relation-extracted
+                  <input
+                    inputMode="numeric"
+                    style={{ width: 110 }}
+                    placeholder="all of them"
+                    value={passBBudget}
+                    onChange={(e) => setPassBBudget(e.target.value.replace(/[^0-9]/g, ''))}
+                  />
+                </label>
+              </div>
+              <p className="hint">
+                Reading more pages is cheap — it is a parse, not a model call — so a large page budget with a smaller
+                relation budget gets you the whole map of the world and pays for deep extraction only where the story
+                is. For an entire wiki (100,000+ pages) use the offline dump ingest:{' '}
+                <code>pnpm ingest --wiki=… --seed="…" --dump --mode=all --commit</code>.
+              </p>
+            </div>
+
             <CharacterEditor sketch={plan.character} onChange={(character) => setPlan({ ...plan, character })} />
             <StyleEditor style={plan.style} onChange={(style) => setPlan({ ...plan, style })} />
 
@@ -528,7 +567,18 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 onClick={() =>
                   void guard(async () => {
                     setRefined(false);
-                    const j = await api.setup.discover(wiki.baseUrl, plan.seeds, plan.mode, plan.character, plan.excludeCategories, wiki.name);
+                    const j = await api.setup.discover(
+                      wiki.baseUrl,
+                      plan.seeds,
+                      plan.mode,
+                      plan.character,
+                      plan.excludeCategories,
+                      wiki.name,
+                      {
+                        ...(pageBudget ? { maxPages: Number(pageBudget) } : {}),
+                        ...(passBBudget ? { passBMaxPages: Number(passBBudget) } : {}),
+                      },
+                    );
                     setJob(j);
                     setStep('discovering');
                   })
@@ -568,6 +618,19 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 <span>estimated</span>
               </div>
             </div>
+
+            {preview.budgets ? (
+              <p className="hint">
+                Budget for this run: <b>{preview.budgets.maxPages === 'all' ? 'every page' : `${preview.budgets.maxPages.toLocaleString()} pages`}</b> read,
+                relation extraction on{' '}
+                <b>
+                  {preview.budgets.passBMaxPages === 'all'
+                    ? 'all of them'
+                    : `at most ${preview.budgets.passBMaxPages.toLocaleString()}`}
+                </b>
+                . The estimate above follows from those two numbers.
+              </p>
+            ) : null}
 
             {preview.preview.characters.length ? (
               <div className="field">
@@ -725,22 +788,30 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
  * inventing a new look.
  */
 function JobProgress({ job }: { job: Job }) {
+  const { current, total } = job.progress;
+  // A percentage only where the server gave a real total. Where it did not — a
+  // live crawl with no ceiling — the detail line above still carries a true
+  // count ("3,502 pages, 1,900 queued"), and a spinner is the honest visual.
+  const pct = total && total > 0 ? Math.min(100, Math.floor((current / total) * 100)) : null;
   return (
     <>
       <div className="progress">
-        <div className="progress-stage">{job.progress.stage}</div>
+        <div className="progress-stage">
+          {job.progress.stage}
+          {pct === null ? null : <span className="dimmer mono" style={{ marginLeft: 8 }}>{pct}%</span>}
+        </div>
         {job.progress.detail ? <div className="dim small">{job.progress.detail}</div> : null}
-        {job.progress.total ? (
+        {pct === null ? (
+          <div className="spinner" />
+        ) : (
           <>
             <div className="bar">
-              <i style={{ width: `${Math.min(100, (job.progress.current / job.progress.total) * 100)}%` }} />
+              <i style={{ width: `${pct}%` }} />
             </div>
             <div className="dimmer small mono">
-              {job.progress.current} / {job.progress.total}
+              {current.toLocaleString()} / {(total ?? 0).toLocaleString()}
             </div>
           </>
-        ) : (
-          <div className="spinner" />
         )}
       </div>
 

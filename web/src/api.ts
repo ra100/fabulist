@@ -275,9 +275,21 @@ export interface CharacterSketch {
   vows: Array<{ text: string; rank: number }>;
 }
 
+/** Page/hop/pass-B budgets, in the wire form the server uses (`'all'`, never `Infinity`). */
+export interface IngestBudgets {
+  maxPages: number | 'all';
+  hops: number | 'all';
+  passBMaxPages: number | 'all';
+}
+
+/** What a caller may override per run; absent fields fall back to the mode preset. */
+export type IngestBudgetOverrides = Partial<IngestBudgets>;
+
+export type DepthMode = 'skim' | 'mid' | 'deep' | 'all';
+
 export interface IngestPlan {
   seeds: string[];
-  mode: 'skim' | 'mid' | 'deep';
+  mode: DepthMode;
   reasoning: string;
   excludeCategories: string[];
   character: CharacterSketch;
@@ -301,9 +313,11 @@ export interface DiscoveryPreview {
 
 export interface PreviewResult {
   preview: DiscoveryPreview;
-  mode: 'skim' | 'mid' | 'deep';
+  mode: DepthMode;
   seeds: string[];
   estimatedSeconds: number;
+  /** The budgets the crawl actually ran with — preset plus any overrides. */
+  budgets: IngestBudgets;
   previewKey: string;
 }
 
@@ -314,7 +328,8 @@ export interface DiscoverResult extends PreviewResult {
 
 export interface IngestContext {
   baseUrl: string;
-  mode: 'skim' | 'mid' | 'deep';
+  mode: DepthMode;
+  budgets?: Partial<IngestBudgets>;
   seeds: string[];
   excludeCategories: string[];
   title: string;
@@ -342,9 +357,9 @@ export interface Job<T = unknown> {
 
 export interface SetupStatus {
   fresh: boolean;
-  counts: { entities: number; edges: number; canon: number; chronicle: number };
-  playerCharacterId: string;
+  /** Whether this book has a protagonist. A world can be full of canon and still have none. */
   hasPlayer: boolean;
+  playerCharacterId: string;
 }
 
 /**
@@ -581,12 +596,17 @@ export const api = {
   /** `{ user: null }` is the honest, 200 answer when login is off entirely or this browser has no session — never an error to handle. */
   auth: { me: () => req<{ user: CurrentUser | null }>('/auth/me') },
   state: () => req<State>('/state'),
-  graph: (params: { layer?: string; type?: string; limit?: number } = {}) => {
+  /**
+   * `minWeight` omitted lets the server apply its own default (0.5 — typed
+   * relationships only, mentions excluded). Pass 0 to include everything.
+   */
+  graph: (params: { layer?: string; type?: string; limit?: number; minWeight?: number } = {}) => {
     const q = new URLSearchParams();
     if (params.layer) q.set('layer', params.layer);
     if (params.type) q.set('type', params.type);
     if (params.limit) q.set('limit', String(params.limit));
-    return req<{ entities: Entity[]; edges: Edge[]; scene: number }>(`/graph?${q}`);
+    if (params.minWeight !== undefined) q.set('minWeight', String(params.minWeight));
+    return req<{ entities: Entity[]; edges: Edge[]; scene: number; hiddenEdges: number; minWeight: number }>(`/graph?${q}`);
   },
   entity: (id: string) => req<EntityDetail>(`/entity/${encodeURIComponent(id)}`),
   cast: () => req<Array<{ sheet: Sheet; entity: Entity | null }>>('/cast'),
@@ -741,8 +761,14 @@ export const api = {
     status: () => req<SetupStatus>('/setup/status'),
     resolve: (query: string) => post<{ candidates: WikiCandidate[] }>('/setup/resolve', { query }),
     plan: (wish: string, wiki: WikiCandidate) => post<IngestPlan>('/setup/plan', { wish, wiki }),
-    preview: (baseUrl: string, seeds: string[], mode: string, excludeCategories: string[] = [], title = '') =>
-      post<PreviewResult>('/setup/preview', { baseUrl, seeds, mode, excludeCategories, title }),
+    preview: (
+      baseUrl: string,
+      seeds: string[],
+      mode: string,
+      excludeCategories: string[] = [],
+      title = '',
+      budgets: IngestBudgetOverrides = {},
+    ) => post<PreviewResult>('/setup/preview', { baseUrl, seeds, mode, excludeCategories, title, ...budgets }),
     discover: (
       baseUrl: string,
       seeds: string[],
@@ -750,7 +776,8 @@ export const api = {
       character: CharacterSketch,
       excludeCategories: string[] = [],
       title = '',
-    ) => post<Job<DiscoverResult>>('/setup/discover', { baseUrl, seeds, mode, character, excludeCategories, title }),
+      budgets: IngestBudgetOverrides = {},
+    ) => post<Job<DiscoverResult>>('/setup/discover', { baseUrl, seeds, mode, character, excludeCategories, title, ...budgets }),
     ingest: (previewKey: string, character: CharacterSketch, style: Partial<StyleContract>, opening: string) =>
       post<Job>('/setup/ingest', { previewKey, character, style, opening }),
     custom: (description: string, style?: Partial<StyleContract>) => post<Job>('/setup/custom', { description, style }),
@@ -763,7 +790,8 @@ export const api = {
     setPlayer: (sketch: Partial<CharacterSketch>) => post<{ playerCharacterId: string; created: boolean; warnings: string[]; opening: string }>('/setup/player', sketch),
     reset: () => post<{ ok: boolean }>('/setup/reset'),
     ingestHealth: () => req<IngestHealth>('/setup/ingest-health'),
-    continue: (overrides: { seeds?: string[]; mode?: string; excludeCategories?: string[] } = {}) =>
-      post<Job>('/setup/continue', overrides),
+    continue: (
+      overrides: { seeds?: string[]; mode?: string; excludeCategories?: string[] } & IngestBudgetOverrides = {},
+    ) => post<Job>('/setup/continue', overrides),
   },
 };

@@ -468,15 +468,23 @@ export class Engine {
    * `TurnOutcome`, since there is no in-fiction meaning for "your turn
    * vanished" — that is a caller bug (a stale token, a second attempt after
    * the ten-minute window) rather than something a player did.
+   *
+   * `world` mirrors `TakeTurnOptions.world`: the caller's own resolution of
+   * which story this belongs to, which for a per-user MCP connection is that
+   * user's story rather than whichever one the shared pointer happens to be
+   * on. Without it this resolved through `getWorld()`, so every user whose
+   * story was not the current shared one hit the story-changed guard below on
+   * commit and lost the turn — the guard firing on an unrelated user's switch
+   * rather than on a real mismatch.
    */
-  async commitExternalNarration(resumeToken: string, prose: string): Promise<TurnOutcome> {
+  async commitExternalNarration(resumeToken: string, prose: string, worldOverride?: World): Promise<TurnOutcome> {
     const pending = this.pending.get(resumeToken);
     if (!pending) throw new Error(`no pending narration for token ${resumeToken} (expired or already resolved)`);
     this.pending.delete(resumeToken);
 
     this.busy = true;
     try {
-      const world = this.getWorld();
+      const world = worldOverride ?? this.getWorld();
       if (world.storyId !== pending.storyId) {
         // The story switched under this pending turn (a save switch mid-
         // conversation). Committing against the wrong story's graph would be

@@ -380,4 +380,18 @@ export class HybridSource implements PageSource {
     this.onFallback?.(title);
     return this.live.fetchPage(title);
   }
+
+  /**
+   * The dump's page count — the overwhelming majority of what this source will
+   * ever serve, and the only part that is countable at all.
+   *
+   * Not a hard ceiling: the live fallback can serve titles created after the
+   * snapshot, so a crawl can legitimately end up a few pages past this. It is
+   * reported anyway because it is the difference between a progress bar and a
+   * spinner over tens of thousands of pages, and `crawl` never lets the total
+   * sit below the count it has already reached.
+   */
+  size(): number {
+    return this.dump.size();
+  }
 }

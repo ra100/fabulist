@@ -598,3 +598,55 @@ function emptyStoryIdentity() {
 function blankMeta() {
   return { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] };
 }
+
+// -------------------------------------------------- name resolution rigour
+
+test('resolveName allows case, articles and disambiguators — and nothing else', () => {
+  const world = w();
+  world.graph.upsert({ id: 'loc:citadel', type: 'Location', name: 'The Citadel', summary: 'A station.' }, 'canon');
+  world.graph.upsert({ id: 'char:shepard', type: 'Character', name: 'Shepard (Commander)' }, 'canon');
+
+  assert.equal(world.graph.resolveName('The Citadel')?.id, 'loc:citadel', 'exact');
+  assert.equal(world.graph.resolveName('the citadel')?.id, 'loc:citadel', 'case');
+  assert.equal(world.graph.resolveName('Citadel')?.id, 'loc:citadel', 'a leading article is not a different referent');
+  assert.equal(world.graph.resolveName('Shepard')?.id, 'char:shepard', 'nor is a wiki disambiguator');
+  assert.equal(world.graph.resolveName('  Citadel  ')?.id, 'loc:citadel');
+
+  // Anything looser must fail rather than pick the nearest-looking row: a
+  // wrong edge is invisible, a missing one gets counted and reported.
+  assert.equal(world.graph.resolveName('Citadel Council'), undefined, 'not a superstring');
+  assert.equal(world.graph.resolveName('Cita'), undefined, 'not a prefix');
+  assert.equal(world.graph.resolveName('A station.'), undefined, 'and never by summary text');
+  assert.equal(world.graph.resolveName(''), undefined);
+  world.close();
+});
+
+test('a synthetic event node can never be resolved as a referent by its sentence text', () => {
+  const world = w();
+  world.graph.upsert({ id: 'loc:mars', type: 'Location', name: 'Mars', salience: 0.2 }, 'canon');
+  // Exactly what Pass B mints: name = first 70 chars of the event sentence,
+  // summary = the whole sentence, and a salience high enough to have won the
+  // old fuzzy top-hit contest against the real article.
+  world.graph.upsert(
+    {
+      id: 'event:char:x:1',
+      type: 'Event',
+      name: 'Humans discovered a Prothean data cache on Mars in 2148',
+      summary: 'Humans discovered a Prothean data cache on Mars in 2148',
+      salience: 0.9,
+    },
+    'canon',
+  );
+
+  assert.equal(world.graph.resolveName('Mars')?.id, 'loc:mars', 'the place, not the sentence that mentions it');
+  assert.equal(
+    world.graph.resolveName('Prothean data cache'),
+    undefined,
+    'and a phrase out of an event sentence resolves to nothing at all',
+  );
+
+  // A real, page-derived event still works, because it has a real title.
+  world.graph.upsert({ id: 'event:battle-of-the-citadel', type: 'Event', name: 'Battle of the Citadel' }, 'canon');
+  assert.equal(world.graph.resolveName('Battle of the Citadel')?.id, 'event:battle-of-the-citadel');
+  world.close();
+});

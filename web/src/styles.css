@@ -1083,6 +1083,28 @@ hr {
   font-size: 14px;
   padding: var(--s2) 0;
 }
+/*
+ * A standing condition the reader has to act on, not a transient message:
+ * a book with no protagonist cannot be played, and the book view otherwise
+ * looks merely empty. Sits inside `.book`, so it borrows the page's own
+ * measure and serif rather than looking like chrome dropped on top.
+ */
+.notice {
+  margin: 0 0 var(--s3);
+  padding: var(--s2) var(--s3);
+  border-left: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+  color: var(--ink-2);
+  font-family: var(--serif);
+  font-size: 14px;
+  line-height: 1.5;
+  max-width: 44rem;
+}
+.notice code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 .scroll-x { overflow-x: auto; }
 
 /* explanatory copy obeys a measure */

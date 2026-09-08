@@ -9,30 +9,136 @@
  * Deep is a superset of mid is a superset of skim, so upgrading is a diff over
  * nodes below the target level. Nothing is ever re-extracted.
  */
+import { createHash } from 'node:crypto';
 import type { DepthLevelValue, Entity, EntityId } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
 import type { PageSource, WikiPage } from './client.ts';
 import { runPassA, type PassAResult } from './passA.ts';
 import { crawl, discover, prune, type CrawlResult, type DiscoveryPreview } from './scope.ts';
 
-export type DepthMode = 'skim' | 'mid' | 'deep';
+export type DepthMode = 'skim' | 'mid' | 'deep' | 'all';
 
 export interface DepthSpec {
   level: DepthLevelValue;
   hops: number;
   maxPages: number;
   passB: 'none' | 'core' | 'all';
+  /**
+   * Hard cap on how many pages Pass B runs on, applied *after* `passB`'s own
+   * core/all selection. `UNLIMITED` means "no cap beyond that selection",
+   * which is what every preset except `all` uses — so this field changes
+   * nothing for skim/mid/deep.
+   *
+   * It exists because page breadth and extraction depth stopped being the
+   * same decision the moment `maxPages` could be unlimited. Pass A is an
+   * offline parse: 127k pages of a Fandom dump is minutes of CPU and costs
+   * nothing. Pass B is one ~7k-token model call *per page*, so the same 127k
+   * pages is 127k calls — days of wall-clock and a bill to match. Tying the
+   * two together would have meant "crawl everything" was unusable in
+   * practice, so the whole graph is now cheap to build while the expensive
+   * typed-relation pass stays pointed at the pages that scored highest.
+   */
+  passBMaxPages: number;
   voiceCards: 'none' | 'main' | 'all';
   embeddings: 'leads' | 'sections-in-scope' | 'sections-all';
   reconcileContradictions: boolean;
 }
 
+/**
+ * "No limit", for `maxPages`/`hops`/`passBMaxPages`.
+ *
+ * `Infinity` rather than a large sentinel so the arithmetic in `scope.ts`
+ * (`maxPages * 3`, `slice(0, n)`, `hop <= hops`) stays correct without any
+ * special-casing. It must never reach a JSON response — `JSON.stringify`
+ * turns it into `null` — so anything crossing the wire goes through
+ * `budgetToWire`/`parseBudget` instead.
+ */
+export const UNLIMITED = Number.POSITIVE_INFINITY;
+
 /** The table from DESIGN.md §3.1, made executable. */
 export const MODES: Record<DepthMode, DepthSpec> = {
-  skim: { level: 1, hops: 1, maxPages: 150, passB: 'none', voiceCards: 'none', embeddings: 'leads', reconcileContradictions: false },
-  mid: { level: 2, hops: 2, maxPages: 600, passB: 'core', voiceCards: 'main', embeddings: 'sections-in-scope', reconcileContradictions: false },
-  deep: { level: 3, hops: 3, maxPages: 3000, passB: 'all', voiceCards: 'all', embeddings: 'sections-all', reconcileContradictions: true },
+  skim: { level: 1, hops: 1, maxPages: 150, passB: 'none', passBMaxPages: UNLIMITED, voiceCards: 'none', embeddings: 'leads', reconcileContradictions: false },
+  mid: { level: 2, hops: 2, maxPages: 600, passB: 'core', passBMaxPages: UNLIMITED, voiceCards: 'main', embeddings: 'sections-in-scope', reconcileContradictions: false },
+  deep: { level: 3, hops: 3, maxPages: 3000, passB: 'all', passBMaxPages: UNLIMITED, voiceCards: 'all', embeddings: 'sections-all', reconcileContradictions: true },
+  /**
+   * The whole wiki. `hops: UNLIMITED` means breadth-first until the frontier
+   * stops producing new titles rather than stopping at a fixed radius, which
+   * is the only way "all of it" is reachable — a 127k-page wiki is nowhere
+   * near covered by deep's 3 hops.
+   *
+   * Reachability, stated honestly: this is still a crawl from the seeds, so
+   * it covers everything link-connected to them. On a real wiki that is
+   * effectively the whole main namespace; a genuinely orphaned page with no
+   * inbound links from the connected component is not included, and no
+   * ranking signal exists for one anyway.
+   *
+   * `passBMaxPages` is deliberately finite here (see that field's comment):
+   * `all` means "build the whole graph", not "spend a five-figure model bill
+   * without being asked". Raise it explicitly — `limits.passBMaxPages` — if
+   * that is genuinely what you want.
+   */
+  all: { level: 3, hops: UNLIMITED, maxPages: UNLIMITED, passB: 'all', passBMaxPages: 3000, voiceCards: 'all', embeddings: 'sections-all', reconcileContradictions: true },
 };
+
+/**
+ * Per-run overrides on top of a mode's preset, so the presets stay the
+ * common answer without becoming a ceiling. Every field is optional and
+ * absent means "whatever the mode says" — passing `{}` is exactly today's
+ * behaviour.
+ */
+export interface IngestLimits {
+  /** Pages kept in scope (and therefore Pass A'd). `UNLIMITED` for the whole crawl. */
+  maxPages?: number;
+  /** Crawl radius from the seeds. `UNLIMITED` to walk until the frontier is exhausted. */
+  hops?: number;
+  /** Cap on Pass B pages. See `DepthSpec.passBMaxPages`. */
+  passBMaxPages?: number;
+}
+
+/** A mode's preset with any caller overrides applied. */
+export function specFor(mode: DepthMode, limits: IngestLimits = {}): DepthSpec {
+  const base = MODES[mode];
+  if (!base) throw new Error(`unknown depth mode "${mode}"`);
+  return {
+    ...base,
+    ...(limits.maxPages !== undefined ? { maxPages: limits.maxPages } : {}),
+    ...(limits.hops !== undefined ? { hops: limits.hops } : {}),
+    ...(limits.passBMaxPages !== undefined ? { passBMaxPages: limits.passBMaxPages } : {}),
+  };
+}
+
+/**
+ * Parses a budget off the wire (an HTTP body, an MCP argument, a CLI flag).
+ *
+ * Accepts a positive number, or `'all'`/`'unlimited'`/`Infinity` for no
+ * limit. Returns `undefined` for absent/empty so a caller can spread it into
+ * `IngestLimits` without inventing a value, and throws on anything else
+ * rather than silently degrading to a default — a mistyped budget that
+ * quietly becomes 600 pages is the failure mode this exists to prevent.
+ */
+export function parseBudget(value: unknown, label = 'budget'): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === Number.POSITIVE_INFINITY) return UNLIMITED;
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase();
+    if (v === 'all' || v === 'unlimited' || v === 'none') return UNLIMITED;
+    const n = Number(v);
+    if (Number.isInteger(n) && n > 0) return n;
+    throw new Error(`${label} must be a positive integer or "all", got "${value}"`);
+  }
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  throw new Error(`${label} must be a positive integer or "all", got ${JSON.stringify(value)}`);
+}
+
+/** The JSON-safe form of a budget: `Infinity` would serialise to `null`. */
+export function budgetToWire(n: number): number | 'all' {
+  return Number.isFinite(n) ? n : 'all';
+}
+
+/** For a log line or a progress label. */
+export function budgetLabel(n: number): string {
+  return Number.isFinite(n) ? n.toLocaleString() : 'all';
+}
 
 /**
  * Pass B is the LLM half: typed relations with evidence spans, timeline events,
@@ -76,6 +182,8 @@ export interface IngestOptions {
   client: PageSource;
   seeds: string[];
   mode: DepthMode;
+  /** Per-run overrides on the mode's preset. See `IngestLimits`. */
+  limits?: IngestLimits;
   wiki?: string;
   exclude?: string[];
   extractor?: PassBExtractor;
@@ -85,6 +193,13 @@ export interface IngestOptions {
   passBConcurrency?: number;
   /** Progress for the long pass, forwarded to `runPassB`'s `onProgress`. */
   onPassBProgress?: (done: number, total: number, title: string) => void;
+  /**
+   * Progress for Pass A, forwarded to `runPassA`'s `onProgress`. Worth wiring
+   * even though Pass A is fast per page: over a whole-wiki scope it is tens of
+   * thousands of pages of otherwise silent work, and unlike the crawl its total
+   * is exact from the start.
+   */
+  onPassAProgress?: (done: number, total: number, phase: 'parsing' | 'writing') => void;
   /** Forwarded to `runPassA`. See `PassAOptions.secondary` for the merge policy this drives. */
   secondary?: boolean;
 }
@@ -92,7 +207,7 @@ export interface IngestOptions {
 export interface IngestResult {
   preview: DiscoveryPreview;
   passA: PassAResult | null;
-  passB: { pages: number; edges: number; events: number; voiceCards: number } | null;
+  passB: PassBCounters | null;
   mode: DepthMode;
 }
 
@@ -101,7 +216,7 @@ export interface IngestResult {
  * calls for it.
  */
 export async function ingest(opts: IngestOptions & { world?: World }): Promise<IngestResult> {
-  const spec = MODES[opts.mode];
+  const spec = specFor(opts.mode, opts.limits ?? {});
   const crawled = await crawl({
     client: opts.client,
     seeds: opts.seeds,
@@ -120,9 +235,11 @@ export async function ingest(opts: IngestOptions & { world?: World }): Promise<I
   const pages = [...scoped.pages.values()];
   const passA = runPassA(opts.world, pages, {
     depth: spec.level,
+    depthByTitle: depthByHops(scoped, spec.level),
     wiki: opts.wiki ?? 'wiki',
     voiceCards: spec.voiceCards !== 'none',
     ...(opts.secondary !== undefined ? { secondary: opts.secondary } : {}),
+    ...(opts.onPassAProgress ? { onProgress: opts.onPassAProgress } : {}),
   });
 
   let passB: IngestResult['passB'] = null;
@@ -197,13 +314,16 @@ export async function runPassB(
   extractor: PassBExtractor,
   spec: DepthSpec,
   opts: RunPassBOptions = {},
-): Promise<{ pages: number; edges: number; events: number; voiceCards: number }> {
-  const targets =
+): Promise<PassBCounters> {
+  const selected =
     spec.passB === 'all'
       ? scoped.candidates
       : scoped.candidates.slice(0, Math.max(20, Math.floor(scoped.candidates.length * 0.25)));
+  // Candidates are already sorted by score (see `crawl`), so capping is
+  // "the best N pages", not "the first N the crawler happened to reach".
+  const targets = Number.isFinite(spec.passBMaxPages) ? selected.slice(0, spec.passBMaxPages) : selected;
 
-  const out = { pages: 0, edges: 0, events: 0, voiceCards: 0 };
+  const out = emptyPassBCounters();
 
   // Resolve the work up front so the pool has nothing to decide. Entities are
   // resolved here rather than in the worker because `resolveName` is a
@@ -290,6 +410,40 @@ export async function runPassB(
   return out;
 }
 
+/**
+ * A short, human label for an event node.
+ *
+ * The first clause, or a truncation — never the whole sentence. `name` is what
+ * the graph explorer draws and what name resolution reads; a 70-character
+ * sentence fragment there is both unreadable in a node label and, before
+ * `resolveName` was tightened, a match for almost any proper noun in the world.
+ */
+function shortEventLabel(text: string): string {
+  const clause = text.split(/[,;:.\u2014]/)[0]!.trim();
+  const label = clause.length >= 12 && clause.length <= 60 ? clause : text.slice(0, 60).trim();
+  return label.length < text.length ? `${label}\u2026` : label;
+}
+
+/**
+ * Per-page depth from crawl distance: a seed gets the mode's full level, and
+ * every hop outward is one level shallower, floored at 1.
+ *
+ * This is what makes depth mean anything in the data. The mode's level is a
+ * *ceiling*, not a uniform stamp — "you play in a small corner of a universe"
+ * (DESIGN.md §3.1) only holds if the corner you are in is recorded as deeper
+ * than the rim. With every entity stamped at the mode level, `belowDepth`
+ * returned nothing and `upgradeDepth`/`promoteRegion`/`deepenOnDemand` had
+ * nothing to act on.
+ */
+export function depthByHops(scoped: CrawlResult, level: DepthLevelValue): Map<string, DepthLevelValue> {
+  const map = new Map<string, DepthLevelValue>();
+  for (const c of scoped.candidates) {
+    const value = Math.max(1, Math.min(level, level - c.hops));
+    map.set(c.title, value as DepthLevelValue);
+  }
+  return map;
+}
+
 /** Page ids already marked `done` for this wiki, so a resume never re-pays for them. */
 function donePages(world: World, wiki: string): Set<string> {
   const rows = world.db.prepare(`SELECT page_id FROM ingest_pages WHERE wiki = ? AND passb_status = 'done'`).all(wiki) as Array<{
@@ -305,18 +459,72 @@ function recordPassBStatus(world: World, wiki: string, pageId: string, status: '
     .run(status, pageId, wiki);
 }
 
+/** Counters `applyPassB` accumulates across a whole pass. */
+export interface PassBCounters {
+  pages: number;
+  edges: number;
+  events: number;
+  voiceCards: number;
+  /**
+   * Extracted statements that did not become event nodes because they were
+   * neither dated nor shared by two known entities. Kept on the subject
+   * instead — see `applyPassB`'s own note on why that is not data loss.
+   */
+  eventsSkipped: number;
+  /** `INVOLVED_IN` edges written, which is what makes an event a *shared* node. */
+  eventParticipants: number;
+}
+
+export function emptyPassBCounters(): PassBCounters {
+  return { pages: 0, edges: 0, events: 0, voiceCards: 0, eventsSkipped: 0, eventParticipants: 0 };
+}
+
+/** Statements kept on the subject rather than promoted to event nodes. Capped, because props are read into prompts. */
+const MAX_ENTITY_EVENT_NOTES = 12;
+
 /**
- * Commits one page's extraction. Split out of `runPassB` so the ordering
- * guarantee above is enforced by construction: this is the only writer, and it
- * is only ever called from `drain`, serially, in candidate order.
+ * The id of an event, derived from *what happened* rather than from who
+ * reported it.
+ *
+ * This is the whole of the identity fix. The old id was
+ * `event:<subject>:<counter>`, which made an event a property of the page it
+ * was read on: the same battle described on three pages became three
+ * single-participant nodes, and re-running the pass renumbered the counter so
+ * a second ingest duplicated rather than converged. Hashing the normalised
+ * text plus the in-world date means all three pages `upsert` the *same* node
+ * and each contributes an `INVOLVED_IN` edge, which is how an event ends up
+ * with the participants it actually had.
+ *
+ * Measured on the world that prompted this: 8,760 synthetic events, 8,140 of
+ * them at degree 1, and 26 groups sharing byte-identical summaries.
  */
-function applyPassB(
+export function eventIdFor(text: string, inWorldDate?: string): string {
+  const norm = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const digest = createHash('sha256').update(`${norm}|${inWorldDate ?? ''}`).digest('hex').slice(0, 16);
+  return `event:${digest}`;
+}
+
+/**
+ * Commits one page's extraction.
+ *
+ * Exported because `SetupService.runResumablePassB` runs its own loop (it needs
+ * per-page job progress and cooperative cancellation) and used to duplicate
+ * this logic — with one consequence nobody had noticed: that copy handled
+ * relations, voice and contradictions but *never created event nodes at all*,
+ * only counted them. So a wizard/API/MCP ingest and a CLI ingest produced
+ * materially different graphs from the same pages. One writer now, called from
+ * both loops.
+ *
+ * Still the only writer, and still called serially in candidate order (see
+ * `runPassB`'s note on why the commit order is load-bearing).
+ */
+export function applyPassB(
   world: World,
   spec: DepthSpec,
   title: string,
   entity: Entity,
   result: PassBOutput,
-  out: { pages: number; edges: number; events: number; voiceCards: number },
+  out: PassBCounters,
 ): void {
   out.pages++;
 
@@ -332,22 +540,71 @@ function applyPassB(
     out.edges++;
   }
 
+  const keptNotes: string[] = [];
   for (const ev of result.events) {
-    const id = `event:${entity.id}:${out.events}`;
+    const text = ev.text.trim();
+    if (!text) continue;
+
+    // Everyone this event names *and that this world already knows*, the
+    // subject included. Resolution is exact-or-nothing now (see
+    // `GraphStore.resolveName`), so an unknown name drops out rather than
+    // binding to the nearest-looking row.
+    const participants = new Set<string>([entity.id]);
+    for (const name of ev.participants ?? []) {
+      const hit = world.graph.resolveName(name);
+      if (hit) participants.add(hit.id);
+    }
+
+    // The threshold. An undated statement with one known participant is not an
+    // event, it is a sentence about the subject — and 8,140 of those were what
+    // made the graph look like confetti: a node per sentence, each hanging off
+    // its own page by a single edge, contributing nothing a traversal can use.
+    //
+    // Not discarded: it is appended to the subject's own props below, which is
+    // where a statement about one entity belongs. Nothing is lost, it just
+    // stops pretending to be a shared node.
+    const dated = !!ev.inWorldDate?.trim();
+    if (!dated && participants.size < 2) {
+      keptNotes.push(text);
+      out.eventsSkipped++;
+      continue;
+    }
+
+    const id = eventIdFor(text, ev.inWorldDate ?? undefined);
     world.graph.upsert(
       {
         id,
         type: 'Event',
-        name: ev.text.slice(0, 70),
-        summary: ev.text,
+        // A short label, not the sentence: the full text lives in `summary`.
+        // A prose-length `name` is what made these nodes magnets for name
+        // resolution before `resolveName` stopped guessing.
+        name: shortEventLabel(text),
+        summary: text,
         provenance: `passB:${title}`,
         depthLevel: spec.level,
         props: ev.inWorldDate ? { inWorldDate: ev.inWorldDate } : {},
       },
       'canon',
     );
-    world.graph.assertEdge({ subject: entity.id, predicate: 'INVOLVED_IN', object: id, weight: 0.6 }, 0, 'canon');
+    for (const participantId of participants) {
+      world.graph.assertEdge(
+        { subject: participantId, predicate: 'INVOLVED_IN', object: id, weight: 0.6 },
+        0,
+        'canon',
+        `passB:${title}`,
+      );
+      out.eventParticipants++;
+    }
     out.events++;
+  }
+
+  if (keptNotes.length) {
+    const current = world.graph.get(entity.id);
+    if (current) {
+      const existing = Array.isArray(current.props?.pageEvents) ? (current.props.pageEvents as unknown[]).map(String) : [];
+      const merged = [...new Set([...existing, ...keptNotes])].slice(0, MAX_ENTITY_EVENT_NOTES);
+      world.graph.upsert({ ...current, props: { ...current.props, pageEvents: merged } }, 'canon');
+    }
   }
 
   if (result.voiceCard && spec.voiceCards !== 'none') {
