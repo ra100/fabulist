@@ -2,6 +2,8 @@
 
 **Not legal advice.** I am not a lawyer. This is engineering-grade research from primary sources read directly (Fandom ToU/Licensing, CC legal code, EUR-Lex) on 2026-09-05. Anything commercial needs a real IP attorney.
 
+**Policy update, recorded (2026-09-08): this project takes no profit and runs no subscription — provide it as-is.** That decision removes model (c) ("paid access / hosted fandom-as-a-service," the highest-risk row in §4's table) from consideration entirely, not just mitigates it. Everything below stays accurate as risk analysis and keeps governing model (a)/(b)/(d) — local ingest, free sharing, and the recommended ingest-tool-only path — none of which depended on monetization to begin with. See `.design/SAAS-MULTIUSER.md` §7 for where the no-monetization decision itself is recorded.
+
 ## 1. Fandom's Actual Terms (verified)
 
 **License: CC BY-SA 3.0 Unported — not 4.0.** [fandom.com/licensing](https://www.fandom.com/licensing) states: *"the text on Fandom communities… is licensed under the Creative Commons Attribution-Share Alike License 3.0 (Unported)."* This matters concretely: 3.0 has **no sui generis database-right grant** (4.0 §4 does), and no 30-day cure period — breach terminates automatically. Some wikis instead use **CC BY-NC / BY-NC-SA / BY-NC-ND**; the license "is made clear on the edit page of that wiki." Fandom's "Commercial Use Waiver" runs **only to Fandom**, not to you, so **a commercial product must check per wiki.** Screen via `api.php?action=query&meta=siteinfo&siprop=rightsinfo` — live on witcher.fandom.com it returns `{"url":"https://www.fandom.com/licensing","text":"CC-BY-SA"}` — but it omits version and NC status, so treat it as a screen, not proof.

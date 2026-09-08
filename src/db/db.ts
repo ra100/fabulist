@@ -88,6 +88,7 @@ function migrate(db: Db): void {
   // `exec()` before `migrate()` — an index built there against a column added
   // here would be building against nothing on every pre-existing save.
   db.exec('CREATE INDEX IF NOT EXISTS idx_ingest_pages_wiki_status ON ingest_pages(wiki, passb_status)');
+  widenIngestPagesKey(db);
 
   // NULL, not a default: NULL means "no owner" (every story created before
   // this column existed, and every story created while login is off — see
@@ -104,6 +105,51 @@ function addColumnIfMissing(db: Db, table: string, column: string, ddl: string):
   const existing = rows<{ name: string }>(db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table));
   if (existing.some((c) => c.name === column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+}
+
+/**
+ * Widens `ingest_pages`'s primary key from `page_id` alone to `(wiki,
+ * page_id)`, for every save created before multi-wiki ingest into one world
+ * was a real case: Fandom mints page ids per-wiki, so two different wikis
+ * routinely reuse the same numeric id for two completely unrelated pages,
+ * and a bare-`page_id` key let a second wiki's row silently overwrite the
+ * first's revision/depth/passb_status whenever that coincidence hit.
+ *
+ * SQLite has no `ALTER TABLE ... DROP/ADD PRIMARY KEY`, so this is the
+ * standard rebuild: create the new shape, copy through, swap the names.
+ * Guarded by `pragma_table_info`'s own `pk` column rather than regexing the
+ * stored DDL — the schema declares `page_id TEXT PRIMARY KEY` (an inline
+ * column constraint), not `PRIMARY KEY (page_id)`, and confirmed directly
+ * against a real save that `pragma_table_info` reports that shape as exactly
+ * one column with `pk = 1`, which this checks by count rather than syntax.
+ * Idempotent by construction: a save already rebuilt (or a brand new one,
+ * whose `schema.sql` already declares the wide key) has two `pk`-flagged
+ * columns and is left alone.
+ */
+function widenIngestPagesKey(db: Db): void {
+  const cols = rows<{ name: string; pk: number }>(db.prepare(`SELECT name, pk FROM pragma_table_info('ingest_pages')`).all());
+  if (!cols.length) return; // table does not exist yet (fresh :memory: before schema.sql — should not happen, but not this function's job to create it)
+  const pkCols = cols.filter((c) => c.pk > 0).map((c) => c.name);
+  if (pkCols.length !== 1 || pkCols[0] !== 'page_id') return;
+
+  db.exec(`
+    CREATE TABLE ingest_pages_new (
+      page_id      TEXT NOT NULL,
+      wiki         TEXT NOT NULL,
+      title        TEXT NOT NULL,
+      revision     TEXT NOT NULL DEFAULT '',
+      depth        INTEGER NOT NULL DEFAULT 0,
+      hops         INTEGER NOT NULL DEFAULT 0,
+      score        REAL NOT NULL DEFAULT 0,
+      fetched_at   TEXT NOT NULL DEFAULT '',
+      passb_status TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (wiki, page_id)
+    );
+    INSERT INTO ingest_pages_new (page_id, wiki, title, revision, depth, hops, score, fetched_at, passb_status)
+      SELECT page_id, wiki, title, revision, depth, hops, score, fetched_at, passb_status FROM ingest_pages;
+    DROP TABLE ingest_pages;
+    ALTER TABLE ingest_pages_new RENAME TO ingest_pages;
+  `);
 }
 
 export function jsonGet<T>(raw: unknown, fallback: T): T {

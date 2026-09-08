@@ -359,8 +359,16 @@ CREATE TABLE IF NOT EXISTS prose_blocklist (
 -- result, so a crawl that died mid-run (an expired credential, say) left no
 -- trace of which of its pages still needed the LLM pass at all.
 
+-- `PRIMARY KEY (wiki, page_id)`, not `page_id` alone: Fandom mints page ids
+-- per-wiki from its own auto-increment sequence, so two unrelated wikis
+-- routinely reuse the same numeric id for completely different pages
+-- (confirmed directly: ~95k of Memory Alpha's and Memory Beta's ~160k-226k
+-- ids collide, out of no shared history whatsoever). A world that ingests
+-- more than one wiki — which multi-source ingest into one world makes a real
+-- case, not a hypothetical — would otherwise have one wiki's revision/depth/
+-- passb_status silently clobber the other's every time their ids coincide.
 CREATE TABLE IF NOT EXISTS ingest_pages (
-  page_id      TEXT PRIMARY KEY,
+  page_id      TEXT NOT NULL,
   wiki         TEXT NOT NULL,
   title        TEXT NOT NULL,
   revision     TEXT NOT NULL DEFAULT '',
@@ -368,7 +376,8 @@ CREATE TABLE IF NOT EXISTS ingest_pages (
   hops         INTEGER NOT NULL DEFAULT 0,
   score        REAL NOT NULL DEFAULT 0,
   fetched_at   TEXT NOT NULL DEFAULT '',
-  passb_status TEXT NOT NULL DEFAULT ''
+  passb_status TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (wiki, page_id)
 );
 
 -- The index on `passb_status` is created in `db.ts`'s `migrate()`, not here:

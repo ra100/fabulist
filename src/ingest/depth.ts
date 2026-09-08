@@ -85,6 +85,8 @@ export interface IngestOptions {
   passBConcurrency?: number;
   /** Progress for the long pass, forwarded to `runPassB`'s `onProgress`. */
   onPassBProgress?: (done: number, total: number, title: string) => void;
+  /** Forwarded to `runPassA`. See `PassAOptions.secondary` for the merge policy this drives. */
+  secondary?: boolean;
 }
 
 export interface IngestResult {
@@ -120,6 +122,7 @@ export async function ingest(opts: IngestOptions & { world?: World }): Promise<I
     depth: spec.level,
     wiki: opts.wiki ?? 'wiki',
     voiceCards: spec.voiceCards !== 'none',
+    ...(opts.secondary !== undefined ? { secondary: opts.secondary } : {}),
   });
 
   let passB: IngestResult['passB'] = null;
