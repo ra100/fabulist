@@ -3,15 +3,19 @@ services:
     image: ra100/fabulist:latest
     container_name: fabulist
     restart: unless-stopped
-    # Non-secret runtime config (MCP_OAUTH_ISSUER etc.) rendered by CI from
-    # repo variables and uploaded alongside this file — see deploy/deploy.sh
-    # and .github/workflows/release.yml. `required: false` so a first-ever
-    # `docker compose up` before that upload has run doesn't fail outright:
-    # the app boots with /mcp simply not mounted (buildMcpAuth() returns null
-    # on missing env — src/mcp/auth.ts), same as any other under-configured
-    # profile. Compose already recreates the container whenever this file's
-    # *contents* change, even though the filename itself never does — no
-    # extra restart logic needed here for a config update to take effect.
+    # Runtime config rendered by CI from repo secrets/variables and uploaded
+    # alongside this file — see deploy/deploy.sh and
+    # .github/workflows/release.yml. Carries real secrets now (WORKOS_API_KEY,
+    # WORKOS_COOKIE_PASSWORD for the web login feature), not just public
+    # config — `required: false` is still correct (a first-ever
+    # `docker compose up` before that upload has run boots with both /mcp and
+    # login simply not mounted — buildMcpAuth()/resolveAuthConfig() both
+    # return null on missing env), it just means this file is more sensitive
+    # than its name suggests: never commit a real app.env, and treat the
+    # VPS's own copy with the same care as any secrets file. Compose already
+    # recreates the container whenever this file's *contents* change, even
+    # though the filename itself never does — no extra restart logic needed
+    # here for a config update to take effect.
     env_file:
       - path: app.env
         required: false
