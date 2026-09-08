@@ -13,9 +13,10 @@
  * nodes are structure without information.
  */
 import { World } from '../store/index.ts';
+import { resolveCurrentStory } from '../store/world.ts';
 import { listWorlds, pathsFor } from '../store/worlds.ts';
 import { repairEvents, isLegacyEventId } from '../ingest/repair.ts';
-import { tx } from '../db/db.ts';
+import { openDb, tx } from '../db/db.ts';
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.find((a) => a.startsWith(`--${name}=`))?.split('=').slice(1).join('=');
@@ -40,7 +41,10 @@ worlds here:${worlds.length ? '' : ' (none)'}`);
 }
 
 const paths = pathsFor(slug, dataRoot);
-const world = World.open(paths.dbPath, undefined, paths.imagesDir);
+const db = openDb(paths.dbPath);
+// Event repair reads and writes shared canon rows, not story-scoped state. Bind
+// a World to the current story only because its stores require that handle.
+const world = new World(db, resolveCurrentStory(db), paths.imagesDir);
 
 const before = snapshot();
 console.log(`world "${slug}": ${before.entities.toLocaleString()} entities, ${before.edges.toLocaleString()} edges`);
