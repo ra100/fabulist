@@ -106,6 +106,25 @@ export function resolveAuthConfig(config: Config, env: Record<string, string | u
 /** The sealed session cookie's name. `httpOnly`/`sameSite=lax`/`secure` (when the request looks like it arrived over TLS) — a plain server-set cookie, not a client-readable token. */
 export const SESSION_COOKIE = 'fabulist_session';
 
+/**
+ * How long the *cookie* lives — two weeks, long enough that a returning
+ * player is not asked to log in every visit, short enough that a stolen
+ * laptop is not a permanent key. Lives here rather than in `routes.ts`
+ * (which originally defined it) because `verifySession` below now also
+ * needs it, to re-seal a cookie with the same lifetime after a silent
+ * refresh — a refreshed session should not get a *shorter* remaining life
+ * than a freshly logged-in one just because the refresh happened to land
+ * on day 3 rather than day 0.
+ *
+ * This is deliberately much longer than the *access token* sealed inside
+ * the cookie, which WorkOS issues short-lived (on the order of an hour) by
+ * design — `verifySession`'s whole refresh path exists to paper over that
+ * gap so the cookie's stated 14-day lifetime is what a user actually
+ * experiences, not "logged out roughly every hour because nothing ever
+ * called session.refresh()."
+ */
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 14;
+
 function parseCookies(header: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!header) return out;
@@ -159,18 +178,53 @@ export interface SessionUser {
 
 /**
  * Verifies the session cookie on an incoming request. Returns `null` on
- * anything short of a fully valid, still-live session — an expired token, a
- * tampered cookie, and no cookie at all are all just "not logged in" to a
- * caller, which mirrors `authenticateWithSessionCookie`'s own three-reason
- * failure enum collapsing to one boolean here, since nothing on this side
- * needs to distinguish *why* a caller should be shown the login page.
+ * anything short of a fully valid, still-live session — a tampered cookie,
+ * no cookie at all, or a refresh that itself fails (refresh token also
+ * expired/revoked) are all just "not logged in" to a caller, which mirrors
+ * `authenticateWithSessionCookie`'s own three-reason failure enum
+ * collapsing to one boolean here, since nothing on this side needs to
+ * distinguish *why* a caller should be shown the login page.
+ *
+ * One case is *not* collapsed to "not logged in": an `invalid_jwt` failure
+ * from `session.authenticate()` means the sealed cookie's *access* token
+ * has expired, which WorkOS does on the order of an hour — routine, not a
+ * sign the user should be asked to log in again, since the cookie also
+ * carries a refresh token good for the cookie's own much longer lifetime
+ * (`SESSION_MAX_AGE_SECONDS`, 14 days). That case calls `session.refresh()`
+ * and, on success, writes a freshly sealed cookie via `res` before
+ * returning the user — so the *browser's* stored cookie also advances
+ * past its old access token, not just this one request's view of it. Pass
+ * `res` whenever one is available (every real HTTP request has one); it is
+ * optional only so a caller with no response to write to (none exist in
+ * this codebase today, but the type would otherwise force one everywhere)
+ * still compiles — such a caller silently skips the refresh-cookie
+ * rewrite and would re-hit the same `invalid_jwt` refresh path on its very
+ * next call, which is correct, just less efficient.
  */
-export async function verifySession(auth: AuthConfig, req: IncomingMessage): Promise<SessionUser | null> {
+export async function verifySession(auth: AuthConfig, req: IncomingMessage, res?: ServerResponse): Promise<SessionUser | null> {
   const sealed = readSessionCookie(req);
   if (!sealed) return null;
   const session = auth.workos.userManagement.loadSealedSession({ sessionData: sealed, cookiePassword: auth.cookiePassword });
   const result = await session.authenticate();
-  if (!result.authenticated) return null;
+  // RefreshSessionSuccessResponse omits `accessToken` (it hands back a new
+  // sealed cookie instead, per the SDK's own Omit<..., 'accessToken'> type),
+  // so its `user` is read separately here rather than folding it into
+  // `result` above and sharing one destructure below — the two success
+  // shapes are similar but not the same type.
+  if (!result.authenticated) {
+    if (result.reason !== 'invalid_jwt') return null;
+    const refreshed = await session.refresh();
+    if (!refreshed.authenticated) return null;
+    if (refreshed.sealedSession && res) setSessionCookie(req, res, refreshed.sealedSession, SESSION_MAX_AGE_SECONDS);
+    const { user } = refreshed;
+    return {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      isAdmin: auth.adminEmails.has(user.email.toLowerCase()),
+    };
+  }
   const { user } = result;
   return {
     id: user.id,

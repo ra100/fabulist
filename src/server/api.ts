@@ -1567,7 +1567,7 @@ export function createApiServer(opts: ServerOptions) {
     // the landing page decides between "Sign in" and "Open the chronicle".
     let user: SessionUser | null = null;
     if (authConfig) {
-      user = await verifySession(authConfig, req);
+      user = await verifySession(authConfig, req, res);
       if (!user) {
         const wantsHtml = (req.headers.accept ?? '').includes('text/html') && !url.pathname.startsWith('/api/') && url.pathname !== '/mcp';
         if (webRoot) {

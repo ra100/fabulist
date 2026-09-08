@@ -12,10 +12,9 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AuthConfig } from './config.ts';
-import { clearSessionCookie, setSessionCookie } from './config.ts';
+import { clearSessionCookie, setSessionCookie, SESSION_MAX_AGE_SECONDS } from './config.ts';
 
 const PKCE_COOKIE = 'fabulist_pkce';
-const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 14; // two weeks — long enough that a returning player is not asked to log in every visit, short enough that a stolen laptop is not a permanent key
 
 /** Where `getAuthorizationUrl`'s own `redirect_uri` needs to point — this server's own `/auth/callback`, at whatever host the request actually arrived on, not a hardcoded guess. Mirrors the reasoning in `src/mcp/auth.ts`/`serve.ts` about `mcpResourceUrl`: the URL a redirect names must be one the browser can actually follow back to, which depends on how this server is being reached (localhost in dev, a real domain behind a proxy in production) and cannot be inferred once and cached. */
 function callbackUrl(req: IncomingMessage): string {
