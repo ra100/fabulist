@@ -9,7 +9,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { UnslothAuth, defaultDesktopSecretPath } from '../src/providers/unslothAuth.ts';
+import { UnslothAuth, defaultAgentApiKeyPath, defaultDesktopSecretPath } from '../src/providers/unslothAuth.ts';
 
 interface Call {
   url: string;
@@ -95,6 +95,28 @@ test('a rejected desktop secret falls through to the password path', async () =>
   assert.equal(calls.length, 2, 'desktop-login was tried first, then login');
 });
 
+test('a current local Studio install reuses its scoped agent key without an exported key', async () => {
+  const calls: string[] = [];
+  const fetcher = (async (url: unknown, init?: RequestInit) => {
+    calls.push(String(url));
+    assert.equal(init?.headers && new Headers(init.headers).get('authorization'), 'Bearer cached-local-key');
+    return new Response(JSON.stringify({ data: [{ id: 'bonsai', loaded: true }] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const auth = new UnslothAuth({
+    baseUrl: 'http://127.0.0.1:8888',
+    fetcher,
+    desktopSecretPath: '/missing-desktop-secret',
+    agentApiKeyPath: '/agent-api-key.json',
+    readFile: async (path) => {
+      if (path === '/agent-api-key.json') return JSON.stringify({ servers: { 'http://127.0.0.1:8888': { minted: ['cached-local-key'] } } });
+      throw new Error('ENOENT');
+    },
+  });
+
+  assert.deepEqual(await auth.token(), { token: 'cached-local-key', source: 'agent-cache' });
+  assert.deepEqual(calls, ['http://127.0.0.1:8888/v1/models']);
+});
+
 test('a remote instance with nothing to offer resolves to null, not a throw', async () => {
   // The honest outcome: no key configured, and no local secret can authenticate
   // a machine that is not this one. Saying so beats a 401 at illustration time.
@@ -136,6 +158,8 @@ test('the secret path follows the documented relocation hook', () => {
 
   const standard = defaultDesktopSecretPath({});
   assert.match(standard, /\.unsloth\/studio\/auth\/\.desktop_secret$/, 'the default desktop install location');
+
+  assert.equal(defaultAgentApiKeyPath({ UNSLOTH_STUDIO_HOME: '/opt/unsloth' }), '/opt/unsloth/auth/agent_api_key.json');
 });
 
 test('a blank secret file is treated as absent', async () => {
