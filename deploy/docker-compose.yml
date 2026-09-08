@@ -26,12 +26,36 @@ services:
     ports:
       - "127.0.0.1:4317:4317"
     volumes:
-      # Named volume, not a bind mount: this app's node:sqlite files are WAL
-      # mode (see Dockerfile's own comment on this) and the volume is the
-      # thing docker-fix (be4819f/v0.1.1) actually persists worlds into via
-      # --data-root=/data. Do not `cp` this while the container is running —
-      # see the README's "Copying a save" section for why.
-      - fabulist-data:/data
+      # Bind mount, not a named volume: a named volume's backing directory
+      # sits under Docker's own storage path (typically
+      # /var/lib/docker/volumes/<name>/_data), root-owned and considered an
+      # implementation detail Docker does not promise to keep stable across
+      # versions — getting a file in or out means `docker cp`, never a plain
+      # `scp`/`rsync` to a host path. A bind mount is an ordinary directory
+      # on the VPS's own disk instead: `scp`, `rsync`, `ls`, a cron backup
+      # job, all work on it directly, no `docker` invocation needed. The
+      # container still writes node:sqlite's WAL-mode files here exactly as
+      # before via --data-root=/data — nothing about that changes. Do not
+      # `cp` a *world* file while the container is running regardless of
+      # which volume type this is — see the README's "Copying a save"
+      # section for why; that hazard is about the app's own open database
+      # handle, not about Docker's volume plumbing.
+      #
+      # ${FABULIST_DATA_DIR:-./fabulist-data}: a relative default so this
+      # file discloses no real host path. Compose resolves a relative bind
+      # source against *this compose file's own directory*
+      # (`deploy/fabulist-data` wherever this file actually lives on the
+      # VPS — confirmed against Compose's own docs, not assumed), so the
+      # committed default never needs to name the operator's real layout.
+      # Override by exporting FABULIST_DATA_DIR before `docker compose up`,
+      # or by adding it to app.env (which `env_file` already loads) if an
+      # absolute path elsewhere on the disk is preferred.
+      #
+      # The container runs as root (no USER in the Dockerfile), so files
+      # written here are root-owned on the host. `sudo` to browse/copy
+      # directly, or keep using `docker cp` if that's inconvenient — both
+      # still work.
+      - ${FABULIST_DATA_DIR:-./fabulist-data}:/data
     healthcheck:
       # Any HTTP response below 500 counts as healthy, not just 200. What this
       # needs to answer is "is the process up and serving HTTP", and with
@@ -48,6 +72,3 @@ services:
       retries: 3
       start_period: 10s
 
-volumes:
-  fabulist-data:
-    name: fabulist-data

@@ -22,6 +22,11 @@ coverage/
 *.log
 .scratch/
 
+# deploy/docker-compose.yml's default bind-mount target (FABULIST_DATA_DIR) —
+# real world data if compose is ever run from within a repo checkout rather
+# than a bare deploy directory on the VPS.
+deploy/fabulist-data/
+
 web/dist/
 
 .dsh/
