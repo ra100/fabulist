@@ -10,8 +10,8 @@ anywhere real, and no `oauth_clients`/`oauth_tokens` schema or per-user web iden
 exists yet — see "What's actually built" for the precise line.
 
 Companion to `.design/SAAS-MULTIUSER.md`, not a replacement for it. That document
-covers the hosted web app (login, shared canon, OpenRouter billing, Docker/npm
-distribution). This one covers a different, additive surface: **Claude, ChatGPT, and
+covers the hosted web app (login, shared canon, BYOK provider config,
+Docker/npm distribution — no billing anywhere, see its §7). This one covers a different, additive surface: **Claude, ChatGPT, and
 any other MCP-speaking chat client as the front end, with Fabulist exposed as a remote
 MCP server that is purely the world-model backend.** Same engine, same schema, no new
 storage model — a new transport, and one real new subsystem (OAuth as an authorization
@@ -94,8 +94,6 @@ require `SAAS-MULTIUSER.md`'s identity work first, which does not exist yet):
 - `oauth_clients`/`oauth_tokens` schema, and tying a verified token's `userId` to
   this app's own `world_access`/`stories.owner_user_id` rows (§2) — there is no
   `users` table yet for it to tie to.
-- The ChatGPT `search`/`fetch` compatibility pair (§4) — optional polish, not
-  attempted.
 - Deployment: `fabulist.rast.io`'s nginx config still IP-allowlists everything, and
   this work has not touched it. `/mcp` exists and works; nothing has exposed it
   publicly anywhere.
@@ -311,8 +309,16 @@ Confirmed directly against both platforms' current docs, not assumed:
   that specific ChatGPT surface (rather than the general connector path) matters.
 
 Net: build the tool list in §3 once; it works unmodified for Claude and for ChatGPT's
-general connector path. Add the `search`/`fetch` pair only for the extra ChatGPT
-deep-research polish, as a follow-up, not a blocker.
+general connector path.
+
+**The `search`/`fetch` pair turned out to be required, not polish, and is now
+built.** Predicting it as optional was wrong in one specific way: a ChatGPT
+connector that authenticates successfully but finds no tool named `search` or
+`fetch` reports *no discoverable tools at all* rather than falling back to the
+richer tool list. `search_entities` did not satisfy it — the lookup is by exact
+name. Confirmed against OpenAI's own current docs ("should implement two
+read-only tools: search and fetch") after ChatGPT hit exactly this, while
+Claude, which accepts any tool shape, had connected fine throughout.
 
 ---
 
@@ -326,7 +332,7 @@ deep-research polish, as a follow-up, not a blocker.
 | Interrupt-as-tool-exchange (§3) | M | **done, simpler than planned** | Turned out not to need durable server-side "pending interrupt" storage at all — the web UI's own resolution already works by resubmitting the original text with `overrideIntegrity: true` (no stored interrupt row exists there either), so `resolve_interrupt` does the same: the calling model hands the original text back, no new expiry/storage concern beyond what `narrateExternally`'s pending map already needed |
 | OAuth 2.1 authorization server (§1) | M–L | **done, delegated rather than built** | Not hand-rolled RFC 7591/8414/9728 after all — `src/mcp/auth.ts`'s OAuth mode is a JWT-verification client against any RFC 8414-compliant issuer (AuthKit, confirmed against AuthKit's own docs), so this server never has to *be* the authorization server, only trust one. The dev-token mode is the genuinely small addition, for exercising everything before an AuthKit account exists |
 | `oauth_clients` / `oauth_tokens` tables | S | not started | Needs `SAAS-MULTIUSER.md`'s `users` table to tie to first |
-| ChatGPT `search`/`fetch` compatibility pair | S | not started | Optional, thin wrapper over existing entity/fact/turn reads |
+| ChatGPT `search`/`fetch` compatibility pair | S | **done** | `searchTool`/`fetchTool` in `src/mcp/tools.ts`. Not optional after all: without these exact names a ChatGPT connector discovers *zero* tools. `search` spans entities (via `graph.search`), facts and threads; `fetch` returns full text + metadata for an entity, fact, thread or turn. Ids pass through verbatim rather than wrapped, since `fact:`/`thread:`/`turn:` are already native id prefixes and entities carry a type prefix — an earlier draft added its own prefix and broke `fetch` on a bare turn id, caught by the round-trip test rather than by review |
 
 Nothing here requires touching `entities`/`edges`/`sheets` or any canon/chronicle
 logic. The turn loop, the integrity gate, the frame assembler, the consequence
@@ -338,9 +344,10 @@ is genuinely new work and the one place to budget real time.
 
 ## 6. Sequencing, relative to `SAAS-MULTIUSER.md`
 
-This channel depends on identity existing (§2), but not on billing, sharing, or
-mobile from the other document — it can land in parallel with, or even before,
-`SAAS-MULTIUSER.md` Phase 2 (money), since this channel has no money to move.
+This channel depends on identity existing (§2), but not on billing (there is none —
+`SAAS-MULTIUSER.md` §7), sharing, or mobile from the other document — it can land in
+parallel with, or even before, `SAAS-MULTIUSER.md` Phase 2 (per-user BYOK provider
+config), since this channel has no provider spend of its own to configure.
 
 **Turned out not to be strictly sequential in practice.** Phases A and B below are
 both done, ahead of `SAAS-MULTIUSER.md` Phase 0, because the read tools and
@@ -362,14 +369,16 @@ built, without it.
 3. **MCP Phase B** · done: `propose_turn` (mode b) + the interrupt exchange, and
    `commit_narration`. Verified end to end, including the integrity-gate interrupt
    path, over a real MCP client connection.
-4. **MCP Phase C**: ChatGPT `search`/`fetch` compatibility pair, if wanted. Not
-   started.
+4. **MCP Phase C**: ChatGPT `search`/`fetch` compatibility pair. **Done** — and it
+   was a prerequisite for the ChatGPT channel working at all, not the optional
+   polish §4 originally called it.
 5. **Genuinely still blocked on `SAAS-MULTIUSER.md`**: tying `verified.userId` from
    `auth.ts` to a real `users` row and this app's own per-user world/story access
    control, rather than every valid token seeing whatever world the server has open
    — the one place identity is still notional rather than real.
 
-Independent of `SAAS-MULTIUSER.md` Phases 2–4 (money, sharing, mobile) entirely —
-those are about the hosted web UI; this channel has no UI and no per-token billing
-to speak of, since the chat client's own subscription absorbs the LLM cost.
+Independent of `SAAS-MULTIUSER.md` Phases 2–4 (BYOK provider config, sharing,
+mobile) entirely — those are about the hosted web UI; this channel has no UI and
+no billing to speak of, since the chat client's own subscription absorbs the LLM
+cost and this project charges nothing regardless.
 
