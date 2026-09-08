@@ -86,6 +86,7 @@ jobs:
           MCP_OAUTH_AUDIENCE: ${{ vars.MCP_OAUTH_AUDIENCE }}
           MCP_RESOURCE_URL: ${{ vars.MCP_RESOURCE_URL }}
           AUTH_REQUIRE_LOGIN: ${{ vars.AUTH_REQUIRE_LOGIN }}
+          AUTH_ADMIN_EMAILS: ${{ vars.AUTH_ADMIN_EMAILS }}
           WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
           WORKOS_CLIENT_ID: ${{ vars.WORKOS_CLIENT_ID }}
           WORKOS_COOKIE_PASSWORD: ${{ secrets.WORKOS_COOKIE_PASSWORD }}
@@ -116,9 +117,18 @@ jobs:
           # empty-but-present value would make resolveAuthConfig() try to
           # turn login on with a blank flag instead of correctly treating it
           # as "not configured", and equivalently for buildMcpAuth().
+          #
+          # AUTH_ADMIN_EMAILS is in the list because the admin gate added in
+          # f1089e8 fails closed: an empty allowlist means *nobody* is an
+          # admin, so shipping that gate with no way to populate this variable
+          # would have left the live instance's shared settings — LLM profile,
+          # API keys, blocklist, re-ingest — unreachable by everyone, with no
+          # route back from inside the app. Skipped like the rest when unset,
+          # which is still the safe direction; it just becomes possible to set.
           render_env() {
             for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL \
-                        AUTH_REQUIRE_LOGIN WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD; do
+                        AUTH_REQUIRE_LOGIN AUTH_ADMIN_EMAILS \
+                        WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD; do
               value="${!name:-}"
               [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
             done
