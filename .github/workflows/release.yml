@@ -85,6 +85,10 @@ jobs:
           MCP_OAUTH_ISSUER: ${{ vars.MCP_OAUTH_ISSUER }}
           MCP_OAUTH_AUDIENCE: ${{ vars.MCP_OAUTH_AUDIENCE }}
           MCP_RESOURCE_URL: ${{ vars.MCP_RESOURCE_URL }}
+          AUTH_REQUIRE_LOGIN: ${{ vars.AUTH_REQUIRE_LOGIN }}
+          WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
+          WORKOS_CLIENT_ID: ${{ vars.WORKOS_CLIENT_ID }}
+          WORKOS_COOKIE_PASSWORD: ${{ secrets.WORKOS_COOKIE_PASSWORD }}
         run: |
           set -euo pipefail
           install -m 600 -D /dev/null "$HOME/.ssh/deploy_key"
@@ -102,16 +106,19 @@ jobs:
           ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
             "$SSH_USER@$SSH_DOMAIN" "chmod +x $deploy_path/deploy.sh"
 
-          # Non-secret only, by construction: every value here is a repo
-          # *variable* (vars.*), never a secret — WorkOS's own API key never
-          # leaves GitHub, only the public issuer/audience/resource-url the
-          # running server needs to verify a bearer token against, per
-          # src/mcp/auth.ts. Skips any var left unset entirely rather than
-          # writing e.g. "MCP_OAUTH_ISSUER=" — an empty-but-present value
-          # would make buildMcpAuth() try OAuth mode with a blank issuer
-          # instead of correctly treating it as "not configured".
+          # Some of these are real secrets now (WORKOS_API_KEY,
+          # WORKOS_COOKIE_PASSWORD, for src/auth/config.ts's web login
+          # feature), not just public config like the MCP_* vars below — the
+          # `secrets.*`/`vars.*` split in the `env:` block above is what
+          # actually matters for GitHub's own masking in logs; this list just
+          # controls what reaches app.env. Skips any left unset entirely
+          # rather than writing e.g. "AUTH_REQUIRE_LOGIN=" — an
+          # empty-but-present value would make resolveAuthConfig() try to
+          # turn login on with a blank flag instead of correctly treating it
+          # as "not configured", and equivalently for buildMcpAuth().
           render_env() {
-            for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL; do
+            for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL \
+                        AUTH_REQUIRE_LOGIN WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD; do
               value="${!name:-}"
               [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
             done

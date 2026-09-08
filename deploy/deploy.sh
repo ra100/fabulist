@@ -31,9 +31,11 @@ case "$action" in
   upload-env)
     # Receives the rendered app.env over stdin and writes it atomically (via
     # a temp file + rename) so a mid-write failure, or a `docker compose up`
-    # racing this, can never observe a half-written file. Content only —
-    # never executed, never echoed back (it carries no secrets today, but
-    # treating it as opaque now means this path stays safe if it ever does).
+    # racing this, can never observe a half-written file. `umask 077` before
+    # the write, not after, so the temp file is never briefly
+    # world/group-readable — this carries real secrets now (WORKOS_API_KEY,
+    # WORKOS_COOKIE_PASSWORD), not just public config. Content only — never
+    # executed, never echoed back.
     umask 077
     cat > app.env.tmp
     mv app.env.tmp app.env
