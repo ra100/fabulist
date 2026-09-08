@@ -5,6 +5,7 @@ import {
   setSelectedStoryId,
   type BookTurn,
   type Consequence,
+  type CurrentUser,
   type Edge,
   type Entity,
   type EntityDetail,
@@ -65,6 +66,12 @@ export function App() {
   const [fresh, setFresh] = useState<boolean | null>(null);
   // Non-null when the server predates this bundle. See `checkServerFreshness`.
   const [stale, setStale] = useState<StaleServer | null>(null);
+  // null while unknown, `{ user: null }` when login is off or this browser
+  // has no session — SettingsTab reads `.isAdmin` off this to decide
+  // whether to render the system-wide panels at all (the actual boundary
+  // is server-side: `requireAdmin` in `src/server/api.ts` 403s those routes
+  // regardless of what this renders).
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -104,6 +111,12 @@ export function App() {
   // everything else looks fine, because the symptom appears later and elsewhere.
   useEffect(() => {
     void checkServerFreshness().then(setStale).catch(() => {});
+  }, []);
+
+  // Also independent of the world check: who is signed in has nothing to do
+  // with which world/story is open, and must not block first paint on it.
+  useEffect(() => {
+    void api.auth.me().then((r) => setCurrentUser(r.user)).catch(() => setCurrentUser(null));
   }, []);
 
   if (fresh === null) return <div className="wizard"><div className="wizard-card dim">loading…</div></div>;
@@ -195,7 +208,7 @@ export function App() {
           onResetToWizard={() => setFresh(true)}
         />
       ) : null}
-      {tab === 'settings' ? <SettingsTab state={state} onChanged={refresh} /> : null}
+      {tab === 'settings' ? <SettingsTab state={state} onChanged={refresh} currentUser={currentUser} /> : null}
     </div>
   );
 }
@@ -1429,10 +1442,16 @@ function PalettePicker() {
 
 // ------------------------------------------------------------------ settings
 
-function SettingsTab({ state, onChanged }: { state: State | null; onChanged: () => void }) {
+function SettingsTab({ state, onChanged, currentUser }: { state: State | null; onChanged: () => void; currentUser: CurrentUser | null }) {
   const [style, setStyle] = useState<State['session']['style'] | null>(null);
   const [knobs, setKnobs] = useState<State['session']['knobs'] | null>(null);
   const [anchors, setAnchors] = useState<Array<{ id: number; text: string; note: string }>>([]);
+  // No `currentUser` at all (login off) means there is no admin concept in
+  // play here — the same "off means unrestricted, not restricted" shape
+  // `requireAdmin` uses server-side. Once login is on, only an explicit
+  // `isAdmin` shows the system-wide panels below; a signed-in non-admin
+  // simply never sees the controls whose routes would 403 them anyway.
+  const showSystemSettings = !currentUser || currentUser.isAdmin;
 
   useEffect(() => {
     void api.style().then(setStyle);
@@ -1510,11 +1529,11 @@ function SettingsTab({ state, onChanged }: { state: State | null; onChanged: () 
           </div>
         ) : null}
 
-        <IngestHealthPanel worldTitle={state?.worldTitle} onChanged={onChanged} />
-        <ImageProvidersPanel />
-        <ProvidersPanel />
+        {showSystemSettings ? <IngestHealthPanel worldTitle={state?.worldTitle} onChanged={onChanged} /> : null}
+        {showSystemSettings ? <ImageProvidersPanel /> : null}
+        {showSystemSettings ? <ProvidersPanel /> : null}
         <UsagePanel usage={state?.usage ?? null} />
-        <ConfigPanels />
+        {showSystemSettings ? <ConfigPanels /> : null}
 
         {anchors.length ? (
           <div className="card">

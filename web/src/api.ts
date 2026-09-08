@@ -479,6 +479,23 @@ export interface ServerMeta {
 }
 
 /**
+ * Mirrors `SessionUser` in `src/auth/config.ts`. `isAdmin` is what
+ * `SettingsTab` (App.tsx) reads to decide whether to render the
+ * system-wide panels (providers, config, ingest) at all — those routes
+ * already 403 a non-admin server-side (`requireAdmin` in
+ * `src/server/api.ts`), so hiding the controls client-side is a courtesy,
+ * not the actual boundary; a non-admin poking the API directly still gets
+ * refused.
+ */
+export interface CurrentUser {
+  id: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  isAdmin: boolean;
+}
+
+/**
  * Routes this bundle needs that a server predating them will not have.
  *
  * Only the ones whose absence breaks a *visible* feature belong here: the point
@@ -536,6 +553,8 @@ export async function checkServerFreshness(): Promise<StaleServer | null> {
 
 export const api = {
   meta: () => req<ServerMeta>('/meta'),
+  /** `{ user: null }` is the honest, 200 answer when login is off entirely or this browser has no session — never an error to handle. */
+  auth: { me: () => req<{ user: CurrentUser | null }>('/auth/me') },
   state: () => req<State>('/state'),
   graph: (params: { layer?: string; type?: string; limit?: number } = {}) => {
     const q = new URLSearchParams();
