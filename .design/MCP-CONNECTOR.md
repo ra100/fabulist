@@ -235,11 +235,37 @@ for a similar reason — "no single call does three incompatible jobs."
 | Tool | Mirrors | Returns |
 |---|---|---|
 | `list_worlds` | `GET /api/worlds` | Worlds this user can access (own + shared/public) |
+| `switch_world` | `POST /api/worlds/:slug/switch` | Switches which world every subsequent tool call operates on, effective immediately |
 | `list_stories` | `GET /api/stories` | This user's stories in the current world |
+| `create_story` / `fork_story` / `switch_story` | `POST /api/stories`, `/fork`, `/:id/switch` | Start, branch, or switch which story every subsequent tool call operates on |
+| `list_characters` / `start_story` | `GET /api/setup/characters`, `POST /api/setup/player` | Candidate protagonists, and adopting/inventing one plus an opening line — what turns a freshly ingested world into a playable one |
 | `get_state` | `GET /api/state` | Session, counts, pending consequences, usage |
 | `get_scene_frame` | `src/frame/` assembly | The budgeted frame a Narrator role would receive — entities, threads, recent turns in scope |
 | `get_cast` / `get_entity` | `GET /api/cast`, entity detail | Sheets, locks, appearance |
 | `get_threads` / `get_facts` | existing routes | Tension dials, epistemics |
+
+**Write tools** (thin wrappers over existing write routes/services — every one has a REST equivalent):
+
+| Tool | Mirrors | Notes |
+|---|---|---|
+| `pin_turn` / `regenerate_turn` | `POST /api/turn/:id/pin`, `/regenerate` | Re-render one turn's prose without changing what happened; refuses a pinned turn |
+| `update_sheet` / `lock_sheet_field` | `PUT /api/sheet/:id`, `POST /api/sheet/:id/lock` | Edits identity/contract/voice/condition/appearance; never touches `appearance.referenceImagePath`/`seed` |
+| `update_thread` | `PUT /api/thread/:id` | Tension, status, title, stakes |
+| `add_directive` / `delete_directive` | `POST/DELETE /api/directive[/:id]` | Steers the future; reports the recalculation diff it triggers |
+| `update_style` / `update_knobs` | `PUT /api/style`, `/knobs` | Partial patch, merged over the current values |
+| `add_anchor` | `POST /api/anchor` | Records a style-anchor passage |
+| `generate_portrait` / `generate_scene_illustration` / `delete_illustration` | `POST /api/illustrate/portrait/:id`, `/scene/:turnId`, `DELETE /api/illustration/:id` | Requires an image provider configured |
+| `tick` / `compact` / `close_scene` | `POST /api/tick`, `/compact`, `/scene/close` | World-clock advancement, scene summarisation, manual scene close |
+| `branch_story_to_file` | `POST /api/branch` | Forks the *save file* at a scene to a different path on disk — distinct from `fork_story`, which stays in the same world file |
+| `play` | `POST /api/play` | Server-narrated alternative to `propose_turn`/`commit_narration`: one call, this server's own provider writes the prose |
+| `resolve_wiki` / `plan_world` / `preview_ingest` / `discover_world` / `commit_ingest` | `POST /api/setup/resolve`, `/plan`, `/preview`, `/discover`, `/ingest` | The wiki-ingest wizard; `discover_world`/`commit_ingest` return a job polled with `get_setup_job` |
+| `create_custom_world` / `use_sample_world` | `POST /api/setup/custom`, `/sample` | No-wiki world creation paths |
+| `get_setup_job` / `cancel_setup_job` | `GET /api/setup/job/:id`, `POST .../cancel` | Poll or cooperatively cancel a background setup job |
+| `reset_world` | `POST /api/setup/reset` | Wipes the whole world file — genuinely destructive, no undo |
+
+Excluded by design, same as the REST routes they'd mirror: anything gated by
+`requireAdmin` (provider/image-provider config, blocklist, the ingest-health
+admin panel) — server/deployment configuration, not story content.
 
 **The one write tool that matters:**
 

@@ -14,9 +14,20 @@
  * than reimplementing any part of the turn loop here.
  */
 import type { Engine } from '../loop/engine.ts';
+import { forkStory, branchSave, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
+import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate.ts';
+import type { IllustrationService } from '../illustration/service.ts';
+import { NoImageProviderError } from '../illustration/service.ts';
+import { assignPlayerCharacter, proposeOpening, type ApplyCustomResult } from '../setup/apply.ts';
+import type { SetupService, IngestJobResult, PreviewResult } from '../setup/service.ts';
+import type { CharacterSketch, IngestPlan } from '../setup/planner.ts';
+import type { WikiCandidate } from '../setup/directory.ts';
+import type { DepthMode } from '../ingest/depth.ts';
+import type { Job } from '../setup/jobs.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
-import { listStories } from '../store/world.ts';
+import { createStory, listStories } from '../store/world.ts';
 import { listWorlds } from '../store/worlds.ts';
+import type { Directive, StyleContract, Knobs, VisualStyle, EntityId } from '../domain/types.ts';
 
 export interface McpToolContext {
   /** Resolves fresh per call, exactly like every route in `api.ts` does — a story/world switch must take effect on the next call, not after a restart. */
@@ -24,10 +35,20 @@ export interface McpToolContext {
   engine: Engine;
   currentStory?: CurrentStory;
   currentWorld?: CurrentWorld;
+  /** Undefined on a server built with `setup` disabled — see `requireSetup`'s REST-side equivalent in `src/server/api.ts`. */
+  setup?: SetupService;
+  /** Undefined on a server built with no image provider configured — see `requireIllustrations`'s REST-side equivalent in `src/server/api.ts`. */
+  illustrations?: IllustrationService;
   dataRoot: string;
 }
 
+const VISUAL_STYLES: VisualStyle[] = ['realistic', 'drawing', 'sketch', 'draft', 'animation'];
+function parseVisualStyle(v: unknown): VisualStyle | undefined {
+  return typeof v === 'string' && (VISUAL_STYLES as string[]).includes(v) ? (v as VisualStyle) : undefined;
+}
+
 // -------------------------------------------------------------- read tools
+
 
 export function listWorldsTool(ctx: McpToolContext) {
   const worlds = listWorlds(ctx.dataRoot);
@@ -37,12 +58,89 @@ export function listWorldsTool(ctx: McpToolContext) {
   };
 }
 
+/**
+ * `switch_world`. The MCP-side counterpart of `POST /api/worlds/:slug/switch`
+ * (`src/server/api.ts`) — same underlying `CurrentWorld.switchTo`, same
+ * "takes effect immediately, no restart" semantics, because `world()`/`engine`
+ * everywhere else in this file are live getters over it, not a `World`
+ * captured once. Without this tool a calling model can *see* every world via
+ * `list_worlds` but has no way to act on that list — every other tool only
+ * ever reads whichever world happens to be open, which is the gap this closes.
+ *
+ * `currentWorld` is optional on `McpToolContext` (undefined whenever this
+ * server was built with a single fixed `World` rather than a `CurrentWorld` —
+ * see `createApiServer`'s own `world` option), so this throws a clear,
+ * actionable message rather than a null-deref when that is the case.
+ */
+export function switchWorldTool(ctx: McpToolContext, args: { slug: string }) {
+  if (!ctx.currentWorld) {
+    throw new Error('switch_world: this server has no switchable world (a single fixed world was configured at startup)');
+  }
+  ctx.currentWorld.switchTo(args.slug);
+  return { current: ctx.currentWorld.slug() };
+}
+
 export function listStoriesTool(ctx: McpToolContext) {
   const world = ctx.world();
   const stories = listStories(world.db);
   return {
     stories: stories.map((s) => ({ ...s, current: s.id === world.storyId })),
   };
+}
+
+/**
+ * `create_story`. The MCP-side counterpart of `POST /api/stories` — a fresh,
+ * non-overlapping story sharing only this world's canon. Does not switch to
+ * it, matching the REST route's own documented behaviour: the caller decides
+ * whether to open it immediately (`switch_story`) or leave the current story
+ * as it is.
+ *
+ * Ownership (`owner_user_id`) is deliberately left unset here — see
+ * `.design/MCP-CONNECTOR.md` and this tool's own test for why: the REST
+ * route attributes a created story to the verified session user, but no
+ * such identity reaches an individual MCP tool call today (the OAuth
+ * verification in `handleMcpRequest` authenticates the *connection*, not
+ * each call), and this server currently only runs with login off in
+ * practice. Wiring per-user ownership through here is future work, not a
+ * silent gap this tool should paper over with a wrong owner.
+ */
+export function createStoryTool(ctx: McpToolContext, args: { title?: string }) {
+  const world = ctx.world();
+  const story = createStory(world.db, { title: args.title?.trim() ?? '' });
+  return { story };
+}
+
+/**
+ * `fork_story`. The MCP-side counterpart of `POST /api/stories/fork`: omit
+ * `atScene` for a fresh copy sharing canon only, pass it to copy that
+ * story's own chronicle up to that scene boundary first (a "branch from
+ * here" / "continue from an earlier point"). `fromStoryId` defaults to
+ * whichever story is current in the open world.
+ */
+export function forkStoryTool(ctx: McpToolContext, args: { fromStoryId?: string; title?: string; atScene?: number }) {
+  const world = ctx.world();
+  const opts: ForkOptions = { fromStoryId: args.fromStoryId || world.storyId };
+  if (args.title !== undefined) opts.title = args.title;
+  if (args.atScene !== undefined) opts.atScene = args.atScene;
+  return forkStory(world, opts);
+}
+
+/**
+ * `switch_story`. The MCP-side counterpart of `POST /api/stories/:id/switch`
+ * — same underlying `CurrentStory.switchTo`, same "takes effect immediately"
+ * semantics `switch_world` documents above, one level down: which *story*
+ * within the currently open world every subsequent tool call operates on.
+ *
+ * `currentStory` is optional on `McpToolContext` for the same reason
+ * `currentWorld` is (a server built over a single fixed `World` has no story
+ * management at all — see `requireCurrentStory`'s REST-side equivalent).
+ */
+export function switchStoryTool(ctx: McpToolContext, args: { id: string }) {
+  if (!ctx.currentStory) {
+    throw new Error('switch_story: this server has no story management enabled (a single fixed world was configured at startup)');
+  }
+  ctx.currentStory.switchTo(args.id);
+  return { current: args.id };
 }
 
 export function getStateTool(ctx: McpToolContext) {
@@ -101,6 +199,67 @@ export function getFactsTool(ctx: McpToolContext, args: { limit?: number }) {
 export function getBookTool(ctx: McpToolContext, args: { limit?: number }) {
   const world = ctx.world();
   return { turns: world.chronicle.turns({ limit: args.limit ?? 50 }) };
+}
+
+// ---------------------------------------------- starting a story after ingest
+
+/**
+ * `list_characters`. The MCP-side counterpart of `GET /api/setup/characters`
+ * — candidate protagonists for `start_story`, ranked by connectedness (the
+ * same "who matters most in this corner of the world" signal the REST route
+ * uses), each flagged with whether it already has vows a player would
+ * inherit. A world just ingested (like this one, right after a wiki crawl)
+ * has entities but no protagonist yet — this is how a calling model finds
+ * out who is available to *become* one, before calling `start_story`.
+ */
+export function listCharactersTool(ctx: McpToolContext) {
+  const world = ctx.world();
+  const characters = world.graph
+    .list({ type: 'Character', limit: 60 })
+    .map((e) => {
+      const sheet = world.cast.get(e.id);
+      return {
+        id: e.id,
+        name: e.name,
+        summary: e.summary,
+        salience: e.salience,
+        hasVows: (sheet?.contract.vows.length ?? 0) > 0,
+        connections: world.graph.neighbours(e.id).length,
+      };
+    })
+    .sort((a, b) => b.connections - a.connections);
+  return { characters };
+}
+
+/**
+ * `start_story`. The MCP-side counterpart of `POST /api/setup/player` —
+ * sets (or replaces) the protagonist of the current story and proposes an
+ * opening line to play from. This is the tool that actually gets a freshly
+ * ingested world (entities and edges, no player, no opening) into a playable
+ * state; without it, `list_characters` can only look, never act.
+ *
+ * `existing` names one of `list_characters`' results to adopt as-is; leave
+ * it unset (with `name`/`role`) to place an original character instead — see
+ * `assignPlayerCharacter`'s own doc comment for exactly how each is built.
+ * `setup` is optional on `McpToolContext` for the same reason `currentWorld`/
+ * `currentStory` are (see `requireSetup`'s REST-side equivalent).
+ */
+export function startStoryTool(
+  ctx: McpToolContext,
+  args: { existing?: string; name?: string; role?: string; goals?: string[]; vows?: Array<{ text: string; rank: number }> },
+) {
+  if (!ctx.setup) {
+    throw new Error('start_story: this server has no setup service enabled (a single fixed world was configured at startup)');
+  }
+  const world = ctx.world();
+  const assigned = assignPlayerCharacter(world, {
+    existing: args.existing ?? null,
+    name: args.name ?? '',
+    role: args.role ?? '',
+    goals: args.goals ?? [],
+    vows: args.vows ?? [],
+  });
+  return { ...assigned, opening: proposeOpening(world) };
 }
 
 // ---------------------------------------------------------- the turn tools
@@ -238,6 +397,388 @@ export async function resolveInterruptTool(
   // what overrideIntegrity bypasses — so 'interrupted' here would mean the
   // engine's own invariant broke, not a normal outcome to report gracefully.
   throw new Error(`resolve_interrupt: unexpected outcome kind ${(outcome as { kind: string }).kind} after override`);
+}
+
+// -------------------------------------------- other turn/session write tools
+
+/**
+ * `play`. The MCP-side counterpart of `POST /api/play` — the *server*-
+ * narrated alternative to `propose_turn`/`commit_narration`: this server's
+ * own configured Narrator provider writes the prose (billed to whatever
+ * profile is configured here, not the calling model), and the finished turn
+ * comes back in one call. Exists alongside the split flow for a caller that
+ * would rather not implement two round trips, or whose own model should not
+ * be the one writing this world's prose style.
+ */
+export async function playTool(ctx: McpToolContext, args: { input: string; overrideIntegrity?: boolean }) {
+  const world = ctx.world();
+  const outcome = await ctx.engine.takeTurn(args.input, { overrideIntegrity: args.overrideIntegrity === true, world });
+  let seeded = 0;
+  let tick: ReturnType<typeof tickConsequences> | null = null;
+  if (outcome.kind === 'narrated') {
+    const { seedConsequences } = await import('../consequence/propagate.ts');
+    seeded = seedConsequences(world, outcome.delta, outcome.commit.events).length;
+    tick = tickConsequences(world);
+    worldTick(world);
+  }
+  return { outcome, seeded, tick };
+}
+
+/** `pin_turn`. The MCP-side counterpart of `POST /api/turn/:id/pin` \u2014 a pinned turn's prose survives `regenerate_turn`/compaction untouched. */
+export function pinTurnTool(ctx: McpToolContext, args: { id: string; pinned?: boolean }) {
+  const world = ctx.world();
+  world.chronicle.setPinned(args.id, args.pinned !== false);
+  return world.chronicle.getTurn(args.id);
+}
+
+/**
+ * `regenerate_turn`. The MCP-side counterpart of `POST /api/turn/:id/regenerate`
+ * \u2014 re-renders one turn's prose in place; nothing about what happened changes,
+ * only how it reads (DESIGN \u00a77.2's "prose is a view of state"). Throws on a
+ * pinned turn rather than silently no-opping.
+ */
+export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string; note?: string }) {
+  const world = ctx.world();
+  return ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
+}
+
+/**
+ * `update_sheet`. The MCP-side counterpart of `PUT /api/sheet/:id` \u2014 edits a
+ * character's identity/contract/voice/condition/locks. `appearance` never
+ * touches `referenceImagePath`/`seed` through this general editor (those two
+ * fields are written exactly once, by `generate_portrait` on success) \u2014 same
+ * strip the REST route applies, so an edit to the description text cannot
+ * accidentally invalidate a reference that took a real provider call to produce.
+ */
+export function updateSheetTool(
+  ctx: McpToolContext,
+  args: {
+    id: string;
+    identity?: Record<string, unknown>;
+    contract?: Record<string, unknown>;
+    voice?: Record<string, unknown>;
+    condition?: Record<string, unknown>;
+    appearance?: Record<string, unknown>;
+    locks?: string[];
+  },
+) {
+  const world = ctx.world();
+  const existing = world.cast.get(args.id);
+  if (!existing) throw new Error(`update_sheet: no sheet ${args.id}`);
+  world.cast.put({
+    ...existing,
+    identity: (args.identity as unknown as typeof existing.identity) ?? existing.identity,
+    contract: (args.contract as unknown as typeof existing.contract) ?? existing.contract,
+    voice: (args.voice as unknown as typeof existing.voice) ?? existing.voice,
+    condition: (args.condition as unknown as typeof existing.condition) ?? existing.condition,
+    appearance: args.appearance
+      ? { ...existing.appearance, ...args.appearance, referenceImagePath: existing.appearance.referenceImagePath, seed: existing.appearance.seed }
+      : existing.appearance,
+    locks: args.locks ?? existing.locks,
+  });
+  return world.cast.get(args.id);
+}
+
+/** `lock_sheet_field`. The MCP-side counterpart of `POST /api/sheet/:id/lock` \u2014 marks (or unmarks) one field path as author-locked, exempt from future auto-drift. */
+export function lockSheetFieldTool(ctx: McpToolContext, args: { id: string; path: string; locked?: boolean }) {
+  const world = ctx.world();
+  if (args.locked === false) world.cast.unlock(args.id, args.path);
+  else world.cast.lock(args.id, args.path);
+  return world.cast.get(args.id);
+}
+
+/** `update_thread`. The MCP-side counterpart of `PUT /api/thread/:id` \u2014 edits a narrative thread's tension, status, title, or stakes. */
+export function updateThreadTool(
+  ctx: McpToolContext,
+  args: { id: string; tension?: number; status?: string; title?: string; stakes?: string },
+) {
+  const world = ctx.world();
+  const { id, ...patch } = args;
+  world.threads.update(id, patch as never);
+  return world.threads.get(id);
+}
+
+/**
+ * `add_directive`. The MCP-side counterpart of `POST /api/directive` \u2014
+ * steers the future (a scene/chapter/campaign-scoped nudge) and reports the
+ * recalculation it triggers, because silent recalculation in a system with
+ * offscreen machinery is how you stop trusting it (see `applyDirectiveRecalc`).
+ */
+export function addDirectiveTool(
+  ctx: McpToolContext,
+  args: { text: string; scope?: Directive['scope']; strength?: Directive['strength']; lifetimeScenes?: number },
+) {
+  const world = ctx.world();
+  const created = world.directives.create({
+    text: args.text,
+    scope: args.scope ?? 'chapter',
+    strength: args.strength ?? 'push',
+    lifetimeScenes: args.lifetimeScenes ?? 5,
+    status: 'active',
+    createdScene: world.session.get().scene,
+  });
+  const diff = applyDirectiveRecalc(world, created.id, created.text);
+  return {
+    directive: created,
+    diff: {
+      ...diff,
+      raisedThreadTitles: diff.raisedThreads.map((tid) => world.threads.get(tid)?.title ?? tid),
+      loweredThreadTitles: diff.loweredThreads.map((tid) => world.threads.get(tid)?.title ?? tid),
+    },
+  };
+}
+
+/** `delete_directive`. The MCP-side counterpart of `DELETE /api/directive/:id` \u2014 retires (never hard-deletes) a directive. */
+export function deleteDirectiveTool(ctx: McpToolContext, args: { id: string }) {
+  const world = ctx.world();
+  world.directives.setStatus(args.id, 'retired');
+  return { ok: true };
+}
+
+/** `update_style`. The MCP-side counterpart of `PUT /api/style` \u2014 merges a partial patch over the current story's style contract (POV, tense, register, ...). */
+export function updateStyleTool(ctx: McpToolContext, args: Partial<StyleContract>) {
+  const world = ctx.world();
+  const cur = world.session.get();
+  const next = { ...cur.style, ...args };
+  world.session.set({ style: next });
+  return next;
+}
+
+/** `update_knobs`. The MCP-side counterpart of `PUT /api/knobs` \u2014 merges a partial patch over the current story's dials (canon fidelity, danger, pacing, ...). */
+export function updateKnobsTool(ctx: McpToolContext, args: Partial<Knobs>) {
+  const world = ctx.world();
+  const cur = world.session.get();
+  const next = { ...cur.knobs, ...args };
+  world.session.set({ knobs: next });
+  return next;
+}
+
+/** `add_anchor`. The MCP-side counterpart of `POST /api/anchor` \u2014 records a style-anchor passage (prose the player liked, to steer future generation toward). */
+export function addAnchorTool(ctx: McpToolContext, args: { text: string; note?: string }) {
+  const world = ctx.world();
+  world.chronicle.addAnchor(args.text, args.note ?? '', world.session.get().scene);
+  return { ok: true };
+}
+
+/**
+ * `generate_portrait`. The MCP-side counterpart of `POST /api/illustrate/portrait/:id`
+ * \u2014 generates or regenerates a character's portrait; sets `appearance.referenceImagePath`
+ * on success. `illustrations` is optional on `McpToolContext` for the same reason
+ * `setup`/`currentWorld` are (see `requireIllustrations`'s REST-side equivalent).
+ */
+export async function generatePortraitTool(ctx: McpToolContext, args: { entityId: string; visualStyle?: string }) {
+  if (!ctx.illustrations) {
+    throw new Error('generate_portrait: this server has no image provider configured');
+  }
+  const style = parseVisualStyle(args.visualStyle);
+  try {
+    return await ctx.illustrations.illustratePortrait(args.entityId, style, ctx.world());
+  } catch (err) {
+    if (err instanceof NoImageProviderError) throw new Error('generate_portrait: no image provider configured');
+    throw err;
+  }
+}
+
+/**
+ * `generate_scene_illustration`. The MCP-side counterpart of `POST /api/illustrate/scene/:turnId`
+ * \u2014 illustrates an already-committed turn, from the cast/location its own delta recorded
+ * (never a player-supplied list, so the image depicts what actually happened).
+ */
+export async function generateSceneIllustrationTool(ctx: McpToolContext, args: { turnId: string; visualStyle?: string }) {
+  if (!ctx.illustrations) {
+    throw new Error('generate_scene_illustration: this server has no image provider configured');
+  }
+  const world = ctx.world();
+  const turn = world.chronicle.getTurn(args.turnId);
+  if (!turn) throw new Error(`generate_scene_illustration: no turn ${args.turnId}`);
+  const style = parseVisualStyle(args.visualStyle);
+  const firstEvent = turn.delta?.events[0];
+  const locationId = (firstEvent?.locationId ?? world.session.get().currentLocationId ?? null) as EntityId | null;
+  const presentIds = (firstEvent?.participants ?? []) as EntityId[];
+  try {
+    return await ctx.illustrations.illustrateScene(args.turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style, world);
+  } catch (err) {
+    if (err instanceof NoImageProviderError) throw new Error('generate_scene_illustration: no image provider configured');
+    throw err;
+  }
+}
+
+/** `delete_illustration`. The MCP-side counterpart of `DELETE /api/illustration/:id`. */
+export function deleteIllustrationTool(ctx: McpToolContext, args: { id: string }) {
+  ctx.world().illustrations.delete(args.id);
+  return { ok: true };
+}
+
+/** `tick`. The MCP-side counterpart of `POST /api/tick` \u2014 advances seeded consequences toward firing and runs whatever else the world clock does per tick. */
+export function tickTool(ctx: McpToolContext) {
+  const world = ctx.world();
+  const tick = tickConsequences(world);
+  const notes = worldTick(world);
+  return { tick, notes };
+}
+
+/**
+ * `compact`. The MCP-side counterpart of `POST /api/compact` \u2014 summarise one
+ * closed scene on demand (pass `scene`), or catch up everything that closed
+ * unsummarised (omit it).
+ */
+export async function compactTool(ctx: McpToolContext, args: { scene?: number; force?: boolean }) {
+  const world = ctx.world();
+  const compactor = ctx.engine.compaction();
+  if (typeof args.scene === 'number') {
+    const summary = await compactor.summariseScene(args.scene, args.force === true);
+    return { scene: args.scene, summary };
+  }
+  return compactor.backfill(world.session.get().scene);
+}
+
+/**
+ * `close_scene`. The MCP-side counterpart of `POST /api/scene/close` \u2014 closes
+ * the current scene by hand (the CLI's `/scene`). Without this, scene stays 1
+ * forever unless the extractor happens to set `sceneAdvance`, and hierarchical
+ * compaction never runs.
+ */
+export async function closeSceneTool(ctx: McpToolContext) {
+  const world = ctx.world();
+  const before = world.session.get();
+  const result = await ctx.engine.compaction().onSceneClosed(before.scene);
+  world.session.set({ scene: before.scene + 1, turn: 0 });
+  world.chronicle.upsertScene(before.scene + 1, { chapter: ctx.engine.compaction().chapterOf(before.scene + 1) });
+  const summary = world.chronicle.scenes().find((s) => s.scene === before.scene)?.summary ?? null;
+  return {
+    closedScene: before.scene,
+    nowScene: before.scene + 1,
+    summary,
+    scenesSummarised: result.scenesSummarised,
+    chaptersSummarised: result.chaptersSummarised,
+  };
+}
+
+/**
+ * `branch_story_to_file`. The MCP-side counterpart of `POST /api/branch` \u2014
+ * forks the *save file* at a scene into a different path on disk, leaving
+ * the source completely untouched. This is a different operation from
+ * `fork_story` (which branches within the same world file): a genuinely
+ * separate save the caller can hand off or archive independently.
+ */
+export function branchStoryToFileTool(ctx: McpToolContext, args: { atScene: number; toPath: string; overwrite?: boolean }) {
+  const world = ctx.world();
+  const fromPath = world.db.prepare(`PRAGMA database_list`).get() as { file?: string } | undefined;
+  if (!fromPath?.file) throw new Error('branch_story_to_file: cannot branch an in-memory save');
+  const opts: BranchOptions = { fromPath: fromPath.file, toPath: args.toPath, atScene: args.atScene, overwrite: args.overwrite === true };
+  return branchSave(opts);
+}
+
+// ---------------------------------------------------- setup wizard write tools
+
+/** `resolve_wiki`. The MCP-side counterpart of `POST /api/setup/resolve` \u2014 resolves free text to candidate wikis. */
+export async function resolveWikiTool(ctx: McpToolContext, args: { query: string }) {
+  if (!ctx.setup) throw new Error('resolve_wiki: this server has no setup service enabled');
+  return { candidates: await ctx.setup.resolveWiki(args.query.trim()) };
+}
+
+/** `plan_world`. The MCP-side counterpart of `POST /api/setup/plan` \u2014 free text plus a resolved wiki (from resolve_wiki) becomes an editable ingest plan. */
+export async function planWorldTool(ctx: McpToolContext, args: { wish: string; wiki: WikiCandidate }) {
+  if (!ctx.setup) throw new Error('plan_world: this server has no setup service enabled');
+  return ctx.setup.plan(args.wish.trim(), args.wiki);
+}
+
+/**
+ * `preview_ingest`. The MCP-side counterpart of `POST /api/setup/preview` \u2014
+ * crawls and reports what an ingest would cost, without writing anything.
+ * The returned `previewKey` is what `commit_ingest` needs, so confirming a
+ * preview never pays for the crawl twice.
+ */
+export async function previewIngestTool(
+  ctx: McpToolContext,
+  args: { baseUrl: string; seeds: string[]; mode?: DepthMode; excludeCategories?: string[]; title?: string },
+) {
+  if (!ctx.setup) throw new Error('preview_ingest: this server has no setup service enabled');
+  return ctx.setup.preview(args.baseUrl, args.seeds, args.mode ?? 'mid', args.excludeCategories ?? [], args.title ?? '');
+}
+
+/**
+ * `discover_world`. The MCP-side counterpart of `POST /api/setup/discover` \u2014
+ * same crawl as `preview_ingest`, run as a background job (poll with
+ * `get_setup_job`) so a slow mid/deep crawl reports real progress instead of
+ * a blind wait. Also refines the character sketch against what the crawl
+ * actually found.
+ */
+export function discoverWorldTool(
+  ctx: McpToolContext,
+  args: {
+    baseUrl: string;
+    seeds: string[];
+    mode?: DepthMode;
+    character?: CharacterSketch;
+    excludeCategories?: string[];
+    title?: string;
+  },
+): Job<PreviewResult & { previewKey: string; character: CharacterSketch }> {
+  if (!ctx.setup) throw new Error('discover_world: this server has no setup service enabled');
+  const sketch = args.character ?? { existing: null, name: '', role: '', goals: [], vows: [] };
+  return ctx.setup.startDiscover(args.baseUrl, args.seeds, args.mode ?? 'mid', sketch, args.excludeCategories ?? [], args.title ?? '');
+}
+
+/**
+ * `commit_ingest`. The MCP-side counterpart of `POST /api/setup/ingest` \u2014
+ * commits a previewed scope (from `preview_ingest`/`discover_world`'s
+ * `previewKey`) as a background job (poll with `get_setup_job`). This is the
+ * step that actually writes canon.
+ */
+export function commitIngestTool(
+  ctx: McpToolContext,
+  args: { previewKey: string; character?: CharacterSketch; style?: Partial<IngestPlan['style']>; opening?: string },
+): Job<IngestJobResult> {
+  if (!ctx.setup) throw new Error('commit_ingest: this server has no setup service enabled');
+  return ctx.setup.startIngest(args.previewKey, {
+    character: args.character ?? { existing: null, name: '', role: '', goals: [], vows: [] },
+    style: args.style ?? {},
+    opening: args.opening ?? '',
+  });
+}
+
+/** `create_custom_world`. The MCP-side counterpart of `POST /api/setup/custom` \u2014 builds an authored world from a description, no wiki involved. Runs as a background job (poll with `get_setup_job`). */
+export function createCustomWorldTool(
+  ctx: McpToolContext,
+  args: { description: string; style?: Partial<IngestPlan['style']> },
+): Job<ApplyCustomResult> {
+  if (!ctx.setup) throw new Error('create_custom_world: this server has no setup service enabled');
+  return ctx.setup.startCustomWorld(args.description.trim(), args.style);
+}
+
+/** `use_sample_world`. The MCP-side counterpart of `POST /api/setup/sample` \u2014 the built-in example, for trying the engine with no setup at all. */
+export function useSampleWorldTool(ctx: McpToolContext) {
+  if (!ctx.setup) throw new Error('use_sample_world: this server has no setup service enabled');
+  return ctx.setup.useSample();
+}
+
+/** `get_setup_job`. Polls a job started by discover_world/commit_ingest/create_custom_world. The MCP-side counterpart of `GET /api/setup/job/:id`. */
+export function getSetupJobTool(ctx: McpToolContext, args: { id: string }) {
+  if (!ctx.setup) throw new Error('get_setup_job: this server has no setup service enabled');
+  const job = ctx.setup.jobs.get(args.id);
+  if (!job) throw new Error(`get_setup_job: no such job ${args.id}`);
+  return job;
+}
+
+/** `cancel_setup_job`. The MCP-side counterpart of `POST /api/setup/job/:id/cancel` \u2014 cooperative cancellation; keeps whatever the job already wrote. */
+export function cancelSetupJobTool(ctx: McpToolContext, args: { id: string }) {
+  if (!ctx.setup) throw new Error('cancel_setup_job: this server has no setup service enabled');
+  return { cancelled: ctx.setup.jobs.cancel(args.id) };
+}
+
+/**
+ * `reset_world`. The MCP-side counterpart of `POST /api/setup/reset` \u2014 wipes
+ * the whole world file (canon included, every story dropped, one blank story
+ * created to replace them) so the wizard can be run again. Genuinely
+ * destructive \u2014 there is no undo, and unlike `create_story`/`fork_story` this
+ * discards every existing story in the file, not just the current one.
+ */
+export function resetWorldTool(ctx: McpToolContext) {
+  if (!ctx.setup) throw new Error('reset_world: this server has no setup service enabled');
+  const storyId = ctx.setup.reset();
+  ctx.currentStory?.switchTo(storyId);
+  return { ok: true, storyId };
 }
 
 // ------------------------------------------- ChatGPT search/fetch compatibility
