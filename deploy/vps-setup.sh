@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# One-time setup for fabulist on this VPS.
+# One-time *bootstrap* for fabulist on this VPS — installs Docker and starts
+# the container for the first time. Not the ongoing sync mechanism: every
+# tag push re-syncs deploy.sh/docker-compose.yml itself via scp from
+# release.yml's deploy job, so this script's own copy step only matters
+# before that pipeline has run even once.
 #
 # Assumes the reverse proxy (openresty) and the *.rast.io wildcard TLS cert
 # already exist and are managed outside this script — this box terminates
