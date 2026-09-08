@@ -37,6 +37,23 @@ export interface Config {
   imageProfile?: string;
   /** Extra image-provider specs beyond `IMAGE_PRESETS`, same override shape as `providers`. */
   imageProviders?: Record<string, ImageProviderSpec>;
+  /**
+   * Require a signed-in user before any route (other than the login flow
+   * itself) responds. Off by default — a bare `pnpm serve` on a laptop with
+   * no login screen in the way is the whole point of the local/offline
+   * story this app tells everywhere else (README's "everything runs offline
+   * on a deterministic mock provider by default"), and provider setup
+   * already gates what a local run can *do*; this gate is about who may
+   * reach it at all, which only matters once the server is reachable by
+   * more than the one person running it.
+   *
+   * `AUTH_REQUIRE_LOGIN=true`/`false` in the environment overrides this —
+   * see `src/auth/config.ts` — because a real deployment
+   * (fabulist.rast.io) should not depend on a JSON file nobody re-reads at
+   * deploy time to stay correctly configured; env is what CI/the deploy
+   * script actually sets.
+   */
+  requireLogin?: boolean;
 }
 
 export function defaultConfig(): Config {

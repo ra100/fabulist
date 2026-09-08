@@ -59,6 +59,7 @@
   "dependencies": {
     "7zip-min": "^3.0.1",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "@workos-inc/node": "^10.13.0",
     "jose": "^6.2.12",
     "sax": "^1.6.1",
     "zod": "^3.25.76"

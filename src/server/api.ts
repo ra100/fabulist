@@ -33,6 +33,9 @@ import { composePortraitPrompt, composeScenePrompt } from '../illustration/compo
 import type { McpAuth } from '../mcp/auth.ts';
 import { handleMcpRequest, protectedResourceMetadata } from '../mcp/server.ts';
 import type { McpToolContext } from '../mcp/tools.ts';
+import type { AuthConfig, SessionUser } from '../auth/config.ts';
+import { verifySession } from '../auth/config.ts';
+import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 
 export interface ServerOptions {
   /**
@@ -76,6 +79,15 @@ export interface ServerOptions {
   mcpAuth?: McpAuth;
   /** The externally-reachable URL of the `/mcp` route, required alongside `mcpAuth` \u2014 what the OAuth resource-indicator and metadata point back at. */
   mcpResourceUrl?: string;
+  /**
+   * Enables the web login flow (`/auth/login`, `/auth/callback`,
+   * `/auth/logout`) and gates every other route behind a valid session
+   * cookie. Absent means what it always meant before this existed: no
+   * login screen, no gate, every route open — see `src/auth/config.ts`'s
+   * `resolveAuthConfig` for how `serve.ts` decides whether to pass this at
+   * all.
+   */
+  authConfig?: AuthConfig;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -94,6 +106,8 @@ interface RouteContext {
   url: URL;
   body: unknown;
   params: Record<string, string>;
+  /** The signed-in user, once the session gate already verified them for this request — `null` when login is off entirely (see `src/auth/config.ts`), never re-verified here since the gate above already paid that cost. */
+  user: SessionUser | null;
 }
 
 const MIME: Record<string, string> = {
@@ -166,6 +180,19 @@ route('GET', '/api/meta', (_req, res) => {
     routes: routes.map((r) => `${r.method} ${r.path}`).sort(),
     startedAt: STARTED_AT,
   });
+});
+
+/**
+ * The web UI's own login-state check, distinct from `verifySession` at the
+ * dispatch layer: that gate already ran and either let this request through
+ * (login off, or a valid session) or 401'd it. This route exists so the
+ * frontend can render "signed in as X" / a login link without every other
+ * route needing to say so, and so it degrades to `{ user: null }` rather
+ * than a 404 when login is off entirely — a page that always calls this on
+ * load should not need to know whether login is even configured.
+ */
+route('GET', '/api/auth/me', (_req, res, { user }) => {
+  send(res, 200, { user });
 });
 
 route('GET', '/api/state', (_req, res, { world }) => {
@@ -1292,7 +1319,20 @@ function serveStatic(res: ServerResponse, webRoot: string, pathname: string): bo
 }
 
 export function createApiServer(opts: ServerOptions) {
-  const { engine, webRoot, setup, registry, config, illustrations, imageRegistry, currentStory, currentWorld, mcpAuth, mcpResourceUrl } = opts;
+  const {
+    engine,
+    webRoot,
+    setup,
+    registry,
+    config,
+    illustrations,
+    imageRegistry,
+    currentStory,
+    currentWorld,
+    mcpAuth,
+    mcpResourceUrl,
+    authConfig,
+  } = opts;
   const dataRoot = opts.dataRoot ?? 'data';
   const getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
   // Built once per server, not per request: the tools themselves are stateless
@@ -1321,6 +1361,10 @@ export function createApiServer(opts: ServerOptions) {
       return send(res, 200, protectedResourceMetadata(mcpAuth, mcpResourceUrl));
     }
 
+    // /mcp carries its own bearer-token check (src/mcp/auth.ts) — a
+    // fundamentally different credential than the web session cookie below,
+    // since the caller is Claude/ChatGPT, not a browser with a cookie jar.
+    // It is deliberately reached *before* the session gate, not gated by it.
     if (mcpAuth && mcpToolContext && mcpResourceUrl && url.pathname === '/mcp') {
       try {
         const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
@@ -1329,6 +1373,43 @@ export function createApiServer(opts: ServerOptions) {
         if (!res.headersSent) send(res, 500, { error: err instanceof Error ? err.message : String(err) });
       }
       return;
+    }
+
+    // Login itself must be reachable with no session — that is the entire
+    // point of these three routes — so they sit ahead of the gate below,
+    // not behind it. Unauthenticated by design, the same reasoning as the
+    // MCP metadata route just above.
+    if (authConfig && url.pathname === '/auth/login') {
+      await handleLogin(authConfig, req, res);
+      return;
+    }
+    if (authConfig && url.pathname === '/auth/callback') {
+      await handleCallback(authConfig, req, res, url);
+      return;
+    }
+    if (authConfig && url.pathname === '/auth/logout' && req.method === 'POST') {
+      handleLogout(res);
+      return;
+    }
+
+    // The session gate. Everything below this line — every /api/ route and
+    // every static asset — requires a verified session when login is
+    // required at all. A browser with no valid session gets redirected to
+    // /auth/login for a page navigation, or a plain 401 for an API call
+    // (redirecting a fetch() is rarely what the caller wants — it would
+    // "succeed" with the login page's HTML as the body, which is a worse
+    // failure than an honest 401 the client can actually detect).
+    let user: SessionUser | null = null;
+    if (authConfig) {
+      user = await verifySession(authConfig, req);
+      if (!user) {
+        const wantsHtml = (req.headers.accept ?? '').includes('text/html') && !url.pathname.startsWith('/api/') && url.pathname !== '/mcp';
+        if (wantsHtml) {
+          res.writeHead(302, { location: '/auth/login' });
+          return res.end();
+        }
+        return send(res, 401, { error: 'sign-in required' });
+      }
     }
 
     if (url.pathname.startsWith('/api/')) {
@@ -1342,7 +1423,22 @@ export function createApiServer(opts: ServerOptions) {
         // a restart. Every route body still just reads `world` as a plain
         // value — the getter is dereferenced exactly once, here.
         const world = getWorld();
-        await match.handler(req, res, { world, engine, setup, registry, config, illustrations, imageRegistry, currentStory, currentWorld, dataRoot, url, body, params });
+        await match.handler(req, res, {
+          world,
+          engine,
+          setup,
+          registry,
+          config,
+          illustrations,
+          imageRegistry,
+          currentStory,
+          currentWorld,
+          dataRoot,
+          url,
+          body,
+          params,
+          user,
+        });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.
