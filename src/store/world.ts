@@ -452,6 +452,34 @@ export function resolveDefaultStory(db: Db): StoryId {
 }
 
 /**
+ * The same resolution for a *long-lived server's* "which story is currently
+ * pointed at" (`CurrentWorld.open`/`switchTo`/`reopen` in `src/store/index.ts`),
+ * where refusing to guess is the wrong answer: it is fatal at boot.
+ *
+ * `resolveDefaultStory` above stays strict on purpose — for a library caller
+ * that asked for "the" story of a file, several stories genuinely is
+ * ambiguous and worth an error. But that function's own comment assumed
+ * multi-story files did not exist yet ("which is every one of them today"),
+ * and per-user stories made them ordinary: two accounts playing the same
+ * world is two stories in one file. The deployed instance hit exactly that —
+ * a world with 2 stories, so `CurrentWorld.open` threw during startup, the
+ * container crash-looped under `restart: unless-stopped`, and the reverse
+ * proxy served 502s. Boot must not depend on a human disambiguating.
+ *
+ * Picks the most recently played (`listStories` is ordered
+ * `last_played_at DESC, created_at DESC`), matching what
+ * `resolveOrCreateStoryForUser` already does per-user rather than inventing a
+ * second, differently-guessing rule. Nothing is lost by choosing here: this
+ * pointer is only where a session lands by default, and with login on every
+ * request resolves its own story through `CurrentStory.worldFor(user)`.
+ */
+export function resolveCurrentStory(db: Db): StoryId {
+  const existing = listStories(db);
+  if (existing.length === 0) return createStory(db, { title: '' }).id;
+  return existing[0]!.id;
+}
+
+/**
  * The per-user analogue of `resolveDefaultStory`, and the resolution
  * `CurrentStory.worldFor` (`src/store/index.ts`) calls on every request once
  * a session user is known. Deliberately not an error when several stories

@@ -23,6 +23,7 @@ import {
   StoryStore,
   ThreadStore,
   getStory,
+  resolveCurrentStory,
   resolveDefaultStory,
   resolveOrCreateStoryForUser,
 } from './world.ts';
@@ -201,7 +202,7 @@ export class CurrentWorld {
     const paths = pathsFor(slug, dataRoot);
     if (!isWorldDir(paths.dir)) throw new Error(`no world "${slug}"`);
     const db = openDb(paths.dbPath);
-    const story = new CurrentStory(db, resolveDefaultStory(db), paths.imagesDir);
+    const story = new CurrentStory(db, resolveCurrentStory(db), paths.imagesDir);
     return new CurrentWorld(dataRoot, slug, db, story);
   }
 
@@ -241,11 +242,14 @@ export class CurrentWorld {
     const nextDb = openDb(paths.dbPath);
     let nextStoryId: StoryId;
     try {
-      nextStoryId = resolveDefaultStory(nextDb);
+      nextStoryId = resolveCurrentStory(nextDb);
     } catch (err) {
-      // Leave the old world untouched: a world with several stories and no
-      // recorded "current" one is a legitimate state we simply cannot
-      // auto-resolve, and it must not cost the player their open session.
+      // Leave the old world untouched if resolution fails for any reason (a
+      // corrupt or unreadable file, say): losing the player's open session is
+      // a worse outcome than refusing the switch. Several stories is no
+      // longer one of those reasons — `resolveCurrentStory` picks the most
+      // recently played rather than throwing, since per-user stories made
+      // multi-story worlds ordinary.
       nextDb.close();
       throw err;
     }
@@ -267,7 +271,7 @@ export class CurrentWorld {
     const paths = pathsFor(slug, this.dataRoot);
     if (!isWorldDir(paths.dir)) throw new Error(`no world "${slug}"`);
     const nextDb = openDb(paths.dbPath);
-    const nextStoryId = resolveDefaultStory(nextDb);
+    const nextStoryId = resolveCurrentStory(nextDb);
     const previous = this.db;
     this.db = nextDb;
     this.slugValue = slug;
