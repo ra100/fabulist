@@ -13,6 +13,7 @@ import { SetupService } from '../setup/service.ts';
 import { ConfigService } from '../config/service.ts';
 import { IllustrationService } from '../illustration/service.ts';
 import { buildMcpAuth } from '../mcp/auth.ts';
+import { resolveAuthConfig } from '../auth/config.ts';
 
 const args = process.argv.slice(2);
 const portArg = args.find((a) => a.startsWith('--port='));
@@ -170,6 +171,22 @@ if (mcpAuth && !mcpResourceUrl) {
   console.log('/mcp not mounted (set MCP_OAUTH_ISSUER or MCP_DEV_TOKEN to enable it)');
 }
 
+/**
+ * Web login. See `src/auth/config.ts`'s own header comment for the access
+ * model (any WorkOS-verified identity, no per-user scoping) and priority
+ * (`AUTH_REQUIRE_LOGIN` in the environment, else `config.requireLogin` from
+ * `fabulist.config.json`). Off by default, matching every other gate in this
+ * app — a fresh `pnpm serve` on a laptop should never show a login screen
+ * nobody asked for. `resolveAuthConfig` throws rather than silently running
+ * without login when it *was* requested but the WorkOS env vars are
+ * missing — a deployment that meant to require login and quietly didn't is
+ * a much worse failure than refusing to start.
+ */
+const authConfig = resolveAuthConfig(cfg);
+console.log(
+  authConfig ? 'login required (WorkOS AuthKit)' : 'login not required \u2014 every route is open (set AUTH_REQUIRE_LOGIN=true to change this)',
+);
+
 const server = createApiServer({
   world: getWorld,
   engine,
@@ -184,6 +201,7 @@ const server = createApiServer({
   dataRoot,
   mcpAuth: mcpAuth ?? undefined,
   mcpResourceUrl,
+  authConfig: authConfig ?? undefined,
 });
 server.listen(port, host, () => {
   console.log(`fabulist on http://${host}:${port}`);
