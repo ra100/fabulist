@@ -406,6 +406,18 @@ Watch it with `gh run watch --repo ra100/fabulist` or
 
 ## Verifying after a deploy
 
+The single most useful check, and it needs no login:
+
+    curl -s https://<your-host>/api/health
+
+`{"ok":true,"database":"reachable","ms":9}` with HTTP 200 means the process is up *and*
+Postgres is answering. HTTP 503 names the reason instead. Prefer this over `/api/meta`,
+which renders its route table from memory and answers 200 throughout a database
+outage — it reported "healthy" for the whole of a Postgres restart loop, which is why
+the container healthcheck no longer uses it.
+
+
+
 ```bash
 ssh -p 25 ra100@omnius.rast.io 'cd Development/fabulist && docker compose ps && docker compose logs --tail 20'
 curl -s https://fabulist.rast.io/api/meta
