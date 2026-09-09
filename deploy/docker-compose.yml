@@ -19,6 +19,21 @@ services:
     env_file:
       - path: app.env
         required: false
+    environment:
+      # The database URL, defaulted to the bundled Postgres.
+      #
+      # `${FABULIST_PG:-...}` rather than a bare default, so `app.env`'s own value
+      # still wins — env_file is loaded first and `environment:` would otherwise
+      # override it. Compose resolves `${...}` from the shell and `.env`, not from
+      # `env_file`, which is exactly the interaction that makes this work: the
+      # substitution only applies when nothing else set it.
+      #
+      # This is what makes `--profile bundled` need no configuration at all. It also
+      # means a plain `docker compose up` with *no* FABULIST_PG anywhere points at a
+      # `postgres` host that does not exist, and the app says so at boot in one line
+      # — better than defaulting to `localhost`, which inside a container is the
+      # container itself and produces the same failure with a more confusing message.
+      FABULIST_PG: ${FABULIST_PG:-postgres://fabulist:${POSTGRES_PASSWORD:-fabulist-local}@postgres:5432/fabulist}
     # 127.0.0.1 only, never 0.0.0.0: nginx is the sole public listener (see
     # deploy/nginx/fabulist.conf), and the container's own bind-all is only
     # for reachability *inside* the container network, not a reason to also
@@ -88,16 +103,40 @@ services:
       # is serving.
       start_period: 120s
 
-    # The app cannot serve without a database, so it waits for one that is
-    # actually accepting connections rather than merely started. `service_healthy`
-    # and not `service_started`: Postgres' own entrypoint runs an initdb and a
-    # restart on first boot, so the port exists well before it will answer, and
-    # `service_started` would let the app race it and exit.
+    # Reaches a *host* Postgres by name. Container `localhost` is the container's
+    # own network namespace, so a host service is not there — `host-gateway`
+    # resolves to the address the host presents on the Docker bridge, which is what
+    # `FABULIST_PG=...@host.docker.internal:5432/...` then points at. Harmless when
+    # the bundled Postgres is used instead; it is one extra hosts entry nothing
+    # looks up.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Waits for the bundled Postgres *when there is one*.
+    #
+    # `required: false` is what makes the two deployment modes one file: without the
+    # `bundled` profile the `postgres` service does not exist, and a plain
+    # `depends_on` would then refuse to start the app at all. With the profile on,
+    # this still waits for `service_healthy` rather than `service_started` — the
+    # Postgres entrypoint runs an initdb and an internal restart on first boot, so
+    # the port is listening well before it will answer, and racing it makes the app
+    # exit on a perfectly healthy cold start.
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
 
+  # The bundled Postgres: off unless asked for.
+  #
+  #     docker compose up -d                      -> your own Postgres, via FABULIST_PG
+  #     docker compose --profile bundled up -d     -> this one, created automatically
+  #
+  # A profile rather than a second compose file, so there is one file to read and no
+  # chance of the two drifting. The deployed VPS uses its existing Postgres (the
+  # database and role created by hand once); a local `--profile bundled` run needs
+  # nothing but Docker, which is the point — `POSTGRES_DB`/`POSTGRES_USER` below make
+  # the entrypoint create both on an empty volume.
   postgres:
+    profiles: ["bundled"]
     # Pinned to a major version, not `latest`: a Postgres major upgrade needs
     # pg_upgrade or a dump/restore, so silently moving between them on a
     # `docker compose pull` would leave the container unable to open its own data
@@ -108,10 +147,15 @@ services:
     environment:
       POSTGRES_DB: fabulist
       POSTGRES_USER: fabulist
-      # Required. No default on purpose: a compose file that shipped a fallback
-      # password would be one `docker compose up` away from a database open to
-      # anything that can reach the container network.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in app.env}
+      # Defaulted, deliberately, and only safe because of the two lines below it:
+      # this service publishes no ports, so the database is reachable only from the
+      # compose network. A local `--profile bundled` run should need nothing but
+      # Docker — demanding a password to try the app on a laptop is the kind of
+      # friction that gets worked around with a worse password.
+      #
+      # Set POSTGRES_PASSWORD in app.env for anything not on a laptop. The deployed
+      # instance does not use this service at all.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fabulist-local}
     # 300, not the default 100. Measured: 100 concurrent players plus one wiki
     # ingest against max_connections=100 does not degrade, it *aborts* with
     # `FATAL: sorry, too many clients already` on arbitrary requests. The app
@@ -127,7 +171,15 @@ services:
       # than a root-owned path under Docker's own storage that only `docker cp`
       # can reach. Back this up with `pg_dump`, not by copying the directory
       # while the server is running.
-      - ${FABULIST_PG_DIR:-./fabulist-pg}:/var/lib/postgresql/data
+      #
+      # `/var/lib/postgresql`, *not* `/var/lib/postgresql/data`. The 18 images
+      # changed this: they store data in a major-version subdirectory so
+      # `pg_upgrade --link` works without crossing a mount boundary, and mounting at
+      # the old `/data` path makes the entrypoint refuse to start with "there appears
+      # to be PostgreSQL data in /var/lib/postgresql/data (unused mount/volume)".
+      # Found by actually running it — the pre-18 path is still what most examples
+      # show, and it fails at boot rather than at build.
+      - ${FABULIST_PG_DIR:-./fabulist-pg}:/var/lib/postgresql
     healthcheck:
       # `pg_isready` against the app's own database and user, not the defaults:
       # `pg_isready` with no arguments succeeds as soon as the *server* is up,

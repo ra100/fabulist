@@ -79,13 +79,73 @@ bind-mount directory is created automatically on first `docker compose up -d`.
 ## Postgres
 
 The engine runs on one Postgres database rather than a SQLite file per world.
-`pnpm serve` is the SQLite path (still present and green); `pnpm serve-pg` is this
-one.
+`pnpm serve` starts it; `pnpm serve-sqlite` is the previous path, kept for one
+release.
 
-    FABULIST_PG=postgres://user:pass@host:5432/fabulist pnpm serve-pg
+    FABULIST_PG=postgres://user:pass@host:5432/fabulist pnpm serve
 
 `DATABASE_URL` works too. `deploy/pg-dev.sh` runs a local server for development
 (`pnpm pg:start`, port 5433) with `max_connections=300`.
+
+### Which Postgres
+
+Two modes, one compose file:
+
+    docker compose up -d                     # your own Postgres, via FABULIST_PG
+    docker compose --profile bundled up -d   # a Postgres container, created for you
+
+**The VPS uses its own.** Create the role and database once, then set `FABULIST_PG`
+as a repo secret — CI passes it through to `app.env` verbatim rather than assembling
+it, because a workflow cannot know your host, port, role or database:
+
+```sql
+CREATE USER fabulist WITH PASSWORD 'pick-something';
+CREATE DATABASE fabulist OWNER fabulist;
+\c fabulist
+GRANT ALL ON SCHEMA public TO fabulist;
+```
+
+The app creates every table, index and role itself on first boot, so there is no
+migration to run — and no `psql` needed after those four lines.
+
+⚠️ **A container cannot reach the host at `localhost`** — that is the container's own
+network namespace. `docker-compose.yml` maps `host.docker.internal` to
+`host-gateway`, so the connection string is:
+
+    FABULIST_PG=postgres://fabulist:pw@host.docker.internal:5432/fabulist
+
+Two things on the host side have to allow it, both one-time edits:
+
+- `postgresql.conf`: `listen_addresses` must cover the Docker bridge, not just
+  `localhost` — `listen_addresses = '*'` with the `pg_hba.conf` rule below, or the
+  bridge address specifically.
+- `pg_hba.conf`: a line for the Docker subnet, e.g.
+  `host fabulist fabulist 172.16.0.0/12 scram-sha-256`. Reload with
+  `SELECT pg_reload_conf();` or `systemctl reload postgresql`.
+
+  Docker's default bridge is usually in `172.17.0.0/16`, but Compose creates its own
+  networks and the exact subnet can change when they are recreated — hence the wider
+  `/12`, which is the whole of Docker's default private range and still not routable
+  from outside the host.
+
+**On macOS, `host.docker.internal` does not reach the Mac.** Docker Desktop and
+Rancher Desktop run the engine inside a Linux VM, so `host-gateway` is that VM's
+gateway (`172.17.0.1`) — the VM, not your machine. Verified directly: a container
+resolves the name and connects to `172.17.0.1:5432` (the VM's own Postgres, if any)
+while a Postgres on the Mac at 5433 is refused. Rancher exposes the Mac at
+`192.168.5.2` instead, so a local container-to-Mac-Postgres URL is:
+
+    FABULIST_PG=postgres://fabulist:pw@192.168.5.2:5433/fabulist
+
+That address is Rancher-specific and not worth relying on — on macOS prefer
+`--profile bundled`, or run the app outside Docker with `pnpm serve`. **The VPS is
+Linux, where `host.docker.internal:host-gateway` is exactly right**, which is the
+case this deployment actually targets.
+
+**`--profile bundled` needs none of that.** It runs `postgres:18-alpine`, creates the
+`fabulist` role and database from an empty volume, publishes no ports (reachable only
+on the compose network), and defaults its password — which is why it is for local runs
+and not the deployment. `POSTGRES_PASSWORD` in `app.env` overrides it.
 
 **Boot is automatic and idempotent.** On start it checks capacity, applies the
 schema (`CREATE TABLE IF NOT EXISTS` throughout, so it is also the upgrade path),
