@@ -254,6 +254,37 @@ tables under MVCC, so an ingest costs about 18% of read throughput and essential
 nothing in write latency. `pnpm integrity-pg` checked 167,216 rows clean in 0.1s
 afterwards.
 
+### Multi-user isolation
+
+Several people can read different worlds and write different books at the same time
+without seeing or blocking each other. Measured on the real code path, not asserted:
+
+| scenario | throughput | p50 | p95 |
+| --- | --- | --- | --- |
+| 20 users, 2 shared worlds | 3,333 turns/s | 4.7 ms | 13.0 ms |
+| same, with an ingest writing 6,000 canon rows | 3,659 turns/s | 4.5 ms | 7.7 ms |
+
+A live ingest does not degrade play — MVCC means readers never wait for the writer, and
+the second row is faster only because the cache is warm by then. Zero cross-user
+contamination in every run.
+
+What actually holds it together:
+
+- **"Which book am I in" is per user**, resolved on every request from the session, with
+  no server-wide current-story state. The SQLite ancestor could not do this: one process
+  held one world file open, so switching worlds moved every reader at once.
+- **`?storyId=` pins a tab to a book**, kept in `sessionStorage` rather than
+  `localStorage` so a new tab lands on "my most recently played" instead of inheriting
+  whatever an old tab left selected. That is what lets one person keep two worlds open
+  side by side.
+- **A story id from the client cannot reach another user's book.** It is checked against
+  `owner_user_id` on every resolution, so a guessed id is refused rather than honoured.
+- **Canon is shared and read-only to players**, enforced by the `fabulist_play` grants in
+  the database rather than by application code, so one player cannot corrupt a world
+  another is reading.
+
+`test/pg-access.test.ts` pins all four.
+
 ### Resource footprint
 
 Measured on this schema, not estimated. An idle bundled Postgres container is

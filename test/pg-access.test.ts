@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { makeWorld, withPg } from './pg-harness.ts';
-import { World, createWorld, getWorldBySlug } from '../src/store/index-pg.ts';
+import { World, createWorld, getWorldBySlug, worldFor } from '../src/store/index-pg.ts';
 import { createStory } from '../src/store/world-pg.ts';
 import {
   assertWorldAccess,
@@ -31,6 +31,8 @@ import {
   worldsVisibleTo,
 } from '../src/store/access-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
+import { commitDelta } from '../src/loop/commit-pg.ts';
+import { emptyDelta } from '../src/domain/types.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
@@ -333,3 +335,133 @@ test('the blocklist routes round-trip', async (t) => {
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+// ------------------------------------------- multi-user, multi-world isolation
+
+//
+// The property the deployment actually depends on: several people reading
+// different worlds and writing different books at the same time, without seeing or
+// blocking each other. Asserted here rather than assumed, because the SQLite
+// ancestor could not do it at all — one process held one world file open, and
+// "switch world" was a server-wide mutation.
+
+/**
+ * Each user resolves to their own book, and sees only the canon that book reads.
+ *
+ * The failure this rules out is the one that matters most: user A's request resolving
+ * to user B's story, or reading a world it does not source. Both would be silent.
+ */
+test('concurrent users on different worlds see only their own book and canon', async (t) => {
+  const ran = await withPg(async (db) => {
+    const alpha = await makeWorld(db, 'alpha', 'Alpha');
+    const beta = await makeWorld(db, 'beta', 'Beta');
+    await db.query(
+      `INSERT INTO canon_entities (world_id,id,type,name,summary,salience) VALUES
+         ($1,'char:a','Character','Hero Alpha','x',1),
+         ($2,'char:b','Character','Hero Beta','x',1)`,
+      [alpha, beta],
+    );
+    const alice = userOf('user-alice');
+    const bob = userOf('user-bob');
+    await createStory(db, { title: "alice's", ownerUserId: alice.id, worldIds: [alpha] });
+    await createStory(db, { title: "bob's", ownerUserId: bob.id, worldIds: [beta] });
+
+    // Resolved concurrently, as two simultaneous requests would.
+    const [aWorld, bWorld] = await Promise.all([worldFor(db, alice), worldFor(db, bob)]);
+    assert.notEqual(aWorld.storyId, bWorld.storyId, 'two users must not share a book');
+
+    const aSees = (await aWorld.graph.search('Hero')).map((e) => e.name);
+    const bSees = (await bWorld.graph.search('Hero')).map((e) => e.name);
+    assert.deepEqual(aSees, ['Hero Alpha']);
+    assert.deepEqual(bSees, ['Hero Beta']);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * Turns taken at the same time land in the right books.
+ *
+ * Interleaved deliberately rather than run in sequence: a shared "current story"
+ * would show up as one user's event appearing in another's chronicle, and only
+ * concurrency exposes it.
+ */
+test('simultaneous turns do not cross between users', async (t) => {
+  const ran = await withPg(async (db) => {
+    const shared = await makeWorld(db, 'shared', 'Shared');
+    const users = ['u1', 'u2', 'u3'].map((id) => userOf(id));
+    for (const u of users) await createStory(db, { title: u.id, ownerUserId: u.id, worldIds: [shared] });
+
+    // All three writing at once, to the same world's canon but their own chronicles.
+    await Promise.all(
+      users.map(async (u) => {
+        const world = await worldFor(db, u);
+        for (let i = 0; i < 5; i += 1) {
+          await commitDelta(db, world, {
+            ...emptyDelta(),
+            events: [{ text: `${u.id}-event-${i}`, participants: [], locationId: null, significance: 0.5 }],
+          });
+        }
+      }),
+    );
+
+    for (const u of users) {
+      const world = await worldFor(db, u);
+      const { rows } = await db.query<{ text: string }>(`SELECT text FROM events WHERE story_id = $1`, [
+        world.storyId,
+      ]);
+      assert.equal(rows.length, 5, `${u.id} should have exactly its own five events`);
+      const foreign = rows.filter((r) => !r.text.startsWith(u.id));
+      assert.deepEqual(foreign, [], `${u.id}'s book contains another user's events`);
+    }
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * One user, two books open at once — which is what two browser tabs are.
+ *
+ * `?storyId=` is what makes this work: without it a request resolves to "my most
+ * recently played", so both tabs would collapse onto whichever book was touched last.
+ * The client keeps that id in `sessionStorage` (per tab, deliberately not
+ * `localStorage`), so this test pins the server half of the contract.
+ */
+test('a single user can hold two different books open via storyIdOverride', async (t) => {
+  const ran = await withPg(async (db) => {
+    const one = await makeWorld(db, 'one', 'One');
+    const two = await makeWorld(db, 'two', 'Two');
+    const user = userOf('solo');
+    const bookOne = await createStory(db, { title: 'in one', ownerUserId: user.id, worldIds: [one] });
+    const bookTwo = await createStory(db, { title: 'in two', ownerUserId: user.id, worldIds: [two] });
+
+    const tabA = await worldFor(db, user, { storyIdOverride: bookOne.id });
+    const tabB = await worldFor(db, user, { storyIdOverride: bookTwo.id });
+    assert.equal(tabA.storyId, bookOne.id);
+    assert.equal(tabB.storyId, bookTwo.id);
+
+    // Without the override both collapse onto the most recently played, which is the
+    // documented fallback rather than a bug — worth pinning so a change is deliberate.
+    await db.query(`UPDATE stories SET last_played_at = now() WHERE id = $1`, [bookTwo.id]);
+    assert.equal((await worldFor(db, user)).storyId, bookTwo.id);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * Another user's book is unreachable even with its exact id.
+ *
+ * `?storyId=` is client-supplied, so it is an attack surface: this is the check that
+ * stops it being one.
+ */
+test('storyIdOverride cannot reach another user\'s book', async (t) => {
+  const ran = await withPg(async (db) => {
+    const w = await makeWorld(db, 'private-book', 'W');
+    const mine = await createStory(db, { title: 'mine', ownerUserId: 'owner', worldIds: [w] });
+    await assert.rejects(
+      () => worldFor(db, userOf('intruder'), { storyIdOverride: mine.id }),
+      /does not belong to this user/,
+      'a guessed story id must not grant access',
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
