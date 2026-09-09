@@ -300,10 +300,13 @@ case "$action" in
     #
     # `|| true` throughout: this is diagnostics, and a failure to *report* must never
     # fail a deploy that otherwise worked.
-    echo "--- waiting for the app to answer (up to 180s) ---"
+    # Waits on `/api/health`, which proves the database is reachable — the previous
+    # endpoint answered from memory and would have reported success throughout the
+    # restart loop this deploy path exists to catch.
+    echo "--- waiting for the app to answer, database included (up to 180s) ---"
     for _ in $(seq 1 60); do
       if docker compose exec -T fabulist node -e \
-        "require('http').get('http://127.0.0.1:4317/api/meta',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))" \
+        "require('http').get('http://127.0.0.1:4317/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))" \
         >/dev/null 2>&1; then
         echo "app is answering"
         break

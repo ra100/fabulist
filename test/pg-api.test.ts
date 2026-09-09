@@ -403,3 +403,63 @@ test('every advertised parameterless GET responds', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+/**
+ * `/api/health` reports the database, not just the process.
+ *
+ * Written after a production restart loop that container healthchecks reported as
+ * `healthy` throughout: they probed `/api/meta`, which renders the route table from
+ * memory and never touches Postgres. A health signal that cannot see the database is
+ * close to useless on a database-backed service, and the endpoint that replaced it is
+ * worth pinning — including that it answers *before* the session gate, since a probe
+ * has no cookie and one that must treat 401 as success cannot tell "up" from
+ * "unauthorised".
+ */
+test('/api/health proves the database is reachable, and needs no session', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(db, async (base) => {
+      const res = await get(base, '/api/health');
+      assert.equal(res.status, 200);
+      assert.equal(res.body.ok, true);
+      assert.equal(res.body.database, 'reachable');
+      // A number, so a slow database is visible rather than merely "healthy".
+      assert.equal(typeof res.body.ms, 'number');
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('/api/health answers 503 when the database is gone', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'health');
+    const story = await createStory(db, { worldIds: [worldId] });
+    const world = await World.forStory(db, story.id);
+
+    // A pool pointed at a port nothing listens on: the same shape as a database that
+    // has stopped, without stopping the one the rest of the suite is using.
+    const { Db } = await import('../src/db/pg.ts');
+    const dead = new Db({ connectionString: 'postgres://nobody@127.0.0.1:1/none', kind: 'play', max: 1 });
+    const providers = new ProviderRegistry(new MockProvider());
+    const server = createApiServer({
+      world: () => world,
+      db: dead,
+      engine: new Engine({ world: () => world, db, providers }),
+    });
+    await listen(server);
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const res = await get(base, '/api/health');
+      // 503, not 200 — this is the bit the old `/api/meta` check could not express.
+      assert.equal(res.status, 503);
+      assert.equal(res.body.ok, false);
+      assert.equal(res.body.database, 'unreachable');
+      assert.ok(res.body.error.length > 0, 'the reason belongs in the response');
+      // And `/api/meta` still answers, which is exactly why it was the wrong probe.
+      assert.equal((await get(base, '/api/meta')).status, 200);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      await dead.close().catch(() => {});
+    }
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+

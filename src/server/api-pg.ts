@@ -234,6 +234,36 @@ function route(method: string, path: string, handler: Handler): void {
  * thing to forget, and the inventory answers "can this page's features work
  * here" directly instead of by proxy.
  */
+/**
+ * Liveness *and* database reachability, for container healthchecks.
+ *
+ * `/api/meta` was doing this job and could not: it renders the route table from
+ * memory and never touches Postgres, so a container reporting `healthy` said
+ * nothing about whether the database was reachable — and the deploy's own wait loop
+ * used the same endpoint. Both were reporting "the process is up", which was never
+ * the question worth asking after a database migration.
+ *
+ * Answered by the dispatcher *before* the session gate, so an unauthenticated
+ * healthcheck gets a real answer rather than a 401 it would have to interpret as
+ * success. Registered here too, so it appears in `/api/meta`'s route list and stays
+ * discoverable; the dispatcher's copy is what actually runs. Returns 503 with the
+ * reason when the database is unreachable, which is what makes a healthcheck, a
+ * restart policy and a load balancer all behave correctly.
+ */
+route('GET', '/api/health', async (_req, res, { db }) => {
+  const started = Date.now();
+  try {
+    await db.query('SELECT 1');
+    send(res, 200, { ok: true, database: 'reachable', ms: Date.now() - started });
+  } catch (err) {
+    send(res, 503, {
+      ok: false,
+      database: 'unreachable',
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
 route('GET', '/api/meta', (_req, res) => {
   send(res, 200, {
     // Sorted so two servers can be diffed by eye.
@@ -2249,6 +2279,27 @@ export function createApiServer(opts: ServerOptions) {
     // can actually detect). `/api/auth/me` is one of those 401s, and it is how
     // the landing page decides between "Sign in" and "Open the chronicle".
     let user: SessionUser | null = null;
+    // `/api/health` answers before the session gate.
+    //
+    // A healthcheck has no cookie, so with login on the gate would return 401 to it —
+    // and a probe that has to treat 401 as success cannot distinguish "up" from
+    // "unauthorised", which is exactly the ambiguity that made the previous
+    // `/api/meta` healthcheck useless after this migration. It exposes one bit
+    // (is the database reachable) and no data, so it is safe to answer unauthenticated.
+    if (url.pathname === '/api/health' && req.method === 'GET') {
+      const started = Date.now();
+      try {
+        await db.query('SELECT 1');
+        return send(res, 200, { ok: true, database: 'reachable', ms: Date.now() - started });
+      } catch (err) {
+        return send(res, 503, {
+          ok: false,
+          database: 'unreachable',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     if (authConfig) {
       user = await verifySession(authConfig, req, res);
       if (!user) {
