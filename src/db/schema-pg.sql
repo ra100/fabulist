@@ -81,8 +81,46 @@ CREATE TABLE IF NOT EXISTS worlds (
   ingest_context     JSONB NOT NULL DEFAULT '{}'::jsonb,
   revision_watermark TEXT NOT NULL DEFAULT '',
   last_refreshed_at  TIMESTAMPTZ,
+  -- See `world_access` for what these mean and why 'public' is the default.
+  visibility         TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public','private')),
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Who may see and ingest into a world.
+--
+-- Worlds are system data shared by every story that reads them, so "may this user
+-- see this world" is not answerable from the story tables — the question could not
+-- even be asked when a world was a file on one laptop. Two things it decides:
+--
+--   * `visibility = 'public'` means every signed-in user may read the world and
+--     point a story at it. That is the right default for an ingested wiki: the
+--     canon is not anybody's private writing, and hiding it by default would make a
+--     shared instance useless until an admin granted each world individually.
+--   * `visibility = 'private'` means only the rows below may. For a world someone
+--     is still building, or one whose source material is not meant to be shared.
+--
+-- A row grants one user a role *on top of* visibility, so a private world can name
+-- its readers, and a public world can name who may re-ingest it. `role`:
+--   'reader'  — may read canon and point a story at it.
+--   'ingest'  — may also run the wizard against it and refresh its canon.
+--   'owner'   — may also rename it, change its visibility, and delete it.
+--
+-- Deliberately *not* enforced by Postgres roles. The grants in schema-pg-roles.sql
+-- separate user data from system data (a play connection cannot write canon at
+-- all), which is a different question from which humans may see which world — that
+-- one changes per row, and encoding it as database roles would mean a role per
+-- user. Enforcement lives in `store/access-pg.ts`, called by the routes.
+CREATE TABLE IF NOT EXISTS world_access (
+  world_id   BIGINT NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+  -- Empty string is the login-off local case, matching `stories.owner_user_id`
+  -- and `prose_blocklist.user_id`: one person on one laptop, no identities.
+  user_id    TEXT NOT NULL,
+  role       TEXT NOT NULL DEFAULT 'reader' CHECK (role IN ('reader','ingest','owner')),
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (world_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_access_user ON world_access (user_id);
 
 -- Per-source detail within a world. A world can ingest more than one wiki
 -- (data/worlds/star-trek-alpha-beta really does hold two: `enmemoryalpha` and

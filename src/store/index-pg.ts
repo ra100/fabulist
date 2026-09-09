@@ -55,6 +55,8 @@ export interface WorldSummary {
   /** Most recent `lastPlayedAt` across this world's stories, for ordering. */
   lastPlayedAt: string | null;
   lastRefreshedAt: string | null;
+  /** See `world_access` in the schema for what this gates and why 'public' is the default. */
+  visibility: 'public' | 'private';
   /** Which wikis this world was built from, for attribution and refresh. */
   sources: Array<{ wiki: string; baseUrl: string; pageCount: number; revisionWatermark: string }>;
 }
@@ -195,8 +197,9 @@ export async function listWorlds(db: Queryable): Promise<WorldSummary[]> {
     edge_count: string;
     last_played_at: Date | null;
     last_refreshed_at: Date | null;
+    visibility: 'public' | 'private';
   }>(
-    `SELECT w.id, w.slug, w.title, w.last_refreshed_at,
+    `SELECT w.id, w.slug, w.title, w.last_refreshed_at, w.visibility,
        (SELECT count(*) FROM story_sources ss WHERE ss.world_id = w.id) story_count,
        (SELECT count(*) FROM canon_entities c WHERE c.world_id = w.id AND c.retired_at_revision IS NULL) entity_count,
        (SELECT count(*) FROM canon_edges e WHERE e.world_id = w.id) edge_count,
@@ -235,6 +238,7 @@ export async function listWorlds(db: Queryable): Promise<WorldSummary[]> {
     edgeCount: Number(r.edge_count),
     lastPlayedAt: r.last_played_at ? r.last_played_at.toISOString() : null,
     lastRefreshedAt: r.last_refreshed_at ? r.last_refreshed_at.toISOString() : null,
+    visibility: r.visibility,
     sources: byWorld.get(r.id) ?? [],
   }));
 }
@@ -305,6 +309,9 @@ export async function createWorld(db: Queryable, title: string): Promise<WorldSu
     edgeCount: 0,
     lastPlayedAt: null,
     lastRefreshedAt: null,
+    // A new world is public by default: see `world_access` in the schema for why
+    // hiding ingested canon by default would make a shared instance unusable.
+    visibility: 'public',
     sources: [],
   };
 }

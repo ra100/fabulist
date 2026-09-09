@@ -22,6 +22,17 @@ import {
   renameWorld,
   setStorySources,
 } from '../store/index-pg.ts';
+import {
+  assertWorldAccess,
+  blockPhrase,
+  blocklistFor,
+  grantWorldAccess,
+  revokeWorldAccess,
+  setWorldVisibility,
+  unblockPhrase,
+  worldGrants,
+  worldsVisibleTo,
+} from '../store/access-pg.ts';
 import { applyDirectiveRecalc, seedConsequences, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
 import type { Condition, Directive, Entity, Knobs, StyleContract, VisualStyle } from '../domain/types.ts';
 import { limitsFromWire, type SetupService } from '../setup/service-pg.ts';
@@ -1241,10 +1252,15 @@ route('DELETE', '/api/stories/:id', async (_req, res, { world, db, params, user 
  * for one laptop and wrong for a shared instance. A world is a row now, and which
  * ones a request reads comes from its story's `story_sources`.
  */
-route('GET', '/api/worlds', async (_req, res, { world, db }) => {
+route('GET', '/api/worlds', async (_req, res, { world, db, user }) => {
   const reading = new Set(world.sources.map((src) => src.worldId));
+  // Filtered by visibility, not merely annotated with it: a private world a caller
+  // has no grant on must not appear at all, since its existence and title are the
+  // leak. `worldsVisibleTo` resolves that in one query, so this stays a single
+  // round trip regardless of how many worlds exist.
+  const visible = new Map((await worldsVisibleTo(db, user)).map((v) => [v.worldId, v]));
   send(res, 200, {
-    worlds: (await listWorlds(db)).map((w) => ({
+    worlds: (await listWorlds(db)).filter((w) => visible.has(w.id)).map((w) => ({
       id: w.id,
       slug: w.slug,
       title: w.title,
@@ -1256,6 +1272,10 @@ route('GET', '/api/worlds', async (_req, res, { world, db }) => {
       sources: w.sources,
       // "Is this story reading it", not "is the server holding it open".
       reading: reading.has(w.id),
+      visibility: visible.get(w.id)!.visibility,
+      // What *this* caller may do with it, so the UI can hide an action rather than
+      // offering one that will 403.
+      role: visible.get(w.id)!.role,
     })),
   });
 });
@@ -1288,7 +1308,7 @@ route('POST', '/api/worlds', async (_req, res, { db, body, user, authConfig }) =
  * Per story rather than per server, so one user changing worlds is invisible to
  * everyone else — the property the old switch route could not have.
  */
-route('PUT', '/api/story/sources', async (_req, res, { world, db, body }) => {
+route('PUT', '/api/story/sources', async (_req, res, { world, db, body, user }) => {
   const { slugs } = (body ?? {}) as { slugs?: string[] };
   if (!Array.isArray(slugs) || !slugs.length) {
     return send(res, 400, { error: 'slugs must be a non-empty array of world slugs, in precedence order' });
@@ -1297,6 +1317,14 @@ route('PUT', '/api/story/sources', async (_req, res, { world, db, body }) => {
   for (const slug of slugs) {
     const found = await getWorldBySlug(db, slug);
     if (!found) return send(res, 404, { error: `no world "${slug}"` });
+    // Reading a world through a story is still reading it, so the same check
+    // applies here as to the list above. Without this, a private world would be
+    // fully readable by anyone who could guess its slug.
+    try {
+      await assertWorldAccess(db, user, found.id, 'reader');
+    } catch {
+      return send(res, 404, { error: `no world "${slug}"` });
+    }
     ids.push(found.id);
   }
   try {
@@ -1342,6 +1370,111 @@ route('DELETE', '/api/worlds/:slug', async (_req, res, { db, params, user, authC
   } catch (err) {
     send(res, 409, { error: err instanceof Error ? err.message : String(err) });
   }
+});
+
+/**
+ * Makes a world public or private. Needs `owner` on that world.
+ *
+ * Deliberately not admin-only: the person who ingested a world is the one who knows
+ * whether its source material should be shared, and requiring an admin for that
+ * would either bottleneck it or push everyone to be an admin.
+ */
+route('PUT', '/api/worlds/:slug/visibility', async (_req, res, { db, params, body, user }) => {
+  const slug = decodeURIComponent(params.slug ?? '');
+  const { visibility } = (body ?? {}) as { visibility?: string };
+  if (visibility !== 'public' && visibility !== 'private') {
+    return send(res, 400, { error: "visibility must be 'public' or 'private'" });
+  }
+  const found = await getWorldBySlug(db, slug);
+  // 404 rather than 403 when the caller cannot see it at all: confirming that a
+  // named private world exists is the leak.
+  if (!found) return send(res, 404, { error: `no world "${slug}"` });
+  try {
+    await assertWorldAccess(db, user, found.id, 'owner');
+    await setWorldVisibility(db, found.id, visibility);
+    send(res, 200, { slug, visibility });
+  } catch (err) {
+    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Who has an explicit grant on this world. Needs `owner`. */
+route('GET', '/api/worlds/:slug/access', async (_req, res, { db, params, user }) => {
+  const slug = decodeURIComponent(params.slug ?? '');
+  const found = await getWorldBySlug(db, slug);
+  if (!found) return send(res, 404, { error: `no world "${slug}"` });
+  try {
+    await assertWorldAccess(db, user, found.id, 'owner');
+    send(res, 200, { slug, visibility: found.visibility, grants: await worldGrants(db, found.id) });
+  } catch (err) {
+    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * Grants a user a role on this world. Needs `owner`.
+ *
+ * `role` is `reader` unless stated, because that is the grant that makes a private
+ * world usable and the one with the least consequence if it is wrong.
+ */
+route('POST', '/api/worlds/:slug/access', async (_req, res, { db, params, body, user }) => {
+  const slug = decodeURIComponent(params.slug ?? '');
+  const { userId, role } = (body ?? {}) as { userId?: string; role?: 'reader' | 'ingest' | 'owner' };
+  if (typeof userId !== 'string') return send(res, 400, { error: 'userId is required' });
+  if (role !== undefined && !['reader', 'ingest', 'owner'].includes(role)) {
+    return send(res, 400, { error: "role must be 'reader', 'ingest' or 'owner'" });
+  }
+  const found = await getWorldBySlug(db, slug);
+  if (!found) return send(res, 404, { error: `no world "${slug}"` });
+  try {
+    await assertWorldAccess(db, user, found.id, 'owner');
+    await grantWorldAccess(db, found.id, userId, role ?? 'reader');
+    send(res, 200, { slug, userId, role: role ?? 'reader' });
+  } catch (err) {
+    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Revokes an explicit grant. A public world stays readable; a private one does not. */
+route('DELETE', '/api/worlds/:slug/access/:userId', async (_req, res, { db, params, user }) => {
+  const slug = decodeURIComponent(params.slug ?? '');
+  const found = await getWorldBySlug(db, slug);
+  if (!found) return send(res, 404, { error: `no world "${slug}"` });
+  try {
+    await assertWorldAccess(db, user, found.id, 'owner');
+    await revokeWorldAccess(db, found.id, decodeURIComponent(params.userId ?? ''));
+    send(res, 200, { ok: true });
+  } catch (err) {
+    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ---------------------------------------------------------------- blocklist
+//
+// Per user, because a phrase one player is tired of is not a property of the
+// server. The SQLite table was global and — as its own schema comment recorded —
+// read by nothing: `config.blocklist` was what actually fed the linter, so the
+// table looked like a feature and was dead weight. These routes are what make it
+// real.
+
+route('GET', '/api/blocklist', async (_req, res, { db, user }) => {
+  send(res, 200, await blocklistFor(db, user));
+});
+
+route('POST', '/api/blocklist', async (_req, res, { db, body, user }) => {
+  const { pattern, note } = (body ?? {}) as { pattern?: string; note?: string };
+  if (typeof pattern !== 'string' || !pattern.trim()) return send(res, 400, { error: 'pattern is required' });
+  try {
+    await blockPhrase(db, user, pattern, note ?? '');
+    send(res, 201, { pattern: pattern.trim(), note: note ?? '' });
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+route('DELETE', '/api/blocklist/:pattern', async (_req, res, { db, params, user }) => {
+  await unblockPhrase(db, user, decodeURIComponent(params.pattern ?? ''));
+  send(res, 200, { ok: true });
 });
 
 route('GET', '/api/providers', async (_req, res, ctx) => {
