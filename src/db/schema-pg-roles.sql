@@ -91,8 +91,12 @@ DECLARE
     'consequences', 'turns', 'scenes', 'chapters', 'directives', 'divergences',
     'style_anchors', 'prose_blocklist', 'illustrations'];
   system_tables TEXT[] := ARRAY[
-    'worlds', 'world_sources', 'world_meta', 'canon_entities', 'canon_edges',
-    'canon_sheets', 'ingest_pages', 'migrations', 'sqlite_import_log'];
+    -- `world_access` is system data: who may see a world is not something a play
+    -- connection may edit, or a user could grant themselves access to a private
+    -- world by playing. Readable by `fabulist_play` (the default SELECT grant
+    -- below) because every request has to *check* it.
+    'worlds', 'world_sources', 'world_meta', 'world_access', 'canon_entities',
+    'canon_edges', 'canon_sheets', 'ingest_pages', 'migrations', 'sqlite_import_log'];
 BEGIN
   FOREACH t IN ARRAY user_tables LOOP
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON %I.%I TO fabulist_play', sch, t);
