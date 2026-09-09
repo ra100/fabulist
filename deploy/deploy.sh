@@ -95,15 +95,36 @@ case "$action" in
       # exactly that while testing (`password authentication failed`, restart loop),
       # which is why the check is on the data directory itself.
       pg_dir="${FABULIST_PG_DIR:-./fabulist-pg}"
-      pg_initialised=false
-      # `-maxdepth 3`, because `PG_VERSION` is not unique: the cluster has one at
-      # `<dir>/18/docker/PG_VERSION` and *another inside every database subdirectory*
-      # (`base/1/PG_VERSION`, `base/16384/…`). An unbounded `find` matches those too,
-      # so it reports "initialised" for a directory that only contains debris — and
-      # would then refuse to start a genuinely empty one. Found while chasing a
-      # failure that turned out to be a stale directory my own test had not cleaned.
-      if [ -n "$(find "$pg_dir" -maxdepth 3 -name PG_VERSION -print -quit 2>/dev/null)" ]; then
+
+      # Is there a real cluster here? Asked from *inside a root container*, and that
+      # is not incidental.
+      #
+      # This ran as the deploy user before, and it destroyed a working database.
+      # Postgres creates its data directory mode 0700 owned by uid 999, so the deploy
+      # user cannot even traverse it: `find` returned nothing, this concluded "no
+      # cluster present", and the clearing branch below then deleted a fully imported
+      # database — 5 worlds and 13 stories. The earlier mount diagnostics had already
+      # printed `drwx------ 3 999 999` and `cd: ./fabulist-pg: Permission denied`; I
+      # did not connect them to this check.
+      #
+      # Two rules now, and both matter:
+      #   - the question is asked with privileges that can actually answer it;
+      #   - "I could not tell" is treated as *initialised*, never as empty. An
+      #     unreadable directory must never mean "safe to delete".
+      #
+      # `-maxdepth 3`, because `PG_VERSION` is not unique: the cluster root has one at
+      # `<dir>/18/docker/PG_VERSION`, and there is another inside every database
+      # subdirectory (`base/1/…`). Bounding it distinguishes a real cluster from
+      # scattered debris.
+      pg_parent="$(cd "$(dirname "$pg_dir")" && pwd)"
+      pg_leaf="$(basename "$pg_dir")"
+      pg_probe="$(docker run --rm -v "$pg_parent:/parent" --user 0 alpine sh -c \
+        "find '/parent/$pg_leaf' -maxdepth 3 -name PG_VERSION -print -quit 2>/dev/null" 2>/dev/null)" \
+        || pg_probe="UNREADABLE"
+      if [ -n "$pg_probe" ]; then
         pg_initialised=true
+      else
+        pg_initialised=false
       fi
 
       if [ -f .env ] && grep -q '^POSTGRES_PASSWORD=' .env; then
@@ -169,12 +190,14 @@ case "$action" in
     # Guarded on `pg_initialised` so this can never touch a real database: the moment a
     # cluster exists, this branch does not run. Done from a root container because the
     # debris is root-owned and the deploy user is not root.
-    if [ "${pg_initialised:-false}" != true ] && [ -n "$(ls -A "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null || echo probe)" ]; then
-      pg_parent="$(cd "$(dirname "${FABULIST_PG_DIR:-./fabulist-pg}")" && pwd)"
-      pg_leaf="$(basename "${FABULIST_PG_DIR:-./fabulist-pg}")"
+    # Only when the probe above *positively* determined there is no cluster. The
+    # `= false` test is deliberate rather than `!= true`: an unset or unknown value
+    # must not reach the delete. This branch deleted a real database once, when the
+    # probe could not read the directory and its failure was read as emptiness.
+    if [ -z "${FABULIST_PG:-}" ] && [ "${pg_initialised:-unknown}" = false ]; then
       if docker run --rm -v "$pg_parent:/parent" --user 0 alpine sh -c \
         "rm -rf '/parent/$pg_leaf' && mkdir -p '/parent/$pg_leaf'"; then
-        echo "cleared an uninitialised database directory (failed-init debris, no cluster present)"
+        echo "cleared an uninitialised database directory (no cluster present)"
       else
         echo "note: could not clear ${FABULIST_PG_DIR:-./fabulist-pg}; Postgres may fail to initialise" >&2
       fi
