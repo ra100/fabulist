@@ -580,6 +580,31 @@ async function copyStories(client: Queryable, src: DatabaseSync, worldId: number
     ]),
   );
 
+  // Carry the player flag across the layer boundary.
+  //
+  // The SQLite schema allowed `is_player` on a *canon* sheet, and real saves use
+  // it: `saint-verrow` marks `char:brother-anselm` as the player on its canon
+  // row. The Postgres schema deliberately keeps `is_player` on chronicle only —
+  // who the protagonist is, is a property of a playthrough, not of the source
+  // material, and two stories in one world have different players — so a
+  // straight table-for-table copy silently dropped it and `cast.player()`
+  // returned undefined for an imported save. Caught by reading the imported data
+  // back through the stores, not by a unit test.
+  //
+  // `stories.player_character_id` is the authoritative answer (it is what every
+  // frame builder actually reads), so it seeds the chronicle sheet here. Written
+  // with ON CONFLICT so a story that already had a chronicle sheet for its player
+  // keeps the rest of that sheet and only gains the flag.
+  for (const s of stories) {
+    const pc = s.player_character_id;
+    if (typeof pc !== 'string' || !pc) continue;
+    await client.query(
+      `INSERT INTO chron_sheets (story_id, entity_id, is_player) VALUES ($1,$2,true)
+       ON CONFLICT (story_id, entity_id) DO UPDATE SET is_player = true`,
+      [s.id, pc],
+    );
+  }
+
   // The remaining story-scoped tables. Declared as data rather than as 13
   // near-identical functions: the column lists differ only in names, and a
   // table added later is one row here instead of a new function somebody
