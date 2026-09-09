@@ -118,14 +118,28 @@ case "$action" in
       # scattered debris.
       pg_parent="$(cd "$(dirname "$pg_dir")" && pwd)"
       pg_leaf="$(basename "$pg_dir")"
+      # The probe reports one of three words, rather than leaning on an exit status.
+      #
+      # Distinguishing them matters and an exit code cannot: `find` on a *missing*
+      # path exits 1, exactly like a real failure, so an earlier version treated a
+      # brand-new directory as "unreadable" and therefore as an initialised database —
+      # refusing to start on a fresh box. Asking the container to say which case it
+      # found removes the ambiguity entirely.
       pg_probe="$(docker run --rm -v "$pg_parent:/parent" --user 0 alpine sh -c \
-        "find '/parent/$pg_leaf' -maxdepth 3 -name PG_VERSION -print -quit 2>/dev/null" 2>/dev/null)" \
-        || pg_probe="UNREADABLE"
-      if [ -n "$pg_probe" ]; then
-        pg_initialised=true
-      else
-        pg_initialised=false
-      fi
+        "d='/parent/$pg_leaf'
+         [ -d \"\$d\" ] || { echo ABSENT; exit 0; }
+         if find \"\$d\" -maxdepth 3 -name PG_VERSION -print -quit 2>/dev/null | grep -q .; then
+           echo CLUSTER
+         else
+           echo NOCLUSTER
+         fi" 2>/dev/null)" || pg_probe="UNREADABLE"
+      case "$pg_probe" in
+        CLUSTER)              pg_initialised=true ;;
+        ABSENT|NOCLUSTER)     pg_initialised=false ;;
+        # Anything else — including a docker failure — is the uncertain case, and
+        # uncertainty must never authorise a delete.
+        *)                    pg_initialised=true ;;
+      esac
 
       if [ -f .env ] && grep -q '^POSTGRES_PASSWORD=' .env; then
         # Whatever the database was initialised with. An `app.env` value is
@@ -237,6 +251,45 @@ case "$action" in
 
     docker compose pull
     docker compose up -d
+
+    # Restore `*.pre-pg` files when the database has no record of them.
+    #
+    # The importer renames a world's `world.db` to `world.db.pre-pg` once it is safely
+    # in Postgres, so a restart does not repeat the work. That is the right behaviour,
+    # and it also means a *lost database* leaves those files stranded: `findSqliteWorlds`
+    # looks for `world.db`, so nothing re-imports them.
+    #
+    # This is not hypothetical — 0.7.7's cluster check deleted a working database and
+    # four worlds were left as `.pre-pg` with nothing to read them. Renaming them back
+    # when the database has no `sqlite_import_log` row is safe in both directions: with
+    # a row, the data is already in Postgres and the file stays parked; without one,
+    # the file is the only copy and must be readable again.
+    # Runs *after* `up`, because answering the question needs a live database, and
+    # restores are followed by a restart of the app so its boot importer sees them.
+    restored_any=false
+    if [ -z "${FABULIST_PG:-}" ] && [ -d "${FABULIST_DATA_DIR:-./fabulist-data}/worlds" ]; then
+      for pre in "${FABULIST_DATA_DIR:-./fabulist-data}"/worlds/*/world.db.pre-pg; do
+        [ -f "$pre" ] || continue
+        slug="$(basename "$(dirname "$pre")")"
+        # `docker compose exec -T` rather than a psql on the host: the database is only
+        # reachable on the compose network, and this runs before the app is up.
+        known="$(docker compose exec -T postgres psql -U fabulist -d fabulist -tAc \
+          "SELECT 1 FROM sqlite_import_log WHERE slug = '$slug' AND state = 'done'" 2>/dev/null || echo "")"
+        if [ -z "$known" ]; then
+          for suffix in "" "-wal" "-shm"; do
+            [ -f "$pre$suffix" ] && mv "$pre$suffix" "${pre%.pre-pg}$suffix"
+          done
+          echo "restored $slug for import (no record of it in the database)"
+          restored_any=true
+        fi
+      done
+    fi
+
+    if [ "$restored_any" = true ]; then
+      echo "restarting the app so its boot importer picks the restored worlds up"
+      docker compose restart fabulist >/dev/null 2>&1 || true
+    fi
+
 
     # Report what actually happened, in the deploy output.
     #
