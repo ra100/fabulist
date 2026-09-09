@@ -94,16 +94,32 @@ Two modes, one compose file:
     docker compose up -d                     # your own Postgres, via FABULIST_PG
     docker compose --profile bundled up -d   # a Postgres container, created for you
 
-**Bundled is a reasonable deployment choice**, not only a convenience: 20 MB idle,
-~32 MB with the app's pools open, and the database's lifecycle stays tied to the
-app's. Two settings in `app.env`:
+**Nothing needs configuring.** `deploy.sh` prepares the database itself, so a release
+lands without anyone touching the box:
 
-    COMPOSE_PROFILES=bundled
-    POSTGRES_PASSWORD=<something>
+- **No `FABULIST_PG`** → runs the bundled Postgres, generating a password on first
+  deploy and keeping it in `.env` (never uploaded, so CI's `app.env` rewrite cannot
+  destroy it). This is the default because it is the shape that works with no
+  decisions made.
+- **`FABULIST_PG` set** → uses that Postgres and leaves the bundled service off.
 
-`FABULIST_PG` can then be left unset — compose defaults it to the bundled service.
+It also creates the bind-mount directories and reports how many SQLite worlds the app
+will import on this boot. Verified end to end on a fresh directory carrying a real
+`world.db`: password generated, Postgres started, `imported saint-verrow: 22 canon
+entities, 37 edges, 1 story`, serving — one command, no preparation. A second deploy
+re-imports nothing and rotates nothing.
 
-`COMPOSE_PROFILES` has to reach the *client's* environment, not just the container's:
+Setting `POSTGRES_PASSWORD` in `app.env` before the *first* deploy uses that value
+instead of a generated one. Setting it afterwards is deliberately **ignored, with an
+explanation**: it cannot change an existing database (see the warning below), so
+applying it would only lock the app out.
+
+Bundled is a reasonable deployment choice, not only a convenience: 20 MB idle, ~32 MB
+with the app's pools open, and the database's lifecycle stays tied to the app's.
+
+`deploy.sh` sets `COMPOSE_PROFILES=bundled` on its own when `FABULIST_PG` is unset, so
+this is only worth knowing if you set it by hand. It has to reach the *client's*
+environment, not just the container's:
 `env_file:` is read by the container at start, while profile selection and `${...}`
 substitution are done by the `docker compose` client from its own environment and
 `.env`. `deploy.sh` therefore sources `app.env` before invoking compose, so one file
