@@ -191,10 +191,30 @@ async function boot(): Promise<void> {
   // 4. Somewhere to land. A fresh install gets an empty world so the wizard has
   //    somewhere to ingest into — the role `World.open` on a nonexistent path used
   //    to play.
+  //
+  //    Skipped when SQLite worlds are still waiting to be imported. `slugify('')` is
+  //    `world`, so this placeholder claims that slug — and a real
+  //    `data/worlds/world/world.db` then failed to import with
+  //    `duplicate key value violates unique constraint "worlds_slug_key"`, recorded as
+  //    `failed`, which blocks automatic retry. That is not hypothetical; it happened on
+  //    the deployed instance, because an earlier boot created the placeholder while the
+  //    import was failing for an unrelated reason.
+  //
+  //    The importer now also adopts an empty world holding its slug, so this is the
+  //    second of two independent guards. Both are worth having: this one keeps the
+  //    database clean, and that one recovers a database that is already dirty.
   const worlds = await listWorlds(play);
   if (!worlds.length) {
-    const created = await createWorld(ingest, '');
-    console.log(`created an empty world (${created.slug}) for the setup wizard`);
+    const stillToImport = findSqliteWorlds(dataRoot);
+    if (stillToImport.length) {
+      console.log(
+        `not creating a placeholder world: ${stillToImport.length} SQLite world(s) still to import ` +
+          `(${stillToImport.map((w) => w.slug).join(', ')})`,
+      );
+    } else {
+      const created = await createWorld(ingest, '');
+      console.log(`created an empty world (${created.slug}) for the setup wizard`);
+    }
   }
 
   const imagesDir = join(dataRoot, 'images');

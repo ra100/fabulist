@@ -233,11 +233,43 @@ async function importOneWorld(
         await client.query(`DELETE FROM worlds WHERE slug = $1`, [cand.slug]);
       }
 
-      const worldRow = await client.query<{ id: string }>(
-        `INSERT INTO worlds (slug, title, ingest_context) VALUES ($1,$2,$3::jsonb) RETURNING id`,
-        [cand.slug, meta.worldTitle, meta.ingestContext],
+      // An *empty* world already holding this slug is adopted rather than collided
+      // with.
+      //
+      // This is a real failure, not a hypothetical: a boot that finds no worlds
+      // creates an empty one for the setup wizard, and `slugify('')` is `world`. On
+      // this deployment an earlier boot had done exactly that while the import was
+      // still failing for unrelated reasons, so a genuine `data/worlds/world/world.db`
+      // then hit `duplicate key value violates unique constraint "worlds_slug_key"`
+      // and was recorded as `failed` — which deliberately blocks automatic retry, so
+      // it stayed broken.
+      //
+      // Adoption is strictly limited to a world with no canon of its own: it reuses
+      // the row's id, so any story already pointing at it keeps working, and a world
+      // with content still collides loudly rather than being silently overwritten.
+      // `FOR UPDATE` because the boot path that creates placeholders can be running
+      // concurrently in another process.
+      const existing = await client.query<{ id: string; entities: string }>(
+        `SELECT w.id, (SELECT count(*) FROM canon_entities ce WHERE ce.world_id = w.id) AS entities
+           FROM worlds w WHERE w.slug = $1 FOR UPDATE`,
+        [cand.slug],
       );
-      const worldId = Number(worldRow.rows[0]!.id);
+      let worldId: number;
+      if (existing.rows[0] && existing.rows[0].entities === '0') {
+        worldId = Number(existing.rows[0].id);
+        await client.query(`UPDATE worlds SET title = $2, ingest_context = $3::jsonb WHERE id = $1`, [
+          worldId,
+          meta.worldTitle,
+          meta.ingestContext,
+        ]);
+        opts.log(`${cand.slug}: adopting the empty world already using this slug`);
+      } else {
+        const worldRow = await client.query<{ id: string }>(
+          `INSERT INTO worlds (slug, title, ingest_context) VALUES ($1,$2,$3::jsonb) RETURNING id`,
+          [cand.slug, meta.worldTitle, meta.ingestContext],
+        );
+        worldId = Number(worldRow.rows[0]!.id);
+      }
 
       await copyCanonEntities(client, src, worldId);
       await copyCanonEdges(client, src, worldId);

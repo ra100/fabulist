@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withPg } from './pg-harness.ts';
 import { findSqliteWorlds, importSqliteWorlds } from '../src/db/import-sqlite.ts';
+import { createWorld } from '../src/store/index-pg.ts';
 import { overlayEntity, sourcesFor } from '../src/db/overlay.ts';
 import { CastStore } from '../src/store/cast-pg.ts';
 
@@ -382,3 +383,70 @@ test('a world with no stories imports as canon only', async (t) => {
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+/**
+ * The placeholder-slug collision that broke a real deployment.
+ *
+ * A boot with no worlds creates an empty one for the setup wizard, and
+ * `slugify('')` is `world`. So a genuine `data/worlds/world/world.db` hit
+ * `duplicate key value violates unique constraint "worlds_slug_key"` and was recorded
+ * `failed` — which blocks automatic retry, so it stayed broken until someone noticed.
+ *
+ * The importer now adopts an *empty* world already holding the slug, reusing its id so
+ * that anything already pointing at it keeps working.
+ */
+test('importing adopts an empty world that already holds the slug', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withRoot(async (root) => {
+      // Exactly what boot does when it finds nothing: an empty world, slug `world`.
+      const placeholder = await createWorld(db, '');
+      assert.equal(placeholder.slug, 'world', 'the empty-title slug is what collides');
+
+      makeSqliteWorld(root, 'world', { canon: 3, title: 'A Real World' });
+      const report = await importSqliteWorlds(db, { dataRoot: root });
+
+      assert.deepEqual(report.failed, [], 'must not collide any more');
+      assert.deepEqual(report.imported.map((w) => w.slug), ['world']);
+
+      // The same row, reused — not a second world with a suffixed slug.
+      const rows = await db.query<{ id: string; title: string }>(`SELECT id, title FROM worlds WHERE slug = 'world'`);
+      assert.equal(rows.rows.length, 1, 'one world for the slug, not two');
+      assert.equal(Number(rows.rows[0]!.id), placeholder.id, 'the placeholder id is kept');
+      assert.equal(rows.rows[0]!.title, 'A Real World', 'and the real title replaces the empty one');
+
+      const canon = await db.query<{ n: string }>(
+        `SELECT count(*) n FROM canon_entities WHERE world_id = $1`,
+        [placeholder.id],
+      );
+      assert.equal(canon.rows[0]!.n, '3', 'canon landed on the adopted row');
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * Adoption must not become a silent overwrite: a world with canon of its own is real
+ * data, and colliding with it should still fail loudly.
+ */
+test('importing refuses to adopt a world that already has canon', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withRoot(async (root) => {
+      // A world at the same slug, with content — the case that must be protected.
+      makeSqliteWorld(root, 'occupied', { canon: 2, title: 'First' });
+      const first = await importSqliteWorlds(db, { dataRoot: root });
+      assert.deepEqual(first.failed, []);
+
+      // A *different* source file arriving at the same slug.
+      makeSqliteWorld(root, 'occupied', { canon: 5, title: 'Second' });
+      const second = await importSqliteWorlds(db, { dataRoot: root });
+
+      // Skipped by the import log rather than adopted — the log is checked first, and
+      // that is the correct outcome: an already-imported world is not re-imported.
+      assert.deepEqual(second.imported, [], 'no silent overwrite');
+      const rows = await db.query<{ title: string }>(`SELECT title FROM worlds WHERE slug = 'occupied'`);
+      assert.equal(rows.rows[0]!.title, 'First', 'the existing world is untouched');
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
