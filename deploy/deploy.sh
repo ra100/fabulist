@@ -176,12 +176,16 @@ case "$action" in
     # the only place this shows up — which is exactly why the diagnostics added in
     # 0.7.2 were worth a release of their own.
     #
-    # Only when the directory is still empty: an initialised cluster already has the
-    # right ownership, and chowning a live data directory is not something a deploy
-    # should do unasked. `|| true` because a box where this is not permitted (an
-    # unprivileged deploy user) should still get the clearer failure from the database
-    # log rather than an opaque abort here.
-    if [ -z "$(ls -A "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null)" ]; then
+    # Gated on "is there a cluster here", not "is the directory empty".
+    #
+    # `-z "$(ls -A …)"` was the wrong test and cost another release: v0.7.2 had left
+    # debris in the directory — a partial `18/` from the failed inits — so the
+    # directory was non-empty, the chown was skipped, and the identical
+    # `Permission denied` loop continued. What actually matters is whether an
+    # initialised cluster is present, because that is the only case where changing
+    # ownership would be interfering with real data rather than fixing a fresh mount.
+    # `$pg_initialised` already answers exactly that, computed above from PG_VERSION.
+    if [ -z "${FABULIST_PG:-}" ] && [ "${pg_initialised:-false}" != true ]; then
       pg_abs="$(cd "${FABULIST_PG_DIR:-./fabulist-pg}" && pwd)"
       # Done through a throwaway root container rather than `chown`/`sudo`: the deploy
       # user owns the directory it just created but is not necessarily root, and
