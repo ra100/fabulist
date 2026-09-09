@@ -88,6 +88,20 @@ function toSheet(r: SheetRow): CharacterSheet {
   };
 }
 
+/** An absent sheet, rendered so callers never branch on existence. */
+function blankSheet(entityId: EntityId): CharacterSheet {
+  return {
+    entityId,
+    identity: emptyIdentity(),
+    contract: emptyContract(),
+    voice: emptyVoice(),
+    condition: emptyCondition(),
+    appearance: emptyAppearance(),
+    locks: [],
+    isPlayer: false,
+  };
+}
+
 export interface CastStoreOptions {
   db: Queryable;
   storyId: StoryId;
@@ -140,18 +154,43 @@ export class CastStore {
 
   /** Sheet or a blank one, so callers never branch on existence. */
   async getOrBlank(entityId: EntityId): Promise<CharacterSheet> {
-    return (
-      (await this.get(entityId)) ?? {
-        entityId,
-        identity: emptyIdentity(),
-        contract: emptyContract(),
-        voice: emptyVoice(),
-        condition: emptyCondition(),
-        appearance: emptyAppearance(),
-        locks: [],
-        isPlayer: false,
-      }
+    return (await this.get(entityId)) ?? blankSheet(entityId);
+  }
+
+  /**
+   * Many sheets by entity id, in one query, blanks included.
+   *
+   * The frame builders render a sheet per present character every turn, so this
+   * is the same round-trip problem `GraphStore.getMany` solves: `getOrBlank` in a
+   * loop was free in-process and is one network hop per character here.
+   *
+   * Every requested id is present in the result — missing ones as blanks — so a
+   * caller can render without branching, which is what `getOrBlank` promised.
+   */
+  async getManyOrBlank(entityIds: EntityId[]): Promise<Map<EntityId, CharacterSheet>> {
+    const out = new Map<EntityId, CharacterSheet>();
+    const unique = [...new Set(entityIds)].filter((id) => id);
+    if (!unique.length) return out;
+
+    const cols = 'entity_id, identity, contract, voice, condition, appearance, locks';
+    const params: unknown[] = [this.storyId, unique];
+    const arms = [
+      `SELECT ${cols}, is_player, 0 AS pri FROM chron_sheets WHERE story_id = $1 AND entity_id = ANY($2)`,
+    ];
+    for (const s of this.sources) {
+      params.push(s.worldId, s.ordinal);
+      arms.push(
+        `SELECT ${cols}, false AS is_player, $${params.length} AS pri FROM canon_sheets
+           WHERE world_id = $${params.length - 1} AND entity_id = ANY($2)`,
+      );
+    }
+    const { rows } = await this.db.query<SheetRow>(
+      `SELECT DISTINCT ON (entity_id) * FROM (${arms.join(' UNION ALL ')}) q ORDER BY entity_id, pri`,
+      params,
     );
+    for (const r of rows) out.set(r.entity_id, toSheet(r));
+    for (const id of unique) if (!out.has(id)) out.set(id, blankSheet(id));
+    return out;
   }
 
   /**

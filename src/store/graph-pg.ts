@@ -172,6 +172,94 @@ export class GraphStore {
   }
 
   /**
+   * Many entities by id, in one query.
+   *
+   * Exists because the frame builders resolve tens of ids per turn and this is
+   * the hot path of the whole application. Under SQLite `get()` in a loop cost
+   * microseconds per call; over a connection each one is a round trip, so
+   * `presentCastBlock` alone would have gone from one in-process burst to ~20
+   * sequential awaits before the narrator sees a token. Measured on the real
+   * corpora, resolving 40 ids one-at-a-time versus batched is the difference
+   * between ~40 round trips and one.
+   *
+   * Returns a Map so a caller can preserve its own ordering and detect misses;
+   * an id that resolves to nothing is simply absent, matching `get()`.
+   */
+  async getMany(ids: EntityId[]): Promise<Map<EntityId, Entity>> {
+    const out = new Map<EntityId, Entity>();
+    const unique = [...new Set(ids)].filter((id) => id);
+    if (!unique.length) return out;
+
+    const cols = 'id, type, name, summary, provenance, confidence, salience, depth_level, props, created_scene';
+    const params: unknown[] = [this.storyId, unique];
+    const arms = [`SELECT ${cols}, 0 AS pri FROM chron_entities WHERE story_id = $1 AND id = ANY($2)`];
+    for (const s of this.sources) {
+      params.push(s.worldId, s.ordinal);
+      arms.push(
+        `SELECT ${cols}, $${params.length} AS pri FROM canon_entities
+           WHERE world_id = $${params.length - 1} AND id = ANY($2) AND retired_at_revision IS NULL`,
+      );
+    }
+    // DISTINCT ON with pri as the second sort key is the same precedence rule
+    // `overlayEntity` applies, applied to a set instead of one id.
+    const { rows } = await this.db.query<EntityRow>(
+      `SELECT DISTINCT ON (id) * FROM (${arms.join(' UNION ALL ')}) q ORDER BY id, pri`,
+      params,
+    );
+    for (const r of rows) out.set(r.id, toEntity(r));
+    return out;
+  }
+
+  /**
+   * Neighbourhoods for many subjects at once — the other half of what the frame
+   * builders need, and the reason `neighbourhood()` could otherwise issue two
+   * queries per id per hop.
+   */
+  async neighboursMany(
+    ids: EntityId[],
+    scene?: number,
+  ): Promise<Map<EntityId, Array<{ edge: Edge; otherId: EntityId }>>> {
+    const out = new Map<EntityId, Array<{ edge: Edge; otherId: EntityId }>>();
+    const unique = [...new Set(ids)].filter((id) => id);
+    if (!unique.length) return out;
+    for (const id of unique) out.set(id, []);
+
+    const params: unknown[] = [this.storyId, unique];
+    const live = (t: string) =>
+      scene === undefined
+        ? `${t}.valid_to IS NULL`
+        : `${t}.valid_from <= $${params.push(scene)} AND (${t}.valid_to IS NULL OR ${t}.valid_to > $${params.length})`;
+
+    const cols = 'subject, predicate, object, valid_from, valid_to, weight, provenance, confidence, evidence';
+    // Both directions in one pass: a neighbourhood is undirected, and asking
+    // twice would double the round trips this method exists to avoid.
+    const arms = [
+      `SELECT ${cols}, 0 AS pri FROM chron_edges c
+         WHERE c.story_id = $1 AND (c.subject = ANY($2) OR c.object = ANY($2)) AND ${live('c')}`,
+    ];
+    for (const s of this.sources) {
+      params.push(s.worldId);
+      arms.push(
+        `SELECT ${cols}, 1 AS pri FROM canon_edges e
+           WHERE e.world_id = $${params.length} AND (e.subject = ANY($2) OR e.object = ANY($2)) AND ${live('e')}
+             AND NOT EXISTS (
+               SELECT 1 FROM chron_edges m WHERE m.story_id = $1
+                 AND m.subject = e.subject AND m.predicate = e.predicate AND m.object = e.object
+             )`,
+      );
+    }
+    const { rows } = await this.db.query<EdgeRow>(`${arms.join(' UNION ALL ')}`, params);
+
+    const wanted = new Set(unique);
+    for (const r of rows) {
+      const edge = toEdge(r);
+      if (wanted.has(edge.subject)) out.get(edge.subject)!.push({ edge, otherId: edge.object });
+      if (wanted.has(edge.object)) out.get(edge.object)!.push({ edge, otherId: edge.subject });
+    }
+    return out;
+  }
+
+  /**
    * Canon as the source material stated it, ignoring every story's
    * playthrough. Searched in source order so a crossover answers with the same
    * precedence the overlay would, minus the chronicle layer.
