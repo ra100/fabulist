@@ -42,10 +42,33 @@ case "$action" in
     echo "app.env updated ($(wc -l < app.env) lines)"
     ;;
   deploy)
+    # `COMPOSE_PROFILES` has to be in *this shell's* environment, not just in
+    # app.env.
+    #
+    # `env_file:` is read by the container at start; `${...}` substitution and
+    # profile selection are done by the `docker compose` client, which looks only at
+    # its own environment and `.env`. So a `COMPOSE_PROFILES=bundled` sitting in
+    # app.env selects nothing — verified directly: `docker compose config --services`
+    # listed only `fabulist`, the database never started, and the app then reported it
+    # could not reach one. Exported here so one file stays the single place an
+    # operator configures.
+    if [ -f app.env ]; then
+      set -a
+      # shellcheck disable=SC1091
+      . ./app.env
+      set +a
+    fi
+    if [ -n "${COMPOSE_PROFILES:-}" ]; then
+      echo "profiles: $COMPOSE_PROFILES"
+    else
+      echo "profiles: none (expecting FABULIST_PG to name an external Postgres)"
+    fi
     docker compose pull
     docker compose up -d
-    # Drops now-unreferenced image layers from the previous release. Volumes
-    # (world data) are never touched by `image prune` — only images.
+    # Drops now-unreferenced image layers from the previous release. Neither the
+    # app's /data nor the database directory is touched by `image prune` — both are
+    # bind mounts on the host disk, not volumes, and `image prune` only removes
+    # images regardless.
     docker image prune -f
     ;;
   *)

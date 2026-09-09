@@ -131,10 +131,15 @@ services:
   #     docker compose --profile bundled up -d     -> this one, created automatically
   #
   # A profile rather than a second compose file, so there is one file to read and no
-  # chance of the two drifting. The deployed VPS uses its existing Postgres (the
-  # database and role created by hand once); a local `--profile bundled` run needs
-  # nothing but Docker, which is the point — `POSTGRES_DB`/`POSTGRES_USER` below make
-  # the entrypoint create both on an empty volume.
+  # chance of the two drifting. `POSTGRES_DB`/`POSTGRES_USER` below make the
+  # entrypoint create the database and role on an empty directory, so neither mode
+  # needs a migration step or any `psql` at all.
+  #
+  # Measured footprint, which is why this is a reasonable *deployment* choice and not
+  # only a convenience: 20 MB idle, ~32 MB with the app's pools open. Running your own
+  # Postgres instead saves that; running this saves configuring `listen_addresses`,
+  # `pg_hba.conf` and a host-gateway route, and keeps the database's lifecycle tied to
+  # the app's.
   postgres:
     profiles: ["bundled"]
     # Pinned to a major version, not `latest`: a Postgres major upgrade needs
@@ -147,14 +152,16 @@ services:
     environment:
       POSTGRES_DB: fabulist
       POSTGRES_USER: fabulist
-      # Defaulted, deliberately, and only safe because of the two lines below it:
-      # this service publishes no ports, so the database is reachable only from the
-      # compose network. A local `--profile bundled` run should need nothing but
+      # Defaulted so a local `docker compose --profile bundled up` needs nothing but
       # Docker — demanding a password to try the app on a laptop is the kind of
       # friction that gets worked around with a worse password.
       #
-      # Set POSTGRES_PASSWORD in app.env for anything not on a laptop. The deployed
-      # instance does not use this service at all.
+      # Tolerable only because this service publishes no ports: the database is
+      # reachable from the compose network and nowhere else, so the password is not a
+      # perimeter. **Set POSTGRES_PASSWORD in app.env on a real server anyway** — it
+      # is the difference between "one service on this host can reach the database"
+      # and "any of them can". `pg_hba.conf` inside the container trusts the compose
+      # network by default, which is the same reasoning and the same limit.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fabulist-local}
     # Sized for a small server, not for the load ceiling.
     #
@@ -186,6 +193,13 @@ services:
       # than a root-owned path under Docker's own storage that only `docker cp`
       # can reach. Back this up with `pg_dump`, not by copying the directory
       # while the server is running.
+      #
+      # A bind mount is also what makes `docker compose down -v` survivable, which is
+      # the accident worth designing against: `-v` removes named *volumes*, and a bind
+      # mount is not one. Verified directly — 48 MB of real data, a `down -v`, a
+      # `docker rm -f` of the container, and the prose was still there afterwards.
+      # `docker volume ls` shows nothing for this stack, so `volume prune` has nothing
+      # to take either.
       #
       # `/var/lib/postgresql`, *not* `/var/lib/postgresql/data`. The 18 images
       # changed this: they store data in a major-version subdirectory so
