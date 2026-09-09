@@ -20,12 +20,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeWorld, withPg } from './pg-harness.ts';
-import { World } from '../src/store/index-pg.ts';
-import { createStory, getStory, listStories } from '../src/store/world-pg.ts';
+import { World, worldFor } from '../src/store/index-pg.ts';
+import { createStory, defaultWorldIds, getStory, listStories } from '../src/store/world-pg.ts';
 import { SetupService } from '../src/setup/service-pg.ts';
 import { IllustrationService } from '../src/illustration/service-pg.ts';
 import { seedWorld } from '../src/seed/verrow-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
+import type { SessionUser } from '../src/auth/config.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { MockImageProvider } from '../src/providers/mockImage.ts';
 import { SwappableImageRegistry } from '../src/providers/image.ts';
@@ -305,3 +306,83 @@ test('a scene illustration reads its cast and place in batched queries', async (
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+/**
+ * A new user on a populated instance gets the library, not the setup wizard.
+ *
+ * `graph.isEmpty()` counts only the worlds a story *sources*, so a story created with no
+ * sources reported empty on an instance holding five populated public worlds — and the UI
+ * put the "ingest a world from scratch" wizard in front of canon that already existed.
+ * Reported as "we should show those mass effect, star trek… worlds to anyone": they were
+ * public and in the library the whole time, behind the wizard.
+ */
+test('a new user on an instance with public canon lands in it, not in the wizard', async (t) => {
+  const ran = await withPg(async (db) => {
+    const providers = new ProviderRegistry(new MockProvider());
+    const user = (id: string): SessionUser => ({
+      id,
+      email: `${id}@example.com`,
+      firstName: null,
+      lastName: null,
+      isAdmin: false,
+    });
+
+    // An empty instance: the wizard is the correct answer, and this asserts the fix did
+    // not simply disable it.
+    const empty = await worldFor(db, user('u-empty'));
+    const emptySvc = new SetupService({ world: () => empty, db, providers });
+    assert.equal(await emptySvc.isFresh(), true, 'nothing to play yet: the wizard is right');
+
+    // Now give the instance one populated public world.
+    const worldId = await makeWorld(db, 'mass-effect', 'Mass Effect');
+    await db.query(
+      `INSERT INTO canon_entities (world_id,id,type,name,summary,salience)
+       VALUES ($1,'char:shepard','Character','Shepard','x',1)`,
+      [worldId],
+    );
+
+    // A brand-new user arriving after that reads it immediately.
+    const arrived = await worldFor(db, user('u-new'));
+    const svc = new SetupService({ world: () => arrived, db, providers });
+    assert.equal(await svc.isFresh(), false, 'canon exists: show the library');
+    assert.deepEqual(
+      arrived.sources.map((src) => src.worldId),
+      [worldId],
+      "a first book sources the instance's existing canon",
+    );
+    assert.deepEqual(
+      (await arrived.graph.search('Shepard')).map((e) => e.name),
+      ['Shepard'],
+      'and can read it without configuring anything',
+    );
+
+    // A story left with no sources at all is a library problem — pick a world — not a
+    // setup problem, so the wizard must still stay away.
+    await db.query(`DELETE FROM story_sources WHERE story_id = $1`, [arrived.storyId]);
+    const bare = await worldFor(db, user('u-new'));
+    const bareSvc = new SetupService({ world: () => bare, db, providers });
+    assert.equal(await bareSvc.isFresh(), false, 'sourceless story on a populated instance is not "fresh"');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * The default never hands out a private world.
+ *
+ * A new user's first book reads whatever canon exists — which must mean *public* canon,
+ * or the convenience becomes the leak `worldsVisibleTo` exists to prevent.
+ */
+test('the default world for a new story is never a private one', async (t) => {
+  const ran = await withPg(async (db) => {
+    const secretId = await makeWorld(db, 'secret', 'Secret');
+    await db.query(
+      `INSERT INTO canon_entities (world_id,id,type,name,summary,salience)
+       VALUES ($1,'char:x','Character','X','x',1)`,
+      [secretId],
+    );
+    await db.query(`UPDATE worlds SET visibility = 'private' WHERE id = $1`, [secretId]);
+    assert.deepEqual(await defaultWorldIds(db), [], 'a private world is nobody\'s default');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+

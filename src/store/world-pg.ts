@@ -587,7 +587,38 @@ export async function resolveOrCreateStoryForUser(
 ): Promise<StoryId> {
   const existing = await listStoriesForUser(db, ownerUserId);
   if (existing.length > 0) return existing[0]!.id;
-  return (await createStory(db, { title: '', ownerUserId, worldIds })).id;
+  // A first book reads whatever canon this instance already has, rather than nothing.
+  //
+  // With no sources, `graph.isEmpty()` is true — it only counts the worlds a story
+  // actually sources — so the UI opened the setup wizard at a new user on an instance
+  // holding five populated public worlds, offering to ingest a world from scratch.
+  // Reported as "we should show those mass effect, star trek… worlds to anyone": they
+  // were public and visible in the library the whole time, but the wizard sat in front
+  // of them.
+  //
+  // Public worlds only, and ordered oldest-first so the default is the instance's
+  // primary world rather than whatever was ingested most recently. A caller that knows
+  // which worlds it wants still passes them explicitly.
+  const seed = worldIds.length ? worldIds : await defaultWorldIds(db);
+  return (await createStory(db, { title: '', ownerUserId, worldIds: seed })).id;
+}
+
+/**
+ * The worlds a brand-new story should read when nobody has said which.
+ *
+ * Public only: a private world is nobody's default, and handing one to a new user is
+ * the leak `worldsVisibleTo` exists to prevent. Empty on a genuinely fresh instance,
+ * which is the one case where the setup wizard is the right answer.
+ */
+export async function defaultWorldIds(db: Queryable): Promise<number[]> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT w.id FROM worlds w
+      WHERE w.visibility = 'public'
+        AND EXISTS (SELECT 1 FROM canon_entities c WHERE c.world_id = w.id AND c.retired_at_revision IS NULL)
+      ORDER BY w.id
+      LIMIT 1`,
+  );
+  return rows.map((r) => Number(r.id));
 }
 
 /**
@@ -603,7 +634,8 @@ export async function resolveOrCreateStoryForUser(
 export async function resolveCurrentStory(db: Queryable, worldIds: number[] = []): Promise<StoryId> {
   const existing = await listStories(db);
   if (existing.length > 0) return existing[0]!.id;
-  return (await createStory(db, { title: '', worldIds })).id;
+  // Same default as the per-user path: a first book reads the canon that exists.
+  return (await createStory(db, { title: '', worldIds: worldIds.length ? worldIds : await defaultWorldIds(db) })).id;
 }
 
 export class StoryStore {

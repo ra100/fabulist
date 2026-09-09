@@ -8,7 +8,7 @@
  */
 import type { World } from '../store/index-pg.ts';
 import type { Db } from '../db/pg.ts';
-import { createStory } from '../store/world-pg.ts';
+import { createStory, defaultWorldIds } from '../store/world-pg.ts';
 import type { StoryId } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
 import { WikiClient } from '../ingest/client.ts';
@@ -246,8 +246,23 @@ export class SetupService {
    * on. An existence check rather than a count: see `GraphStore.isEmpty` for
    * why the difference is worth a method.
    */
+  /**
+   * Is there nothing to play yet — the question that decides whether the UI opens the
+   * setup wizard or the library.
+   *
+   * Deliberately *not* "does my current story have canon". `graph.isEmpty()` counts only
+   * the worlds a story sources, so a story with no sources reported empty on an instance
+   * holding five populated public worlds, and the wizard sat in front of them offering
+   * to ingest one from scratch. That is the wrong answer twice over: the canon exists,
+   * and the fix is to pick a world rather than to build one.
+   *
+   * So this is fresh only when the *instance* has no public canon at all. A story with
+   * no sources on a populated instance is now a library problem — choose a world — not a
+   * setup problem.
+   */
   async isFresh(): Promise<boolean> {
-    return (await this.getWorld()).graph.isEmpty();
+    if (!(await this.getWorld()).graph.isEmpty()) return false;
+    return (await defaultWorldIds(this.db)).length === 0;
   }
 
   async resolveWiki(query: string): Promise<WikiCandidate[]> {
