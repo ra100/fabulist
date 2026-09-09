@@ -132,6 +132,23 @@ export function App() {
     void api.auth.me().then((r) => setCurrentUser(r.user)).catch(() => setCurrentUser(null));
   }, []);
 
+  /**
+   * Clears the server-side session cookie, then hard-navigates to `/` —
+   * not a client-side `setCurrentUser(null)` — so every other bit of state
+   * this browser tab was holding for the *previous* user (the open story,
+   * its cached turns, `sessionStorage`'s own `fabulist_story_id`) does not
+   * linger into whatever renders next. The gate in `src/server/api.ts`
+   * gets to decide what "signed out" looks like (the landing page when
+   * login is required) rather than this component guessing.
+   */
+  const signOut = useCallback(async () => {
+    try {
+      await api.auth.logout();
+    } finally {
+      window.location.href = '/';
+    }
+  }, []);
+
   if (fresh === null) return <div className="wizard"><div className="wizard-card dim">loading…</div></div>;
 
   if (fresh) {
@@ -188,6 +205,23 @@ export function App() {
             </button>
           ))}
         </nav>
+        {/*
+          Absent entirely when login is off or nobody is signed in yet — the
+          same "no `currentUser` means nothing to show" shape `SettingsTab`
+          already uses for `showSystemSettings`, rather than an empty slot
+          reserving space for a control that will never appear on a
+          local/no-login deployment.
+        */}
+        {currentUser ? (
+          <div className="account">
+            <span className="account-who" title={currentUser.email}>
+              {currentUser.firstName ?? currentUser.email}
+            </span>
+            <button className="account-signout" onClick={() => void signOut()}>
+              sign out
+            </button>
+          </div>
+        ) : null}
       </header>
 
       {stale ? (

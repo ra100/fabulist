@@ -1007,6 +1007,43 @@ hr {
   color: var(--ink-2);
 }
 
+/*
+  Sits after `.tabs` in source order but is not part of the `margin-left:
+  auto` group that pushes `.tabs` to the right — it is the rightmost thing
+  in the bar on its own, since nothing after it should ever compete for
+  that edge. `flex-shrink: 0` matches `.tabs button`'s own sibling
+  treatment: a narrow window should squeeze the tab labels before it
+  squeezes an email address into wrapping garbage.
+*/
+.account {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.account-who {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-signout {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 4px 8px;
+  color: var(--ink-3);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+.account-signout:hover {
+  background: none;
+  color: var(--ink);
+  text-decoration: underline;
+}
+
 .main {
   flex: 1;
   min-height: 0;
@@ -2436,6 +2473,12 @@ button.link:hover { background: none; color: var(--ink); }
   .topbar { gap: var(--s3); padding: 0 var(--s3); }
   .meta { display: none; }
   .tabs button { padding: 7px 8px; }
+  /* Same reasoning as `.meta` just above: a phone's topbar has no room for
+     an email address once the icon, title and tab scroller are on it. The
+     sign-out button itself stays visible — losing the "signed in as X"
+     glance costs nothing a user cannot still get from tapping it, but
+     losing the ability to sign out at all on a phone would. */
+  .account-who { display: none; }
 
   /* The composer's action row: hint copy plus two buttons on one line was
      already tight at 375px and overlapping by 320px. The hint takes the

@@ -631,8 +631,21 @@ export async function checkServerFreshness(): Promise<StaleServer | null> {
 
 export const api = {
   meta: () => req<ServerMeta>('/meta'),
-  /** `{ user: null }` is the honest, 200 answer when login is off entirely or this browser has no session — never an error to handle. */
-  auth: { me: () => req<{ user: CurrentUser | null }>('/auth/me') },
+  auth: {
+    /** `{ user: null }` is the honest, 200 answer when login is off entirely or this browser has no session — never an error to handle. */
+    me: () => req<{ user: CurrentUser | null }>('/auth/me'),
+    /**
+     * `POST /auth/logout` — a plain, non-`/api` route (see
+     * `src/auth/routes.ts`'s `handleLogout`), so this bypasses `req()`
+     * rather than getting the `/api` prefix it would otherwise add. Clears
+     * the session cookie server-side; it does not touch any client state
+     * itself, since the caller (`App.tsx`'s `signOut`) needs a full
+     * navigation afterward anyway — a stale in-memory `currentUser` would
+     * otherwise keep the topbar reading "signed in as X" after the cookie
+     * is already gone.
+     */
+    logout: () => fetch('/auth/logout', { method: 'POST' }),
+  },
   state: () => req<State>('/state'),
   /**
    * `minWeight` omitted lets the server apply its own default (0.5 — typed
