@@ -70,5 +70,21 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      # 120s, not 10s: the first boot after the Postgres migration imports every
+      # existing SQLite world before it starts listening, and that is real work —
+      # measured 9.5s for the three worlds on the reference machine (45,034 canon
+      # entities, 226,347 canon edges), so an instance with twenty would take
+      # proportionally longer. `start_period` failures do not count toward
+      # `retries`, so a generous value costs nothing on an ordinary boot (the
+      # check still runs every 30s and the container is marked healthy as soon as
+      # one passes) and prevents a slow one-time import from being reported as a
+      # failing container.
+      #
+      # This does not gate `restart: unless-stopped`, which reacts to the process
+      # exiting rather than to health — the importer is written so a failed world
+      # never crashes the process for exactly that reason (see
+      # src/db/import-sqlite.ts). Prefer running `pnpm import-pg` as a deploy
+      # step when the import is expected to be long, so it happens while nothing
+      # is serving.
+      start_period: 120s
 

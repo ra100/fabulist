@@ -30,6 +30,7 @@
     "pg:stop": "deploy/pg-dev.sh stop",
     "pg:reset": "deploy/pg-dev.sh reset",
     "pg:psql": "deploy/pg-dev.sh psql",
+    "import-pg": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/cli/importpg.ts",
     "play": "node --disable-warning=ExperimentalWarning src/cli/play.ts",
     "seed": "node --disable-warning=ExperimentalWarning src/cli/seed.ts",
     "backup": "node --disable-warning=ExperimentalWarning src/cli/backup.ts",
