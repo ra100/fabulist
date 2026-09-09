@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { withPg } from './pg-harness.ts';
 import { findSqliteWorlds, importSqliteWorlds } from '../src/db/import-sqlite.ts';
 import { overlayEntity, sourcesFor } from '../src/db/overlay.ts';
+import { CastStore } from '../src/store/cast-pg.ts';
 
 /**
  * A minimal but structurally real SQLite world: canon, a story, and chronicle
@@ -58,7 +59,11 @@ function makeSqliteWorld(
     `INSERT INTO edges (subject,predicate,object,layer,story_id,valid_from,weight)
      VALUES ('char:c0','ALLIED_WITH','char:c1','canon',NULL,0,0.5)`,
   ).run();
-  db.prepare(`INSERT INTO sheets (entity_id,layer,story_id,identity) VALUES ('char:c0','canon',NULL,'{"arc":"canon"}')`).run();
+  // is_player on a *canon* sheet, matching what real saves hold: saint-verrow
+  // marks char:brother-anselm as the player on its canon row. The Postgres
+  // schema keeps that flag on chronicle only, so the importer has to carry it
+  // across the layer boundary or cast.player() returns undefined afterwards.
+  db.prepare(`INSERT INTO sheets (entity_id,layer,story_id,identity,is_player) VALUES ('char:c0','canon',NULL,'{"arc":"canon"}',1)`).run();
   db.prepare(
     `INSERT INTO ingest_pages (page_id,wiki,title,revision,depth,fetched_at,passb_status)
      VALUES ('7','example','A','1234',1,'2026-01-01T00:00:00.000Z','done')`,
@@ -191,6 +196,35 @@ test('importing carries canon, chronicle and every story-scoped table across', a
       assert.equal(src?.wiki, 'example');
       assert.equal(src?.base_url, 'https://example.fandom.com');
       assert.equal(src?.revision_watermark, '1234');
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('the player flag survives the canon-to-chronicle layer change', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withRoot(async (root) => {
+      makeSqliteWorld(root, 'played');
+      const report = await importSqliteWorlds(db, { dataRoot: root });
+      assert.equal(report.failed.length, 0, JSON.stringify(report.failed));
+
+      // Found by reading imported real data back through the stores rather than
+      // by a test, which is why this one exists: the SQLite schema allowed
+      // is_player on a canon sheet, the Postgres schema deliberately does not
+      // (the protagonist belongs to a playthrough, not to the source material),
+      // and a table-for-table copy dropped it silently.
+      const storyId = 'story:played';
+      const cast = new CastStore({ db, storyId, sources: await sourcesFor(db, storyId) });
+      const player = await cast.player();
+      assert.equal(player?.entityId, 'char:c0', 'the imported story must still know its protagonist');
+
+      // And it landed on chronicle, not canon — the flag must not have been
+      // smuggled back into the shared baseline.
+      const canonFlag = await db.one<{ n: string }>(
+        `SELECT count(*) n FROM information_schema.columns
+          WHERE table_name = 'canon_sheets' AND column_name = 'is_player'`,
+      );
+      assert.equal(Number(canonFlag!.n), 0, 'canon_sheets must not carry is_player at all');
     });
   });
   if (!ran) t.skip('no Postgres configured');
