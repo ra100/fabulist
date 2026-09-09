@@ -76,6 +76,70 @@ docker volume rm fabulist-data
 A fresh VPS that has never run the old compose file needs none of this — the
 bind-mount directory is created automatically on first `docker compose up -d`.
 
+## Postgres
+
+The engine runs on one Postgres database rather than a SQLite file per world.
+`pnpm serve` is the SQLite path (still present and green); `pnpm serve-pg` is this
+one.
+
+    FABULIST_PG=postgres://user:pass@host:5432/fabulist pnpm serve-pg
+
+`DATABASE_URL` works too. `deploy/pg-dev.sh` runs a local server for development
+(`pnpm pg:start`, port 5433) with `max_connections=300`.
+
+**Boot is automatic and idempotent.** On start it checks capacity, applies the
+schema (`CREATE TABLE IF NOT EXISTS` throughout, so it is also the upgrade path),
+imports any SQLite worlds it finds under `$DATA_ROOT/worlds/*/world.db`, and
+serves. A world that imports successfully has its file renamed to `*.pre-pg`, so a
+restart finds nothing to do. Nothing needs running by hand:
+
+    found 3 SQLite world(s) to import: mass-effect-wiki, saint-verrow, star-trek-alpha-beta
+      saint-verrow:          22 canon entities,     37 edges, 1 story in 0.1s
+      mass-effect-wiki:  11,680 canon entities,  73,854 edges, 1 story in 3.1s
+      star-trek-alpha-beta: 33,332 canon entities, 152,456 edges, 1 story in 7.8s
+    import finished in 11.0s
+
+**A failed import does not stop the server.** This is deliberate, and the reason is
+in this repo's history: a deployed instance already crash-looped at boot once under
+`restart: unless-stopped`. An importer that refused to start because one world of
+five would not convert reproduces exactly that. So a failure is reported loudly,
+recorded, and skipped — the unconverted `world.db` is left untouched and a restart
+does **not** retry it. Only an explicit `pnpm import-pg --reimport=<slug>` does.
+`--skip-import` starts without attempting any import at all.
+
+`max_connections` matters. The default of 100 **aborts** at 100 players plus one
+ingest (`FATAL: sorry, too many clients already`), so boot warns when the server
+cannot supply what the pools want. Raise it to at least 300 on a shared instance.
+
+Two roles enforce the user/system split (`src/db/schema-pg-roles.sql`):
+`fabulist_play` may write stories but only *read* canon, and `fabulist_ingest` may
+write both. That is why creating a world is an ingest operation, and why a bug in a
+play route cannot corrupt source material.
+
+Verified at target scale — 20 worlds, 40,020 canon entities, 79,860 canon edges,
+100 users with stories (some crossovers), driven through the real stores and frame
+builders rather than hand-written SQL:
+
+| operation | throughput | p50 | p99 |
+| --- | --- | --- | --- |
+| resolve story + world | 16,000/s | 0.5 ms | 16.9 ms |
+| full narrator frame | 1,732/s | 10.3 ms | 28.0 ms |
+| turn commit | 1,389/s | 4.2 ms | 73.0 ms |
+
+And the case SQLite could not serve at all — players taking turns *while* a wiki
+ingest writes canon (64,500 entities during a 5s window):
+
+| | frames | commit p50 | commit p99 |
+| --- | --- | --- | --- |
+| idle database | 2,378/s | 2.3 ms | 5.2 ms |
+| ingest running | 1,951/s | 2.8 ms | 6.6 ms |
+
+Under SQLite the same contention starved turn writes by **6×** (to ~40 ms), because
+one writer lock covered the whole file. Here readers and writers touch different
+tables under MVCC, so an ingest costs about 18% of read throughput and essentially
+nothing in write latency. `pnpm integrity-pg` checked 167,216 rows clean in 0.1s
+afterwards.
+
 ## Known gaps, called out on purpose
 
 - **The deploy key has no `authorized_keys` restriction.** The original design
