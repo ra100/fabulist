@@ -303,7 +303,31 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
 
     for (const spec of FORK_TABLES) {
       const columns = await columnsOf(tx, spec.table);
-      const copyable = columns.filter((c) => c !== 'eid' && c !== 'id');
+      // Which columns a copy may carry, and why this is asked of the catalog rather
+      // than listed here.
+      //
+      // Three different things are called `id` or `eid` across these tables, and
+      // getting them wrong fails in three different ways — all three of which this
+      // hit while being written, each caught by the fork route test rather than by
+      // reading the schema:
+      //
+      //   - A **sequence-backed** id (`style_anchors.id`, `divergences.id`, and
+      //     every `eid`) must be omitted so Postgres assigns a new one. Copying it
+      //     duplicates a primary key.
+      //   - A **meaningful text** id (`chron_entities.id` = `char:anselm`) must be
+      //     carried, or the overlay no longer describes the canon entity it is
+      //     about. Omitting it violates NOT NULL.
+      //   - A **surrogate text** id that other tables reference (`turns.id`,
+      //     `facts.id`, `events.id`, `consequences.id`) must be regenerated *and*
+      //     remapped, which is what `freshId` marks and the branch below does.
+      //
+      // Only the third needs declaring; the first two are a property of the column,
+      // so `generatedColumnsOf` reads them from `information_schema`. A column added
+      // later is then handled without anyone remembering this comment exists.
+      const generated = await generatedColumnsOf(tx, spec.table);
+      const copyable = columns.filter(
+        (c) => !generated.has(c) && (spec.freshId ? c !== 'id' : true),
+      );
       const bound = spec.scene ? ` AND ${spec.scene} < $2` : '';
       const params: unknown[] = [opts.fromStoryId];
       if (spec.scene) params.push(scene);
@@ -324,7 +348,8 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
       // Text ids must be fresh, and other tables may reference them, so these are
       // read out, remapped in JS, and inserted back. Only four tables need this.
       const { rows: sourceRows } = await tx.query<Record<string, unknown>>(
-        `SELECT ${columns.join(', ')} FROM ${spec.table} WHERE story_id = $1${bound}`,
+        `SELECT ${columns.filter((c) => !generated.has(c) || c === 'id').join(', ')}
+           FROM ${spec.table} WHERE story_id = $1${bound}`,
         params,
       );
       if (!sourceRows.length) continue;
@@ -333,7 +358,7 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
       idMaps.set(spec.table, ownMap);
       const refs = CROSS_REFS[spec.table] ?? {};
 
-      const insertCols = columns.filter((c) => c !== 'eid');
+      const insertCols = columns.filter((c) => !generated.has(c));
       for (const row of sourceRows) {
         const oldId = String(row.id);
         const prefix = oldId.split(':')[0] ?? spec.table;
@@ -405,4 +430,29 @@ async function columnsOf(tx: Queryable, table: string): Promise<string[]> {
   const cols = rows.map((r) => r.column_name);
   columnCache.set(table, cols);
   return cols;
+}
+
+/**
+ * Columns the database fills in itself — anything with a `nextval(...)` default.
+ *
+ * Asked rather than listed because "is this id mine to copy" is a property of the
+ * column, not a fact about the application: `style_anchors.id` and `divergences.id`
+ * are sequences while `chron_entities.id` is `char:anselm`, and a copy that treats
+ * them alike fails either on a duplicate key or on NOT NULL. Cached alongside
+ * `columnsOf` for the same reason.
+ */
+const generatedCache = new Map<string, Set<string>>();
+
+async function generatedColumnsOf(tx: Queryable, table: string): Promise<Set<string>> {
+  const cached = generatedCache.get(table);
+  if (cached) return cached;
+  const { rows } = await tx.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = $1
+        AND (column_default LIKE 'nextval(%' OR is_identity = 'YES')`,
+    [table],
+  );
+  const set = new Set(rows.map((r) => r.column_name));
+  generatedCache.set(table, set);
+  return set;
 }
