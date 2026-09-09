@@ -2094,6 +2094,8 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
   onResetToWizard: () => void;
 }) {
   const [stories, setStories] = useState<Story[] | null>(null);
+  /** Imported books nobody owns yet — see the claim panel below. */
+  const [unowned, setUnowned] = useState<Story[]>([]);
   const [worlds, setWorlds] = useState<WorldSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -2154,11 +2156,19 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
 
   const load = useCallback(async () => {
     try {
-      // Both lists in parallel: they are independent reads, and changing sources
-      // invalidates both, so they are always refetched together anyway.
-      const [storyList, worldList] = await Promise.all([api.stories.list(), api.worlds.list()]);
+      // Three independent reads in parallel: changing sources invalidates all of
+      // them, so they are always refetched together anyway.
+      const [storyList, worldList, orphanList] = await Promise.all([
+        api.stories.list(),
+        api.worlds.list(),
+        // Unowned books never appear in the ordinary list — `owner_user_id = $1`
+        // cannot match NULL — so without this an imported save is in the database
+        // and nowhere on screen.
+        api.stories.unowned().catch(() => [] as Story[]),
+      ]);
       setStories(storyList);
       setWorlds(worldList.worlds);
+      setUnowned(orphanList);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2416,6 +2426,56 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
               ))
             )}
           </div>
+
+          {unowned.length > 0 && (
+            <div className="card">
+              <h3>imported books waiting to be claimed</h3>
+              <p className="hint">
+                These came across from an older save that had no accounts, so they belong to nobody yet. They are
+                deliberately not attached to whoever signs in first — someone else's writing should not become yours by
+                accident. Claim them and they join your library.
+              </p>
+              {unowned.map((st) => (
+                <div key={st.id} className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span>
+                    {st.title || 'untitled'}{' '}
+                    <span className="hint">
+                      scene {st.scene}·{st.turn}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy === `claim${st.id}`}
+                    onClick={() =>
+                      run(st.id, 'claim', async () => {
+                        await api.stories.claim(st.id);
+                        // Refetch: the claimed book moves out of this panel and into
+                        // the library above, and `run` does not reload on its own.
+                        await load();
+                      })
+                    }
+                  >
+                    claim
+                  </button>
+                </div>
+              ))}
+              {unowned.length > 1 && (
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy === 'claimall'}
+                  onClick={() =>
+                    run('all', 'claim', async () => {
+                      await api.stories.claim();
+                      await load();
+                    })
+                  }
+                >
+                  claim all {unowned.length}
+                </button>
+              )}
+            </div>
+          )}
 
           <div className="card">
             <h3>start a new book</h3>

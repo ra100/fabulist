@@ -444,6 +444,42 @@ export async function listStoriesForUser(db: Queryable, ownerUserId: string): Pr
   return rows.map(toStory);
 }
 
+/**
+ * Stories with no owner, for the "claim your imported books" flow.
+ *
+ * Imported SQLite saves arrive with `owner_user_id` NULL, because they predate login
+ * and attributing them automatically would hand a stranger's writing to whoever signs
+ * in first. But NULL never matches `owner_user_id = $1`, so on a logged-in instance
+ * they became *invisible* — 13 imported books present in the database and absent from
+ * the library, which is how this was noticed.
+ *
+ * Listing them separately is the honest middle: the owner can see that unclaimed work
+ * exists and adopt it deliberately, and nothing is attributed behind their back.
+ */
+export async function listUnownedStories(db: Queryable): Promise<Story[]> {
+  const { rows } = await db.query<StoryRow>(
+    `SELECT ${STORY_COLS} FROM stories WHERE owner_user_id IS NULL ORDER BY last_played_at DESC, created_at DESC`,
+  );
+  return rows.map(toStory);
+}
+
+/**
+ * Takes ownership of the unowned stories, all of them or one by one.
+ *
+ * `owner_user_id IS NULL` in the WHERE clause is the safety: this can only ever claim
+ * work nobody owns, so it cannot transfer a story between users even if called with a
+ * wrong id.
+ */
+export async function claimUnownedStories(db: Queryable, ownerUserId: string, storyId?: StoryId): Promise<number> {
+  const { rowCount } = storyId
+    ? await db.query(`UPDATE stories SET owner_user_id = $1 WHERE id = $2 AND owner_user_id IS NULL`, [
+        ownerUserId,
+        storyId,
+      ])
+    : await db.query(`UPDATE stories SET owner_user_id = $1 WHERE owner_user_id IS NULL`, [ownerUserId]);
+  return rowCount ?? 0;
+}
+
 export async function getStory(db: Queryable, id: StoryId): Promise<Story | undefined> {
   const { rows } = await db.query<StoryRow>(`SELECT ${STORY_COLS} FROM stories WHERE id = $1`, [id]);
   return rows[0] ? toStory(rows[0]) : undefined;

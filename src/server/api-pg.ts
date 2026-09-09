@@ -13,7 +13,15 @@ import type { Engine } from '../loop/engine-pg.ts';
 import { World, worldFor } from '../store/index-pg.ts';
 import { forkStory, rollback } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
-import { createStory, deleteStory, getStory, listStories, listStoriesForUser } from '../store/world-pg.ts';
+import {
+  claimUnownedStories,
+  createStory,
+  deleteStory,
+  getStory,
+  listStories,
+  listStoriesForUser,
+  listUnownedStories,
+} from '../store/world-pg.ts';
 import {
   createWorld,
   deleteWorld,
@@ -1111,6 +1119,32 @@ route('GET', '/api/stories', async (_req, res, { world, db, user }) => {
     200,
     stories.map((st) => ({ ...st, current: st.id === world.storyId })),
   );
+});
+
+/**
+ * Books that belong to nobody, so they can be claimed rather than lost.
+ *
+ * Imported SQLite saves arrive unowned by design — attributing them automatically
+ * would hand one person's writing to whoever signs in first. The consequence was that
+ * on a logged-in instance they were invisible: present in the database, absent from the
+ * library, because `owner_user_id = $1` never matches NULL. This is how the owner finds
+ * out they exist.
+ */
+route('GET', '/api/stories/unowned', async (_req, res, { db }) => {
+  send(res, 200, await listUnownedStories(db));
+});
+
+/**
+ * Claims unowned books: all of them, or one by `?storyId=`.
+ *
+ * Requires a signed-in user, because there is no one to claim *for* otherwise — with
+ * login off every story is already visible and this flow has no purpose.
+ */
+route('POST', '/api/stories/claim', async (_req, res, { db, url, user }) => {
+  if (!user) return send(res, 400, { error: 'sign in first: there is no owner to claim these for' });
+  const storyId = url.searchParams.get('storyId') ?? undefined;
+  const claimed = await claimUnownedStories(db, user.id, storyId);
+  send(res, 200, { claimed });
 });
 
 /**
