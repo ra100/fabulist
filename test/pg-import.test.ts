@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { withPg } from './pg-harness.ts';
 import { findSqliteWorlds, importSqliteWorlds } from '../src/db/import-sqlite.ts';
 import { createWorld } from '../src/store/index-pg.ts';
+import { NO_CONNECTION_STRING, connectionStringFromEnv } from '../src/db/pg.ts';
 import { overlayEntity, sourcesFor } from '../src/db/overlay.ts';
 import { CastStore } from '../src/store/cast-pg.ts';
 
@@ -448,5 +449,47 @@ test('importing refuses to adopt a world that already has canon', async (t) => {
     });
   });
   if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * Every Postgres entry point resolves its connection string the same way.
+ *
+ * This diverged and cost a live instance a working maintenance path: `serve-pg` accepted
+ * `FABULIST_PG` or `DATABASE_URL`, while `importpg` and `integritypg` read only
+ * `DATABASE_URL`. A deployment configured the documented way — `FABULIST_PG`, which is
+ * what docker-compose.yml sets — served fine and then failed `--reimport` with
+ * "DATABASE_URL is not set", pointing at `pnpm pg:start` as though there were no
+ * database at all.
+ *
+ * A unit test rather than three subprocess invocations: the shared resolver is the
+ * contract, and pinning it here is what stops a fourth entry point drifting again.
+ */
+test('the connection string comes from FABULIST_PG or DATABASE_URL, in that order', () => {
+  const saved = { f: process.env.FABULIST_PG, d: process.env.DATABASE_URL };
+  try {
+    delete process.env.FABULIST_PG;
+    delete process.env.DATABASE_URL;
+    assert.equal(connectionStringFromEnv(), undefined, 'neither set: undefined, so a CLI can guide the user');
+
+    process.env.DATABASE_URL = 'postgres://from-database-url/db';
+    assert.equal(connectionStringFromEnv(), 'postgres://from-database-url/db', 'DATABASE_URL still works');
+
+    process.env.FABULIST_PG = 'postgres://from-fabulist-pg/db';
+    assert.equal(
+      connectionStringFromEnv(),
+      'postgres://from-fabulist-pg/db',
+      "FABULIST_PG wins: it is the name compose and CI set, so it must not lose to a stale DATABASE_URL",
+    );
+
+    // And the shared message names both, rather than only the one that happens to be
+    // checked second.
+    assert.match(NO_CONNECTION_STRING, /FABULIST_PG/);
+    assert.match(NO_CONNECTION_STRING, /DATABASE_URL/);
+  } finally {
+    if (saved.f === undefined) delete process.env.FABULIST_PG;
+    else process.env.FABULIST_PG = saved.f;
+    if (saved.d === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = saved.d;
+  }
 });
 
