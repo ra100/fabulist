@@ -26,6 +26,10 @@
   "packageManager": "pnpm@11.5.2",
   "scripts": {
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
+    "pg:start": "deploy/pg-dev.sh start",
+    "pg:stop": "deploy/pg-dev.sh stop",
+    "pg:reset": "deploy/pg-dev.sh reset",
+    "pg:psql": "deploy/pg-dev.sh psql",
     "play": "node --disable-warning=ExperimentalWarning src/cli/play.ts",
     "seed": "node --disable-warning=ExperimentalWarning src/cli/seed.ts",
     "backup": "node --disable-warning=ExperimentalWarning src/cli/backup.ts",
@@ -48,6 +52,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/sax": "^1.2.7",
@@ -62,6 +67,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@workos-inc/node": "^10.13.0",
     "jose": "^6.2.12",
+    "pg": "^8.23.0",
     "sax": "^1.6.1",
     "zod": "^3.25.76"
   }
