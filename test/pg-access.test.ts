@@ -32,6 +32,7 @@ import {
 } from '../src/store/access-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { commitDelta } from '../src/loop/commit-pg.ts';
+import { type McpToolContext, listWorldsTool, setStorySourcesTool } from '../src/mcp/tools-pg.ts';
 import { emptyDelta } from '../src/domain/types.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
@@ -461,6 +462,86 @@ test('storyIdOverride cannot reach another user\'s book', async (t) => {
       /does not belong to this user/,
       'a guessed story id must not grant access',
     );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+// ------------------------------------------------------- the MCP surface too
+//
+/**
+ * An MCP context for the access tests. `engine` is required by the type but unused by
+ * the two tools below, so it gets a real one rather than a cast — a lie in a test
+ * fixture is how a type stops being load-bearing.
+ */
+function mcpCtx(db: Db, world: World, user: SessionUser): McpToolContext {
+  return {
+    world: () => Promise.resolve(world),
+    db,
+    user,
+    dataRoot: 'data',
+    engine: new Engine({ world: () => world, db, providers: new ProviderRegistry(new MockProvider()) }),
+  };
+}
+//
+// `/mcp` is a second front door to the same data, and a check that exists only on the
+// REST side is not a check. Both of these were real bypasses, found because the
+// operator noticed MCP and the web UI showing different world lists.
+
+/**
+ * `list_worlds` hides a private world, exactly as `GET /api/worlds` does.
+ *
+ * It listed every world unconditionally, so a private world's existence and title —
+ * which is the leak the filter exists to prevent — were readable through MCP.
+ */
+test('the MCP world list hides a private world the caller has no grant on', async (t) => {
+  const ran = await withPg(async (db) => {
+    const openId = await makeWorld(db, 'mcp-open', 'Open');
+    const secretId = await makeWorld(db, 'mcp-secret', 'Secret');
+    await setWorldVisibility(db, secretId, 'private');
+    const story = await createStory(db, { worldIds: [openId], ownerUserId: alice.id });
+    const world = await World.forStory(db, story.id);
+
+    const seen = await listWorldsTool(mcpCtx(db, world, alice));
+    const slugs = (seen.worlds as Array<{ slug: string }>).map((w) => w.slug).sort();
+    assert.deepEqual(slugs, ['mcp-open'], 'the private world must not appear');
+
+    // And it does appear once a grant exists — otherwise this test would pass for the
+    // wrong reason (a filter that hides everything).
+    await grantWorldAccess(db, secretId, alice.id, 'reader');
+    const after = await listWorldsTool(mcpCtx(db, world, alice));
+    assert.deepEqual(
+      (after.worlds as Array<{ slug: string }>).map((w) => w.slug).sort(),
+      ['mcp-open', 'mcp-secret'],
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * `set_story_sources` refuses a world the caller may not read.
+ *
+ * The subtler of the two: reading canon through the overlay is legitimate *once* a
+ * story sources a world, so the permission has to be enforced when the source is added.
+ * Without it, an MCP caller could attach a private world and then read all of it.
+ */
+test('the MCP source setter refuses a world the caller may not read', async (t) => {
+  const ran = await withPg(async (db) => {
+    const mineId = await makeWorld(db, 'mcp-mine', 'Mine');
+    const secretId = await makeWorld(db, 'mcp-locked', 'Locked');
+    await setWorldVisibility(db, secretId, 'private');
+    const story = await createStory(db, { worldIds: [mineId], ownerUserId: alice.id });
+    const world = await World.forStory(db, story.id);
+    const ctx = mcpCtx(db, world, alice);
+
+    await assert.rejects(
+      () => setStorySourcesTool(ctx, { slugs: ['mcp-mine', 'mcp-locked'] }),
+      /no world|not allowed|forbidden|access/i,
+      'attaching an unreadable world must fail',
+    );
+
+    // The story's sources are unchanged — a rejected call must not half-apply.
+    const after = await World.forStory(db, story.id);
+    assert.deepEqual(after.sources.map((src) => src.worldId), [mineId]);
   });
   if (!ran) t.skip('no Postgres configured');
 });
