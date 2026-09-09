@@ -13,6 +13,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { CurrentWorld } from '../src/store/index.ts';
@@ -219,6 +221,39 @@ test('the server tells a client how to use it before any tool is called', async 
       const text = got.messages.map((m) => (m.content.type === 'text' ? m.content.text : '')).join('\n');
       assert.match(text, /a heist/, 'the wish is threaded in');
       assert.match(text, /commit_narration/);
+    } finally {
+      await transport.close();
+    }
+  });
+});
+
+test('the server advertises a title, description, and resolvable icons on initialize', async () => {
+  await withServer(async (baseUrl) => {
+    const { client, transport } = connect(baseUrl);
+    await client.connect(transport);
+    try {
+      // A connector-picker UI (Claude Desktop, ChatGPT) reads this off
+      // `serverInfo` before anyone has connected — never populating it is why
+      // a listed connector shows up with no icon and no description next to
+      // every first-party one that has both (`src/mcp/server.ts`'s own
+      // `serverInfo` header comment). Asserted at the wire, not just as a
+      // literal in `buildServer`, so a future refactor cannot silently drop
+      // it from the actual `initialize` response.
+      const info = client.getServerVersion();
+      assert.ok(info, 'the server advertises its identity at all');
+      assert.equal(info!.title, 'Fabulist');
+      assert.match(info!.description ?? '', /state-first fiction engine/);
+      const icons = (info as { icons?: Array<{ src: string; mimeType?: string }> }).icons;
+      assert.ok(icons && icons.length > 0, 'at least one icon is advertised');
+      for (const icon of icons!) {
+        // Absolute and same-origin as the endpoint just connected to — a
+        // relative path here would be meaningless to a client that has no
+        // notion of "relative to what", and the MCP spec itself only allows
+        // an HTTP(S) URL or a data: URI (`Icon.src`, `@modelcontextprotocol/sdk`).
+        assert.match(icon.src, new RegExp(`^${baseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`));
+      }
+      const iconPaths = icons!.map((i) => new URL(i.src).pathname);
+      assert.deepEqual(iconPaths, ['/favicon.svg', '/icon-192.png', '/icon-512.png']);
     } finally {
       await transport.close();
     }

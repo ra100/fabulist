@@ -238,32 +238,24 @@ case "$action" in
     fi
 
 
-    # Repair database-directory ownership when it is not uid 999.
+    # Database-directory ownership is the *entrypoint's* job, not this script's.
     #
-    # Postgres owns its cluster as uid 999 and refuses to read files it does not own —
-    # `FATAL: could not open file "global/pg_filenode.map": Permission denied`, on every
-    # backend, in a restart loop. That is precisely what a previous release of this
-    # script caused by recursively chowning the whole data directory to the app's user
-    # while the database directory sat inside it.
+    # Two attempts here made things worse. 0.7.12 recursively chowned the whole data
+    # directory to the app's user, which took Postgres' files from uid 999 and produced
+    # `FATAL: could not open file "global/pg_filenode.map": Permission denied` on every
+    # backend. 0.7.13 then tried to repair that with `chown -R 999:999` from a
+    # throwaway container: it reported success, Postgres came up healthy, and failed
+    # three minutes later with the same error — a partial recursion whose failure was
+    # swallowed by `2>/dev/null`, fixing the directory but not everything beneath it.
     #
-    # Repairing it is safe and non-destructive: it changes ownership back to the user
-    # the cluster was created as, and touches nothing else. Runs unconditionally
-    # because a correctly-owned directory is unaffected, and because leaving a broken
-    # one to be noticed by a human is how an outage lasts overnight.
-    if [ -z "${FABULIST_PG:-}" ] && [ -d "${FABULIST_PG_DIR:-./fabulist-pg}" ]; then
-      pgfix_parent="$(cd "$(dirname "${FABULIST_PG_DIR:-./fabulist-pg}")" && pwd)"
-      pgfix_leaf="$(basename "${FABULIST_PG_DIR:-./fabulist-pg}")"
-      pgfix_owner="$(docker run --rm -v "$pgfix_parent:/parent" --user 0 alpine \
-        stat -c '%u' "/parent/$pgfix_leaf" 2>/dev/null || echo unknown)"
-      if [ "$pgfix_owner" != "999" ] && [ "$pgfix_owner" != "unknown" ]; then
-        if docker run --rm -v "$pgfix_parent:/parent" --user 0 alpine \
-          chown -R 999:999 "/parent/$pgfix_leaf" 2>/dev/null; then
-          echo "repaired database directory ownership (was uid $pgfix_owner, now 999)"
-        else
-          echo "note: database directory is owned by uid $pgfix_owner, not 999; Postgres will not start" >&2
-        fi
-      fi
-    fi
+    # The image already does this correctly and idempotently. `docker_create_db_directories`
+    # runs on *every* start when the container's uid is 0, and does
+    # `find "$PGDATA" ! -user postgres -exec chown postgres {} +` — a complete,
+    # in-container fix with no bind-mount or filesystem quirks in the way. That is what
+    # `user: "0:0"` in docker-compose.yml is for, and it is why the entrypoint then
+    # re-execs itself as the postgres user.
+    #
+    # So: nothing to do here. Restarting the container is the repair.
 
     # Clear a database directory that holds no cluster.
     #
