@@ -61,15 +61,21 @@ mkdirSync(join(dataRoot, 'images'), { recursive: true });
 /**
  * How many connections this process will hold at peak.
  *
- * Two pools: play (serving turns) and ingest (one wiki crawl at a time). Checked
- * against the server's `max_connections` *before* the pools are built, because the
- * failure without it is not a clear error — measured directly, 100 concurrent
- * players plus one ingest against the default `max_connections=100` produces
- * `FATAL: sorry, too many clients already` on arbitrary requests, which looks like
- * random breakage rather than a capacity limit.
+ * Two pools: play (serving turns) and ingest (one wiki crawl at a time). Small by
+ * default because each connection is a Postgres *process* costing ~1.8 MB of server
+ * memory — six of them is about 11 MB, where the previous default of 23 was ~41 MB
+ * for concurrency a single-user instance never uses. A turn holds a connection only
+ * while it queries, not while it waits on a model, so four goes further than it
+ * looks. Raise `FABULIST_PG_POOL` for an instance with genuinely concurrent players.
+ *
+ * Checked against the server's `max_connections` *before* the pools are built,
+ * because the failure without it is not a clear error: measured directly, 100
+ * concurrent players plus one ingest against the default `max_connections=100`
+ * produces `FATAL: sorry, too many clients already` on arbitrary requests, which
+ * looks like random breakage rather than a capacity limit.
  */
-const PLAY_POOL = Number(process.env.FABULIST_PG_POOL ?? 20);
-const INGEST_POOL = 3;
+const PLAY_POOL = Number(process.env.FABULIST_PG_POOL ?? 4);
+const INGEST_POOL = 2;
 
 const connectionString =
   process.env.FABULIST_PG ?? process.env.DATABASE_URL ?? 'postgres://localhost:5432/fabulist';

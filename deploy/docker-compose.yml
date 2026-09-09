@@ -156,12 +156,27 @@ services:
       # Set POSTGRES_PASSWORD in app.env for anything not on a laptop. The deployed
       # instance does not use this service at all.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fabulist-local}
-    # 300, not the default 100. Measured: 100 concurrent players plus one wiki
-    # ingest against max_connections=100 does not degrade, it *aborts* with
-    # `FATAL: sorry, too many clients already` on arbitrary requests. The app
-    # warns at boot when the server cannot supply what its pools want, but a
-    # warning is not a fix.
-    command: postgres -c max_connections=300
+    # Sized for a small server, not for the load ceiling.
+    #
+    # Measured on this schema, with the app's default pools (4 play + 2 ingest):
+    # an idle container is 20 MB and a busy one about 32 MB. `max_connections=50`
+    # is ~8x the app's peak, leaving room for a psql session and a backup job; the
+    # setting itself costs little, but every *open* connection is a Postgres process
+    # at ~1.8 MB, which is why the app's pool defaults matter more than this number.
+    #
+    # `shared_buffers=64MB` rather than the 128MB default: this schema's hot set is
+    # small (the whole 20-world load-test database was 120 MB on disk) and the OS page
+    # cache does the rest. Raise both, along with FABULIST_PG_POOL, for an instance
+    # with real concurrent load — the 100-user load test ran 20 play connections
+    # against max_connections=300, and the default of 100 genuinely *aborts* there
+    # with `FATAL: sorry, too many clients already` rather than degrading.
+    command: postgres -c max_connections=50 -c shared_buffers=64MB
+    # A hard ceiling, so a runaway query cannot starve the app container on a small
+    # box. Generous against the ~32 MB measured above; Postgres will not use it.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     # Deliberately not published to the host at all: only the app needs to reach
     # it, and it does so over the compose network by service name. An operator
     # wanting psql uses `docker compose exec postgres psql -U fabulist`.
