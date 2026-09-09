@@ -30,6 +30,31 @@
      has to subtract exactly this and guessing it wrong is what cut the plate's
      padding off against the viewport in the first draft. */
   --lp-pad: var(--s5);
+
+  /* Google Fonts, scoped to this page's own subtree by overriding the exact
+     tier-2 names (`--serif` / `--display` / `--sans` / `--mono`) that both
+     this file's own rules AND the shared components it reuses from
+     styles.css (`.eyebrow`, `code`, `.name`, `.swatch`, `.palette-choice`,
+     buttons…) already read. `.lp` wraps the whole page and nothing in the
+     authenticated app carries this class, so `:root`'s definitions in
+     styles.css are untouched and this cascade cannot leak into the app.
+
+     Each new name is added in *front* of the existing chain, so a blocked or
+     slow font request still falls through to exactly the faces the app
+     already ships, never to a new fallback. `--display` (h1 only) gets the
+     display-only cut; h2/h3 use the text-optical cut of the same family,
+     which is why `--serif` for headings below h1 resolves through `.lp-h2` /
+     `.name` rather than through `--display` at all — Big Caslon was never
+     drawn for those sizes and neither is its replacement. */
+  --serif: "Source Serif 4", "Hoefler Text", "Iowan Old Style", Charter, Georgia, serif;
+  --display: "Libre Caslon Display", "Big Caslon", "Hoefler Text", Didot, "Iowan Old Style", Georgia, serif;
+  --sans: "Karla", Seravek, "Avenir Next", -apple-system, "Helvetica Neue", system-ui, sans-serif;
+  --mono: "PT Mono", "SF Mono", Menlo, ui-monospace, monospace;
+  /* The text-optical cut, for h2/h3 (section titles, role names) — sizes Big
+     Caslon Display was never drawn for, so its replacement's display cut
+     (`--display` above) is wrong for them too. Falls back through the same
+     serif Big Caslon's own role headings already used. */
+  --lp-head: "Libre Caslon Text", "Big Caslon", "Hoefler Text", Georgia, serif;
 }
 
 /* --------------------------------------------------------------- masthead */
@@ -211,7 +236,11 @@
 
 .lp-h1 {
   margin: var(--s3) 0 var(--s5);
-  font-family: var(--serif);
+  /* The one h1 on the page, so it is the one place the display face
+     (Libre Caslon Display, replacing Big Caslon) appears set as running
+     text rather than as a single rubricated initial — matching the redesign
+     mockup, which sets its h1 the same way. */
+  font-family: var(--display);
   /* The scale jump. Body is 14px; this reaches 68px, which is the hierarchy —
      a 1.25× ramp through six near-identical sizes is the version with no
      author. Tracking tightens as size grows, as it must. */
@@ -231,7 +260,7 @@
   align-items: center;
   gap: var(--s4);
   margin: 0 0 var(--s4);
-  font-family: var(--serif);
+  font-family: var(--lp-head);
   font-size: clamp(1.35rem, 2.4vw, 1.75rem);
   font-weight: 600;
   line-height: 1.15;
@@ -334,6 +363,141 @@ code {
   gap: var(--s4);
   margin-top: var(--s6);
 }
+
+/* ---- the compact palette picker, pulled into the hero -------------------
+   The full nine-card grid with its genre and source captions stays in
+   section vi, unduplicated; this is a row of dot-and-label swatches feeding
+   the exact same `current` / `onSelect` pair, so there is one state, not two
+   pickers that could disagree. Border-top rather than a boxed panel, echoing
+   how `.lp-actions` above it is not boxed either — this is one more row in
+   the hero, not a second widget bolted under it. */
+.lp-hero-palettes {
+  margin-top: var(--s6);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--rule);
+}
+.lp-hero-palettes-hint {
+  display: block;
+  margin: 0 0 var(--s3);
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.lp-hero-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.lp-hero-swatch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 5px;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-pill);
+  box-shadow: none;
+}
+.lp-hero-swatch:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+  background: var(--surface-3);
+}
+.lp-hero-swatch .swatch { flex: none; }
+.lp-hero-swatch.selected {
+  border-color: var(--accent);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* ---- the graph the tagline promises ------------------------------------
+   "The world is the graph underneath" had no graph anywhere on the page
+   before this — every section only described the world-model in prose. This
+   card sits above the specimen plate, inside the same bleeding container, so
+   the two read as one stacked exhibit rather than two unrelated widgets: same
+   edge treatment (no right border/radius — the plate cuts it, this does too),
+   a hairline gap between them standing in for the seam. */
+
+.lp-graph-card {
+  background: var(--surface-1);
+  border: 1px solid var(--rule);
+  border-right: none;
+  border-radius: var(--r-lg) 0 0 var(--r-lg);
+  padding: var(--s4) var(--s5) var(--s4) var(--s4);
+  margin-bottom: var(--s3);
+  box-shadow: var(--elev-raised);
+}
+.lp-graph-label {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin: 0 0 var(--s3);
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.lp-graph-label .mono { font-size: 10.5px; text-transform: none; letter-spacing: 0.04em; }
+
+.lp-graph-card svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.lp-node text {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  fill: var(--ink-2);
+}
+.lp-node circle {
+  fill: var(--surface-2);
+  stroke: var(--rule-strong);
+  stroke-width: 1.25;
+}
+/* Both are plain tier-2 tokens — a palette swap re-themes these for free,
+   which is the entire point of drawing the graph from CSS classes rather
+   than inline colour. `hot` is the accent's one appearance inside the hero
+   graph (the budget is spent on the CTA and the accent lamp elsewhere in the
+   hero, so this stays the graph's only accent mark); `tense` is the
+   divergence colour, reserved for the thread whose tension just moved. */
+.lp-node.hot circle {
+  stroke: var(--accent);
+  fill: color-mix(in oklch, var(--accent) 14%, var(--surface-2));
+}
+.lp-node.tense circle {
+  stroke: var(--divergent);
+  fill: color-mix(in oklch, var(--divergent) 14%, var(--surface-2));
+}
+.lp-graph-tag {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--divergent);
+}
+.lp-edge {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+  fill: none;
+}
+.lp-edge.hot { stroke: var(--accent); stroke-width: 1.5; }
+.lp-edge.tense { stroke: var(--divergent); stroke-width: 1.5; stroke-dasharray: 2 3; }
+
+.lp-graph-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s5);
+  margin: var(--s3) 0 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+.lp-graph-foot > div { display: flex; gap: 6px; white-space: nowrap; }
+.lp-graph-foot dt { margin: 0; color: var(--ink); font-weight: 600; }
+.lp-graph-foot dd { margin: 0; color: var(--ink-3); white-space: normal; }
 
 /* ---- the specimen plate -------------------------------------------------- */
 
@@ -441,7 +605,7 @@ code {
   border-left: 1px solid var(--rule);
   padding-left: var(--s5);
 }
-.lp-role .name { margin-bottom: 2px; }
+.lp-role .name { margin-bottom: 2px; font-family: var(--lp-head); }
 .lp-role-q {
   margin: 0 0 var(--s3);
   font-family: var(--serif);
@@ -453,7 +617,38 @@ code {
 
 /* -------------------------------------------------------------------- gate */
 
-.lp-gate { max-width: 42rem; margin-bottom: var(--s5); }
+/* The one deliberate break in the section rhythm. Every other section is
+   folio → heading → paragraph → box, six times in a row with no variation;
+   this is that same content in a full-bleed, two-column band instead —
+   bordered top and bottom, wider vertical padding than its neighbours, and
+   wide enough to reach the viewport edge rather than stopping at `.lp-main`'s
+   84rem. The trick is the same one the hero plate already uses one level up:
+   a width of 100vw plus a negative margin computed from the *current*
+   element's own offset from the viewport edge, so it works inside a centred
+   container without knowing that container's width as a literal number. */
+.lp-gate-band {
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  padding-block: calc(var(--s7) * 1.75);
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-1);
+}
+.lp-gate-inner {
+  display: grid;
+  grid-template-columns: var(--lp-gutter) minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: var(--s7);
+  align-items: start;
+  max-width: 84rem;
+  margin: 0 auto;
+  padding: 0 var(--lp-pad);
+}
+.lp-gate-inner > .lp-folio { padding-top: 6px; }
+.lp-gate-copy .lp-h2 { margin-bottom: var(--s4); }
+.lp-gate-copy .lp-kicker { max-width: none; }
+.lp-gate-copy .lp-p { max-width: none; }
+
+.lp-gate { max-width: none; margin-bottom: 0; }
 .lp-gate .raw { margin-bottom: var(--s3); }
 /* A specimen, so the options are not controls. Same shape as the real ones,
    without a focus stop or a promise that clicking does something. */
@@ -704,6 +899,13 @@ code {
   .lp-hero-plate { grid-column: 2; }
   .lp-split { grid-template-columns: minmax(0, 1fr); gap: var(--s5); }
   .lp-lamp-box { max-width: 26rem; }
+  /* The gate's two columns collapse to one before the copy narrows enough to
+     wrap badly; the folio and copy keep the gutter, the interrupt specimen
+     moves under them rather than beside. */
+  .lp-gate-inner {
+    grid-template-columns: var(--lp-gutter) minmax(0, 1fr);
+  }
+  .lp-gate-inner > .lp-gate { grid-column: 2; margin-top: var(--s5); }
 }
 
 @media (max-width: 860px) {
@@ -738,6 +940,7 @@ code {
   .lp-hero { gap: var(--s6); padding-block: var(--s6) var(--s7); }
   .lp-hero-copy { padding-top: 0; }
   .lp-plate { padding: var(--s3) var(--s4) var(--s4) var(--s3); }
+  .lp-graph-card { padding: var(--s3) var(--s4); }
   .lp-actions { gap: var(--s3); }
   /* Scoped to the hero: the masthead's own call must not stretch across the
      bar, which it did while this selector was unscoped. */
@@ -747,4 +950,8 @@ code {
   .lp-tabs::-webkit-scrollbar { display: none; }
   .lp-tabs button { flex: none; }
   .lp-note { padding-left: var(--s3); }
+  .lp-gate-band { padding-block: var(--s6) var(--s7); }
+  .lp-gate-inner { grid-template-columns: minmax(0, 1fr); }
+  .lp-gate-inner > .lp-folio { grid-column: 1; }
+  .lp-gate-inner > .lp-gate { margin-top: var(--s5); }
 }

@@ -106,6 +106,81 @@ function Snippet({ label, code }: { label: string; code: string }) {
 /* ---------------------------------------------------------------------- hero */
 
 /**
+ * The graph the tagline promises. "The world is the graph underneath" appeared nowhere
+ * as an actual graph before this — every section described the world-model in prose. This
+ * draws the same turn the specimen below sets, as a graph rather than as a second telling
+ * of it: Anselm, the captain, Vela and the garrison, the edge that turn added, and the
+ * thread it moved.
+ *
+ * Inline SVG, no chart library — four nodes, a few edges, one node and one edge marked
+ * `hot` (the new edge the turn actually emitted, in `--accent`) and one node marked `tense`
+ * (the garrison, whose quota just moved, in `--divergent`). Both are plain tier-2 tokens, so
+ * picking a palette re-themes this without any change here — the whole reason it is built
+ * from CSS classes and not inline colours.
+ */
+function HeroGraph() {
+  return (
+    <div className="lp-graph-card">
+      <div className="lp-graph-label">
+        <span>saint verrow · scene i · the delta it emitted</span>
+        <span className="mono">i·4</span>
+      </div>
+      <svg viewBox="0 0 380 230" role="img" aria-label="Entity graph: Anselm, the captain, Vela and the garrison, with a new edge from Anselm to Vela and a rising tension thread at the garrison">
+        <path className="lp-edge hot" d="M100,60 C140,80 158,100 176,128" />
+        <path className="lp-edge" d="M100,60 C82,98 82,136 100,172" />
+        <path className="lp-edge tense" d="M176,128 C206,100 226,80 248,60" />
+        <path className="lp-edge" d="M100,172 C138,182 166,186 202,180" />
+        <g className="lp-node hot">
+          <circle cx="100" cy="60" r="25" />
+          <text x="100" y="64" textAnchor="middle">
+            anselm
+          </text>
+        </g>
+        <g className="lp-node">
+          <circle cx="176" cy="128" r="25" />
+          <text x="176" y="132" textAnchor="middle">
+            captain
+          </text>
+        </g>
+        <g className="lp-node">
+          <circle cx="100" cy="172" r="23" />
+          <text x="100" y="176" textAnchor="middle">
+            vela
+          </text>
+        </g>
+        <g className="lp-node tense">
+          <circle cx="248" cy="60" r="27" />
+          <text x="248" y="57" textAnchor="middle">
+            garrison
+          </text>
+          <text x="248" y="93" textAnchor="middle" className="lp-graph-tag">
+            quota 4→6
+          </text>
+        </g>
+      </svg>
+      <dl className="lp-graph-foot">
+        <div>
+          <dt>+edge</dt>
+          <dd>anselm —knows→ vela.whereabouts</dd>
+        </div>
+        <div>
+          <dt>sheet</dt>
+          <dd>captain.regard[anselm] → wary</dd>
+        </div>
+        <div>
+          <dt>thread</dt>
+          <dd>garrison quota 4→6</dd>
+        </div>
+        <div>
+          <dt>fact</dt>
+          <dd>vela.location known-by: anselm, captain</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+/**
  * The specimen: one committed turn, exactly as the book view sets it.
  *
  * Reuses `.turn` / `.folio` / `.prose.opens-scene` from the app's own stylesheet rather
@@ -332,13 +407,14 @@ const TOOLS: Array<[string, string, string]> = [
 /* ------------------------------------------------------------------- palettes */
 
 /**
- * The app's own picker, reused whole — `.palettes` / `.palette-choice` / `.swatch`, and each
- * swatch carrying its own `data-palette` so it renders in the preset it offers rather than in
- * the active one. Duplicating it here would have meant a second place for nine colours to
- * drift out of agreement.
+ * The full picker, reused whole from the app — `.palettes` / `.palette-choice` / `.swatch`,
+ * and each swatch carrying its own `data-palette` so it renders in the preset it offers
+ * rather than in the active one. Duplicating the app's markup here would have meant a second
+ * place for nine colours to drift out of agreement; instead this and the compact hero picker
+ * below both take `current`/`onSelect` from `Landing`, so there is exactly one state, and
+ * picking either one moves both.
  */
-function PaletteStrip() {
-  const [current, setCurrent] = useState(resolvePalette);
+function PaletteStrip({ current, onSelect }: { current: string; onSelect: (key: string) => void }) {
   return (
     <div className="palettes">
       {PRESETS.map((p) => (
@@ -348,10 +424,7 @@ function PaletteStrip() {
           className={`palette-choice${current === p.key ? ' selected' : ''}`}
           aria-pressed={current === p.key}
           title={p.source}
-          onClick={() => {
-            savePalette(p.key);
-            setCurrent(p.key);
-          }}
+          onClick={() => onSelect(p.key)}
         >
           <span className="swatch" data-palette={p.key} aria-hidden="true" />
           <span className="palette-text">
@@ -368,10 +441,50 @@ function PaletteStrip() {
   );
 }
 
+/**
+ * The compact hero version of the same picker — same nine presets, same `data-palette`
+ * swatches, same `onSelect`, so a choice made here and a choice made in the full grid in
+ * section vi are the same click handled two ways rather than two separate mechanisms that
+ * could disagree. Kept to a dot and a label (no genre line, no source caption) because the
+ * hero already carries the CTAs above it; the full picker with its reasoning stays where it
+ * was, in section vi.
+ */
+function HeroPalettePicker({ current, onSelect }: { current: string; onSelect: (key: string) => void }) {
+  return (
+    <div className="lp-hero-palettes" role="group" aria-label="Genre palette">
+      <span className="lp-hero-palettes-hint">nine palettes, one per genre — pick one, the graph repaints ↓</span>
+      <div className="lp-hero-swatches">
+        {PRESETS.map((p) => (
+          <button
+            type="button"
+            key={p.key}
+            className={`lp-hero-swatch${current === p.key ? ' selected' : ''}`}
+            aria-pressed={current === p.key}
+            title={`${p.label} — ${p.genre}`}
+            onClick={() => onSelect(p.key)}
+          >
+            <span className="swatch" data-palette={p.key} aria-hidden="true" />
+            <span>{p.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------------- page */
 
 export function Landing() {
   const [tab, setTab] = useState<ChatTab>('claude');
+  // One piece of state, read by the hero picker and the section-vi grid alike, so a
+  // choice made in either place is reflected in both immediately rather than only after
+  // a reload picks the stored key back up.
+  const [palette, setPalette] = useState(resolvePalette);
+  const selectPalette = useCallback((key: string) => {
+    savePalette(key);
+    setPalette(key);
+  }, []);
+
   // null while unknown: a visitor who already has a session should be offered the
   // chronicle, not a sign-in they do not need. 401 here is the normal answer and
   // not an error — it is how the gate says "not signed in".
@@ -450,9 +563,12 @@ export function Landing() {
                 or drive it from Claude and ChatGPT →
               </a>
             </div>
+
+            <HeroPalettePicker current={palette} onSelect={selectPalette} />
           </div>
 
           <div className="lp-hero-plate">
+            <HeroGraph />
             <Specimen />
           </div>
         </section>
@@ -484,48 +600,64 @@ export function Landing() {
           </p>
         </Section>
 
-        {/* --- iii --------------------------------------------------------- */}
-        <Section
-          n={2}
-          title="It will stop rather than write your character out of character"
-          kicker="Brother Anselm has held a vow of nonviolence for thirty years. Ask for this and the game master does not narrate it, and does not silently soften it either."
-        >
-          <div className="lp-gate">
-            <div className="raw">i stab the captain</div>
-            <div className="interrupt">
-              <p>
-                Brother Anselm holds this: harm no living thing. Nothing in this scene forces it. Taken
-                straight, this is not a choice they have access to.
+        {/* --- iii — the one deliberate rhythm break, once ------------------
+            Every other section is folio → heading → paragraph → box, six
+            times in a row. This one alone runs full-bleed and two columns —
+            copy and content are unchanged from the folio→heading→paragraph
+            version, only the frame around them differs. */}
+        <section className="lp-gate-band" id="integrity">
+          <div className="lp-gate-inner">
+            <div className="lp-folio" aria-hidden="true">
+              {ROMAN[1]}
+            </div>
+            <div className="lp-gate-copy">
+              <h2 className="lp-h2">
+                It will stop rather than write your character out of character
+                <i />
+              </h2>
+              <p className="lp-kicker">
+                Brother Anselm has held a vow of nonviolence for thirty years. Ask for this and the game
+                master does not narrate it, and does not silently soften it either.
               </p>
-              <div className="opts">
-                <div className="opt">
-                  <b>a</b> Rewrite it — I want a different approach
-                </div>
-                <div className="opt">
-                  <b>b</b> Something has broken in Brother Anselm. Establish what, and play the fallout.
-                </div>
-                <div className="opt">
-                  <b>c</b> I meant a different character
-                </div>
-                <div className="opt">
-                  <b>d</b> Override — deliberate heel turn, play it straight
+              <p className="lp-p">
+                Option <b>d</b> always exists. An author has to be able to break their own character on
+                purpose; the gate exists to make it <i>cost</i> something rather than to prevent it. Take
+                it and the break is written onto the sheet, spawns the highest-tension thread in the
+                story, and is recorded in the divergence ledger where you can find it again.
+              </p>
+              <p className="lp-p">
+                Strictness is a dial: <b>permissive</b> narrates anything, <b>coaching</b> pushes back
+                only in fiction, <b>strict</b> interrupts on a genuine breach, <b>iron</b> also stops on
+                off-key. World facts get the opposite default — mention a tavern that does not exist and
+                it is quietly created, and real from then on.
+              </p>
+            </div>
+            <div className="lp-gate">
+              <div className="raw">i stab the captain</div>
+              <div className="interrupt">
+                <p>
+                  Brother Anselm holds this: harm no living thing. Nothing in this scene forces it. Taken
+                  straight, this is not a choice they have access to.
+                </p>
+                <div className="opts">
+                  <div className="opt">
+                    <b>a</b> Rewrite it — I want a different approach
+                  </div>
+                  <div className="opt">
+                    <b>b</b> Something has broken in Brother Anselm. Establish what, and play the
+                    fallout.
+                  </div>
+                  <div className="opt">
+                    <b>c</b> I meant a different character
+                  </div>
+                  <div className="opt">
+                    <b>d</b> Override — deliberate heel turn, play it straight
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-          <p className="lp-p">
-            Option <b>d</b> always exists. An author has to be able to break their own character on
-            purpose; the gate exists to make it <i>cost</i> something rather than to prevent it. Take it
-            and the break is written onto the sheet, spawns the highest-tension thread in the story, and
-            is recorded in the divergence ledger where you can find it again.
-          </p>
-          <p className="lp-p">
-            Strictness is a dial: <b>permissive</b> narrates anything, <b>coaching</b> pushes back only
-            in fiction, <b>strict</b> interrupts on a genuine breach, <b>iron</b> also stops on off-key.
-            World facts get the opposite default — mention a tavern that does not exist and it is quietly
-            created, and real from then on.
-          </p>
-        </Section>
+        </section>
 
         {/* --- iv ---------------------------------------------------------- */}
         <Section
@@ -764,7 +896,7 @@ dropped: 18 unevidenced, 12 off-vocabulary, 11 unknown target`}
           kicker="A genre name on its own is a mood, and a mood forbids nothing — which is how science fiction ends up blue-and-cyan every time. So each preset is pinned to a specific artefact instead, and that source is the tie-breaker for every later colour question."
           wide
         >
-          <PaletteStrip />
+          <PaletteStrip current={palette} onSelect={selectPalette} />
           <p className="lp-note">
             Pick one; this page changes with it, and so will the app when you sign in. All nine keep the
             same discipline — one accent on a three-appearance budget, a second colour reserved for
