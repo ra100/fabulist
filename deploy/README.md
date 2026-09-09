@@ -285,6 +285,32 @@ one already on the server, so the marginal cost of this migration is the app's o
 pools — about 11 MB — rather than another database. `--profile bundled` is for a
 laptop, where its 20-32 MB does not matter.
 
+### If Postgres restarts every 5 minutes
+
+Symptom: the database log ends at `checkpoint starting: time` with no
+`checkpoint complete`, no shutdown message and no error, roughly 300s
+(`checkpoint_timeout`) after each start, and the container shows
+`Restarting (1)`.
+
+Cause: a container memory limit. There was a `256M` limit on the postgres service here,
+set from measurements taken against an *empty* database; the first timed checkpoint on a
+real dataset exceeded it and the kernel killed the process mid-writeback, which leaves no
+message at all. The limit is gone. If you add one back, size it against a loaded
+database, not an idle one.
+
+`docker inspect fabulist-postgres --format '{{.State.ExitCode}} {{.State.OOMKilled}}'` is
+the question that settles it: `137`/`true` is a memory kill, `1`/`false` is Postgres
+refusing to start. `deploy.sh` now prints this for both containers whenever one is
+unhealthy.
+
+### If worlds disappear after a database problem
+
+The importer renames `world.db` to `world.db.pre-pg` once a world is in Postgres, so
+losing the database strands those files — nothing looks for `.pre-pg`. `deploy.sh`
+restores them automatically when the database has no `sqlite_import_log` row for that
+slug, then restarts the app so its boot importer runs. Nothing is lost as long as the
+`.pre-pg` files are on disk; they are the original SQLite saves, untouched.
+
 ### If the bundled Postgres will not start
 
 Symptom: the app logs `getaddrinfo ENOTFOUND postgres` or
