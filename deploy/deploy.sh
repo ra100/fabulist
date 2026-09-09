@@ -217,6 +217,23 @@ case "$action" in
     docker compose logs --tail 40 --no-log-prefix fabulist 2>&1 || true
     echo "--- database log (last 15) ---"
     docker compose logs --tail 15 --no-log-prefix postgres 2>&1 || true
+    # Mount diagnostics, printed only when the database is not healthy.
+    #
+    # Added because the `Permission denied` on `/var/lib/postgresql/18/` survived both
+    # a recursive host chown *and* running the container as root — and root cannot be
+    # denied by ownership, so the cause is something else: an SELinux label on the bind
+    # mount (needs `:Z`), a read-only mount, or a filesystem that refuses it. Each
+    # leaves a different fingerprint, and guessing between them from a Mac has already
+    # cost several releases.
+    if ! docker compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null | grep -q "fabulist-postgres.*healthy"; then
+      echo "--- mount diagnostics ---"
+      echo "host selinux: $(getenforce 2>/dev/null || echo 'not present')"
+      echo "host dir:     $(ls -ldnZ "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null || ls -ldn "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null)"
+      echo "filesystem:   $(df -T "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null | tail -1)"
+      echo "as seen inside a root container:"
+      docker run --rm -v "$(cd "${FABULIST_PG_DIR:-./fabulist-pg}" && pwd):/m" --user 0 alpine sh -c \
+        'id; ls -ldn /m; touch /m/.probe 2>&1 && echo "root CAN write the mount" && rm -f /m/.probe || echo "root CANNOT write the mount"' 2>&1 || true
+    fi
     echo "--- end ---"
     # Drops now-unreferenced image layers from the previous release. Neither the
     # app's /data nor the database directory is touched by `image prune` — both are
