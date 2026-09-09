@@ -220,6 +220,7 @@ export function App() {
             void refresh();
           }}
           onResetToWizard={() => setFresh(true)}
+          currentUser={currentUser}
         />
       ) : null}
       {tab === 'settings' ? <SettingsTab state={state} onChanged={refresh} currentUser={currentUser} /> : null}
@@ -2080,10 +2081,12 @@ function SettingsTab({ state, onChanged, currentUser }: { state: State | null; o
  * "I don't see a way to switch": the switching worked, but nothing marked the
  * current row, so every entry looked like an identical inert label.
  */
-function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
+function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard, currentUser }: {
   currentSceneTurn: string;
   onSwitched: () => void;
   onResetToWizard: () => void;
+  /** `null` when login is off (no admin concept at all — see `SettingsTab`'s identical `showSystemSettings` reasoning) or when the request has not resolved yet; the upload control below is shown either when there is no login at all or when this user is specifically an admin. */
+  currentUser: CurrentUser | null;
 }) {
   const [stories, setStories] = useState<Story[] | null>(null);
   const [worlds, setWorlds] = useState<WorldSummary[] | null>(null);
@@ -2095,6 +2098,16 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
   const [forkFrom, setForkFrom] = useState<{ id: string; title: string } | null>(null);
   const [forkScene, setForkScene] = useState('');
   const [forkTitle, setForkTitle] = useState('');
+  // Same "no login means no admin concept, otherwise gate on isAdmin" rule
+  // SettingsTab already applies to the system-wide panels — this control
+  // replaces a file every story in a world shares, the same class of
+  // system-wide action, so it is gated identically rather than inventing a
+  // second rule.
+  const showWorldUpload = !currentUser || currentUser.isAdmin;
+  // One hidden <input type="file"> per world row, keyed by slug, so each
+  // row's "replace file…" button can trigger its own picker via a plain DOM
+  // ref rather than lifting one shared input's target world into state.
+  const uploadInputs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const load = useCallback(async () => {
     try {
@@ -2213,6 +2226,36 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                     >
                       delete
                     </button>
+                    {showWorldUpload ? (
+                      <>
+                        <input
+                          type="file"
+                          accept=".db"
+                          ref={(el) => { uploadInputs.current[w.slug] = el; }}
+                          style={{ display: 'none' }}
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file) return;
+                            void run(w.slug, 'wupload', async () => {
+                              await api.worlds.upload(w.slug, file);
+                              await load();
+                            });
+                          }}
+                        />
+                        <button
+                          disabled={w.current || busy === `${w.slug}wupload`}
+                          title={
+                            w.current
+                              ? 'switch to another world before replacing its file'
+                              : 'replace this world\u2019s database file with an uploaded .db \u2014 e.g. a save repaired elsewhere with sqlite3 .recover. The existing file is kept as a dated backup, not deleted.'
+                          }
+                          onClick={() => uploadInputs.current[w.slug]?.click()}
+                        >
+                          {busy === `${w.slug}wupload` ? 'uploading…' : 'replace file…'}
+                        </button>
+                      </>
+                    ) : null}
                   </span>
                 </div>
               ))

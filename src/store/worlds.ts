@@ -34,9 +34,11 @@
  * `readdir` plus one tiny read per world on the list route, which is nothing at
  * this scale (a handful of worlds, local disk).
  */
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { timestamp } from './backup.ts';
 import { checkpoint, openDb, row, type Db } from '../db/db.ts';
+import { checkIntegrity } from './integrity.ts';
 import { listStories } from './world.ts';
 
 /** Where worlds live under a data root. */
@@ -213,6 +215,94 @@ export function deleteWorldFile(slug: string, opts: { dataRoot?: string; openSlu
     throw new Error('cannot delete the world that is currently open; switch to another world first');
   }
   rmSync(paths.dir, { recursive: true, force: true });
+}
+
+/**
+ * Replaces a world's `world.db` with an uploaded file — the server-side half
+ * of `POST /api/worlds/:slug/upload`, for the case this was actually written
+ * for: a save repaired on another machine (e.g. `sqlite3 .recover` after
+ * corruption) and handed back over HTTP instead of `scp`, so a deployed
+ * instance with no SSH access for the operator can still recover a save.
+ *
+ * Same refusal as `deleteWorldFile` and for the identical reason: swapping the
+ * file out from under a live `Db` handle is the exact hazard the README's
+ * "Copying a save" section documents (WAL mode splits an open database across
+ * `.db`/`-wal`/`-shm`; the caller would be replacing one third of a live
+ * database while the other two sidecars still point at the old one). The
+ * caller switches away first — this never force-closes anything itself.
+ *
+ * Validated *before* anything on disk changes, in this order:
+ *
+ *   1. `PRAGMA integrity_check` on the upload, written to a throwaway temp
+ *      path first — this is the exact check that caught the "database disk
+ *      image is malformed" failure this endpoint exists to fix, so letting an
+ *      upload past this and *then* discovering it is broken would recreate
+ *      the original problem one layer up.
+ *   2. This repo's own `checkIntegrity` — cheap once the file already opened
+ *      cleanly, and catches dangling entity references `PRAGMA
+ *      integrity_check` cannot see (see `store/integrity.ts`).
+ *
+ * The existing file is backed up (via `world.db.pre-upload-<stamp>`,
+ * alongside the sidecars if any survived an earlier crash) rather than
+ * deleted outright — an upload that turns out to be the wrong file, or a
+ * second corrupt copy, must not destroy the last known-good copy on its way
+ * in.
+ */
+export function replaceWorldFile(
+  slug: string,
+  bytes: Buffer,
+  opts: { dataRoot?: string; openSlug?: string } = {},
+): WorldSummary {
+  const dataRoot = opts.dataRoot ?? 'data';
+  const paths = pathsFor(slug, dataRoot);
+  if (!isWorldDir(paths.dir)) throw new Error(`no world "${slug}"`);
+  if (opts.openSlug === slug) {
+    throw new Error('cannot replace the world that is currently open; switch to another world first');
+  }
+  if (!bytes.length) throw new Error('uploaded file is empty');
+
+  // A path next to the real one, not `os.tmpdir()`: the eventual `renameSync`
+  // below must stay on one filesystem to be atomic, and a container's `/tmp`
+  // is not guaranteed to share a mount with the bind-mounted data volume.
+  const stamp = timestamp();
+  const candidatePath = `${paths.dbPath}.upload-${stamp}`;
+  writeFileSync(candidatePath, bytes);
+
+  let db: Db;
+  try {
+    db = openDb(candidatePath);
+  } catch (err) {
+    unlinkSync(candidatePath);
+    throw new Error(`uploaded file is not a valid SQLite database: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  try {
+    const check = row<{ integrity_check: string }>(db.prepare('PRAGMA integrity_check').get());
+    if (check?.integrity_check !== 'ok') {
+      throw new Error(`uploaded database failed PRAGMA integrity_check: ${check?.integrity_check ?? 'unknown error'}`);
+    }
+    const report = checkIntegrity(db);
+    if (!report.ok) {
+      throw new Error(`uploaded database has ${report.orphans.length} dangling reference(s); run pnpm integrity on it locally for details`);
+    }
+  } finally {
+    db.close();
+  }
+
+  const backupPath = `${paths.dbPath}.pre-upload-${stamp}`;
+  if (existsSync(paths.dbPath)) renameSync(paths.dbPath, backupPath);
+  // Stale sidecars from whatever was open before must not survive next to the
+  // new file — an old `-wal` would be replayed against pages that no longer
+  // mean what it thinks they mean.
+  for (const suffix of ['-wal', '-shm']) {
+    const sidecar = `${paths.dbPath}${suffix}`;
+    if (existsSync(sidecar)) renameSync(sidecar, `${backupPath}${suffix}`);
+  }
+  // Same-filesystem rename, atomic: the world directory never observes a
+  // half-written `world.db`.
+  renameSync(candidatePath, paths.dbPath);
+
+  return readWorldSummary(slug, dataRoot)!;
 }
 
 /**

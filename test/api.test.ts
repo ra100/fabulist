@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WorkOS } from '@workos-inc/node';
 import { CurrentStory, CurrentWorld, World } from '../src/store/index.ts';
-import { createWorldFile } from '../src/store/worlds.ts';
+import { createWorldFile, pathsFor } from '../src/store/worlds.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
@@ -64,6 +64,16 @@ const send = async (base: string, method: string, path: string, body?: unknown) 
   });
   return { status: res.status, body: await res.json() };
 };
+/** Same as `send`, plus a session cookie \u2014 for the admin-gated world-upload tests below, where login is on and every setup call needs a real identity to get past the session gate. */
+const sendAs = async (base: string, cookie: string, method: string, path: string, body?: unknown) => {
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers: { 'content-type': 'application/json', cookie: `${SESSION_COOKIE}=${encodeURIComponent(cookie)}` },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return { status: res.status, body: await res.json() };
+};
+
 
 test('state endpoint reports the world at a glance', async () => {
   await withServer(async (base) => {
@@ -1389,4 +1399,170 @@ test('the stories list flags the one being read', async () => {
     );
     assert.ok(rows.some((r) => r.id === (created.body as { id: string }).id));
   });
+});
+
+// ------------------------------------------------------------- world upload
+
+/**
+ * Same shape as `withWorldServer`, but with a real `fakeAuthConfig`
+ * (`login on`, since the upload route is admin-gated) sitting in front of a
+ * `CurrentWorld` over a real temp directory — a world upload replaces a real
+ * file, so unlike the login tests above (`:memory:`) this needs one.
+ */
+async function withAdminWorldServer(
+  usersByCookie: Record<string, { id: string; email: string }>,
+  adminEmails: string[],
+  fn: (base: string, cw: CurrentWorld, root: string) => Promise<void>,
+) {
+  const root = mkdtempSync(join(tmpdir(), 'fabulist-api-upload-'));
+  createWorldFile('First World', root);
+  const cw = CurrentWorld.open('first-world', root);
+  const engine = new Engine({ world: cw.world, providers: new ProviderRegistry(new MockProvider()) });
+  const authConfig = fakeAuthConfig(usersByCookie, adminEmails);
+  const server = createApiServer({
+    world: cw.world,
+    engine,
+    currentStory: cw.stories(),
+    currentWorld: cw,
+    dataRoot: root,
+    authConfig,
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await fn(`http://127.0.0.1:${port}`, cw, root);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    cw.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A valid, schema-correct world file's bytes, built the same way a real save would be — for upload fixtures. */
+function buildValidWorldBytes(root: string): Buffer {
+  const built = createWorldFile('Uploaded', root);
+  return readFileSync(built.dbPath);
+}
+
+test('uploading a valid file replaces a non-open world\u2019s database', async () => {
+  await withAdminWorldServer(
+    { 'admin-cookie': { id: 'user_admin', email: 'admin@rast.io' } },
+    ['admin@rast.io'],
+    async (base, cw, root) => {
+      await sendAs(base, 'admin-cookie', 'POST', '/api/worlds', { title: 'Second World' });
+      const bytes = buildValidWorldBytes(root);
+
+      const res = await fetch(`${base}/api/worlds/second-world/upload`, {
+        method: 'POST',
+        headers: cookieHeader('admin-cookie'),
+        body: new Uint8Array(bytes),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { slug: string; title: string };
+      assert.equal(body.slug, 'second-world');
+
+      // The uploaded file's own title ("Uploaded") is now what the world
+      // reports, proving the *file* was actually swapped, not just accepted.
+      assert.equal(body.title, 'Uploaded');
+      assert.equal(cw.slug(), 'first-world', 'the open world was never touched');
+
+      // The previous (pre-upload) file was kept, not deleted.
+      const paths = pathsFor('second-world', root);
+      const backups = (await import('node:fs')).readdirSync(paths.dir).filter((f) => f.includes('pre-upload'));
+      assert.ok(backups.length >= 1, 'a pre-upload backup of the replaced file exists');
+    },
+  );
+});
+
+test('uploading to the currently open world is refused with 409, and nothing changes on disk', async () => {
+  await withAdminWorldServer(
+    { 'admin-cookie': { id: 'user_admin', email: 'admin@rast.io' } },
+    ['admin@rast.io'],
+    async (base, cw, root) => {
+      const bytes = buildValidWorldBytes(root);
+      const before = readFileSync(pathsFor('first-world', root).dbPath);
+
+      const res = await fetch(`${base}/api/worlds/first-world/upload`, {
+        method: 'POST',
+        headers: cookieHeader('admin-cookie'),
+        body: new Uint8Array(bytes),
+      });
+      assert.equal(res.status, 409);
+      const body = (await res.json()) as { error: string };
+      assert.match(body.error, /currently open/);
+
+      const after = readFileSync(pathsFor('first-world', root).dbPath);
+      assert.deepEqual(before, after, 'the open world\u2019s file on disk is byte-identical to before the attempt');
+      assert.equal(cw.slug(), 'first-world');
+    },
+  );
+});
+
+test('a signed-in non-admin gets 403 on world upload; login off leaves it unrestricted', async () => {
+  await withAdminWorldServer(
+    { 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } },
+    ['admin@rast.io'],
+    async (base, _cw, root) => {
+      await sendAs(base, 'alice-cookie', 'POST', '/api/worlds', { title: 'Second World' });
+      const bytes = buildValidWorldBytes(root);
+      const res = await fetch(`${base}/api/worlds/second-world/upload`, {
+        method: 'POST',
+        headers: cookieHeader('alice-cookie'),
+        body: new Uint8Array(bytes),
+      });
+      assert.equal(res.status, 403);
+    },
+  );
+
+  // With login off entirely, the same route is unrestricted — same contract
+  // every other admin-gated route already documents.
+  await withWorldServer(async (base, cw, root) => {
+    await send(base, 'POST', '/api/worlds', { title: 'Second World' });
+    const bytes = buildValidWorldBytes(root);
+    const res = await fetch(`${base}/api/worlds/second-world/upload`, { method: 'POST', body: new Uint8Array(bytes) });
+    assert.equal(res.status, 200);
+    void cw;
+  });
+});
+
+test('a corrupt upload is rejected before anything on disk changes', async () => {
+  await withAdminWorldServer(
+    { 'admin-cookie': { id: 'user_admin', email: 'admin@rast.io' } },
+    ['admin@rast.io'],
+    async (base, _cw, root) => {
+      await sendAs(base, 'admin-cookie', 'POST', '/api/worlds', { title: 'Second World' });
+      const paths = pathsFor('second-world', root);
+      const before = readFileSync(paths.dbPath);
+
+      // Not a SQLite file at all — the plainest corruption case, and the one
+      // `openDb` itself throws on rather than `PRAGMA integrity_check`.
+      const res = await fetch(`${base}/api/worlds/second-world/upload`, {
+        method: 'POST',
+        headers: cookieHeader('admin-cookie'),
+        body: new Uint8Array(Buffer.from("not a sqlite database")),
+      });
+      assert.equal(res.status, 409);
+      const body = (await res.json()) as { error: string };
+      assert.match(body.error, /not a valid SQLite database/);
+
+      const after = readFileSync(paths.dbPath);
+      assert.deepEqual(before, after, 'the rejected upload never touched the real file');
+      assert.ok(!existsSync(`${paths.dbPath}.upload-`), 'no leftover temp candidate file');
+    },
+  );
+});
+
+test('an empty upload body is a plain 400, not a 500 or a silent no-op', async () => {
+  await withAdminWorldServer(
+    { 'admin-cookie': { id: 'user_admin', email: 'admin@rast.io' } },
+    ['admin@rast.io'],
+    async (base) => {
+      await sendAs(base, 'admin-cookie', 'POST', '/api/worlds', { title: 'Second World' });
+      const res = await fetch(`${base}/api/worlds/second-world/upload`, {
+        method: 'POST',
+        headers: cookieHeader('admin-cookie'),
+      });
+      assert.equal(res.status, 400);
+    },
+  );
 });
