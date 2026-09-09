@@ -236,6 +236,18 @@ case "$action" in
     done
     echo "--- container status ---"
     docker compose ps --format '{{.Name}}\t{{.Status}}' || true
+    # Why each container last exited, which `docker compose ps` does not say and a
+    # restarting container's own logs eventually roll away.
+    #
+    # Added after a Postgres restart loop that had to be diagnosed by asking the
+    # operator to run `docker inspect` by hand: exit 137 with OOMKilled=true is the
+    # memory limit, exit 1 is a Postgres-level refusal, and the two need completely
+    # different fixes. Guessing between them cost several releases.
+    for c in fabulist fabulist-postgres; do
+      docker inspect "$c" --format \
+        "exit: {{.Name}} code={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} {{.State.Error}}" \
+        2>/dev/null || true
+    done
     echo "--- app log (last 40) ---"
     docker compose logs --tail 40 --no-log-prefix fabulist 2>&1 || true
     echo "--- database log (last 15) ---"
