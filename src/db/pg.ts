@@ -101,6 +101,35 @@ export interface DbOptions {
  * Ingest stays at 2. It is one crawl at a time by design, and the second connection
  * is what lets a batch flush while the next page parses.
  */
+/**
+ * The connection string every Postgres entry point should use.
+ *
+ * One place, because having more than one was a real trap: `serve-pg` accepted
+ * `FABULIST_PG` *or* `DATABASE_URL`, while `importpg` and `integritypg` accepted only
+ * `DATABASE_URL`. So a deployment configured the documented way — `FABULIST_PG` in
+ * `app.env`, which is what docker-compose.yml sets — ran the server fine and then failed
+ * every maintenance command with "DATABASE_URL is not set", pointing at `pnpm pg:start`
+ * as though no database existed. Reported from a live instance while trying to re-run an
+ * import.
+ *
+ * `FABULIST_PG` wins: it is the project's own name and the one the compose file and CI
+ * set. `DATABASE_URL` stays supported because it is the convention every other Postgres
+ * tool reads, and dropping it would break anyone who had followed that.
+ *
+ * Returns undefined rather than defaulting, so a CLI can print its own guidance; the
+ * server supplies its own localhost fallback because a dev server with no configuration
+ * should still start.
+ */
+export function connectionStringFromEnv(): string | undefined {
+  return process.env.FABULIST_PG ?? process.env.DATABASE_URL ?? undefined;
+}
+
+/** The message to print when neither variable is set. Shared so all three agree. */
+export const NO_CONNECTION_STRING =
+  'Set FABULIST_PG (or DATABASE_URL) to your Postgres connection string.\n' +
+  '  Docker deployments already have it in app.env; inside the container it is exported.\n' +
+  '  For a local server: pnpm pg:start, which prints one.';
+
 const POOL_DEFAULTS = { play: 4, ingest: 2 } as const;
 
 export class Db implements Queryable {

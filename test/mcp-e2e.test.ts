@@ -42,6 +42,19 @@ async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   const mcpAuth = buildMcpAuth({ MCP_DEV_TOKEN: DEV_TOKEN });
   assert.ok(mcpAuth, 'dev-token mode should build from this env');
 
+  // The port has to exist before `mcpResourceUrl` can name it, and the URL has to be
+  // right before the server is built — `serverInfo` resolves the advertised icon URLs
+  // against it, so a placeholder makes the server advertise `http://127.0.0.1:0/…`.
+  //
+  // An earlier version passed `:0` with a comment claiming it was "overwritten below
+  // once the real port is known"; nothing overwrote it, and the icon test failed on that
+  // rather than on anything the server does wrong. Listening on a throwaway server first
+  // is the cheap way to learn a free port before committing to it.
+  const probe = createServer();
+  await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+  const port = (probe.address() as AddressInfo).port;
+  await new Promise<void>((r) => probe.close(() => r()));
+
   const server = createApiServer({
     world: () => cw.world(),
     engine,
@@ -49,10 +62,9 @@ async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
     currentWorld: cw,
     dataRoot: root,
     mcpAuth: mcpAuth!,
-    mcpResourceUrl: 'http://127.0.0.1:0/mcp', // overwritten below once the real port is known
+    mcpResourceUrl: `http://127.0.0.1:${port}/mcp`,
   });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-  const { port } = server.address() as { port: number };
+  await new Promise<void>((r) => server.listen(port, '127.0.0.1', r));
   try {
     return await fn(`http://127.0.0.1:${port}`);
   } finally {

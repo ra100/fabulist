@@ -24,7 +24,7 @@
  * Connection comes from DATABASE_URL, matching every other Postgres tool.
  */
 import { statSync } from 'node:fs';
-import { applySchema, Db } from '../db/pg.ts';
+import { Db, NO_CONNECTION_STRING, applySchema, connectionStringFromEnv } from '../db/pg.ts';
 import { findSqliteWorlds, importSqliteWorlds } from '../db/import-sqlite.ts';
 
 const args = process.argv.slice(2);
@@ -49,9 +49,9 @@ if (dryRun) {
   process.exit(0);
 }
 
-const connectionString = process.env.DATABASE_URL;
+const connectionString = connectionStringFromEnv();
 if (!connectionString) {
-  console.error('DATABASE_URL is not set. Start a local server with `pnpm pg:start`, which prints one.');
+  console.error(NO_CONNECTION_STRING);
   process.exit(2);
 }
 

@@ -25,7 +25,7 @@
  */
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { Db, applyRoles, applySchema, checkCapacity } from '../db/pg.ts';
+import { Db, applyRoles, applySchema, checkCapacity, connectionStringFromEnv } from '../db/pg.ts';
 import { findSqliteWorlds, importSqliteWorlds } from '../db/import-sqlite.ts';
 import { createWorld, listWorlds, worldFor } from '../store/index-pg.ts';
 import { listStories } from '../store/world-pg.ts';
@@ -77,8 +77,10 @@ mkdirSync(join(dataRoot, 'images'), { recursive: true });
 const PLAY_POOL = Number(process.env.FABULIST_PG_POOL ?? 4);
 const INGEST_POOL = 2;
 
-const connectionString =
-  process.env.FABULIST_PG ?? process.env.DATABASE_URL ?? 'postgres://localhost:5432/fabulist';
+// The localhost default is the server's alone: a dev server started with no
+// configuration should still come up. The maintenance CLIs deliberately do not guess,
+// because silently importing into the wrong database is worse than an error.
+const connectionString = connectionStringFromEnv() ?? 'postgres://localhost:5432/fabulist';
 
 const play = new Db({ connectionString, kind: 'play', max: PLAY_POOL });
 const ingest = new Db({ connectionString, kind: 'ingest', max: INGEST_POOL });

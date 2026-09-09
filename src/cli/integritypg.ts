@@ -15,7 +15,7 @@
  * every row of twelve tables from disk and took 124 seconds on the real corpora;
  * warm it is 56 ms. Scoping to one world with `--world=` avoids most of that.
  */
-import { Db } from '../db/pg.ts';
+import { Db, NO_CONNECTION_STRING, connectionStringFromEnv } from '../db/pg.ts';
 import { checkIntegrity, formatIntegrityReport } from '../store/integrity-pg.ts';
 import { getWorldBySlug } from '../store/index-pg.ts';
 
@@ -23,9 +23,9 @@ const args = process.argv.slice(2);
 const flag = (name: string): string | undefined =>
   args.find((a) => a.startsWith(`--${name}=`))?.split('=').slice(1).join('=');
 
-const connectionString = process.env.DATABASE_URL;
+const connectionString = connectionStringFromEnv();
 if (!connectionString) {
-  console.error('DATABASE_URL is not set. Start a local server with `pnpm pg:start`, which prints one.');
+  console.error(NO_CONNECTION_STRING);
   process.exit(2);
 }
 
