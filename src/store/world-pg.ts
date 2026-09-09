@@ -410,9 +410,20 @@ function toStory(r: StoryRow): Story {
 }
 
 /** Every story, most recently played first. Used by the save browser. */
+/**
+ * `NULLS LAST` is defensive, not a fix.
+ *
+ * `ORDER BY last_played_at DESC` puts NULLs first in Postgres and last in SQLite, and I
+ * initially blamed that for the wrong-default bug. It cannot be the cause — the column is
+ * `NOT NULL DEFAULT now()`, so a NULL never occurs — and the real cause was that the
+ * default therefore makes "most recently played" mean "most recently created" until
+ * someone plays (see `resolveOrCreateStoryForUser`). Kept because the clause states the
+ * intent explicitly and costs nothing, so a future migration that drops the NOT NULL
+ * cannot silently invert the order.
+ */
 export async function listStories(db: Queryable): Promise<Story[]> {
   const { rows } = await db.query<StoryRow>(
-    `SELECT ${STORY_COLS} FROM stories ORDER BY last_played_at DESC, created_at DESC`,
+    `SELECT ${STORY_COLS} FROM stories ORDER BY last_played_at DESC NULLS LAST, created_at DESC`,
   );
   return rows.map(toStory);
 }
@@ -438,7 +449,7 @@ export async function listStoriesInWorld(db: Queryable, worldId: number): Promis
  */
 export async function listStoriesForUser(db: Queryable, ownerUserId: string): Promise<Story[]> {
   const { rows } = await db.query<StoryRow>(
-    `SELECT ${STORY_COLS} FROM stories WHERE owner_user_id = $1 ORDER BY last_played_at DESC, created_at DESC`,
+    `SELECT ${STORY_COLS} FROM stories WHERE owner_user_id = $1 ORDER BY last_played_at DESC NULLS LAST, created_at DESC`,
     [ownerUserId],
   );
   return rows.map(toStory);
@@ -458,7 +469,7 @@ export async function listStoriesForUser(db: Queryable, ownerUserId: string): Pr
  */
 export async function listUnownedStories(db: Queryable): Promise<Story[]> {
   const { rows } = await db.query<StoryRow>(
-    `SELECT ${STORY_COLS} FROM stories WHERE owner_user_id IS NULL ORDER BY last_played_at DESC, created_at DESC`,
+    `SELECT ${STORY_COLS} FROM stories WHERE owner_user_id IS NULL ORDER BY last_played_at DESC NULLS LAST, created_at DESC`,
   );
   return rows.map(toStory);
 }
@@ -586,7 +597,22 @@ export async function resolveOrCreateStoryForUser(
   worldIds: number[] = [],
 ): Promise<StoryId> {
   const existing = await listStoriesForUser(db, ownerUserId);
-  if (existing.length > 0) return existing[0]!.id;
+  if (existing.length > 0) {
+    // Prefer a book that has actually been written in.
+    //
+    // `last_played_at` is `NOT NULL DEFAULT now()`, so "most recently played" is really
+    // "most recently created" until someone plays — and every failed boot during the
+    // Postgres migration created a blank story here (this function makes one when the
+    // user owns none, and the imported books were unowned at the time). Those blanks were
+    // newer than the real book and won the default, so the session landed on a story that
+    // sourced no world: setup wizard, empty cast, on an instance holding a played book
+    // and 33,000 canon entities.
+    //
+    // Turn count is the honest signal. A timestamp default can make an empty story look
+    // recent; it cannot give it turns. Falls back to the list order when nothing has been
+    // played, which is the ordinary first-run case.
+    return (existing.find((st) => st.turn > 0) ?? existing[0]!).id;
+  }
   // A first book reads whatever canon this instance already has, rather than nothing.
   //
   // With no sources, `graph.isEmpty()` is true — it only counts the worlds a story

@@ -18,17 +18,7 @@ import { sourcesFor } from '../src/db/overlay.ts';
 import { CastStore, emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../src/store/cast-pg.ts';
 import { ChronicleStore } from '../src/store/chronicle-pg.ts';
 import { IllustrationStore } from '../src/store/illustration-pg.ts';
-import {
-  ConsequenceStore,
-  DirectiveStore,
-  StoryStore,
-  ThreadStore,
-  createStory,
-  deleteStory,
-  getStory,
-  listStoriesForUser,
-  resolveOrCreateStoryForUser,
-} from '../src/store/world-pg.ts';
+import { ConsequenceStore, DirectiveStore, StoryStore, ThreadStore, createStory, deleteStory, getStory, listStoriesForUser, resolveOrCreateStoryForUser } from '../src/store/world-pg.ts';
 import {
   World,
   createWorld,
@@ -625,6 +615,48 @@ test('illustrations keep bytes on disk and delete them with the row', async (t) 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * An empty story must not outrank a book with writing in it.
+ *
+ * `last_played_at` is `NOT NULL DEFAULT now()`, so "most recently played" is really "most
+ * recently created" until someone plays. Every one of the failed boots during the
+ * Postgres migration created a blank story — `resolveOrCreateStoryForUser` makes one when
+ * the user owns none, and the imported books were unowned at the time — so those blanks
+ * were newer than the real book and won the default. The session landed on a blank story
+ * that sourced no world, which is why the setup wizard appeared and the cast was empty on
+ * an instance holding a played book and 33,000 canon entities.
+ *
+ * Fixed by preferring a story that has actually been written in. Turn count is the honest
+ * signal: it cannot be faked by a timestamp default, and a book with turns is a book.
+ */
+test('resolution prefers a book with writing over a newer empty one', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'ordering', 'Ordering');
+    const owner = 'user-order';
+
+    const real = await createStory(db, { title: 'Real book', ownerUserId: owner, worldIds: [worldId] });
+    await db.query(`UPDATE stories SET turn = 12, scene = 3 WHERE id = $1`, [real.id]);
+    // Created afterwards, so a plain `last_played_at DESC` puts it first.
+    const blank = await createStory(db, { title: '', ownerUserId: owner, worldIds: [] });
+
+    assert.equal(
+      await resolveOrCreateStoryForUser(db, owner),
+      real.id,
+      'a session must land on the book with turns, not the newer blank one',
+    );
+
+    // The blank story still exists — this is about which one is *default*, not about
+    // deleting anything.
+    const mine = await listStoriesForUser(db, owner);
+    assert.equal(mine.length, 2);
+    assert.ok(
+      mine.some((st) => st.id === blank.id),
+      'the empty story is still listed, just not preferred',
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });
