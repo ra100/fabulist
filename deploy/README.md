@@ -200,6 +200,37 @@ tables under MVCC, so an ingest costs about 18% of read throughput and essential
 nothing in write latency. `pnpm integrity-pg` checked 167,216 rows clean in 0.1s
 afterwards.
 
+### Resource footprint
+
+Measured on this schema, not estimated. An idle bundled Postgres container is
+**20 MB**; with the app's default pools open it is about **32 MB**, on a 425 MB image.
+The Node process is ~80 MB RSS, which it was before this migration too.
+
+The lever that matters is **pool size, not `max_connections`**: every open connection
+is a Postgres *process* costing ~1.8 MB. The defaults are 4 play + 2 ingest — about
+11 MB — chosen for one person on one server rather than for the load ceiling. An
+earlier default of 20 + 3 spent ~41 MB serving concurrency a single-user instance
+never has.
+
+Four is enough because a turn holds a connection only while it *queries*. The seconds
+it spends waiting on a model are spent with the connection returned to the pool.
+Measured with 8 concurrent players deliberately oversubscribing a pool of 4:
+
+| pool | turns/s | p50 | p99 |
+| --- | --- | --- | --- |
+| 4 | 990 | 6.8 ms | 21.2 ms |
+| 20 | 1,500 | 4.4 ms | 17.4 ms |
+
+A third less throughput, and 2.4 ms more latency on a turn that takes seconds — not
+a tradeoff a player can perceive. Raise `FABULIST_PG_POOL` (and `max_connections`,
+and `shared_buffers`) for an instance with genuine concurrent load; the 100-user load
+test used 20 against `max_connections=300`.
+
+**To save the most, don't run a second Postgres.** `docker compose up -d` uses the
+one already on the server, so the marginal cost of this migration is the app's own
+pools — about 11 MB — rather than another database. `--profile bundled` is for a
+laptop, where its 20-32 MB does not matter.
+
 ## Known gaps, called out on purpose
 
 - **The deploy key has no `authorized_keys` restriction.** The original design

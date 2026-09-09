@@ -82,7 +82,26 @@ export interface DbOptions {
  * measurement above), large enough that Pass A's batch writes and Pass B's
  * per-page updates are not serialised behind each other.
  */
-const POOL_DEFAULTS = { play: 20, ingest: 3 } as const;
+/**
+ * Pool sizes, defaulted for one person on one server rather than for the load
+ * ceiling.
+ *
+ * Each pooled connection is a *process* in Postgres, and measured on this schema it
+ * costs about 1.8 MB of server memory: an idle Postgres container sits at 20 MB, and
+ * holding 23 connections open takes it to 62 MB. So the old default of 20 play
+ * connections spent ~36 MB to serve a concurrency nobody had — the number was chosen
+ * for the 100-user load test, which is the wrong default for the common case.
+ *
+ * Four is enough for a handful of simultaneous readers, and a turn holds a
+ * connection only while it queries — the seconds a turn spends waiting on a model
+ * are spent with the connection *returned* to the pool. `FABULIST_PG_POOL` raises it
+ * for an instance that genuinely has concurrent players; the load test at 100 users
+ * used 20 and is what that setting is for.
+ *
+ * Ingest stays at 2. It is one crawl at a time by design, and the second connection
+ * is what lets a batch flush while the next page parses.
+ */
+const POOL_DEFAULTS = { play: 4, ingest: 2 } as const;
 
 export class Db implements Queryable {
   readonly pool: Pool;
