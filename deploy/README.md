@@ -285,6 +285,32 @@ one already on the server, so the marginal cost of this migration is the app's o
 pools — about 11 MB — rather than another database. `--profile bundled` is for a
 laptop, where its 20-32 MB does not matter.
 
+### If the bundled Postgres will not start
+
+Symptom: the app logs `getaddrinfo ENOTFOUND postgres` or
+`waiting for the database to accept connections…` forever, and the database logs
+`mkdir: can't create directory '/var/lib/postgresql/18/': Permission denied` in a
+restart loop.
+
+Cause: the bind-mounted database directory contains a partial `18/` from an earlier
+failed initialisation, which the entrypoint cannot write past. `deploy.sh` clears such
+a directory automatically — but only when it holds *no cluster*, checked via
+`PG_VERSION`, so a real database is never touched. If it reports
+`note: could not clear …`, the deploy user lacks Docker access to fix it and the
+directory needs removing by hand:
+
+    sudo rm -rf <deploy-path>/fabulist-pg
+
+That is safe **only** while no import has succeeded. Once there is a cluster, use
+`pg_dump` (above) — never delete the directory.
+
+This took five releases to find, and the reason is worth recording: Docker on macOS
+does not enforce bind-mount ownership, so every local reproduction passed while
+production kept failing. When a deploy fails on a Linux host in a way that cannot be
+reproduced on a Mac, add diagnostics to the deploy before attempting another fix —
+`deploy.sh` now prints container status, both logs, and mount diagnostics on failure,
+which is what finally identified this.
+
 ## Known gaps, called out on purpose
 
 - **The deploy key has no `authorized_keys` restriction.** The original design
