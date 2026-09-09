@@ -138,23 +138,24 @@ async function boot(): Promise<void> {
   const imagesDir = join(dataRoot, 'images');
 
   /**
-   * The boot story, for the pieces that need a `World` at construction rather than
-   * per request.
+   * The world for requests with no signed-in user.
    *
-   * Deliberately a thin shim rather than a revived `CurrentStory`. Every *request*
-   * resolves its own world from the session user (see `api-pg.ts`'s dispatcher), so
-   * this exists only so `Engine`/`SetupService`/`IllustrationService` have
-   * something to hold — and it resolves fresh on each call, so it never goes stale
-   * the way a captured `World` would.
+   * **Resolved per request, never cached.** A cached `World` is wrong here and it
+   * cost a real bug: this was resolved once and refreshed on a 30-second timer, so
+   * after `PUT /api/story/sources` added a second canon world the very next request
+   * still read the one-world snapshot. The browser showed the checkbox snapping
+   * back, the database was correct, and the write had returned 200 — a stale read
+   * with no error anywhere. Caught by clicking the real control in a real browser,
+   * which is the only place it was visible.
+   *
+   * `World.forStory` is two small queries and this path serves only login-off
+   * requests, so resolving every time is cheap. A cache with a refresh interval is
+   * precisely the shape whose failures this migration set out to remove.
    */
-  let bootWorld = await worldFor(play, null, { imagesDir });
-  const getWorld = () => bootWorld;
-  const refreshBootWorld = async () => {
-    bootWorld = await worldFor(play, null, { imagesDir });
-  };
+  const resolveWorld = () => worldFor(play, null, { imagesDir });
 
   if (args.includes('--sample')) {
-    await seedWorld(bootWorld);
+    await seedWorld(await resolveWorld());
     console.log('seeded the Saint Verrow sample');
   }
 
@@ -165,9 +166,9 @@ async function boot(): Promise<void> {
   if (cfg.profile === 'mock') console.log('tip: pnpm providers — the UI can switch profile without a restart');
   for (const n of imageNotes) console.log(n);
 
-  const illustrations = new IllustrationService({ world: getWorld, providers: imageRegistry });
+  const illustrations = new IllustrationService({ world: resolveWorld, providers: imageRegistry });
   const engine = new Engine({
-    world: getWorld,
+    world: resolveWorld,
     db: play,
     providers: registry,
     // Live settings, so editing the blocklist affects the very next turn.
@@ -181,7 +182,7 @@ async function boot(): Promise<void> {
   // grant boundary made concrete: `fabulist_play` has no write access to
   // `canon_entities`, so a bug in a play route cannot corrupt source material even
   // if it tries.
-  const setup = new SetupService({ world: getWorld, db: ingest, providers: registry });
+  const setup = new SetupService({ world: resolveWorld, db: ingest, providers: registry });
   if (await setup.isFresh()) console.log('no canon yet - the UI will open the setup wizard');
 
   const stories = await listStories(play);
@@ -211,7 +212,7 @@ async function boot(): Promise<void> {
   );
 
   const server = createApiServer({
-    world: getWorld,
+    world: resolveWorld,
     db: play,
     engine,
     webRoot,
@@ -230,10 +231,6 @@ async function boot(): Promise<void> {
     console.log(`fabulist on http://${host}:${port}`);
   });
 
-  // A story created after boot (the wizard, a pack install) should be what the
-  // boot shim resolves to as well, so the CLI-facing pieces do not keep pointing at
-  // whatever existed at startup.
-  setInterval(() => void refreshBootWorld().catch(() => {}), 30_000).unref();
 
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.on(sig, () => {

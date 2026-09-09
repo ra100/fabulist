@@ -27,7 +27,7 @@ import { installPack } from '../packs/apply-pg.ts';
 export type WorldSource = 'fandom' | 'custom' | 'sample';
 
 export interface SetupServiceOptions {
-  world: World | (() => World);
+  world: World | (() => World | Promise<World>);
   /**
    * The pool. Needed to start transactions: an ingest, a story reset and a canon
    * rebuild each have to be atomic, and a `World` holds a `Queryable` that may
@@ -215,7 +215,7 @@ export class SetupService {
    * job closure — exactly the shape that goes stale silently if it is a
    * resolved reference instead of a live one.
    */
-  private getWorld: () => World;
+  private getWorld: () => World | Promise<World>;
   private db: Db;
   private providers: Registry;
   private directory: WikiDirectory;
@@ -247,7 +247,7 @@ export class SetupService {
    * why the difference is worth a method.
    */
   async isFresh(): Promise<boolean> {
-    return this.getWorld().graph.isEmpty();
+    return (await this.getWorld()).graph.isEmpty();
   }
 
   async resolveWiki(query: string): Promise<WikiCandidate[]> {
@@ -407,7 +407,7 @@ export class SetupService {
       // re-resolved per step: an ingest is one continuous act of writing canon,
       // and letting the target world change mid-write would split the ingest
       // across two stories/worlds, which is a real corruption, not a stale-read.
-      const world = this.getWorld();
+      const world = await this.getWorld();
       await world.chronicle.setMeta('worldTitle', title || wikiName);
       // Persisted so a later session can offer "continue reading this wiki"
       // without asking the player to re-enter the universe, seeds and mode —
@@ -619,7 +619,7 @@ export class SetupService {
    * wiki this world has no `ingest_pages` rows for yet.
    */
   async ingestHealth(): Promise<IngestHealth> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const context = await loadIngestContext(world);
     if (!context) return { hasContext: false, context: null, pagesDone: 0, pagesFailed: 0, pagesPending: 0 };
 
@@ -664,7 +664,7 @@ export class SetupService {
   async continueIngest(
     overrides: { seeds?: string[]; mode?: DepthMode; excludeCategories?: string[]; limits?: IngestLimits } = {},
   ): Promise<Job<IngestJobResult>> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const context = await loadIngestContext(world);
     if (!context) throw new Error('this world has no wiki ingest to continue — it was not built from a wiki, or predates this feature');
 
@@ -765,7 +765,7 @@ export class SetupService {
       // Resolved after the (only) await in this job, same reasoning as
       // startIngest: one continuous act of authoring canon, held for its
       // whole lifetime rather than re-resolved mid-write.
-      const world = this.getWorld();
+      const world = await this.getWorld();
       handle.stage('writing it down');
       const result = await applyCustomWorld(world, raw);
       handle.log(`${result.entities} entities, ${result.edges} relations, ${result.threads} threads`);
@@ -781,7 +781,7 @@ export class SetupService {
 
   /** The built-in example, for trying the engine without any setup at all. */
   async useSample(): Promise<{ playerCharacterId: string; opening: string }> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     await seedWorld(world);
     await world.chronicle.setMeta('worldTitle', 'Saint Verrow');
     return {
@@ -821,7 +821,7 @@ export class SetupService {
     const pack = packById(packId);
     if (!pack) throw new Error(`no such world pack: ${packId}`);
 
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const result = await installPack(this.db, world, pack);
     if (!result.scenarios.length) throw new Error(`${packId} installed no playable scenario`);
 
@@ -882,7 +882,7 @@ export class SetupService {
    * the same canon worlds the old one did.
    */
   async resetMyStory(storyId?: StoryId): Promise<StoryId> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const target = storyId ?? world.storyId;
     const worldIds = world.sources.map((src) => src.worldId);
 
@@ -910,7 +910,7 @@ export class SetupService {
    * and it is recoverable, where deleting somebody's novel is not.
    */
   async rebuildCanon(worldId?: number): Promise<{ worldId: number; entities: number; edges: number }> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const target = worldId ?? world.sources[0]?.worldId;
     if (target === undefined) throw new Error('rebuildCanon: no canon world to rebuild');
 

@@ -53,7 +53,12 @@ ENV PORT=4317
 # The flag below overrides the bind host without touching serve.ts's default
 # for the non-Docker path.
 # --data-root=/data alongside --config=/data/fabulist.config.json: both must
-# point inside the mounted volume, or worlds land in the container's writable
-# layer and vanish the moment `docker compose up -d` recreates the container
-# (see serve.ts's --data-root comment for the failure this fixes).
-CMD ["node", "--disable-warning=ExperimentalWarning", "src/cli/serve.ts", "--host=0.0.0.0", "--config=/data/fabulist.config.json", "--data-root=/data"]
+# point inside the mounted volume. Canon and stories live in Postgres now, but
+# `--data-root` still matters for two things that stay on disk — generated image
+# bytes, and any SQLite `world.db` waiting to be imported on first boot. Both
+# would vanish the moment `docker compose up -d` recreates the container if this
+# pointed at the writable layer (see serve-pg.ts's own comment).
+#
+# `serve-pg.ts`, not `serve.ts`: Postgres is the default now. `FABULIST_PG` (or
+# `DATABASE_URL`) must be set — see deploy/docker-compose.yml.
+CMD ["node", "--disable-warning=ExperimentalWarning", "src/cli/serve-pg.ts", "--host=0.0.0.0", "--config=/data/fabulist.config.json", "--data-root=/data"]

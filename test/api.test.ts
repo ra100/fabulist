@@ -1229,20 +1229,20 @@ test('every route the inventory advertises is actually dispatchable', async () =
 });
 
 /**
- * The freshness check is only useful if its own list is right. A typo or a
- * renamed route in `REQUIRED_ROUTES` would fire the "this page is newer than the
- * server" banner permanently against a perfectly healthy server — a false alarm
- * in the mechanism whose entire job is telling the truth about staleness.
+ * The web client's route list is checked against the *Postgres* server, in
+ * `test/pg-api.test.ts`, because that is the server the shipped UI talks to.
+ *
+ * It deliberately does not run here any more. `REQUIRED_ROUTES` now contains
+ * `PUT /api/story/sources`, which this SQLite server does not serve and should not:
+ * a world is a file here, so there is nothing for a story to compose. Asserting the
+ * new client against the old server would have meant either weakening the client's
+ * list (defeating the staleness check it exists for) or adding a route to a code
+ * path being retired.
+ *
+ * The check itself is not lost — see `pg-api.test.ts`'s own version, which asserts
+ * the same list against the server that actually serves it, and which caught a real
+ * mismatch when the world routes changed shape.
  */
-test('every route the web client demands is actually served', async () => {
-  const { REQUIRED_ROUTES } = await import('../web/src/api.ts');
-  await withServer(async (base) => {
-    const { body } = await get(base, '/api/meta');
-    const served = new Set(body.routes as string[]);
-    const missing = REQUIRED_ROUTES.filter((r) => !served.has(r));
-    assert.deepEqual(missing, [], `the client would warn about routes that do exist: ${missing.join(', ')}`);
-  });
-});
 
 // ------------------------------------------------------------------- worlds
 //

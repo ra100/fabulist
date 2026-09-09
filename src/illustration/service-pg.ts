@@ -26,7 +26,7 @@ export interface IllustrationRegistry {
 }
 
 export interface IllustrationServiceOptions {
-  world: World | (() => World);
+  world: World | (() => World | Promise<World>);
   providers: IllustrationRegistry;
 }
 
@@ -38,7 +38,7 @@ export class NoImageProviderError extends Error {
 }
 
 export class IllustrationService {
-  private getWorld: () => World;
+  private getWorld: () => World | Promise<World>;
   private providers: IllustrationRegistry;
 
   constructor(opts: IllustrationServiceOptions) {
@@ -53,7 +53,7 @@ export class IllustrationService {
 
   /** The prompt alone, for the "no provider — copy this into whatever you have" path. Never touches the provider or the illustrations table. */
   async composePortrait(entityId: EntityId, overrideStyle?: VisualStyle): Promise<ComposedPrompt> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const [entity, sheet, style] = await Promise.all([
       world.graph.get(entityId),
       world.cast.getOrBlank(entityId),
@@ -71,7 +71,7 @@ export class IllustrationService {
     sceneDetail: string,
     overrideStyle?: VisualStyle,
   ): Promise<ComposedPrompt> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const { location, present, style } = await this.sceneSubjects(world, locationId, presentIds, overrideStyle);
     return composeScenePrompt(location, present, style, sceneDetail);
   }
@@ -117,7 +117,15 @@ export class IllustrationService {
    * — every caller that predates per-user stories keeps working exactly as
    * it did.
    */
-  async illustratePortrait(entityId: EntityId, overrideStyle?: VisualStyle, world: World = this.getWorld()): Promise<Illustration> {
+  async illustratePortrait(
+    entityId: EntityId,
+    overrideStyle?: VisualStyle,
+    worldOverride?: World,
+  ): Promise<Illustration> {
+    // Resolved in the body rather than as a parameter default: the getter may
+    // return a promise now (see `serve-pg.ts` on why it must not be cached), and a
+    // parameter initializer cannot await.
+    const world = worldOverride ?? (await this.getWorld());
     const provider = this.providers.get();
     if (!provider) throw new NoImageProviderError();
 
@@ -185,8 +193,9 @@ export class IllustrationService {
     presentIds: EntityId[],
     sceneDetail: string,
     overrideStyle?: VisualStyle,
-    world: World = this.getWorld(),
+    worldOverride?: World,
   ): Promise<Illustration> {
+    const world = worldOverride ?? (await this.getWorld());
     const provider = this.providers.get();
     if (!provider) throw new NoImageProviderError();
 

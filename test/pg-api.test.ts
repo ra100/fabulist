@@ -349,3 +349,57 @@ test('a 404 and a bad body are answered, not crashed', async (t) => {
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+/**
+ * The staleness check is only useful if its own list is right.
+ *
+ * `web/src/api.ts` warns "this page is newer than the server" when a route it needs
+ * is missing from `/api/meta`. A typo or a renamed route in `REQUIRED_ROUTES` fires
+ * that banner permanently against a perfectly healthy server — a false alarm in the
+ * mechanism whose entire job is telling the truth about staleness.
+ *
+ * Moved here from `test/api.test.ts` when the UI moved to this server: the list now
+ * contains `PUT /api/story/sources`, which the SQLite server does not serve and
+ * should not, since a world is a file there and a story composes nothing. This is
+ * the server the shipped UI talks to, so this is where the list has to match.
+ */
+test('every route the web client demands is actually served', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { REQUIRED_ROUTES } = await import('../web/src/api.ts');
+    await withServer(db, async (base) => {
+      const meta = await get(base, '/api/meta');
+      const served = new Set(meta.body.routes as string[]);
+      const missing = REQUIRED_ROUTES.filter((r) => !served.has(r));
+      assert.deepEqual(missing, [], `the client would warn about routes that do exist: ${missing.join(', ')}`);
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * Every advertised parameterless GET is actually dispatchable.
+ *
+ * `/api/meta` is generated from the route table, so a route can be advertised and
+ * still 404 if its handler throws on the way in — which is exactly what an
+ * unawaited promise or a missing store method looks like. Cheap to check, and it
+ * covers the routes no other test in this file touches.
+ */
+test('every advertised parameterless GET responds', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(db, async (base) => {
+      const meta = await get(base, '/api/meta');
+      const simpleGets = (meta.body.routes as string[])
+        .filter((r) => r.startsWith('GET /') && !r.includes(':'))
+        .map((r) => r.slice('GET '.length));
+      assert.ok(simpleGets.length > 10, `expected a real route table, got ${simpleGets.length}`);
+      for (const path of simpleGets) {
+        const res = await fetch(`${base}${path}`);
+        assert.notEqual(res.status, 404, `${path} is advertised but not dispatchable`);
+        // A 500 here is the shape an unawaited promise or a missing method takes.
+        assert.notEqual(res.status, 500, `${path} threw: ${JSON.stringify(await res.json().catch(() => null))}`);
+      }
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+

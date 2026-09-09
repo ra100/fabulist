@@ -61,7 +61,7 @@ export interface ProseGate {
 }
 
 export interface EngineOptions {
-  world: World | (() => World);
+  world: World | (() => World | Promise<World>);
   /**
    * The pool, needed to *start* a transaction.
    *
@@ -168,7 +168,7 @@ export class Engine {
    * Resolved once per `takeTurn` call (not per internal step) so a single
    * turn is never split across two different stories mid-flight.
    */
-  private getWorld: () => World;
+  private getWorld: () => World | Promise<World>;
   private db: Db;
   private providers: Registry;
   private proseGate: ProseGate | undefined;
@@ -248,7 +248,7 @@ export class Engine {
   }
 
   async session(): Promise<SessionState> {
-    return this.getWorld().session.get();
+    return (await this.getWorld()).session.get();
   }
 
   /**
@@ -264,7 +264,7 @@ export class Engine {
   async takeTurn(rawInput: string, opts: TakeTurnOptions = {}): Promise<TurnOutcome> {
     this.busy = true;
     try {
-      return await this.takeTurnOn(opts.world ?? this.getWorld(), rawInput, opts);
+      return await this.takeTurnOn(opts.world ?? await this.getWorld(), rawInput, opts);
     } finally {
       this.busy = false;
     }
@@ -524,7 +524,7 @@ export class Engine {
 
     this.busy = true;
     try {
-      const world = worldOverride ?? this.getWorld();
+      const world = worldOverride ?? await this.getWorld();
       if (world.storyId !== pending.storyId) {
         // The story switched under this pending turn (a save switch mid-
         // conversation). Committing against the wrong story's graph would be
@@ -576,7 +576,7 @@ export class Engine {
     turnId: string,
     opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
   ): Promise<Turn> {
-    const world = opts.world ?? this.getWorld();
+    const world = opts.world ?? await this.getWorld();
     const turn = await world.chronicle.getTurn(turnId);
     if (!turn) throw new Error(`no turn ${turnId}`);
     if (turn.pinned) throw new Error('this passage is pinned and will not be re-rendered');

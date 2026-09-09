@@ -90,6 +90,11 @@ jobs:
           WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
           WORKOS_CLIENT_ID: ${{ vars.WORKOS_CLIENT_ID }}
           WORKOS_COOKIE_PASSWORD: ${{ secrets.WORKOS_COOKIE_PASSWORD }}
+          # A real secret: it is the database password, and `render_env` also
+          # derives FABULIST_PG from it. Unset means the deployed instance has no
+          # database configured, and `serve-pg` says so at boot rather than
+          # silently trying localhost.
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
           set -euo pipefail
           install -m 600 -D /dev/null "$HOME/.ssh/deploy_key"
@@ -128,10 +133,22 @@ jobs:
           render_env() {
             for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL \
                         AUTH_REQUIRE_LOGIN AUTH_ADMIN_EMAILS \
-                        WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD; do
+                        WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD \
+                        POSTGRES_PASSWORD; do
               value="${!name:-}"
               [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
             done
+            # The app's connection string, derived rather than configured
+            # separately. Two variables that have to agree about one password is
+            # a way to have them disagree: `postgres` is the compose service
+            # name, resolved on the compose network, and the database and user
+            # are fixed by docker-compose.yml's own `environment:` block.
+            #
+            # Skipped entirely when POSTGRES_PASSWORD is unset, like everything
+            # above — and then `serve-pg` exits at boot with a clear message
+            # about setting FABULIST_PG rather than silently trying localhost.
+            [ -n "${POSTGRES_PASSWORD:-}" ] \
+              && printf 'FABULIST_PG=postgres://fabulist:%s@postgres:5432/fabulist\n' "$POSTGRES_PASSWORD"
             # Without this, `[ -n "$value" ]` on the *last* unset variable in
             # the loop returns 1, which becomes render_env's own exit code —
             # and `set -e` upstream would then fail the whole step on the

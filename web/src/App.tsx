@@ -220,7 +220,6 @@ export function App() {
             void refresh();
           }}
           onResetToWizard={() => setFresh(true)}
-          currentUser={currentUser}
         />
       ) : null}
       {tab === 'settings' ? <SettingsTab state={state} onChanged={refresh} currentUser={currentUser} /> : null}
@@ -2081,12 +2080,18 @@ function SettingsTab({ state, onChanged, currentUser }: { state: State | null; o
  * "I don't see a way to switch": the switching worked, but nothing marked the
  * current row, so every entry looked like an identical inert label.
  */
-function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard, currentUser }: {
+/**
+ * `currentUser` is deliberately absent.
+ *
+ * It was here only to gate the world-upload control on `isAdmin`. Per-world
+ * permissions now arrive on each world row as `role`, computed by the server from
+ * `world_access` — which is strictly better than an admin flag, because it can say
+ * "you own this one world" rather than only "you administer everything".
+ */
+function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
   currentSceneTurn: string;
   onSwitched: () => void;
   onResetToWizard: () => void;
-  /** `null` when login is off (no admin concept at all — see `SettingsTab`'s identical `showSystemSettings` reasoning) or when the request has not resolved yet; the upload control below is shown either when there is no login at all or when this user is specifically an admin. */
-  currentUser: CurrentUser | null;
 }) {
   const [stories, setStories] = useState<Story[] | null>(null);
   const [worlds, setWorlds] = useState<WorldSummary[] | null>(null);
@@ -2098,29 +2103,64 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard, currentUser
   const [forkFrom, setForkFrom] = useState<{ id: string; title: string } | null>(null);
   const [forkScene, setForkScene] = useState('');
   const [forkTitle, setForkTitle] = useState('');
-  // Same "no login means no admin concept, otherwise gate on isAdmin" rule
-  // SettingsTab already applies to the system-wide panels — this control
-  // replaces a file every story in a world shares, the same class of
-  // system-wide action, so it is gated identically rather than inventing a
-  // second rule.
-  const showWorldUpload = !currentUser || currentUser.isAdmin;
-  // One hidden <input type="file"> per world row, keyed by slug, so each
-  // row's "replace file…" button can trigger its own picker via a plain DOM
-  // ref rather than lifting one shared input's target world into state.
-  const uploadInputs = useRef<Record<string, HTMLInputElement | null>>({});
+  // The "replace this world's .db file" control is gone with the world files it
+  // acted on. What replaced it is narrower and better: `role` on each world row
+  // says whether this caller may rename, hide or delete it, so a control is hidden
+  // rather than offered and then refused. Recovering a corrupted save is now the
+  // operator's `pg_dump`/`pg_restore` rather than a browser upload.
+  /**
+   * The worlds this book currently reads, in precedence order.
+   *
+   * Derived from the world list's `reading` flag rather than tracked separately,
+   * so it cannot drift from what the server says. Order matters — the first world
+   * wins any id two of them share — and the server returns them in ordinal order,
+   * which is why this preserves list order instead of sorting.
+   */
+  const reading = (worlds ?? []).filter((w) => w.reading).map((w) => w.slug);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+
+  /**
+   * Adds or removes a world from what this book reads.
+   *
+   * Replaces the old "switch world" button, which closed one database and opened
+   * another for the whole server — so on a shared instance it moved every other
+   * reader too. This changes one story's own sources and is invisible to everyone
+   * else.
+   *
+   * Removing the last world is refused client-side with a plain explanation: the
+   * server would reject it anyway (a story with no canon cannot resolve anything),
+   * and a 400 with no context reads like a bug.
+   */
+  const toggleSource = async (slug: string) => {
+    const next = reading.includes(slug) ? reading.filter((s) => s !== slug) : [...reading, slug];
+    if (!next.length) {
+      setSourceError('A book has to read at least one world. Tick another one first, then untick this.');
+      return;
+    }
+    setSourceError(null);
+    setBusy('sources');
+    try {
+      await api.story.setSources(next);
+      await load();
+      // Canon changed underneath every cached view, so the caller refetches
+      // wholesale — the same thing a world switch used to require.
+      onSwitched();
+    } catch (e) {
+      setSourceError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const load = useCallback(async () => {
     try {
-      // Both lists in parallel: they are independent reads, and a world switch
+      // Both lists in parallel: they are independent reads, and changing sources
       // invalidates both, so they are always refetched together anyway.
       const [storyList, worldList] = await Promise.all([api.stories.list(), api.worlds.list()]);
       setStories(storyList);
       setWorlds(worldList.worlds);
       setError(null);
     } catch (e) {
-      // A server without story/world management enabled (currentStory or
-      // currentWorld not configured) 503s every route here — worth saying
-      // plainly rather than showing an empty, confusing list.
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
@@ -2148,10 +2188,12 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard, currentUser
           <div className="card">
             <h3>worlds</h3>
             <p className="hint">
-              A world is its own file: its own canon, cast and illustrations. Nothing is shared between two
-              worlds. Switching closes one and opens the other — no restart, but it does replace everything on
-              screen.
+              A world is canon: entities, cast sheets and the relations between them, ingested once and shared
+              by every book that reads it. Tick the worlds this book should read — more than one makes a
+              crossover, and the order decides which one wins when two of them use the same id. Your writing
+              lives in the book, not the world, so changing this never touches a scene you have already played.
             </p>
+            {sourceError ? <p className="error">{sourceError}</p> : null}
             {!worlds ? (
               <p className="empty">loading…</p>
             ) : (
@@ -2177,47 +2219,70 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard, currentUser
                       />
                     ) : (
                       <>
-                        <b>{w.title || 'untitled world'}</b>
-                        {w.current ? <span className="tag locked" style={{ marginLeft: 6 }}>open</span> : null}
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={reading.includes(w.slug)}
+                            disabled={busy === 'sources'}
+                            onChange={() => void toggleSource(w.slug)}
+                          />
+                          <b>{w.title || 'untitled world'}</b>
+                        </label>
+                        {reading[0] === w.slug && reading.length > 1 ? (
+                          <span className="tag locked" style={{ marginLeft: 6 }} title="wins any id these worlds share">
+                            primary
+                          </span>
+                        ) : null}
+                        {w.visibility === 'private' ? (
+                          <span className="tag" style={{ marginLeft: 6 }} title="only people you have granted access can see this world">
+                            private
+                          </span>
+                        ) : null}
                         <br />
                         <span className="small dimmer">
-                          <span className="mono">{w.slug}</span> · {w.entityCount} entities ·{' '}
-                          {w.storyCount} book{w.storyCount === 1 ? '' : 's'}
+                          <span className="mono">{w.slug}</span> · {w.entityCount.toLocaleString()} entities ·{' '}
+                          {w.edgeCount.toLocaleString()} relations · {w.storyCount} book{w.storyCount === 1 ? '' : 's'}
+                          {w.sources.length ? ` · from ${w.sources.map((src) => src.wiki).join(', ')}` : ''}
                         </span>
                       </>
                     )}
                   </span>
                   <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     <button
-                      className={w.current ? '' : 'primary'}
-                      disabled={w.current || busy === `${w.slug}wswitch`}
-                      title={w.current ? 'already open' : 'close the current world and open this one'}
-                      onClick={() => void run(w.slug, 'wswitch', async () => {
-                        await api.worlds.switchTo(w.slug);
-                        await load();
-                        onSwitched();
-                      })}
-                    >
-                      {w.current ? 'open' : 'switch'}
-                    </button>
-                    <button
-                      disabled={worldRenaming?.slug === w.slug}
+                      disabled={worldRenaming?.slug === w.slug || w.role !== 'owner'}
+                      title={w.role === 'owner' ? 'rename this world' : 'only a world\u2019s owner can rename it'}
                       onClick={() => setWorldRenaming({ slug: w.slug, title: w.title })}
                     >
                       rename
                     </button>
+                    {w.role === 'owner' ? (
+                      <button
+                        disabled={busy === `${w.slug}wvis`}
+                        title={
+                          w.visibility === 'public'
+                            ? 'hide this world from everyone you have not granted access'
+                            : 'let anyone signed in read this world'
+                        }
+                        onClick={() => void run(w.slug, 'wvis', async () => {
+                          await api.worlds.setVisibility(w.slug, w.visibility === 'public' ? 'private' : 'public');
+                          await load();
+                        })}
+                      >
+                        {w.visibility === 'public' ? 'make private' : 'make public'}
+                      </button>
+                    ) : null}
                     <button
                       className="warn"
-                      disabled={w.current || worlds.length <= 1 || busy === `${w.slug}wdelete`}
+                      disabled={w.storyCount > 0 || busy === `${w.slug}wdelete` || w.role !== 'owner'}
                       title={
-                        w.current
-                          ? 'switch to another world before deleting this one'
-                          : worlds.length <= 1
-                            ? 'the only world cannot be deleted; use "discard this world" below to empty it'
-                            : 'delete this world, its canon, every book in it, and its images'
+                        w.role !== 'owner'
+                          ? 'only a world\u2019s owner can delete it'
+                          : w.storyCount > 0
+                            ? `${w.storyCount} book${w.storyCount === 1 ? '' : 's'} still read this world \u2014 delete or repoint them first`
+                            : 'delete this world and its canon'
                       }
                       onClick={() => {
-                        if (!window.confirm(`Delete the world "${w.title || w.slug}"? This removes its canon, all ${w.storyCount} book(s) and its images. This cannot be undone.`)) return;
+                        if (!window.confirm(`Delete the world "${w.title || w.slug}"? This removes its canon. Books are not touched.`)) return;
                         void run(w.slug, 'wdelete', async () => {
                           await api.worlds.remove(w.slug);
                           await load();
@@ -2226,36 +2291,6 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard, currentUser
                     >
                       delete
                     </button>
-                    {showWorldUpload ? (
-                      <>
-                        <input
-                          type="file"
-                          accept=".db"
-                          ref={(el) => { uploadInputs.current[w.slug] = el; }}
-                          style={{ display: 'none' }}
-                          onChange={(e) => {
-                            const file = e.target.files?.[0];
-                            e.target.value = '';
-                            if (!file) return;
-                            void run(w.slug, 'wupload', async () => {
-                              await api.worlds.upload(w.slug, file);
-                              await load();
-                            });
-                          }}
-                        />
-                        <button
-                          disabled={w.current || busy === `${w.slug}wupload`}
-                          title={
-                            w.current
-                              ? 'switch to another world before replacing its file'
-                              : 'replace this world\u2019s database file with an uploaded .db \u2014 e.g. a save repaired elsewhere with sqlite3 .recover. The existing file is kept as a dated backup, not deleted.'
-                          }
-                          onClick={() => uploadInputs.current[w.slug]?.click()}
-                        >
-                          {busy === `${w.slug}wupload` ? 'uploading…' : 'replace file…'}
-                        </button>
-                      </>
-                    ) : null}
                   </span>
                 </div>
               ))
@@ -2436,21 +2471,41 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard, currentUser
           ) : null}
 
           <div className="card">
-            <h3>empty this world</h3>
+            <h3>start this book over</h3>
             <p className="hint warn">
-              Wipes every book in <em>this</em> world, and its canon with them, so the setup wizard can run
-              again from scratch. The world file stays (under the same name); it is its contents that go. To
-              remove a world outright, use its delete button above.
+              Discards <em>this book</em> — its scenes, prose and everything that happened in it — and gives you
+              a blank one reading the same worlds. Canon stays. Other books stay. This is not undoable.
             </p>
             <button
               className="warn"
               onClick={async () => {
-                if (!window.confirm('Empty this world — every book in it, and its canon? The world itself stays, but nothing in it will.')) return;
+                if (!window.confirm('Discard this book and start a blank one? Its scenes and prose go; canon and every other book stay.')) return;
                 await api.setup.reset();
                 onResetToWizard();
               }}
             >
-              empty world &amp; start over
+              start this book over
+            </button>
+          </div>
+
+          <div className="card">
+            <h3>rebuild canon</h3>
+            <p className="hint">
+              Empties the canon of the world this book reads, so the setup wizard can ingest it again — for a
+              wiki that has moved on, or an ingest that went wrong. <b>Nothing you have written is touched:</b>{' '}
+              every book keeps its scenes and prose. Until the world is ingested again those books will
+              reference characters that no longer resolve, which the integrity check reports plainly.
+            </p>
+            <button
+              className="warn"
+              disabled={busy === 'rebuild'}
+              onClick={() => void run('canon', 'rebuild', async () => {
+                if (!window.confirm('Empty this world\u2019s canon so it can be ingested again? No prose is deleted.')) return;
+                await api.setup.rebuildCanon();
+                onResetToWizard();
+              })}
+            >
+              {busy === 'canonrebuild' ? 'rebuilding…' : 'rebuild canon'}
             </button>
           </div>
         </div>

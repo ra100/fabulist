@@ -46,7 +46,7 @@ threads are still open. Preserve entity ids exactly as supplied. Five sentences
 at most. Reply with JSON only.`;
 
 export interface CompactorOptions {
-  world: World | (() => World);
+  world: World | (() => World | Promise<World>);
   provider: Provider;
   /** Scenes per chapter. */
   chapterSize?: number;
@@ -70,7 +70,7 @@ export class Compactor {
    * writing to whichever story was current when the server started —
    * exactly the bug shape the SetupPlanner fix caught, one level up.
    */
-  private getWorld: () => World;
+  private getWorld: () => World | Promise<World>;
   private provider: Provider;
   private chapterSize: number;
   private minTurns: number;
@@ -90,7 +90,7 @@ export class Compactor {
    * on every scene advance.
    */
   async summariseScene(scene: number, force = false): Promise<string | null> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const existing = (await world.chronicle.scenes()).find((s) => s.scene === scene);
     if (existing?.summary && !force) return existing.summary;
 
@@ -144,7 +144,7 @@ export class Compactor {
 
   /** Rolls completed scene summaries into a chapter summary. */
   async summariseChapter(chapter: number, force = false): Promise<string | null> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const existing = await world.chronicle.chapter(chapter);
     if (existing?.summary && !force) return existing.summary;
 
@@ -190,7 +190,7 @@ export class Compactor {
 
   /** Catches up any scene that closed without being summarised. */
   async backfill(currentScene: number): Promise<CompactionResult> {
-    const world = this.getWorld();
+    const world = await this.getWorld();
     const result: CompactionResult = { scenesSummarised: [], chaptersSummarised: [] };
     const have = new Map((await world.chronicle.scenes()).map((s) => [s.scene, s.summary]));
 
