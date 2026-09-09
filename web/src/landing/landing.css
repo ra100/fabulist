@@ -139,6 +139,23 @@
 }
 .lp-cta.lg { font-size: 14.5px; padding: 12px 22px; }
 
+/* The support link. `--divergent` rather than `--accent` on purpose — it is
+   the app's own second accent (reserved elsewhere for the heel-turn override),
+   so it reads as a genuinely different call than "sign in" under every one of
+   the nine presets, without inventing a tenth colour just for this button. */
+.lp-cta.kofi {
+  color: var(--divergent);
+  border-color: var(--divergent-line);
+  background: transparent;
+  font-weight: 600;
+}
+.lp-cta.kofi:hover {
+  color: var(--ground);
+  background: var(--divergent);
+  border-color: var(--divergent);
+}
+.lp-cta.kofi span { font-size: 12px; }
+
 .lp-quiet {
   font-family: var(--sans);
   font-size: 12px;
