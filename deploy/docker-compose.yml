@@ -149,6 +149,27 @@ services:
     image: postgres:18-alpine
     container_name: fabulist-postgres
     restart: unless-stopped
+    # Starts as root so the entrypoint can fix its own data directory.
+    #
+    # This is the fix for the failure that cost four releases: the 18 images mount
+    # `/var/lib/postgresql` and create a `18/` subdirectory inside it, and with a
+    # bind mount owned by the host's root that `mkdir` fails —
+    # `mkdir: can't create directory '/var/lib/postgresql/18/': Permission denied`,
+    # in a restart loop.
+    #
+    # The image's entrypoint already handles exactly this: running as root it chowns
+    # the data directory and then re-executes as the postgres user, which is how the
+    # pre-18 images behaved and what the official image documents for bind mounts.
+    # The alternative — chowning the host directory from `deploy.sh` — was tried and
+    # is *unverifiable* on macOS, where Docker's VM ignores bind-mount ownership
+    # entirely, so every local test passed while production kept failing. Moving the
+    # work into the entrypoint removes the host-ownership dependency rather than
+    # guessing at it.
+    #
+    # Not a privilege increase in any meaningful sense: the *server* still runs as
+    # postgres, and this container already had root available at startup — the
+    # `user:` line only stops Compose from forcing it to start unprivileged.
+    user: "0:0"
     environment:
       POSTGRES_DB: fabulist
       POSTGRES_USER: fabulist
