@@ -411,6 +411,19 @@ export class ChronicleStore {
     }));
   }
 
+  /**
+   * The undo of `setKnowledge` — removes the row outright rather than
+   * setting a level, so a revoked entity goes back to "never told", not to
+   * some fourth level meaning "explicitly does not know". The natural
+   * authoring move when the extractor grants knowledge to the wrong NPC
+   * (DESIGN §11): before this, the only fix was overwriting with `'wrong'`,
+   * which is a different claim (they know something false) than the one
+   * usually meant (they were never told at all).
+   */
+  revokeKnowledge(factId: FactId, entityId: EntityId): void {
+    this.db.prepare(`DELETE FROM fact_knowledge WHERE fact_id = ? AND entity_id = ?`).run(factId, entityId);
+  }
+
   knows(entityId: EntityId, factId: FactId): boolean {
     const r = row<{ level: string }>(
       this.db.prepare(`SELECT level FROM fact_knowledge WHERE fact_id = ? AND entity_id = ?`).get(factId, entityId),

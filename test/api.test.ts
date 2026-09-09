@@ -159,6 +159,51 @@ test('a directive returns the recalculation diff rather than moving things silen
   });
 });
 
+test('creating a thread by hand is the fix for tension the extractor never wrote', async () => {
+  await withServer(async (base, world) => {
+    const before = world.threads.all().length;
+    const { status, body } = await send(base, 'POST', '/api/threads', {
+      title: 'who told the garrison',
+      stakes: 'Anselm hangs if it traces back to him',
+    });
+    assert.equal(status, 200);
+    const thread = body as { id: string; title: string; tension: number; status: string };
+    assert.equal(thread.title, 'who told the garrison');
+    assert.equal(thread.tension, 0.5, 'default tension, same as the schema default');
+    assert.equal(thread.status, 'open');
+    assert.equal(world.threads.all().length, before + 1);
+  });
+});
+
+test('creating a thread with no title is refused, not silently defaulted', async () => {
+  await withServer(async (base) => {
+    const { status } = await send(base, 'POST', '/api/threads', { stakes: 'no title given' });
+    assert.equal(status, 400);
+  });
+});
+
+test('a thread can be retitled and closed by hand, the two moves §11 calls out as missing', async () => {
+  await withServer(async (base, world) => {
+    const thread = world.threads.all()[0]!;
+    const { status, body } = await send(base, 'PUT', `/api/thread/${encodeURIComponent(thread.id)}`, {
+      title: 'renamed by hand',
+      status: 'resolved',
+    });
+    assert.equal(status, 200);
+    const b = body as { title: string; status: string };
+    assert.equal(b.title, 'renamed by hand');
+    assert.equal(b.status, 'resolved');
+    assert.equal(world.threads.get(thread.id)?.status, 'resolved');
+  });
+});
+
+test('updating an unknown thread 404s rather than silently doing nothing', async () => {
+  await withServer(async (base) => {
+    const { status } = await send(base, 'PUT', '/api/thread/thread%3Anonexistent', { title: 'x' });
+    assert.equal(status, 404);
+  });
+});
+
 test('locking a sheet field makes it survive an AI update', async () => {
   await withServer(async (base, world) => {
     await send(base, 'POST', '/api/sheet/char:brother-anselm/lock', { path: 'condition.mood' });
@@ -169,6 +214,43 @@ test('locking a sheet field makes it survive an AI update', async () => {
 
     await send(base, 'POST', '/api/sheet/char:brother-anselm/lock', { path: 'condition.mood', locked: false });
     assert.ok(!world.cast.get('char:brother-anselm')!.locks.includes('condition.mood'));
+  });
+});
+
+/**
+ * §11's "sheets are not editable, including vows — which is odd, because
+ * the vow list is the one thing the integrity gate actually enforces". The
+ * route (`PUT /api/sheet/:id`) already existed; this exercises the exact
+ * shape the new `SheetEditor` UI sends.
+ */
+test('a sheet\u2019s contract, identity and voice are editable through the api \u2014 including vows', async () => {
+  await withServer(async (base, world) => {
+    const before = world.cast.get('char:brother-anselm')!;
+    const { status, body } = await send(base, 'PUT', '/api/sheet/char:brother-anselm', {
+      contract: {
+        ...before.contract,
+        vows: [...before.contract.vows, { id: 'vow:new', text: 'never lie to Tem', rank: 5, broken: false, brokenScene: null }],
+        breakingPoint: 'if Tem is hurt for it',
+      },
+      identity: { ...before.identity, secrets: [...before.identity.secrets, 'kept the psalter hidden'] },
+      voice: { ...before.voice, never: [...before.voice.never, 'raise his voice'] },
+    });
+    assert.equal(status, 200);
+    const b = body as typeof before;
+    assert.ok(b.contract.vows.some((v) => v.text === 'never lie to Tem'), 'a vow can be added by hand');
+    assert.equal(b.contract.breakingPoint, 'if Tem is hurt for it');
+    assert.ok(b.identity.secrets.includes('kept the psalter hidden'));
+    assert.ok(b.voice.never.includes('raise his voice'));
+
+    const stored = world.cast.get('char:brother-anselm')!;
+    assert.ok(stored.contract.vows.some((v) => v.text === 'never lie to Tem'), 'persisted, not just echoed');
+  });
+});
+
+test('editing a sheet that does not exist is a 404, not a silent no-op', async () => {
+  await withServer(async (base) => {
+    const { status } = await send(base, 'PUT', '/api/sheet/char%3Anonexistent', { identity: {} });
+    assert.equal(status, 404);
   });
 });
 
@@ -239,6 +321,41 @@ test('the book endpoint returns both registers per turn', async () => {
   });
 });
 
+test('GET /api/export downloads the book as markdown by default, with a content-disposition filename', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    const res = await fetch(`${base}/api/export`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /text\/markdown/);
+    assert.match(res.headers.get('content-disposition') ?? '', /attachment; filename="saint-verrow\.md"/);
+    const text = await res.text();
+    assert.match(text, /^# Saint Verrow/);
+    const turn = world.chronicle.turns()[0]!;
+    assert.ok(text.includes(turn.bookProse.trim()));
+  });
+});
+
+test('GET /api/export?format=text downloads the plain-text variant', async () => {
+  await withServer(async (base) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    const res = await fetch(`${base}/api/export?format=text`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /text\/plain/);
+    assert.match(res.headers.get('content-disposition') ?? '', /\.txt"/);
+    const text = await res.text();
+    assert.ok(!text.includes('#'), 'no literal markdown heading syntax');
+  });
+});
+
+test('GET /api/export on an empty book still returns 200 with a valid title page', async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/export`);
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    assert.match(text, /^# Saint Verrow/);
+  });
+});
+
 test('causality endpoint links acts to what they seeded', async () => {
   await withServer(async (base) => {
     await send(base, 'POST', '/api/play', { input: 'i hide the psalter and lie to the prior about it' });
@@ -258,6 +375,57 @@ test('facts endpoint exposes who knows what, including partial knowledge', async
     const route = facts.find((f) => /over the pass/.test(f.text))!;
     assert.ok(route.knowers.some((k) => k.level === 'knows'));
     assert.ok(route.knowers.some((k) => k.level === 'suspects'), 'suspicion is distinct from knowledge');
+  });
+});
+
+test('granting knowledge is the fix for the natural authoring move: an NPC who should react but cannot yet', async () => {
+  await withServer(async (base, world) => {
+    const fact = world.chronicle.facts().find((f) => /over the pass/.test(f.text))!;
+    assert.ok(!world.chronicle.knows('char:novice-tem', fact.id), 'not a knower yet, so the grant is meaningful');
+
+    const { status, body } = await send(base, 'POST', `/api/fact/${encodeURIComponent(fact.id)}/knowledge`, {
+      entityId: 'char:novice-tem',
+      level: 'knows',
+    });
+    assert.equal(status, 200);
+    const knowers = (body as { knowers: Array<{ entityId: string; level: string }> }).knowers;
+    assert.ok(knowers.some((k) => k.entityId === 'char:novice-tem' && k.level === 'knows'));
+    assert.ok(world.chronicle.knows('char:novice-tem', fact.id));
+  });
+});
+
+test('granting knowledge with a bad level is a 400, not a silent write of the wrong thing', async () => {
+  await withServer(async (base) => {
+    const { body: facts } = await get(base, '/api/facts');
+    const fact = (facts as Array<{ id: string }>)[0]!;
+    const { status } = await send(base, 'POST', `/api/fact/${encodeURIComponent(fact.id)}/knowledge`, {
+      entityId: 'char:novice-tem',
+      level: 'definitely',
+    });
+    assert.equal(status, 400);
+  });
+});
+
+test('granting knowledge of a fact that does not exist 404s rather than throwing', async () => {
+  await withServer(async (base) => {
+    const { status } = await send(base, 'POST', '/api/fact/fact%3Anonexistent/knowledge', {
+      entityId: 'char:novice-tem',
+      level: 'knows',
+    });
+    assert.equal(status, 404);
+  });
+});
+
+test('revoking knowledge is the undo: back to never told, not a fourth level', async () => {
+  await withServer(async (base, world) => {
+    const fact = world.chronicle.facts().find((f) => /over the pass/.test(f.text))!;
+    assert.ok(world.chronicle.knows('char:brother-anselm', fact.id));
+
+    const { status, body } = await send(base, 'DELETE', `/api/fact/${encodeURIComponent(fact.id)}/knowledge/char:brother-anselm`);
+    assert.equal(status, 200);
+    const knowers = (body as { knowers: Array<{ entityId: string }> }).knowers;
+    assert.ok(!knowers.some((k) => k.entityId === 'char:brother-anselm'));
+    assert.equal(world.chronicle.knowledgeOf('char:brother-anselm').find((k) => k.factId === fact.id), undefined);
   });
 });
 
@@ -305,6 +473,57 @@ test('chapters endpoint exposes the compaction hierarchy', async () => {
     const b = body as { chapters: unknown[]; scenes: unknown[] };
     assert.ok(Array.isArray(b.chapters));
     assert.ok((b.scenes as unknown[]).length > 0);
+  });
+});
+
+test('timeline endpoint assembles scenes, chapters and divergences into one spine', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    world.chronicle.upsertScene(1, { chapter: 1, title: 'The morning' });
+    world.chronicle.upsertChapter(1, { title: 'Opening' });
+
+    const { status, body } = await get(base, '/api/timeline');
+    assert.equal(status, 200);
+    const b = body as {
+      currentScene: number;
+      chapters: Array<{ chapter: number; title: string }>;
+      scenes: Array<{ scene: number; title: string; turnCount: number; divergences: unknown[] }>;
+      divergenceCount: number;
+    };
+    assert.equal(b.currentScene, 1);
+    assert.ok(b.chapters.some((c) => c.chapter === 1 && c.title === 'Opening'));
+    const scene1 = b.scenes.find((s) => s.scene === 1);
+    assert.ok(scene1, 'scene 1 is present even though it has both a row and turns');
+    assert.equal(scene1!.title, 'The morning');
+    assert.equal(scene1!.turnCount, 1, 'the turn played above is counted');
+    assert.ok(b.divergenceCount >= 0);
+  });
+});
+
+test('timeline endpoint marks the exact scenes divergences happened at', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    world.session.set({ scene: 2, turn: 0 });
+    world.chronicle.addDivergence(2, 'override', 'the player overrode a vow refusal', 'the vow would have held');
+
+    const { body } = await get(base, '/api/timeline');
+    const b = body as { scenes: Array<{ scene: number; divergences: Array<{ kind: string; detail: string }> }> };
+    const scene2 = b.scenes.find((s) => s.scene === 2);
+    assert.ok(scene2, 'scene 2 exists even with no turns yet, since it is the current scene');
+    assert.equal(scene2!.divergences.length, 1);
+    assert.equal(scene2!.divergences[0]!.kind, 'override');
+    const scene1 = b.scenes.find((s) => s.scene === 1);
+    assert.equal(scene1!.divergences.length, 0, 'the divergence is attributed only to the scene it happened at');
+  });
+});
+
+test('timeline endpoint on an empty book still returns 200 with the current scene present', async () => {
+  await withServer(async (base) => {
+    const { status, body } = await get(base, '/api/timeline');
+    assert.equal(status, 200);
+    const b = body as { currentScene: number; scenes: Array<{ scene: number }> };
+    assert.equal(b.currentScene, 1);
+    assert.ok(b.scenes.some((s) => s.scene === 1), 'scene 1 exists from the moment a story does');
   });
 });
 
@@ -439,6 +658,106 @@ test('POST /api/stories/fork can branch a story other than the one currently ope
     assert.equal(currentStory.id(), created.id, 'forking a non-current story does not switch to it');
     assert.equal(world.withStory(forkedBody.story.id).chronicle.turns().length, 1, "the fork copied the original story's turn");
   });
+});
+
+// ------------------------------------------------------------------ rollback
+
+test('POST /api/rollback defaults to fork mode: switches to a new sibling, leaves the original untouched', async () => {
+  await withMultiStoryServer(async (base, world, currentStory) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    world.session.set({ scene: 2, turn: 0 });
+    await send(base, 'POST', '/api/play', { input: 'i check the door' });
+    const originalStoryId = world.storyId;
+    const beforeTurns = world.chronicle.turns().length;
+
+    const { status, body } = await send(base, 'POST', '/api/rollback', { scene: 2 });
+    assert.equal(status, 200);
+    const result = body as { mode: string; toScene: number; forkedStory: { id: string } };
+    assert.equal(result.mode, 'fork');
+    assert.equal(result.toScene, 2);
+
+    // The route switched the server-wide pointer (login-off) to the fork.
+    assert.equal(currentStory.id(), result.forkedStory.id);
+    assert.notEqual(currentStory.id(), originalStoryId);
+
+    // The original story: completely untouched.
+    assert.equal(world.withStory(originalStoryId).chronicle.turns().length, beforeTurns);
+  });
+});
+
+test('POST /api/rollback in destructive mode truncates the current story in place', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    world.session.set({ scene: 2, turn: 0 });
+    await send(base, 'POST', '/api/play', { input: 'i check the door' });
+
+    const { status, body } = await send(base, 'POST', '/api/rollback', { scene: 2, mode: 'destructive' });
+    assert.equal(status, 200);
+    const result = body as { mode: string; toScene: number; removed: { turns: number } };
+    assert.equal(result.mode, 'destructive');
+    assert.ok(result.removed.turns >= 1);
+    assert.equal(world.session.get().scene, 2);
+    assert.equal(world.chronicle.turns().length, 1, 'only the scene-1 turn survives');
+  });
+});
+
+test('POST /api/rollback in destructive mode needs no CurrentStory at all', async () => {
+  await withServer(async (base) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    const { status } = await send(base, 'POST', '/api/rollback', { scene: 1, mode: 'destructive' });
+    assert.equal(status, 200, 'destructive mode never needs to switch anything, so no CurrentStory is required');
+  });
+});
+
+test('POST /api/rollback in fork mode 503s without a CurrentStory to switch through', async () => {
+  await withServer(async (base) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    const { status, body } = await send(base, 'POST', '/api/rollback', { scene: 1 });
+    assert.equal(status, 503);
+    assert.match((body as { error: string }).error, /story management/);
+  });
+});
+
+test('POST /api/rollback refuses ambiguous or out-of-range input with a clear 400', async () => {
+  await withServer(async (base) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    const neither = await send(base, 'POST', '/api/rollback', { mode: 'destructive' });
+    assert.equal(neither.status, 400);
+    assert.match((neither.body as { error: string }).error, /exactly one/);
+
+    const tooFar = await send(base, 'POST', '/api/rollback', { scene: 99, mode: 'destructive' });
+    assert.equal(tooFar.status, 400);
+    assert.match((tooFar.body as { error: string }).error, /has not happened yet/);
+  });
+});
+
+test('POST /api/rollback with login on never moves the shared server-wide pointer, only worldFor resolution', async () => {
+  await withLoginServer(
+    { 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } },
+    async (base, world, currentStory) => {
+      const aliceHeaders = { ...cookieHeader('alice-cookie'), 'content-type': 'application/json' };
+      await fetch(`${base}/api/play`, { method: 'POST', headers: aliceHeaders, body: JSON.stringify({ input: 'i warm the ink' }) });
+      const pointerBefore = currentStory.id();
+
+      const res = await fetch(`${base}/api/rollback`, { method: 'POST', headers: aliceHeaders, body: JSON.stringify({ scene: 1 }) });
+      assert.equal(res.status, 200);
+      const result = (await res.json()) as { mode: string; forkedStory: { id: string } };
+      assert.equal(result.mode, 'fork');
+
+      // The shared pointer this login-off `withServer`/`withMultiStoryServer`
+      // test above relies on must NOT have moved — a signed-in caller's own
+      // rollback must never drag every other user onto their fork.
+      assert.equal(currentStory.id(), pointerBefore, "alice's rollback did not touch the server-wide pointer");
+
+      // But alice's own next request resolves to the fork anyway, via
+      // worldFor's "most recently played of my own stories" — the fork's
+      // createStory call stamps last_played_at as now.
+      const state = await fetch(`${base}/api/state`, { headers: aliceHeaders });
+      const stateBody = (await state.json()) as { session: { scene: number } };
+      assert.equal(stateBody.session.scene, 1, "alice's next request lands on the fresh fork, not her old story");
+      void world;
+    },
+  );
 });
 
 test('story management routes 503 when the server has no CurrentStory configured', async () => {

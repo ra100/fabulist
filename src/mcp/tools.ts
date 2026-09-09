@@ -14,7 +14,7 @@
  * than reimplementing any part of the turn loop here.
  */
 import type { Engine } from '../loop/engine.ts';
-import { forkStory, branchSave, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
+import { forkStory, branchSave, rollback, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate.ts';
 import type { IllustrationService } from '../illustration/service.ts';
 import { NoImageProviderError } from '../illustration/service.ts';
@@ -183,10 +183,45 @@ export function forkStoryTool(ctx: McpToolContext, args: { fromStoryId?: string;
 }
 
 /**
+ * `rollback`. The MCP-side counterpart of `POST /api/rollback` — the
+ * connector needs this more than the browser does, since a model that has
+ * just written a bad turn otherwise has no way to take it back at all.
+ * Always acts on whichever story `ctx.world()` currently resolves to.
+ *
+ * `mode` defaults to `'fork'`, same as the REST route, for the same reason
+ * (GAPS.md 3.6: the discarded tail survives as a sibling book rather than
+ * being deleted). When it produces a new story: an identified caller with a
+ * per-connection `selectStory` gets that connection alone moved onto it
+ * (mirroring `switchStoryTool`'s own reasoning — the shared, server-wide
+ * `CurrentStory` pointer must never be dragged by one caller's rollback);
+ * the login-off/legacy path switches that shared pointer instead, since
+ * there is only one reader by definition.
+ */
+export function rollbackTool(
+  ctx: McpToolContext,
+  args: { scene?: number; chapter?: number; mode?: 'fork' | 'destructive' },
+) {
+  const world = ctx.world();
+  assertOwned(world, world.storyId, ctx.user, 'rollback');
+  const result = rollback(world, {
+    scene: args.scene,
+    chapter: args.chapter,
+    mode: args.mode,
+    ownerUserId: ctx.user?.id,
+  });
+  if (result.mode === 'fork' && result.forkedStory) {
+    if (ctx.user && ctx.selectStory) ctx.selectStory(result.forkedStory.id);
+    else if (ctx.currentStory) ctx.currentStory.switchTo(result.forkedStory.id);
+  }
+  return result;
+}
+
+/**
  * `switch_story`. The MCP-side counterpart of `POST /api/stories/:id/switch`
  * — same underlying `CurrentStory.switchTo`, same "takes effect immediately"
  * semantics `switch_world` documents above, one level down: which *story*
  * within the currently open world every subsequent tool call operates on.
+
  *
  * `currentStory` is optional on `McpToolContext` for the same reason
  * `currentWorld` is (a server built over a single fixed `World` has no story

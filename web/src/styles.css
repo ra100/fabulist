@@ -762,6 +762,34 @@ button:disabled {
   box-shadow: none;
   cursor: default;
 }
+/* An <a> styled to sit in a button row (the export links): same look, same
+   disabled state via aria-disabled since a plain anchor has no :disabled. */
+a.button-like {
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  padding: 5px 11px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+  box-shadow: var(--elev-raised);
+  transition: color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
+}
+a.button-like:hover:not([aria-disabled='true']) {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+  background: var(--surface-3);
+}
+a.button-like[aria-disabled='true'] {
+  color: var(--ink-3);
+  background: var(--surface-1);
+  border-color: var(--rule);
+  box-shadow: none;
+  cursor: default;
+}
 button.primary {
   background: var(--accent);
   color: var(--on-accent);
@@ -1681,6 +1709,40 @@ tr.clickable:hover { background: var(--surface-1); }
 .chain .depth-3 { margin-left: var(--s7); }
 .chain .depth-4 { margin-left: calc(var(--s7) + var(--s5)); }
 
+/* ------------------------------------------------------------- timeline */
+/* one chapter head, then a vertical spine of scene rows beneath it, each
+   with its divergences (if any) nested inline rather than in a sidebar */
+.timeline { font-family: var(--sans); }
+.timeline-chapter-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin: var(--s5) 0 var(--s2);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--ink-3);
+}
+.timeline-chapter-head:first-child { margin-top: 0; }
+.timeline-chapter-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+.timeline-scene {
+  padding: 8px 0 8px var(--s3);
+  border-left: 2px solid var(--rule);
+  border-bottom: 1px solid var(--rule-soft);
+}
+.timeline-scene.current { border-left-color: var(--accent); }
+.timeline-divergence {
+  padding: 5px var(--s2);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
 /* redaction: deliberately hatched, so it reads as withheld and not as broken */
 .spoiler { cursor: pointer; }
 .spoiler.hidden > span {
@@ -1896,6 +1958,17 @@ button.rel-name {
 }
 button.rel-name:hover:not(:disabled) { background: none; color: var(--accent); }
 
+/* A button styled to sit where a heading would, for the rare control (thread
+   retitle) that needs to look like a name but stay natively keyboard-operable. */
+button.as-h2 {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+button.as-h2:hover:not(:disabled) { color: var(--accent); }
+
+
 .regard { padding: var(--s2) 0; border-bottom: 1px solid var(--rule-soft); }
 .regard:last-child { border-bottom: none; }
 .regard-dir { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
@@ -1930,7 +2003,7 @@ button.rel-name:hover:not(:disabled) { background: none; color: var(--accent); }
 }
 .knower {
   display: grid;
-  grid-template-columns: 1fr 4.5rem 2rem;
+  grid-template-columns: 1fr 4.5rem 2rem 1.4rem;
   gap: var(--s2);
   align-items: baseline;
   padding: 5px 0;
@@ -1944,6 +2017,11 @@ button.rel-name:hover:not(:disabled) { background: none; color: var(--accent); }
   white-space: nowrap;
 }
 .knower .mono { text-align: right; }
+.knower button {
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1.4;
+}
 
 /* -------------------------------------------------------------------- wizard */
 

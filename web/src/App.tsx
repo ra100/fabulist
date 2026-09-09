@@ -22,6 +22,7 @@ import {
   type State,
   type Story,
   type Thread,
+  type Timeline,
   type TurnMeta,
   type WorldSummary,
 } from './api.ts';
@@ -29,10 +30,11 @@ import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
 import { ConfigPanels } from './views/ConfigPanels.tsx';
 import { AppearanceEditor, PortraitPanel, SceneIllustration, StylePicker } from './views/Illustration.tsx';
+import { SheetEditor } from './views/SheetEditor.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 
-type Tab = 'book' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'library' | 'settings';
+type Tab = 'book' | 'timeline' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'library' | 'settings';
 
 /** Scene numbers read as roman, the way a book numbers its parts. */
 function roman(n: number): string {
@@ -180,7 +182,7 @@ export function App() {
           </div>
         ) : null}
         <nav className="tabs">
-          {(['book', 'graph', 'cast', 'threads', 'causality', 'facts', 'library', 'settings'] as Tab[]).map((t) => (
+          {(['book', 'timeline', 'graph', 'cast', 'threads', 'causality', 'facts', 'library', 'settings'] as Tab[]).map((t) => (
             <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
               {t}
             </button>
@@ -204,8 +206,9 @@ export function App() {
       {error ? <div className="card warn" style={{ margin: 12 }}>{error}</div> : null}
 
       {tab === 'book' ? <BookTab state={state} hasPlayer={hasPlayer} onChanged={refresh} /> : null}
+      {tab === 'timeline' ? <TimelineTab /> : null}
       {tab === 'graph' ? <GraphTab /> : null}
-      {tab === 'cast' ? <CastTab /> : null}
+      {tab === 'cast' ? <CastTab state={state} /> : null}
       {tab === 'threads' ? <ThreadsTab state={state} onChanged={refresh} /> : null}
       {tab === 'causality' ? <CausalityTab /> : null}
       {tab === 'facts' ? <FactsTab /> : null}
@@ -308,6 +311,10 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
    * to fix.
    */
   const [sideOpen, setSideOpen] = useState(false);
+  /** Rollback panel: closed by default, since it destroys or forks committed prose and should never be one accidental click away. */
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [rollbackBusy, setRollbackBusy] = useState(false);
+  const [chapters, setChapters] = useState<Array<{ chapter: number; title: string; summary: string }>>([]);
 
   const load = useCallback(async () => {
     const book = await api.book();
@@ -436,6 +443,48 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
       setNotes([e instanceof Error ? e.message : String(e)]);
     }
     setClosingScene(false);
+  }
+
+  /** Opens the rollback panel, loading the chapter list it needs on demand rather than on every book load. */
+  async function openRollback() {
+    if (rollbackOpen) return setRollbackOpen(false);
+    try {
+      setChapters((await api.chapters()).chapters);
+    } catch {
+      // A rollback by scene number still works with an empty chapter list.
+    }
+    setRollbackOpen(true);
+  }
+
+  /**
+   * Rolls the book back to a scene or chapter boundary (GAPS.md 3.6). `mode`
+   * defaults server-side to `'fork'` — the safe option, which branches at
+   * the target into a new sibling book and switches to it, leaving this one
+   * exactly as it was. `'destructive'` truncates in place with no way back,
+   * so it gets its own confirmation dialog on top of the panel already
+   * having to be opened deliberately.
+   */
+  async function doRollback(target: { scene?: number; chapter?: number }, mode: 'fork' | 'destructive') {
+    if (rollbackBusy) return;
+    if (mode === 'destructive') {
+      const label = target.scene !== undefined ? `scene ${target.scene}` : `chapter ${target.chapter}`;
+      if (!window.confirm(`Permanently discard everything from ${label} onward? This cannot be undone.`)) return;
+    }
+    setRollbackBusy(true);
+    try {
+      const result = await api.rollback({ ...target, mode });
+      if (result.mode === 'fork' && result.forkedStory) {
+        setNotes([`rolled back to scene ${result.toScene} — switched to a new book "${result.forkedStory.title || 'untitled'}"; this one is untouched`]);
+      } else {
+        setNotes([`rolled back to scene ${result.toScene}, discarding what followed`]);
+      }
+      setRollbackOpen(false);
+      await load();
+      onChanged();
+    } catch (e) {
+      setNotes([e instanceof Error ? e.message : String(e)]);
+    }
+    setRollbackBusy(false);
   }
 
   /**
@@ -613,6 +662,8 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
               </div>
             ) : null}
 
+            {rollbackOpen ? <RollbackPanel state={state} chapters={chapters} busy={rollbackBusy} onRollback={doRollback} onCancel={() => setRollbackOpen(false)} /> : null}
+
             <textarea
               value={input}
               placeholder="Write roughly. The book gets the worked version."
@@ -625,6 +676,32 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
               <span className="hint grow" style={{ marginTop: 0 }}>
                 ⌘↵ to play · shorthand is fine · leading “ooc” for a directive
               </span>
+              <a
+                className="button-like"
+                title="download the book as markdown"
+                href={turns.length ? api.exportUrl('markdown') : undefined}
+                aria-disabled={!turns.length}
+                onClick={(e) => { if (!turns.length) e.preventDefault(); }}
+              >
+                export .md
+              </a>
+              <a
+                className="button-like"
+                title="download the book as plain text"
+                href={turns.length ? api.exportUrl('text') : undefined}
+                aria-disabled={!turns.length}
+                onClick={(e) => { if (!turns.length) e.preventDefault(); }}
+              >
+                export .txt
+              </a>
+              <button
+                className={rollbackOpen ? 'primary' : ''}
+                title="undo the last chapter or scene"
+                disabled={busy || !turns.length}
+                onClick={() => void openRollback()}
+              >
+                roll back…
+              </button>
               <button
                 title="close the current scene and summarise it"
                 disabled={busy || closingScene || !turns.length}
@@ -698,6 +775,83 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
           </div>
         </div>
       </aside>
+    </div>
+  );
+}
+
+/**
+ * The backward move (GAPS.md 3.6): "undo the last chapter" or "back to a
+ * specific scene". Chapter is the default granularity since that is the
+ * user-facing unit; scene is available for finer control. Always shows both
+ * outcomes side by side — fork (the safe default) and destructive (behind
+ * its own confirm) — rather than a single button whose behaviour depends on
+ * a mode nobody remembers they set.
+ */
+function RollbackPanel({
+  state, chapters, busy, onRollback, onCancel,
+}: {
+  state: State | null;
+  chapters: Array<{ chapter: number; title: string; summary: string }>;
+  busy: boolean;
+  onRollback: (target: { scene?: number; chapter?: number }, mode: 'fork' | 'destructive') => void;
+  onCancel: () => void;
+}) {
+  const [unit, setUnit] = useState<'chapter' | 'scene'>(chapters.length ? 'chapter' : 'scene');
+  const [chapter, setChapter] = useState(chapters.length ? String(chapters[chapters.length - 1]!.chapter) : '');
+  const currentScene = state?.session.scene ?? 1;
+  const [scene, setScene] = useState(String(Math.max(1, currentScene - 1)));
+
+  const target = unit === 'chapter'
+    ? (chapter.trim() ? { chapter: Number(chapter) } : null)
+    : (scene.trim() ? { scene: Number(scene) } : null);
+  const valid = target !== null && Number.isFinite(unit === 'chapter' ? target.chapter : target.scene);
+
+  return (
+    <div className="notice" role="region" aria-label="roll back">
+      <b>Roll back</b>
+      <p className="small dim" style={{ margin: '4px 0 var(--s3)' }}>
+        Currently at scene {currentScene}. The default (fork) leaves this book untouched and switches you
+        to a shorter sibling; destructive discards the tail here, with no way back.
+      </p>
+      <div className="row" style={{ marginBottom: 'var(--s2)' }}>
+        <select value={unit} onChange={(e) => setUnit(e.target.value as 'chapter' | 'scene')}>
+          <option value="chapter" disabled={!chapters.length}>chapter{chapters.length ? '' : ' (none recorded yet)'}</option>
+          <option value="scene">scene</option>
+        </select>
+        {unit === 'chapter' ? (
+          <select value={chapter} onChange={(e) => setChapter(e.target.value)}>
+            {chapters.map((c) => (
+              <option key={c.chapter} value={c.chapter}>
+                chapter {c.chapter}{c.title ? ` — ${c.title}` : ''}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type="number" min={1} max={Math.max(1, currentScene - 1)}
+            value={scene} onChange={(e) => setScene(e.target.value)}
+            aria-label="scene to roll back to"
+            style={{ width: '5rem' }}
+          />
+        )}
+      </div>
+      <div className="row wrap">
+        <button
+          className="primary"
+          disabled={busy || !valid}
+          onClick={() => target && onRollback(target, 'fork')}
+        >
+          {busy ? 'rolling back…' : 'roll back (fork — safe)'}
+        </button>
+        <button
+          className="warn"
+          disabled={busy || !valid}
+          onClick={() => target && onRollback(target, 'destructive')}
+        >
+          discard permanently
+        </button>
+        <button onClick={onCancel} disabled={busy}>cancel</button>
+      </div>
     </div>
   );
 }
@@ -1042,7 +1196,7 @@ function EntityPanel({
 
 // ---------------------------------------------------------------------- cast
 
-function CastTab() {
+function CastTab({ state }: { state: State | null }) {
   const [cast, setCast] = useState<Array<{ sheet: Sheet; entity: Entity | null }>>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   // Same canon/chronicle distinction the graph tab filters on: canon is the
@@ -1099,71 +1253,11 @@ function CastTab() {
 
               {openId === sheet.entityId ? (
                 <div className="sheet-detail">
-                  {sheet.contract.vows.length ? (
-                    <>
-                      <h3 className="eyebrow rule">contract</h3>
-                      <div className="stack" style={{ marginBottom: 'var(--s3)' }}>
-                        {[...sheet.contract.vows].sort((a, b) => a.rank - b.rank).map((v) => (
-                          <div key={v.id} className="row baseline small">
-                            <span className={`status ${v.broken ? 'ripening' : 'fired'}`} style={{ minWidth: '4rem' }}>
-                              {v.broken ? 'broken' : 'held'}
-                            </span>
-                            <span className="mono dimmer">r{v.rank}</span>
-                            <span className="grow">{v.text}</span>
-                          </div>
-                        ))}
-                      </div>
-                      {sheet.contract.breakingPoint ? (
-                        <div className="small dim">breaking point — {sheet.contract.breakingPoint}</div>
-                      ) : null}
-                      {sheet.contract.costOfBreak ? (
-                        <div className="small dim">cost of breaking — {sheet.contract.costOfBreak}</div>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {sheet.voice.diction ? (
-                    <>
-                      <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>voice</h3>
-                      <div className="small dim">{sheet.voice.diction}</div>
-                      {sheet.voice.samples.map((s, i) => (
-                        <p
-                          key={i}
-                          style={{
-                            font: 'italic 15px/1.55 var(--serif)',
-                            color: 'var(--ink)',
-                            borderLeft: '1px solid var(--rule-strong)',
-                            padding: '2px 0 2px var(--s3)',
-                            margin: 'var(--s2) 0 0',
-                            maxWidth: '38rem',
-                          }}
-                        >
-                          “{s}”
-                        </p>
-                      ))}
-                      {sheet.voice.never.length ? (
-                        <div className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
-                          never — {sheet.voice.never.join('; ')}
-                        </div>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>appearance</h3>
+                  <h3 className="eyebrow rule" style={{ marginTop: 0 }}>appearance</h3>
                   <PortraitPanel sheet={sheet} onChanged={load} />
                   <AppearanceEditor sheet={sheet} onSaved={load} />
 
-                  <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>identity</h3>
-                  <dl className="kv">
-                    {(['goals', 'wounds', 'fears', 'secrets'] as const).map((k) =>
-                      sheet.identity[k].length ? (
-                        <Fragment key={k}>
-                          <dt>{k}</dt>
-                          <dd>{sheet.identity[k].join('; ')}</dd>
-                        </Fragment>
-                      ) : null,
-                    )}
-                  </dl>
+                  <SheetEditor sheet={sheet} currentScene={state?.session.scene ?? 0} onSaved={load} />
 
                   {/* Locks are how nudging parameters actually works. */}
                   <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>locks</h3>
@@ -1201,11 +1295,99 @@ function CastTab() {
 
 // ------------------------------------------------------------------- threads
 
+/**
+ * One thread: tension is a live drag as before, title is click-to-edit
+ * (retitle inline rather than a separate edit mode, matching how vows/sheet
+ * fields save on blur elsewhere), and status offers "resolve" / "abandon" /
+ * reopen — the "close a thread by hand" half of §11's gap. `PUT
+ * /api/thread/:id` already accepted `title`/`status`; only this control was
+ * missing.
+ */
+function ThreadCard({ thread: t, onChanged }: { thread: Thread; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(t.title);
+  // Local echo while dragging, same reason `AppearanceEditor` echoes locally:
+  // the parent list is sorted by tension, so reloading it on every drag tick
+  // would resort the card out from under the pointer mid-drag.
+  const [tension, setTension] = useState(t.tension);
+
+  async function setStatus(status: string) {
+    await api.updateThread(t.id, { status });
+    onChanged();
+  }
+
+  return (
+    <div className="card">
+      <div className="row baseline">
+        {editing ? (
+          <input
+            className="name sm grow"
+            value={title}
+            autoFocus
+            onChange={(e) => setTitle(e.target.value)}
+            onBlur={async () => {
+              setEditing(false);
+              if (title.trim() && title.trim() !== t.title) await api.updateThread(t.id, { title: title.trim() });
+              onChanged();
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+          />
+        ) : (
+          <button
+            className="name sm grow as-h2"
+            title="click to retitle"
+            onClick={() => setEditing(true)}
+            style={{ cursor: 'text', textAlign: 'left' }}
+          >
+            {t.title}
+          </button>
+        )}
+        <span className="tag">{t.status}</span>
+        {t.status === 'open' ? (
+          <>
+            <button title="mark resolved" onClick={() => setStatus('resolved')}>resolve</button>
+            <button title="mark abandoned" onClick={() => setStatus('abandoned')}>abandon</button>
+          </>
+        ) : (
+          <button title="reopen this thread" onClick={() => setStatus('open')}>reopen</button>
+        )}
+      </div>
+      <div className="small dim" style={{ margin: '5px 0 var(--s4)', maxWidth: '44rem' }}>
+        {t.stakes}
+      </div>
+      <div className="row" style={{ maxWidth: '30rem' }}>
+        <span className="eyebrow" style={{ margin: 0, minWidth: '4.5rem' }}>tension</span>
+        <div className="scale">
+          <input
+            type="range" min="0" max="1" step="0.05" value={tension}
+            aria-label={`tension for ${t.title}`}
+            onChange={async (e) => {
+              const next = Number(e.target.value);
+              setTension(next);
+              await api.updateThread(t.id, { tension: next });
+              onChanged();
+            }}
+          />
+        </div>
+        <span className="mono" style={{ width: 34, textAlign: 'right' }}>{tension.toFixed(2)}</span>
+      </div>
+      {t.resolutions.length ? (
+        <div className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
+          <span className="status" style={{ marginRight: 'var(--s2)' }}>ways out</span>
+          {t.resolutions.join(' · ')}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () => void }) {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [text, setText] = useState('');
   const [strength, setStrength] = useState('push');
   const [diff, setDiff] = useState<Array<[string, string]> | null>(null);
+  const [newTitle, setNewTitle] = useState('');
+  const [newStakes, setNewStakes] = useState('');
 
   const load = useCallback(async () => setThreads(await api.threads()), []);
   useEffect(() => {
@@ -1221,40 +1403,43 @@ function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () =
             and the story leans on it.
           </p>
           {threads.map((t) => (
-            <div key={t.id} className="card">
-              <div className="row baseline">
-                <h2 className="name sm grow">{t.title}</h2>
-                <span className="tag">{t.status}</span>
-              </div>
-              <div className="small dim" style={{ margin: '5px 0 var(--s4)', maxWidth: '44rem' }}>
-                {t.stakes}
-              </div>
-              <div className="row" style={{ maxWidth: '30rem' }}>
-                <span className="eyebrow" style={{ margin: 0, minWidth: '4.5rem' }}>tension</span>
-                <div className="scale">
-                  <input
-                    type="range" min="0" max="1" step="0.05" value={t.tension}
-                    aria-label={`tension for ${t.title}`}
-                    onChange={async (e) => {
-                      const tension = Number(e.target.value);
-                      setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, tension } : x)));
-                      await api.updateThread(t.id, { tension });
-                      onChanged();
-                    }}
-                  />
-                </div>
-                <span className="mono" style={{ width: 34, textAlign: 'right' }}>{t.tension.toFixed(2)}</span>
-              </div>
-              <div className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
-                <span className="status" style={{ marginRight: 'var(--s2)' }}>ways out</span>
-                {t.resolutions.join(' · ')}
-              </div>
-            </div>
+            <ThreadCard key={t.id} thread={t} onChanged={async () => { await load(); onChanged(); }} />
           ))}
+          {threads.length === 0 ? <p className="empty">No threads yet — start one on the right.</p> : null}
         </div>
       </div>
 
       <aside className="side">
+        <div className="card">
+          <h3>start a thread</h3>
+          <p className="small dim" style={{ margin: '0 0 var(--s3)' }}>
+            The natural authoring move when the story needs tension the extractor never wrote —
+            a rivalry, a debt, a countdown.
+          </p>
+          <input
+            value={newTitle} placeholder="title — e.g. 'who told the garrison'"
+            onChange={(e) => setNewTitle(e.target.value)}
+          />
+          <textarea
+            rows={2} style={{ marginTop: 'var(--s2)' }}
+            value={newStakes} placeholder="what's at stake if it resolves badly"
+            onChange={(e) => setNewStakes(e.target.value)}
+          />
+          <button
+            className="primary" style={{ marginTop: 'var(--s2)' }}
+            disabled={!newTitle.trim()}
+            onClick={async () => {
+              await api.createThread(newTitle.trim(), newStakes.trim());
+              setNewTitle('');
+              setNewStakes('');
+              await load();
+              onChanged();
+            }}
+          >
+            open thread
+          </button>
+        </div>
+
         <div className="card">
           <h3>direct the story</h3>
           <textarea
@@ -1329,6 +1514,117 @@ function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () =
             ))}
           </div>
         ) : null}
+      </aside>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ timeline
+
+/**
+ * §11's "Timeline — chronicle with the divergence points marked" (GAPS.md
+ * 3.1, absorbing 3.5). Scenes, chapters and the divergence ledger already
+ * existed with nothing rendering them as one connected spine — the book
+ * view is a flat turn list, and the divergence ledger only ever appeared
+ * in its sidebar when non-empty. This is that spine: one chapter heading
+ * per chapter, one row per scene beneath it (turn count, summary when one
+ * exists), and every divergence recorded at that scene inline, always
+ * visible rather than hidden behind non-emptiness.
+ */
+function TimelineTab() {
+  const [timeline, setTimeline] = useState<Timeline | null>(null);
+  const [reveal, setReveal] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    void api.timeline().then(setTimeline);
+  }, []);
+
+  if (!timeline) return <div className="main"><div className="pane"><p className="empty">Loading.</p></div></div>;
+
+  const chapterMeta = new Map(timeline.chapters.map((c) => [c.chapter, c]));
+  const byChapter = new Map<number, Timeline['scenes']>();
+  for (const s of timeline.scenes) {
+    const list = byChapter.get(s.chapter) ?? [];
+    list.push(s);
+    byChapter.set(s.chapter, list);
+  }
+  const chapterNumbers = [...byChapter.keys()].sort((a, b) => a - b);
+
+  return (
+    <div className="main">
+      <div className="pane">
+        <div className="measure-tool">
+          <p className="lede">
+            The record of how this playthrough actually went — where it diverged from canon, and by how
+            much, scene by scene.
+          </p>
+          {timeline.scenes.length === 0 ? <p className="empty">Nothing played yet.</p> : null}
+          <div className="timeline">
+            {chapterNumbers.map((chapter) => {
+              const cMeta = chapterMeta.get(chapter);
+              return (
+                <Fragment key={chapter}>
+                  <div className="timeline-chapter-head">
+                    <span>Chapter {chapter}{cMeta?.title ? `: ${cMeta.title}` : ''}</span>
+                  </div>
+                  {cMeta?.summary ? <p className="small dim" style={{ margin: '0 0 var(--s3)' }}>{cMeta.summary}</p> : null}
+                  {byChapter.get(chapter)!.map((s) => (
+                    <div key={s.scene} className={`timeline-scene${s.scene === timeline.currentScene ? ' current' : ''}`}>
+                      <div className="row baseline">
+                        <span className="mono" style={{ minWidth: '3.5rem' }}>s{s.scene}</span>
+                        <span className="grow small">{s.title || (s.turnCount ? '' : 'not yet played')}</span>
+                        <span className="dimmer small">{s.turnCount} turn{s.turnCount === 1 ? '' : 's'}</span>
+                        {s.scene === timeline.currentScene ? <span className="tag locked">current</span> : null}
+                      </div>
+                      {s.summary ? <p className="small dim" style={{ margin: '4px 0 0' }}>{s.summary}</p> : null}
+                      {s.divergences.length ? (
+                        <div className="stack" style={{ marginTop: 'var(--s2)' }}>
+                          {s.divergences.map((d) => {
+                            const open = reveal.has(d.id);
+                            return (
+                              <div key={d.id} className="timeline-divergence">
+                                <div className="row baseline">
+                                  <span className="tag chronicle">{d.kind}</span>
+                                  <span className="small grow">{d.detail}</span>
+                                  {d.canon ? (
+                                    <button
+                                      className="link"
+                                      onClick={() => setReveal((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(d.id)) next.delete(d.id); else next.add(d.id);
+                                        return next;
+                                      })}
+                                    >
+                                      {open ? 'hide canon' : 'vs. canon'}
+                                    </button>
+                                  ) : null}
+                                </div>
+                                {open && d.canon ? <p className="small dimmer" style={{ margin: '2px 0 0' }}>{d.canon}</p> : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </Fragment>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+      <aside className="side">
+        <div className="card">
+          <h3>reading this</h3>
+          <p className="small dim">
+            Every divergence here is a real branch point — the story went one way, the source material
+            (or the setup) said another. That gap is what makes this a playthrough of the world rather
+            than a transcript of it.
+          </p>
+          <div className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
+            {timeline.divergenceCount} divergence{timeline.divergenceCount === 1 ? '' : 's'} total
+          </div>
+        </div>
       </aside>
     </div>
   );
@@ -1447,11 +1743,24 @@ function CausalityTab() {
 
 // --------------------------------------------------------------------- facts
 
+/**
+ * Grant/revoke controls — the authoring half of §11's "epistemics are
+ * read-only" gap. The facts view could already show who knows what; there
+ * was no way to fix it when the extractor gets it wrong, which is exactly
+ * what produces an NPC reacting to something they should not know (or,
+ * just as often, failing to react to something they plainly should).
+ */
 function FactsTab() {
   const [facts, setFacts] = useState<Fact[]>([]);
+  const [cast, setCast] = useState<Array<{ sheet: Sheet; entity: Entity | null }>>([]);
+  const [grantTarget, setGrantTarget] = useState<Record<string, string>>({});
+  const [grantLevel, setGrantLevel] = useState<Record<string, string>>({});
+
+  const load = useCallback(async () => setFacts(await api.facts()), []);
   useEffect(() => {
-    void api.facts().then(setFacts);
-  }, []);
+    void load();
+    void api.cast().then(setCast);
+  }, [load]);
 
   return (
     <div className="main">
@@ -1461,35 +1770,77 @@ function FactsTab() {
             Facts are true in the world; knowledge of them is per-character. The gap between the two
             is what produces dramatic irony instead of NPCs reacting to what they cannot know.
           </p>
-          {facts.map((f) => (
-            <div key={f.id} className="card">
-              <div className="row baseline">
-                <p className="name sm" style={{ maxWidth: '38rem' }}>{f.text}</p>
-                <span className="grow" />
-                <span className="mono dimmer">s{f.scene}</span>
-              </div>
-              <h3 className="eyebrow rule" style={{ margin: 'var(--s4) 0 var(--s2)' }}>
-                who holds a version of it
-              </h3>
-              {f.knowers.length === 0 ? (
-                <p className="empty" style={{ padding: 0 }}>Nobody. This is still only true.</p>
-              ) : (
-                <div className="knowers">
-                  {f.knowers.map((k) => (
-                    <div key={k.entityId} className="knower">
-                      <span className="knower-name">{k.name}</span>
-                      <span className={`status ${k.level === 'knows' ? 'fired' : k.level === 'wrong' ? 'ripening' : 'pending'}`}>
-                        {k.level}
-                      </span>
-                      <span className="mono dimmer">
-                        {k.distortion > 0 ? k.distortion.toFixed(1) : ''}
-                      </span>
-                    </div>
-                  ))}
+          {facts.map((f) => {
+            const target = grantTarget[f.id] ?? '';
+            const level = grantLevel[f.id] ?? 'knows';
+            const knownIds = new Set(f.knowers.map((k) => k.entityId));
+            const candidates = cast.filter(({ sheet }) => !knownIds.has(sheet.entityId));
+            return (
+              <div key={f.id} className="card">
+                <div className="row baseline">
+                  <p className="name sm" style={{ maxWidth: '38rem' }}>{f.text}</p>
+                  <span className="grow" />
+                  <span className="mono dimmer">s{f.scene}</span>
                 </div>
-              )}
-            </div>
-          ))}
+                <h3 className="eyebrow rule" style={{ margin: 'var(--s4) 0 var(--s2)' }}>
+                  who holds a version of it
+                </h3>
+                {f.knowers.length === 0 ? (
+                  <p className="empty" style={{ padding: 0 }}>Nobody. This is still only true.</p>
+                ) : (
+                  <div className="knowers">
+                    {f.knowers.map((k) => (
+                      <div key={k.entityId} className="knower">
+                        <span className="knower-name">{k.name}</span>
+                        <span className={`status ${k.level === 'knows' ? 'fired' : k.level === 'wrong' ? 'ripening' : 'pending'}`}>
+                          {k.level}
+                        </span>
+                        <span className="mono dimmer">
+                          {k.distortion > 0 ? k.distortion.toFixed(1) : ''}
+                        </span>
+                        <button
+                          aria-label={`revoke ${f.text} from ${k.name}`}
+                          title="revoke — back to never told"
+                          onClick={async () => { await api.revokeKnowledge(f.id, k.entityId); await load(); }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {candidates.length ? (
+                  <div className="row" style={{ marginTop: 'var(--s3)' }}>
+                    <select
+                      value={target}
+                      style={{ width: 200 }}
+                      onChange={(e) => setGrantTarget((prev) => ({ ...prev, [f.id]: e.target.value }))}
+                    >
+                      <option value="">grant to…</option>
+                      {candidates.map(({ sheet, entity }) => (
+                        <option key={sheet.entityId} value={sheet.entityId}>{entity?.name ?? sheet.entityId}</option>
+                      ))}
+                    </select>
+                    <select value={level} onChange={(e) => setGrantLevel((prev) => ({ ...prev, [f.id]: e.target.value }))}>
+                      <option value="knows">knows</option>
+                      <option value="suspects">suspects</option>
+                      <option value="wrong">wrong</option>
+                    </select>
+                    <button
+                      disabled={!target}
+                      onClick={async () => {
+                        await api.grantKnowledge(f.id, target, level);
+                        setGrantTarget((prev) => ({ ...prev, [f.id]: '' }));
+                        await load();
+                      }}
+                    >
+                      grant
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

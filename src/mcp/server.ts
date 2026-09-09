@@ -56,6 +56,7 @@ import {
   resetWorldTool,
   resolveInterruptTool,
   resolveWikiTool,
+  rollbackTool,
   searchEntitiesTool,
   searchTool,
   startStoryTool,
@@ -191,6 +192,23 @@ function buildServer(ctx: McpToolContext): McpServer {
       },
     },
     async ({ fromStoryId, title, atScene }) => toolResult(forkStoryTool(ctx, { fromStoryId, title, atScene })),
+  );
+
+  server.registerTool(
+    'rollback',
+    {
+      description:
+        'Undo the last chapter or scene of the currently open story \u2014 the backward move fork_story never covered. ' +
+        "Pass exactly one of scene or chapter. Defaults to mode 'fork': branches at the target boundary into a new " +
+        "sibling story and switches to it, leaving the discarded tail intact as a story you can still open. Pass " +
+        "mode 'destructive' to truncate the current story in place instead, with no sibling and no way back.",
+      inputSchema: {
+        scene: z.number().int().positive().optional().describe('Roll back to the start of this scene.'),
+        chapter: z.number().int().positive().optional().describe('Roll back to the start of this chapter.'),
+        mode: z.enum(['fork', 'destructive']).optional().describe("Defaults to 'fork' (safe, keeps the tail as a sibling story)."),
+      },
+    },
+    async ({ scene, chapter, mode }) => toolResult(rollbackTool(ctx, { scene, chapter, mode })),
   );
 
   server.registerTool(

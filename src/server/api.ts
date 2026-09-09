@@ -10,7 +10,8 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import type { Engine } from '../loop/engine.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
-import { forkStory } from '../loop/branch.ts';
+import { forkStory, rollback } from '../loop/branch.ts';
+import { exportMarkdown, exportPlainText } from '../loop/export.ts';
 import { createStory, deleteStory, getStory, listStories, listStoriesForUser } from '../store/world.ts';
 import { createWorldFile, deleteWorldFile, listWorlds, renameWorldFile } from '../store/worlds.ts';
 import {
@@ -328,6 +329,28 @@ route('GET', '/api/book', (_req, res, { world }) => {
   });
 });
 
+/**
+ * GET rather than POST: this reads, never writes, and a plain link/download
+ * button in a browser is a GET by construction — no JS-built request needed
+ * just to fetch a file. `format` defaults to markdown; `text` gets the
+ * plain-text variant (`exportPlainText`). `content-disposition: attachment`
+ * with a filename derived from the world/story title, so a browser's
+ * download prompts something more useful than the route's own path.
+ */
+route('GET', '/api/export', (_req, res, { world, url }) => {
+  const format = url.searchParams.get('format') === 'text' ? 'text' : 'markdown';
+  const title = world.chronicle.getMeta('worldTitle', '') || 'book';
+  const slugged = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'book';
+  const body = format === 'text' ? exportPlainText(world) : exportMarkdown(world);
+  const ext = format === 'text' ? 'txt' : 'md';
+  res.writeHead(200, {
+    'content-type': format === 'text' ? 'text/plain; charset=utf-8' : 'text/markdown; charset=utf-8',
+    'content-disposition': `attachment; filename="${slugged}.${ext}"`,
+    'cache-control': 'no-store',
+  });
+  res.end(body);
+});
+
 route('GET', '/api/turn/:id', (_req, res, { world, params }) => {
   const turn = world.chronicle.getTurn(decodeURIComponent(params.id ?? ''));
   if (!turn) return send(res, 404, { error: 'not found' });
@@ -388,8 +411,33 @@ route('GET', '/api/threads', (_req, res, { world }) => {
   send(res, 200, world.threads.all());
 });
 
+/**
+ * Hand-authored thread. §11's "you cannot create, retitle or close a thread
+ * by hand" — retitling and closing already went through `PUT /api/thread/:id`
+ * (it accepts `title`/`status` alongside `tension`), so creation was the one
+ * real gap. `tension` defaults to 0.5 (the same default the schema uses) and
+ * `parties`/`resolutions` default empty rather than requiring the caller to
+ * know the shape up front — a thread can be given stakes and a resolution
+ * later, the way one written by the extractor would be filled in over time.
+ */
+route('POST', '/api/threads', (_req, res, { world, body }) => {
+  const b = (body ?? {}) as { title?: string; stakes?: string; tension?: number; parties?: string[]; resolutions?: string[] };
+  if (!b.title?.trim()) return send(res, 400, { error: 'title required' });
+  const created = world.threads.create({
+    title: b.title.trim(),
+    stakes: b.stakes ?? '',
+    tension: b.tension ?? 0.5,
+    parties: b.parties ?? [],
+    resolutions: b.resolutions ?? [],
+    status: 'open',
+    createdScene: world.session.get().scene,
+  });
+  send(res, 200, created);
+});
+
 route('PUT', '/api/thread/:id', (_req, res, { world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
+  if (!world.threads.get(id)) return send(res, 404, { error: 'no thread' });
   const patch = (body ?? {}) as { tension?: number; status?: string; title?: string; stakes?: string };
   world.threads.update(id, patch as never);
   send(res, 200, world.threads.get(id));
@@ -450,6 +498,45 @@ route('GET', '/api/facts', (_req, res, { world }) => {
       })),
     })),
   );
+});
+
+/**
+ * Grants (or updates) an entity's knowledge of a fact — §11's fix for the
+ * natural authoring move when the extractor gets epistemics wrong: an NPC
+ * reacting to something they should not know, or one who plainly should
+ * know something and the extractor never wired it. `setKnowledge` already
+ * does the write; this is the missing route. `since_scene` defaults to now
+ * rather than the fact's own creation scene, since a hand-authored grant is
+ * usually "they learn this right now", not a backdated correction — a
+ * caller wanting the latter can still pass `sinceScene` explicitly.
+ *
+ * A bad `factId` fails on the `fact_knowledge.fact_id` foreign key rather
+ * than being checked here twice, and is reported as 404 rather than a raw
+ * 500 — the same "let the constraint do the work, translate the failure"
+ * shape `checkIntegrity` uses elsewhere.
+ */
+route('POST', '/api/fact/:id/knowledge', (_req, res, { world, params, body }) => {
+  const factId = decodeURIComponent(params.id ?? '');
+  const b = (body ?? {}) as { entityId?: string; level?: string; distortion?: number; sinceScene?: number };
+  if (!b.entityId) return send(res, 400, { error: 'entityId required' });
+  if (b.level !== 'knows' && b.level !== 'suspects' && b.level !== 'wrong') {
+    return send(res, 400, { error: "level must be 'knows', 'suspects', or 'wrong'" });
+  }
+  try {
+    world.chronicle.setKnowledge(factId, b.entityId, b.level, b.sinceScene ?? world.session.get().scene, b.distortion ?? 0);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return send(res, message.includes('FOREIGN KEY') ? 404 : 500, { error: message.includes('FOREIGN KEY') ? 'no fact' : message });
+  }
+  send(res, 200, { factId, knowers: world.chronicle.knowersOf(factId) });
+});
+
+/** The undo: back to "never told", not to some fourth level meaning "explicitly does not know". */
+route('DELETE', '/api/fact/:id/knowledge/:entityId', (_req, res, { world, params }) => {
+  const factId = decodeURIComponent(params.id ?? '');
+  const entityId = decodeURIComponent(params.entityId ?? '');
+  world.chronicle.revokeKnowledge(factId, entityId);
+  send(res, 200, { factId, knowers: world.chronicle.knowersOf(factId) });
 });
 
 route('GET', '/api/directives', (_req, res, { world }) => {
@@ -690,6 +777,72 @@ route('GET', '/api/chapters', (_req, res, { world }) => {
   send(res, 200, { chapters: world.chronicle.chapters(), scenes: world.chronicle.scenes() });
 });
 
+/**
+ * The chronicle as a spine (DESIGN §11: "Timeline — chronicle with the
+ * divergence points marked"). Scenes, chapters and the divergence ledger
+ * all already existed in the database with nothing rendering them as one
+ * connected view — this assembles exactly that, once, server-side, rather
+ * than asking the client to reconcile three separate endpoints itself.
+ * Turn counts come from `chronicle.turns()` grouped in memory rather than a
+ * `GROUP BY` query: this route runs once per tab-open, not once per turn, so
+ * the extra row-scan costs nothing a reader would notice, and it reuses the
+ * exact same `Turn[]` shape every other consumer of `turns()` already gets
+ * rather than adding a bespoke count query.
+ */
+route('GET', '/api/timeline', (_req, res, { world }) => {
+  const scenes = world.chronicle.scenes();
+  const chapters = world.chronicle.chapters();
+  const divergences = world.chronicle.divergences();
+  const turns = world.chronicle.turns({ limit: 5000 });
+
+  const turnCounts = new Map<number, number>();
+  for (const t of turns) turnCounts.set(t.scene, (turnCounts.get(t.scene) ?? 0) + 1);
+
+  const divergencesByScene = new Map<number, typeof divergences>();
+  for (const d of divergences) {
+    const list = divergencesByScene.get(d.scene) ?? [];
+    list.push(d);
+    divergencesByScene.set(d.scene, list);
+  }
+
+  // Every scene that has a `scenes` row, at least one turn, a recorded
+  // divergence, or is the current scene — a scene can have turns with no
+  // row yet (the current, still-open scene, before it accumulates enough
+  // turns to summarise), a row with no turns (closed too early to
+  // summarise), or — the case this route cares about that `exportMarkdown`
+  // does not — a divergence recorded at the current scene before any turn
+  // in it has committed yet (a directive/override can fire before the turn
+  // that reports it finishes). Unioned and ordered.
+  const sceneNumbers = new Set<number>([
+    ...scenes.map((s) => s.scene),
+    ...turnCounts.keys(),
+    ...divergencesByScene.keys(),
+    world.session.get().scene,
+  ]);
+  const sceneMeta = new Map(scenes.map((s) => [s.scene, s]));
+
+  const sceneEntries = [...sceneNumbers]
+    .sort((a, b) => a - b)
+    .map((scene) => {
+      const meta = sceneMeta.get(scene);
+      return {
+        scene,
+        title: meta?.title ?? '',
+        summary: meta?.summary ?? '',
+        chapter: meta?.chapter ?? 1,
+        turnCount: turnCounts.get(scene) ?? 0,
+        divergences: divergencesByScene.get(scene) ?? [],
+      };
+    });
+
+  send(res, 200, {
+    currentScene: world.session.get().scene,
+    chapters,
+    scenes: sceneEntries,
+    divergenceCount: divergences.length,
+  });
+});
+
 /** Summarise a closed scene on demand, or catch up everything that closed unsummarised. */
 route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
   const { scene, force } = (body ?? {}) as { scene?: number; force?: boolean };
@@ -831,6 +984,51 @@ route('POST', '/api/stories/fork', (_req, res, { world, body, user }) => {
   if (!ownsStoryOrRespond(res, world, sourceId, user)) return;
   try {
     send(res, 201, forkStory(world, { fromStoryId: sourceId, title: title?.trim(), atScene, ownerUserId: user?.id }));
+  } catch (err) {
+    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * Rolls back the currently-open story to a scene or chapter boundary
+ * (DESIGN §11 / GAPS.md 3.6) — the backward move branching never covered:
+ * "the last chapter went somewhere I did not mean". Always acts on
+ * `world.storyId`, never an explicit id, since rollback is deliberately
+ * "shorten the book I am reading right now", not a general story-management
+ * operation — a caller wanting to shorten a *different* story switches to
+ * it first, the same way every other single-story write route in this file
+ * already assumes the current story.
+ *
+ * `mode` defaults to `'fork'` (see `rollback`'s own doc comment for why).
+ * When it produces a new story and login is off, this route switches the
+ * shared `CurrentStory` pointer immediately — unlike `POST
+ * /api/stories/fork`, which deliberately does not switch, because a
+ * rollback's whole point is "go there now", not "make a copy I may or may
+ * not open later". With login *on*, the pointer is deliberately left alone
+ * — the same reasoning `switchStoryTool` documents for `selectStory`:
+ * mutating the shared, server-wide pointer would drag every other signed-in
+ * user onto this one caller's rollback. `forkStory`'s own `createStory`
+ * already stamps the new story's `last_played_at` as now, so
+ * `worldFor(user)`'s "most recently played of *this user's* stories"
+ * resolution lands on it naturally on the very next request; the client
+ * still records the id locally (`setSelectedStoryId`, mirroring the
+ * Stories tab's own switch handler) so a concurrent second tab is not
+ * pulled along too.
+ */
+route('POST', '/api/rollback', (_req, res, { world, currentStory, body, user }) => {
+  const { scene, chapter, mode } = (body ?? {}) as { scene?: number; chapter?: number; mode?: 'fork' | 'destructive' };
+  if (!ownsStoryOrRespond(res, world, world.storyId, user)) return;
+  const effectiveMode = mode ?? 'fork';
+  // The switch below only runs in login-off mode (see this route's own doc
+  // comment for why login-on deliberately skips it), so that is the only
+  // case where `currentStory` is actually required.
+  if (effectiveMode === 'fork' && !user && !currentStory) {
+    return send(res, 503, { error: 'rollback in fork mode needs story management enabled on this server' });
+  }
+  try {
+    const result = rollback(world, { scene, chapter, mode: effectiveMode, ownerUserId: user?.id });
+    if (result.mode === 'fork' && result.forkedStory && !user) currentStory!.switchTo(result.forkedStory.id);
+    send(res, 200, result);
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }

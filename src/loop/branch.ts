@@ -28,6 +28,18 @@
  * `POST /api/branch` and `forkStory`'s continuation case share; it deletes
  * everything at or after a scene from *one* story, never touching canon or
  * any other story in the same file.
+ *
+ * `rollback` is the backward move (§11/GAPS.md 3.6): "undo the last
+ * chapter" or "back to the start of this scene", on the story you are
+ * actually reading, not a copy. It defaults to the safer of the two designs
+ * GAPS.md left open: `mode: 'fork'` (the default) is just `forkStory` with
+ * `atScene` set to the target — a new sibling story that stops exactly at
+ * the rollback point, leaving the long version completely untouched as a
+ * story you can switch back to, so "I want it back" means "open the other
+ * book", not "you should have forked first". `mode: 'destructive'` instead
+ * runs `truncateToScene` on the current story in place, for the one-file-
+ * forever case. See `firstSceneOfChapter` for the chapter-granularity
+ * mapping onto the same scene-boundary primitive.
  */
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -144,6 +156,83 @@ export function truncateToScene(world: World, scene: number): BranchResult['remo
     world.session.set({ scene, turn: 0 });
     return removed;
   });
+}
+
+/**
+ * "First scene of chapter N" — the mapping the rollback UI's chapter
+ * granularity needs onto `truncateToScene`'s scene-only primitive. Reads
+ * `scenes.chapter` (written by `Compactor` as scenes close) rather than
+ * recomputing `Compactor.chapterOf(scene)`, since that formula depends on a
+ * runtime-configurable `chapterSize` this module has no access to and the
+ * stored column is the actual, authoritative record of which chapter each
+ * scene landed in. Returns `undefined` for a chapter with no recorded
+ * scenes (nothing to roll back to) or the current chapter itself when it
+ * has no scenes yet (a chapter row can exist — see `Chronicle.upsertScene`'s
+ * `ON CONFLICT` — before any of its scenes have closed).
+ */
+export function firstSceneOfChapter(world: World, chapter: number): number | undefined {
+  const inChapter = world.chronicle.scenes().filter((s) => s.chapter === chapter);
+  if (!inChapter.length) return undefined;
+  return Math.min(...inChapter.map((s) => s.scene));
+}
+
+export interface RollbackOptions {
+  /** Roll back to the start of this scene — everything at or after it is discarded. Mutually exclusive with `chapter`. */
+  scene?: number;
+  /** Roll back to the start of this chapter — resolved via `firstSceneOfChapter`. Mutually exclusive with `scene`. */
+  chapter?: number;
+  /**
+   * `'fork'` (the default): the safer option GAPS.md's §3.6 left open.
+   * Forks the current story at the target scene into a new sibling —
+   * `forkStory` with `atScene` set — and switches to it, so the discarded
+   * tail survives untouched as "the other book" rather than being deleted.
+   * `'destructive'`: truncates the current story in place via
+   * `truncateToScene`. No copy, no sibling, no way back except a save you
+   * already had.
+   */
+  mode?: 'fork' | 'destructive';
+  /** Who owns the fork, when `mode: 'fork'` and login is on — same reasoning as `ForkOptions.ownerUserId`. */
+  ownerUserId?: string;
+}
+
+export interface RollbackResult {
+  mode: 'fork' | 'destructive';
+  toScene: number;
+  /** Present only for `mode: 'destructive'`, and per-table, exactly like `BranchResult.removed` — what actually got deleted. */
+  removed?: BranchResult['removed'];
+  /** Present only for `mode: 'fork'` — the new story to switch to; `truncateToScene`'s own return only reports counts, but a fork produces a whole new place to land. */
+  forkedStory?: Story;
+}
+
+/**
+ * Rolls back the currently-open story to a scene or chapter boundary — the
+ * one surface `truncateToScene`/`forkStory` never had, since both of their
+ * existing callers (`forkStory`'s own continuation case, `branchSave`) only
+ * ever ran it against a copy. This is "shorten this one", not "make a
+ * shorter one beside it" — except when `mode: 'fork'` chooses to make one
+ * beside it anyway, on purpose, as the safe default.
+ */
+export function rollback(world: World, opts: RollbackOptions): RollbackResult {
+  if ((opts.scene === undefined) === (opts.chapter === undefined)) {
+    throw new Error('rollback: pass exactly one of scene or chapter');
+  }
+  let scene = opts.scene;
+  if (opts.chapter !== undefined) {
+    scene = firstSceneOfChapter(world, opts.chapter);
+    if (scene === undefined) throw new Error(`rollback: chapter ${opts.chapter} has no recorded scenes`);
+  }
+  if (scene === undefined || scene < 1) throw new Error('rollback: scene must be 1 or greater');
+  const current = world.session.get().scene;
+  if (scene > current) throw new Error(`rollback: scene ${scene} has not happened yet (currently at scene ${current})`);
+
+  const mode = opts.mode ?? 'fork';
+  if (mode === 'destructive') {
+    const removed = truncateToScene(world, scene);
+    return { mode, toScene: scene, removed };
+  }
+
+  const fork = forkStory(world, { fromStoryId: world.storyId, atScene: scene, ownerUserId: opts.ownerUserId });
+  return { mode, toScene: scene, forkedStory: fork.story };
 }
 
 /**

@@ -8,7 +8,7 @@ import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine.ts';
-import { branchSave, forkStory, truncateToScene } from '../src/loop/branch.ts';
+import { branchSave, firstSceneOfChapter, forkStory, rollback, truncateToScene } from '../src/loop/branch.ts';
 import { seedConsequences } from '../src/consequence/propagate.ts';
 
 function tmp() {
@@ -390,5 +390,96 @@ test('forkStory refuses a scene below 1 and an unknown source story', async () =
   seedWorld(world);
   assert.throws(() => forkStory(world, { fromStoryId: world.storyId, atScene: 0 }), /scene must be 1/);
   assert.throws(() => forkStory(world, { fromStoryId: 'story:does-not-exist' }), /no story/);
+  world.close();
+});
+
+// --------------------------------------------------------------- rollback
+
+test('rollback defaults to fork mode: the original story is left completely untouched', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world); // scenes 1-3
+  world.session.set({ scene: 3, turn: 1 });
+
+  const beforeTurns = world.chronicle.turns().length;
+  const result = rollback(world, { scene: 2 });
+  assert.equal(result.mode, 'fork');
+  assert.equal(result.toScene, 2);
+  assert.ok(result.forkedStory, 'a fork mode result names the new story');
+  assert.equal(result.removed, undefined, 'fork mode reports no deletion counts — nothing was deleted');
+
+  // The original story: same turn count, still sitting at scene 3, exactly
+  // as if rollback had never been called.
+  assert.equal(world.chronicle.turns().length, beforeTurns);
+  assert.equal(world.session.get().scene, 3);
+
+  // The fork: stops at the rollback point, same as any atScene fork.
+  const forked = world.withStory(result.forkedStory!.id);
+  assert.equal(forked.session.get().scene, 2);
+  assert.ok(forked.chronicle.turns().length < beforeTurns, 'the tail is not in the fork');
+  world.close();
+});
+
+test('rollback in destructive mode truncates the current story in place, with no sibling', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world);
+  world.session.set({ scene: 3, turn: 1 });
+  const storiesBefore = world.db.prepare(`SELECT COUNT(*) n FROM stories`).get() as { n: number };
+
+  const result = rollback(world, { scene: 2, mode: 'destructive' });
+  assert.equal(result.mode, 'destructive');
+  assert.equal(result.toScene, 2);
+  assert.ok(result.removed && result.removed.turns >= 1, 'destructive mode reports what it deleted');
+  assert.equal(result.forkedStory, undefined, 'destructive mode names no fork');
+
+  assert.equal(world.session.get().scene, 2, 'the current story itself moved back');
+  const storiesAfter = world.db.prepare(`SELECT COUNT(*) n FROM stories`).get() as { n: number };
+  assert.equal(storiesAfter.n, storiesBefore.n, 'no sibling story was created');
+  world.close();
+});
+
+test('rollback by chapter resolves to the first scene recorded in that chapter', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world);
+  world.chronicle.upsertScene(1, { chapter: 1 });
+  world.chronicle.upsertScene(2, { chapter: 1 });
+  world.chronicle.upsertScene(3, { chapter: 2 });
+  world.session.set({ scene: 3, turn: 1 });
+
+  assert.equal(firstSceneOfChapter(world, 1), 1);
+  assert.equal(firstSceneOfChapter(world, 2), 3);
+  assert.equal(firstSceneOfChapter(world, 3), undefined, 'a chapter with no recorded scenes has nothing to roll back to');
+
+  const result = rollback(world, { chapter: 2, mode: 'destructive' });
+  assert.equal(result.toScene, 3, 'chapter 2 started at scene 3');
+  world.close();
+});
+
+test('rollback refuses ambiguous input (both or neither of scene/chapter)', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world);
+  assert.throws(() => rollback(world, {}), /exactly one/);
+  assert.throws(() => rollback(world, { scene: 1, chapter: 1 }), /exactly one/);
+  world.close();
+});
+
+test('rollback refuses a scene that has not happened yet, and a scene below 1', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world);
+  world.session.set({ scene: 2, turn: 0 });
+  assert.throws(() => rollback(world, { scene: 5 }), /has not happened yet/);
+  assert.throws(() => rollback(world, { scene: 0 }), /scene must be 1/);
+  world.close();
+});
+
+test('rollback by chapter refuses a chapter with no recorded scenes', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  await playHistory(world);
+  assert.throws(() => rollback(world, { chapter: 9 }), /no recorded scenes/);
   world.close();
 });
