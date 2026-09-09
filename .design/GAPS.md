@@ -6,9 +6,10 @@ Companion to `DESIGN.md` (the why) and `PLAN.md` (the build decisions).
 ## The organising insight
 
 Most of what is missing is **not missing engine**. It is machinery that works, is
-tested, and has no way to reach it. Compaction, branching, re-render, JIT deepening
-and the frame budget view all exist and all pass tests; four of the five cannot be
-triggered from the UI at all.
+tested, and had no way to reach it. Compaction, branching, re-render, JIT deepening
+and the frame budget view all exist and all pass tests; at the time this was
+written, four of the five could not be triggered from the UI at all — re-render
+and compaction have since been wired up (1.2, 1.4).
 
 So the cheapest and highest-value work is not building features. It is connecting
 ones already built. That ordering is the plan.
@@ -63,21 +64,34 @@ Needs a little more than a button: a scene picker, and — the real gap — **th
 branch it writes is a file the UI cannot open**. Depends on 3.2 (save management) to
 be genuinely useful, so ship the fork first and the switch with 3.2.
 
-### 1.4 Re-render is unreachable · M
+### 1.4 Re-render is unreachable · M · done
 
 The headline consequence of "prose is a view of state": change the tone, re-render
 chapter 4, nothing that happened changes. `setProse` and pinning both exist. No
 route, no button.
 
-Add a re-render endpoint that renders a stored beat through the current style
-contract, skipping pinned turns, and a per-scene button. Must be visibly
-non-destructive — show what will change and what is pinned before doing it.
+Fixed: `POST /api/turn/:id/regenerate` renders the turn's stored delta through the
+current style contract and refuses a pinned turn with 409 rather than a silent
+no-op. The book view's reroll control (with an optional steering note — "shorter",
+"more tension") calls it, and an MCP tool (`regenerate_turn`) exposes the same path
+to a connector. Covered by `test/api.test.ts` (pinned-turn refusal, unknown-turn
+404, delta left untouched) and `test/engine.test.ts`.
 
-### 1.5 Sheets are not editable · M
+### 1.5 Sheets are not editable · M · done
 
 §11 says "editable, with lock toggles per field". Locks work; the text is read-only,
 including vows — which is odd, because the vow list is the one thing the integrity
 gate actually enforces. `PUT /api/sheet/:id` already accepts a full sheet.
+
+Fixed: a `SheetEditor` component (`web/src/views/SheetEditor.tsx`) covers contract
+(vows — add/remove/retitle/re-rank/toggle-broken, breaking point, cost of break,
+drives), identity (goals/wounds/fears/secrets/allegiances/competencies/arc) and
+voice (diction, sample lines, tics, never-says) on blur, the same pattern
+`AppearanceEditor` already used for the visual half. The route needed no changes —
+only the UI was missing. Covered by `test/api.test.ts` (a full round-trip through
+the exact shape the editor sends, including adding a vow by hand, and the 404 on an
+unknown sheet) and verified live in the browser: added a vow to Brother Anselm,
+reloaded, it survived.
 
 ### 1.6 JIT deepening is never called · M
 
@@ -119,11 +133,31 @@ with a "stay on the mock" dismissal that does not touch the persisted config.
 Verified live on this machine: it correctly offered `bedrock` (real `~/.aws`
 credentials), and dismissing left `fabulist.config.json` untouched.
 
-### 2.2 No export · M
+### 2.2 No export · M · done
 
-There is no way to get the book out — not text, not markdown, not anything. For a
-writing tool that is a strange hole. Markdown and plain text cover it; scene and
+There was no way to get the book out — not text, not markdown, not anything. For a
+writing tool that was a strange hole. Markdown and plain text cover it; scene and
 chapter headings come from the compaction work.
+
+Fixed: `exportMarkdown`/`exportPlainText` (new, `src/loop/export.ts`) read only
+what `GET /api/book`/`GET /api/chapters` already expose — `Turn.bookProse`,
+`chronicle.scenes()`, `chronicle.chapters()` — rather than a second rendering
+path, so a hand-edited or pinned turn's *current* prose is what gets exported,
+never a stale copy. A scene groups under its chapter's heading (using the
+chapter's own summary when compaction wrote one), each scene gets its own
+heading plus its own summary when one exists, and each turn's prose follows
+as a paragraph. Plain text is the same structure with `#`/`##`/`###`/
+`*italic*` unwrapped to a reader-friendly heading style, since a markdown
+file opened in a plain-text viewer would otherwise render the hash marks
+literally. `GET /api/export?format=markdown|text` serves it with a
+`content-disposition: attachment` filename derived from the world's title,
+so a plain `<a href>` download link works with no client-side fetch-then-
+blob dance — which is what the book view's new "export .md"/"export .txt"
+links actually are. Covered by `test/export.test.ts` (heading structure,
+chapter/scene grouping, summaries on/off, explicit title override, empty
+book, plain-text stripping, hand-edited prose) and `test/api.test.ts` (the
+route: headers, both formats, empty book). Verified live: downloaded both
+formats against a real server, confirmed the markdown import correctly.
 
 ### 2.3 No save management · M · multi-story done, cross-file management still open
 
@@ -195,13 +229,31 @@ Covered by a store test (`test/store.test.ts`) and an API test.
 
 ## Tier 3 — genuine holes
 
-### 3.1 No timeline view · M
+### 3.1 No timeline view · M · done
 
-§11 lists "Timeline — chronicle with the divergence points marked". The book is a
-flat list of turns. Scenes, chapters and the divergence ledger all exist in the
+§11 lists "Timeline — chronicle with the divergence points marked". The book was a
+flat list of turns. Scenes, chapters and the divergence ledger all existed in the
 database with nothing rendering them as a spine.
 
-Most valuable once 1.2 makes scenes advance, so schedule it after.
+Fixed, absorbing 3.5 in the same pass: `GET /api/timeline` (new,
+`src/server/api.ts`) assembles `chronicle.scenes()`, `chronicle.chapters()`
+and `chronicle.divergences()` into one connected view — every scene grouped
+under its chapter heading, with its own title/summary and turn count, and
+every divergence recorded at that scene attached to it directly rather than
+living only in a sidebar. The union handles three cases a naive `scenes()`
+join misses: a scene with turns but no `scenes` row yet (the current,
+still-open scene), a row with no turns (closed too early to summarise), and
+— the case that matters most for this route specifically — a divergence
+recorded at the current scene before any turn in it has committed (a
+directive/override can fire mid-turn). A new `TimelineTab` renders it as a
+vertical spine: one chapter head, one row per scene beneath it marked
+`current` where relevant, and every divergence inline with a "vs. canon"
+toggle to reveal what it actually diverged from. Covered by `test/api.test.ts`
+(the assembly, the exact-scene attribution, the empty-book case) and
+verified live: played two turns including a vow-break override, closed the
+scene, and watched the divergence stay correctly attached to scene 1 while
+scene 2 appeared as the current, not-yet-played scene under the same
+chapter.
 
 ### 3.2 No ingest depth panel · M
 
@@ -209,26 +261,50 @@ Most valuable once 1.2 makes scenes advance, so schedule it after.
 see what is skim versus deep, or to promote a region before playing there. Pairs
 with 1.6 — one shows the state, the other acts on it.
 
-### 3.3 Epistemics are read-only · S
+### 3.3 Epistemics are read-only · S · done
 
 The facts view shows who knows what. There is no way to grant or revoke knowledge,
 which is the natural authoring move when the extractor gets it wrong — and getting
 it wrong here is exactly what produces an NPC reacting to something they should not
 know.
 
-### 3.4 No thread authoring · S
+Fixed: `POST /api/fact/:id/knowledge` grants or updates an entity's knowledge level
+(`knows`/`suspects`/`wrong`), `DELETE /api/fact/:id/knowledge/:entityId` revokes it
+— a new `ChronicleStore.revokeKnowledge` that deletes the row outright rather than
+overwriting with a level, so a revoked entity goes back to "never told" rather than
+to a fourth state meaning "explicitly does not know". The facts view now shows a ×
+next to every knower and a "grant to…" picker (excluding existing knowers) per
+fact. Covered by `test/store.test.ts` and `test/api.test.ts` (grant, bad-level 400,
+unknown-fact 404, revoke) and verified live: granted the route fact to Novice Tem,
+revoked it, both round-tripped and the candidate list updated each time.
+
+### 3.4 No thread authoring · S · done
 
 Tension is draggable; you cannot create, retitle or close a thread by hand.
 
-### 3.5 Divergence ledger is half-hidden · S
+Fixed: `POST /api/threads` creates a thread (title required, everything else
+defaulted — tension 0.5, empty stakes/parties/resolutions, status `open`); retitle
+and close were already one call away since `PUT /api/thread/:id` already accepted
+`title`/`status`, only the UI was missing. The threads view got a "start a thread"
+panel and, per thread, a click-to-retitle title and resolve/abandon/reopen buttons.
+Covered by `test/api.test.ts` and verified live: created "who told the garrison",
+retitled it, resolved it (status flipped, controls swapped to a single "reopen"),
+all surviving a reload.
 
-Appears in the book sidebar only when non-empty, nowhere else. It is the record of
-how far this playthrough has left canon, and it deserves a real view — most likely
-inside the timeline.
+### 3.5 Divergence ledger is half-hidden · S · done, folded into 3.1
 
-### 3.6 No way to roll back a scene, chapter or part in place · M
+Used to appear in the book sidebar only when non-empty, nowhere else. It is the
+record of how far this playthrough has left canon, and deserved a real view.
 
-**TODO.** You can go forward and you can branch sideways. You cannot go back.
+Fixed as part of 3.1's timeline: every divergence now appears inline against
+the exact scene it happened at, always — not gated on non-emptiness — plus a
+running total in the timeline's own sidebar. The book sidebar's own ledger
+card is untouched (still useful as "what just happened" context beside the
+most recent turn); the timeline is now the place for "the whole record".
+
+### 3.6 No way to roll back a scene, chapter or part in place · M · done
+
+You can go forward and you can branch sideways. Now you can also go back.
 
 Every reason an author wants to: the last chapter went somewhere you did not
 mean, a model wrote three turns of drift before you noticed, an override you
@@ -236,7 +312,7 @@ allowed turned out to break the character after all, a consequence fired that
 you want to un-fire, or you simply want to replay a stretch differently without
 carrying a second save around.
 
-**The engine for this already exists and is tested.** `truncateToScene(world,
+**The engine for this already existed and was tested.** `truncateToScene(world,
 scene)` in `src/loop/branch.ts` deletes every chronicle row at or after a scene
 boundary — turns, events, consequences, facts, threads, directives, divergences,
 illustrations — restores edges retired after that point, and resets the session
@@ -244,42 +320,66 @@ to that scene. `test/branch.test.ts` covers it directly (a dozen assertions) and
 `checkIntegrity` is run against the result, because it deletes rows other tables
 reference.
 
-What is missing is only that **nothing can reach it on the story you are
-reading**. Its two callers are `forkStory` and `branchSave`, and both call it on
-a *copy*: the semantics on offer today are always "leave this playthrough
-intact, make a shorter one beside it". There is no route, no MCP tool, no CLI
-command and no UI for "shorten this one".
+What was missing was only that **nothing could reach it on the story you were
+reading**. Fixed:
 
-What it needs:
+1. **Chapter/part granularity.** `firstSceneOfChapter(world, chapter)` (new,
+   `src/loop/branch.ts`) reads `scenes.chapter` — the actual, authoritative
+   record `Compactor` writes as scenes close — rather than recomputing
+   `Compactor.chapterOf(scene)`, which depends on a runtime-configurable
+   `chapterSize` this module has no access to. `rollback(world, { chapter })`
+   resolves it and calls straight into `truncateToScene`. Parts never became
+   a real level, so there is nothing to map there yet.
+2. **A reachable surface.** `POST /api/rollback`, a `rollback` MCP tool, and a
+   "roll back…" control in the book view next to the existing scene-close
+   button. The panel offers chapter granularity when any chapters have
+   closed, scene granularity always, and shows both outcomes side by side
+   (see decision 4 below) rather than one button whose behaviour depends on
+   a mode nobody remembers setting.
+3. **Ownership and confirmation.** `ownsStoryOrRespond` (REST) /
+   `assertOwned` (MCP) gate it, same as every other story-scoped write. The
+   destructive path additionally requires a confirm dialog naming the exact
+   scene/chapter and stating it cannot be undone; the fork path needs no
+   confirm, since nothing is destroyed. Both report exactly what happened —
+   `removed` (per-table counts, from `truncateToScene`) for destructive,
+   `forkedStory` for fork.
+4. **The recoverability decision, settled.** Fork-under-the-hood by default,
+   with an explicit destructive option — the safer of the two designs this
+   section used to leave open. `mode: 'fork'` (default) is `forkStory` with
+   `atScene` set to the target: a new sibling story that stops exactly at
+   the rollback point, and the route/tool switches to it immediately (unlike
+   `POST /api/stories/fork`, which deliberately does not switch — a
+   rollback's whole point is "go there now"). The long version survives
+   completely untouched as a story you can still open. `mode: 'destructive'`
+   truncates the current story in place, no sibling, no way back except a
+   save you already had.
 
-1. **Chapter/part granularity, not just scene.** The user-facing unit is "undo
-   the last chapter", and chapters already exist —
-   `Compactor.chapterOf(scene)` and `chronicle.chapters()`. Rolling back
-   chapter *n* is `truncateToScene(world, firstSceneOf(n))`, so this is a
-   mapping over machinery that is already there rather than new deletion logic.
-   Same for "back to the start of this part" if parts ever become a real level.
-2. **A reachable surface.** `POST /api/rollback` with a scene or chapter, a
-   `rollback` MCP tool (the connector needs it more than the browser does — a
-   model that has just written a bad turn has no way to take it back), and a
-   control in the book view next to the existing scene-close button.
-3. **Ownership and confirmation.** It destroys committed prose, so: the same
-   `assertOwned`/`ownsStoryOrRespond` check the other story-scoped writes use,
-   an explicit confirmation in the UI, and a return value that says exactly
-   what was removed — `truncateToScene` already reports per-table counts.
-4. **A decision on whether it should be recoverable.** Two honest options, and
-   this is the only real design question here: either rollback is destructive
-   and the answer to "I want it back" is "you should have forked first", or
-   rollback *is* a fork under the hood — branch the current story at the target
-   scene, switch to the branch, keep the long version as a sibling save. The
-   second is strictly safer, costs a story row plus a chronicle copy, and needs
-   no new deletion path at all; the first is what people usually mean by undo.
-   Leaning toward the second, defaulting to keeping the discarded tail, with a
-   "discard permanently" option — but it is not decided.
+**A login-on subtlety the implementation had to get right, not just the
+happy path:** switching on a fork must never mutate the shared, server-wide
+`CurrentStory` pointer when a real signed-in caller is behind the request —
+that pointer is process-wide, and dragging every other user onto one
+caller's rollback would be exactly the bug `switchStoryTool`'s own
+`selectStory` distinction already exists to prevent. So the REST route and
+MCP tool only call `currentStory.switchTo(...)` in the login-off/legacy
+shape; with login on, `forkStory`'s own `createStory` already stamps the new
+story's `last_played_at` as now, so `worldFor(user)`'s "most recently played
+of *this user's* stories" resolution lands on it naturally on the caller's
+very next request, with no shared state touched at all. Verified with a
+dedicated test (`POST /api/rollback with login on never moves the shared
+server-wide pointer, only worldFor resolution`) since this is exactly the
+kind of bug fixture tests against a single caller cannot show.
 
-Related but not the same: **1.3** (branching is unreachable) exposes
-fork-at-scene, which is the sideways move. Doing 1.3 first would make option 4's
-second variant nearly free, since the branch half would already be built and
-routed.
+Covered by `test/branch.test.ts` (the primitive: fork mode leaves the
+original untouched, destructive mode truncates in place with no sibling,
+chapter resolution, ambiguous/out-of-range input refused) and
+`test/api.test.ts` (the route: both modes, the 503 a fork-mode call gets
+with no `CurrentStory` to switch through, the 400s, the login-on pointer
+test above). Verified live in the browser against a real server: played a
+turn, rolled back in fork mode (switched to a new empty sibling book, the
+original untouched and still openable with its turn intact in the Stories
+tab), then rolled back the original in destructive mode (confirm dialog
+named the exact scene, accepting it emptied that book in place with no
+third sibling created).
 
 ---
 
@@ -460,16 +560,30 @@ scene close (both the no-summary and summary-produced cases), graph search and
 selection, the wizard's provider offer with a real `bedrock` probe, and the topbar
 token total after a played turn.
 
-**Slice B — the authoring surface.** 1.4, 1.5, 3.3, 3.4.
+**Slice B — the authoring surface.** 1.4, 1.5, 3.3, 3.4. **Done.**
 Editing what the AI wrote: prose, sheets, knowledge, threads. This is the "inspect
-and nudge" half of §11 that is currently mostly inspect.
+and nudge" half of §11 that is currently mostly inspect. 1.4 landed earlier than
+this doc had recorded (`regenerate_turn`, already routed and MCP-exposed); 1.5,
+3.3 and 3.4 landed together: a `SheetEditor` for identity/contract/voice including
+vows, grant/revoke on the facts view, and create/retitle/close on the threads view.
+963 tests (952 + 11 new), typecheck and lint clean (0 errors, same 24 pre-existing
+warnings), verified live in the browser: added and reloaded a vow, created →
+retitled → resolved a thread, granted and revoked a fact's knowledge — every one
+surviving a reload.
 
-**Slice C — worlds and continuity.** 2.3, 1.3, 3.6, 2.2, 3.1, 3.5.
-Save management first, because branching and export both need it. Then the timeline,
-which needs 1.2 from Slice A to have scenes worth showing. 3.6 (rollback) sits
-directly after 1.3 (branching) on purpose: they are the sideways and backwards
-halves of the same "move around in this playthrough" surface, and 1.3 built first
-makes the safe, non-destructive form of 3.6 almost free.
+**Slice C — worlds and continuity.** 2.3, 1.3, 3.6, 2.2, 3.1, 3.5. **Everything
+except 1.3's own UI is done.**
+Save management first, because branching and export both need it — 2.3's
+multi-story backend is what made 3.6's default (fork-under-the-hood) nearly
+free once it was built. 3.6 landed ahead of 1.3's own UI (the cross-file
+branch button proper is still unreached) because rollback's fork mode only
+needed `forkStory` and `CurrentStory`, both already in place; 2.2 turned out
+to need nothing from either — it only ever needed `chronicle.scenes()`/
+`chapters()`, already there for the book view's own scene breaks. 3.1 landed
+absorbing 3.5 in the same pass, exactly as planned, once it turned out 1.2's
+scenes were already worth showing. Remaining: 1.3's own scene-picker/button
+for `POST /api/branch` — the one item in this slice with a genuine UI gap
+left.
 
 **Slice D — depth.** 1.6, 3.2.
 Play-time deepening and the panel that shows it. Deliberately last of the build
@@ -500,10 +614,36 @@ issues it found degrade the character list, not play. 4.2 (interrupt copy)
 remains genuinely open: the 4.1 session never triggered one, so it needs either
 a deliberately provocative session or targeted testing, not a repeat of this one.
 
+**Slice B is now done.** All four items (1.4 turned out to already be done; 1.5,
+3.3, 3.4 landed together) were reachability-shaped in the same sense Slice A was:
+the write routes mostly already existed (`PUT /api/sheet/:id`, `PUT
+/api/thread/:id`) or needed one small, obvious addition (`POST /api/threads`,
+grant/revoke on `fact_knowledge`) — the actual gap was UI. No design decisions
+needed, unlike Slice C's rollback question, now settled below.
+
 **Added since:** 4.8, distribution metadata ingested as canon. It is the
 concrete, measured form of the "real-world pages as character candidates" note
 two paragraphs up, and it belongs with the ingest-quality work rather than in a
 play slice. Worth doing before any further real-wiki session, because it changes
 what a crawl of the same seeds produces — and therefore what such a session is
 actually testing.
+
+**3.6 (rollback), 2.2 (export) and 3.1+3.5 (timeline) are now done too**,
+ahead of the rest of Slice C. 3.6's design question (destructive vs.
+fork-under-the-hood) is settled in favour of fork by default, exactly the
+lean this doc already had, with an explicit destructive option. Doing it
+before 1.3's own UI turned out fine: rollback's fork mode only needed
+`forkStory` and `CurrentStory`, both already built for 2.3, so nothing about
+1.3's still-missing scene-picker/button was actually a prerequisite. 2.2 and
+3.1 needed even less: no design decisions at all, and no dependency on 2.3,
+1.3 or 3.6 — both only ever needed `chronicle.scenes()`/`chapters()`, already
+there for the book view's own scene breaks. 3.1 absorbed 3.5 in the same
+pass, as planned from the start.
+
+**Slice C is now down to one item: 1.3's own UI** — a scene picker and button
+for `POST /api/branch`, the cross-*file* handoff case, distinct from the
+same-file fork the Stories tab and rollback already use. Everything else in
+this repository's own plan for the near term is either done or is Slice D
+(1.6, 3.2 — deliberately last, and 4.1 already argued for scheduling them
+after a real ingest session, which happened).
 

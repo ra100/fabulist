@@ -100,6 +100,26 @@ test('epistemic state keeps facts the player cannot know', () => {
   world.close();
 });
 
+/**
+ * The undo of a grant, and §11's fix for the natural authoring move when the
+ * extractor gets epistemics wrong. `revokeKnowledge` goes back to "never
+ * told" by deleting the row outright, not to some fourth level meaning
+ * "explicitly does not know" — distinct from overwriting with `'wrong'`,
+ * which is a different claim.
+ */
+test('revoking knowledge removes the row outright, distinct from overwriting with a level', () => {
+  const world = w();
+  const fact = world.chronicle.addFact('the seal is forged', 2);
+  world.chronicle.setKnowledge(fact.id, 'char:forger', 'knows', 2);
+  assert.ok(world.chronicle.knows('char:forger', fact.id));
+
+  world.chronicle.revokeKnowledge(fact.id, 'char:forger');
+  assert.ok(!world.chronicle.knows('char:forger', fact.id));
+  assert.equal(world.chronicle.knowersOf(fact.id).find((k) => k.entityId === 'char:forger'), undefined);
+  assert.deepEqual(world.chronicle.knowledgeOf('char:forger'), [], 'gone, not present at some other level');
+  world.close();
+});
+
 test('salience decays but bumped entities stay hot', () => {
   const world = w();
   world.graph.upsert({ id: 'char:hot', type: 'Character', name: 'Hot', salience: 0.5 }, 'canon');

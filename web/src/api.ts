@@ -181,6 +181,22 @@ export interface State {
   usage: { tokensIn: number; tokensOut: number; calls: number; byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }> };
 }
 
+/** §11's "chronicle with the divergence points marked" — one call, one spine. */
+export interface Timeline {
+  currentScene: number;
+  chapters: Array<{ chapter: number; title: string; summary: string }>;
+  scenes: Array<{
+    scene: number;
+    title: string;
+    summary: string;
+    chapter: number;
+    turnCount: number;
+    divergences: Array<{ id: number; scene: number; kind: string; detail: string; canon: string }>;
+  }>;
+  divergenceCount: number;
+}
+
+
 export interface BookTurn {
   id: string; scene: number; turn: number; rawInput: string; bookProse: string;
   pinned: boolean; move: string | null; integrity: string | null; lintScore: number | null;
@@ -618,10 +634,18 @@ export const api = {
   regenerate: (id: string, note?: string) =>
     post<{ id: string; bookProse: string; pinned: boolean }>(`/turn/${encodeURIComponent(id)}/regenerate`, note ? { note } : {}),
   threads: () => req<Thread[]>('/threads'),
+  /** §11's "you cannot create a thread by hand" — retitle/close already went through `updateThread`. */
+  createThread: (title: string, stakes: string) => post<Thread>('/threads', { title, stakes }),
   updateThread: (id: string, patch: Partial<Thread>) => put<Thread>(`/thread/${encodeURIComponent(id)}`, patch),
   consequences: () => req<Consequence[]>('/consequences'),
   causality: () => req<CausalityGraph>('/causality'),
   facts: () => req<Fact[]>('/facts'),
+  /** Grants or updates an entity's knowledge of a fact — the authoring fix when the extractor gets epistemics wrong. */
+  grantKnowledge: (factId: string, entityId: string, level: string) =>
+    post<{ factId: string; knowers: unknown[] }>(`/fact/${encodeURIComponent(factId)}/knowledge`, { entityId, level }),
+  /** The undo: back to "never told", not to a fourth level meaning "explicitly does not know". */
+  revokeKnowledge: (factId: string, entityId: string) =>
+    req<{ factId: string; knowers: unknown[] }>(`/fact/${encodeURIComponent(factId)}/knowledge/${encodeURIComponent(entityId)}`, { method: 'DELETE' }),
   style: () => req<StyleContract>('/style'),
   setStyle: (patch: Partial<StyleContract>) => put<StyleContract>('/style', patch),
   knobs: () => req<Knobs>('/knobs'),
@@ -641,6 +665,23 @@ export const api = {
     post<{ closedScene: number; nowScene: number; summary: string | null; scenesSummarised: number[]; chaptersSummarised: number[] }>(
       '/scene/close',
     ),
+  chapters: () => req<{ chapters: Array<{ chapter: number; title: string; summary: string }>; scenes: State['scenes'] }>('/chapters'),
+  /**
+   * Rolls the current book back to a scene or chapter boundary (GAPS.md
+   * 3.6). `mode` defaults to `'fork'` server-side — the safe option — so an
+   * unset `mode` here mirrors that rather than picking one client-side.
+   */
+  rollback: (target: { scene?: number; chapter?: number; mode?: 'fork' | 'destructive' }) =>
+    post<{
+      mode: 'fork' | 'destructive';
+      toScene: number;
+      removed?: Record<string, number>;
+      forkedStory?: { id: string; title: string };
+    }>('/rollback', target),
+  /** The bytes live behind this URL, same shape as `illustrate.imageUrl` — a plain `<a href>`/download link, not a fetch-then-blob dance. */
+  exportUrl: (format: 'markdown' | 'text') => withStoryId(`/api/export?format=${format}`),
+  /** §11's "chronicle with the divergence points marked" — one call assembling scenes, chapters and divergences into a spine. */
+  timeline: () => req<Timeline>('/timeline'),
 
   config: {
     get: () => req<ConfigBundle>('/config'),
