@@ -88,6 +88,13 @@ function toSheet(r: SheetRow): CharacterSheet {
   };
 }
 
+/**
+ * Rows per statement for `putMany`. Nine parameters per row against Postgres'
+ * 65,535-parameter ceiling, so 500 is 4,500 — the same headroom `BULK_ROWS` in
+ * `graph-pg.ts` keeps.
+ */
+const BULK_SHEET_ROWS = 500;
+
 /** An absent sheet, rendered so callers never branch on existence. */
 function blankSheet(entityId: EntityId): CharacterSheet {
   return {
@@ -231,6 +238,69 @@ export class CastStore {
          is_player = EXCLUDED.is_player`,
       [this.storyId, sheet.entityId, ...json, sheet.isPlayer],
     );
+  }
+
+  /**
+   * Many sheets in one statement — the ingest path's sheet writer.
+   *
+   * Pass A seeds a sheet from every character infobox (1,091 of them in the real
+   * Star Trek ingest), so this has the same round-trip problem as the entity and
+   * edge writers.
+   *
+   * `is_player` is only written on the chronicle side, as `put` does: the
+   * protagonist belongs to a playthrough, not the source material. A canon batch
+   * that tried to carry the flag would drop it silently — the bug that made a
+   * seeded world unplayable until a test caught it.
+   */
+  async putMany(sheets: CharacterSheet[], layer: Layer = 'chronicle'): Promise<number> {
+    if (!sheets.length) return 0;
+    // Last write wins per entity, matching what sequential `put` calls would leave
+    // and avoiding Postgres' "cannot affect row a second time" on a duplicate.
+    const unique = new Map<string, CharacterSheet>();
+    for (const s of sheets) unique.set(s.entityId, s);
+    const rows = [...unique.values()];
+
+    const canon = layer === 'canon';
+    const scopeCol = canon ? 'world_id' : 'story_id';
+    const scope: string | number = canon ? this.requireCanonWorld() : this.storyId;
+    const table = canon ? 'canon_sheets' : 'chron_sheets';
+    const cols = canon
+      ? `${scopeCol}, entity_id, identity, contract, voice, condition, appearance, locks`
+      : `${scopeCol}, entity_id, identity, contract, voice, condition, appearance, locks, is_player`;
+
+    let written = 0;
+    for (let i = 0; i < rows.length; i += BULK_SHEET_ROWS) {
+      const chunk = rows.slice(i, i + BULK_SHEET_ROWS);
+      const params: unknown[] = [];
+      const tuples = chunk.map((sheet) => {
+        const base = params.length;
+        params.push(
+          scope,
+          sheet.entityId,
+          JSON.stringify(sheet.identity),
+          JSON.stringify(sheet.contract),
+          JSON.stringify(sheet.voice),
+          JSON.stringify(sheet.condition),
+          JSON.stringify(sheet.appearance),
+          JSON.stringify(sheet.locks),
+        );
+        const json = (n: number) => `$${base + n}::jsonb`;
+        const head = `$${base + 1},$${base + 2},${json(3)},${json(4)},${json(5)},${json(6)},${json(7)},${json(8)}`;
+        if (canon) return `(${head})`;
+        params.push(sheet.isPlayer);
+        return `(${head},$${params.length})`;
+      });
+      const res = await this.db.query(
+        `INSERT INTO ${table} (${cols}) VALUES ${tuples.join(',')}
+         ON CONFLICT (${scopeCol}, entity_id) DO UPDATE SET
+           identity = EXCLUDED.identity, contract = EXCLUDED.contract,
+           voice = EXCLUDED.voice, condition = EXCLUDED.condition,
+           appearance = EXCLUDED.appearance, locks = EXCLUDED.locks${canon ? '' : ', is_player = EXCLUDED.is_player'}`,
+        params,
+      );
+      written += res.rowCount ?? 0;
+    }
+    return written;
   }
 
   /**

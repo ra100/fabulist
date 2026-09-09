@@ -53,6 +53,15 @@ import type {
   StoryId,
 } from '../domain/types.ts';
 
+/**
+ * Rows per statement for the bulk writers.
+ *
+ * Bounded by Postgres' 65,535-parameter ceiling: the widest table here binds 11
+ * parameters per row, so 500 rows is 5,500 — comfortably clear, and large enough
+ * that a 60,000-page ingest is ~120 statements rather than 60,000.
+ */
+const BULK_ROWS = 500;
+
 /** A row as either table returns it; `pri` tells the overlay which won. */
 interface EntityRow {
   id: string;
@@ -327,6 +336,69 @@ export class GraphStore {
     );
   }
 
+  /**
+   * Many entities in one statement — the ingest path's writer.
+   *
+   * Pass A processes up to 60,000 pages in a run, and `upsert` per row would be
+   * 60,000 round trips. This batches into multi-row INSERTs of `BULK_ROWS`, which
+   * turns a wiki ingest from "hours of latency" into a handful of statements per
+   * thousand pages.
+   *
+   * Deliberately still an INSERT with ON CONFLICT rather than COPY: it goes through
+   * the same constraint and type checking as any other write, so a malformed
+   * extraction is rejected here instead of corrupting canon. Same tradeoff the
+   * SQLite importer makes, and for the same reason.
+   */
+  async upsertMany(
+    entities: Array<Partial<Entity> & { id: EntityId; type: EntityType; name: string }>,
+    layer: Layer = 'chronicle',
+  ): Promise<number> {
+    if (!entities.length) return 0;
+    const table = layer === 'canon' ? 'canon_entities' : 'chron_entities';
+    const scopeCol = layer === 'canon' ? 'world_id' : 'story_id';
+    const scope: string | number = layer === 'canon' ? this.requireCanonWorld() : this.storyId;
+    const cols = `${scopeCol}, id, type, name, summary, provenance, confidence, salience, depth_level, props, created_scene`;
+
+    let written = 0;
+    for (let i = 0; i < entities.length; i += BULK_ROWS) {
+      const chunk = entities.slice(i, i + BULK_ROWS);
+      const params: unknown[] = [];
+      const tuples = chunk.map((e) => {
+        const base = params.length;
+        params.push(
+          scope,
+          e.id,
+          e.type,
+          e.name,
+          e.summary ?? '',
+          e.provenance ?? 'authored',
+          e.confidence ?? 1,
+          e.salience ?? 0.5,
+          e.depthLevel ?? 0,
+          JSON.stringify(e.props ?? {}),
+          e.createdScene ?? 0,
+        );
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7},$${base + 8},$${base + 9},$${base + 10}::jsonb,$${base + 11})`;
+      });
+      const res = await this.db.query(
+        `INSERT INTO ${table} (${cols}) VALUES ${tuples.join(',')}
+         ON CONFLICT (${scopeCol}, id) DO UPDATE SET
+           type = EXCLUDED.type,
+           name = EXCLUDED.name,
+           summary = EXCLUDED.summary,
+           provenance = EXCLUDED.provenance,
+           confidence = EXCLUDED.confidence,
+           salience = EXCLUDED.salience,
+           depth_level = EXCLUDED.depth_level,
+           props = EXCLUDED.props,
+           created_scene = EXCLUDED.created_scene`,
+        params,
+      );
+      written += res.rowCount ?? 0;
+    }
+    return written;
+  }
+
   async list(
     opts: { type?: EntityType; layer?: Layer; limit?: number; minSalience?: number } = {},
   ): Promise<Entity[]> {
@@ -597,6 +669,58 @@ export class GraphStore {
        DO UPDATE SET weight = EXCLUDED.weight, evidence = COALESCE(EXCLUDED.evidence, ${table}.evidence)`,
       [scope, a.subject, a.predicate, a.object, scene, a.weight ?? 0.5, provenance, a.evidence ?? null],
     );
+  }
+
+  /**
+   * Many edges in one statement — the ingest path's edge writer.
+   *
+   * Pass A emits far more edges than entities (the real Star Trek ingest produced
+   * 152,456 canon edges from 33,332 entities), so this is the single hottest write
+   * in the system and one query per edge would dominate an ingest completely.
+   *
+   * One subtlety: a batch can contain the same (subject, predicate, object) twice —
+   * two infobox fields on one page can imply the same relation — and Postgres
+   * refuses to `ON CONFLICT DO UPDATE` the same row twice in one statement
+   * ("cannot affect row a second time"). Duplicates are therefore collapsed here,
+   * keeping the last occurrence, which matches what sequential `assertEdge` calls
+   * would have left behind.
+   */
+  async assertEdgesMany(
+    edges: EdgeAssert[],
+    scene: number,
+    layer: Layer = 'chronicle',
+    provenance = 'authored',
+  ): Promise<number> {
+    if (!edges.length) return 0;
+    const table = layer === 'canon' ? 'canon_edges' : 'chron_edges';
+    const scopeCol = layer === 'canon' ? 'world_id' : 'story_id';
+    const scope: string | number = layer === 'canon' ? this.requireCanonWorld() : this.storyId;
+
+    // Collapse to one row per identity, last write winning.
+    const unique = new Map<string, EdgeAssert>();
+    for (const e of edges) unique.set(`${e.subject}\u0000${e.predicate}\u0000${e.object}`, e);
+    const rows = [...unique.values()];
+
+    let written = 0;
+    for (let i = 0; i < rows.length; i += BULK_ROWS) {
+      const chunk = rows.slice(i, i + BULK_ROWS);
+      const params: unknown[] = [];
+      const tuples = chunk.map((a) => {
+        const base = params.length;
+        params.push(scope, a.subject, a.predicate, a.object, scene, a.weight ?? 0.5, provenance, a.evidence ?? null);
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},NULL,$${base + 6},$${base + 7},1,$${base + 8})`;
+      });
+      const res = await this.db.query(
+        `INSERT INTO ${table}
+           (${scopeCol}, subject, predicate, object, valid_from, valid_to, weight, provenance, confidence, evidence)
+         VALUES ${tuples.join(',')}
+         ON CONFLICT (${scopeCol}, subject, predicate, object) WHERE valid_to IS NULL
+         DO UPDATE SET weight = EXCLUDED.weight, evidence = COALESCE(EXCLUDED.evidence, ${table}.evidence)`,
+        params,
+      );
+      written += res.rowCount ?? 0;
+    }
+    return written;
   }
 
   /**
