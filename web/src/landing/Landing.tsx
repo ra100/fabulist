@@ -409,6 +409,9 @@ export function Landing() {
           <a href="#local">run it</a>
           <a href="#worlds">worlds</a>
         </nav>
+        <a className="lp-cta kofi" href={KOFI} target="_blank" rel="noopener noreferrer">
+          <span aria-hidden="true">♥</span> Support on Ko-fi
+        </a>
         <a className="lp-cta primary" href={enter.href}>
           {enter.label}
         </a>
