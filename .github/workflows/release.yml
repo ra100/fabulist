@@ -90,11 +90,12 @@ jobs:
           WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
           WORKOS_CLIENT_ID: ${{ vars.WORKOS_CLIENT_ID }}
           WORKOS_COOKIE_PASSWORD: ${{ secrets.WORKOS_COOKIE_PASSWORD }}
-          # A real secret: it is the database password, and `render_env` also
-          # derives FABULIST_PG from it. Unset means the deployed instance has no
-          # database configured, and `serve-pg` says so at boot rather than
-          # silently trying localhost.
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          # A real secret: it carries the database password. Set it to the full
+          # connection string for the VPS's own Postgres — see the comment in
+          # `render_env` below for the `host.docker.internal` form a container needs.
+          # Unset means the deployed instance has no database configured, and
+          # `serve-pg` says so at boot rather than silently trying localhost.
+          FABULIST_PG: ${{ secrets.FABULIST_PG }}
         run: |
           set -euo pipefail
           install -m 600 -D /dev/null "$HOME/.ssh/deploy_key"
@@ -134,21 +135,28 @@ jobs:
             for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL \
                         AUTH_REQUIRE_LOGIN AUTH_ADMIN_EMAILS \
                         WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD \
-                        POSTGRES_PASSWORD; do
+                        FABULIST_PG; do
               value="${!name:-}"
               [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
             done
-            # The app's connection string, derived rather than configured
-            # separately. Two variables that have to agree about one password is
-            # a way to have them disagree: `postgres` is the compose service
-            # name, resolved on the compose network, and the database and user
-            # are fixed by docker-compose.yml's own `environment:` block.
+            # The database URL is passed through as a variable rather than
+            # assembled here.
             #
-            # Skipped entirely when POSTGRES_PASSWORD is unset, like everything
-            # above — and then `serve-pg` exits at boot with a clear message
-            # about setting FABULIST_PG rather than silently trying localhost.
-            [ -n "${POSTGRES_PASSWORD:-}" ] \
-              && printf 'FABULIST_PG=postgres://fabulist:%s@postgres:5432/fabulist\n' "$POSTGRES_PASSWORD"
+            # An earlier version derived it as
+            # `postgres://fabulist:$POSTGRES_PASSWORD@postgres:5432/fabulist` — the
+            # *container* Postgres. That is wrong for this deployment: the VPS has
+            # its own Postgres, and the bundled one is now an opt-in
+            # `--profile bundled` for local runs (see docker-compose.yml). Deriving
+            # it also silently decided the host, port, database and role, none of
+            # which this workflow can know.
+            #
+            # `host.docker.internal` is the hostname to use for a Postgres on the
+            # VPS itself — docker-compose.yml maps it to `host-gateway`, since the
+            # container's own `localhost` is not the host's. So a typical value is
+            #   postgres://fabulist:pw@host.docker.internal:5432/fabulist
+            #
+            # Skipped when unset, like everything above, and `serve-pg` then exits
+            # at boot naming the variable rather than silently trying localhost.
             # Without this, `[ -n "$value" ]` on the *last* unset variable in
             # the loop returns 1, which becomes render_env's own exit code —
             # and `set -e` upstream would then fail the whole step on the
