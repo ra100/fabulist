@@ -204,17 +204,66 @@ case "$action" in
     # deletes anything, and the worst case of running it when it was already correct is
     # that it does nothing. That is deliberately a different shape from the cluster
     # check that once read "I cannot tell" as "safe to delete".
+    # Chowns only what the app actually writes, and never the database directory.
+    #
+    # A `chown -R` of the whole data directory broke production: on this instance the
+    # database directory sits *inside* it, so the recursive chown took Postgres' own
+    # files from uid 999 and every backend died with
+    # `FATAL: could not open file "global/pg_filenode.map": Permission denied`.
+    # Recursion over a directory whose contents belong to another service was the
+    # mistake — the app writes two specific places, so only those are touched.
+    #
+    # `images/` needs -R because illustrations live under it. `worlds/` deliberately
+    # does *not*: the app only renames `world.db` within each subdirectory, so the
+    # directories themselves need to be writable while their contents can stay as they
+    # are — and a `-R` there would be one more chance to trample something.
     if [ -d "${FABULIST_DATA_DIR:-./fabulist-data}" ]; then
       data_parent="$(cd "$(dirname "${FABULIST_DATA_DIR:-./fabulist-data}")" && pwd)"
       data_leaf="$(basename "${FABULIST_DATA_DIR:-./fabulist-data}")"
-      if docker run --rm -v "$data_parent:/parent" --user 0 alpine \
-        chown -R 1000:1000 "/parent/$data_leaf" 2>/dev/null; then
-        echo "data directory owned by uid 1000 (the app no longer runs as root)"
+      if docker run --rm -v "$data_parent:/parent" --user 0 alpine sh -c "
+          d='/parent/$data_leaf'
+          mkdir -p \"\$d/images\" \"\$d/worlds\"
+          chown 1000:1000 \"\$d\" \"\$d/worlds\"
+          chown -R 1000:1000 \"\$d/images\"
+          # Each world's own directory and its SQLite files, but nothing else beneath.
+          for w in \"\$d\"/worlds/*/; do
+            [ -d \"\$w\" ] || continue
+            chown 1000:1000 \"\$w\"
+            for f in \"\$w\"world.db*; do [ -e \"\$f\" ] && chown 1000:1000 \"\$f\"; done
+          done" 2>/dev/null; then
+        echo "app data owned by uid 1000 (images and world files only; the database directory is untouched)"
       else
-        echo "note: could not set ownership on ${FABULIST_DATA_DIR:-./fabulist-data}; the app may fail to write images" >&2
+        echo "note: could not set ownership under ${FABULIST_DATA_DIR:-./fabulist-data}; the app may fail to write images" >&2
       fi
     fi
 
+
+    # Repair database-directory ownership when it is not uid 999.
+    #
+    # Postgres owns its cluster as uid 999 and refuses to read files it does not own —
+    # `FATAL: could not open file "global/pg_filenode.map": Permission denied`, on every
+    # backend, in a restart loop. That is precisely what a previous release of this
+    # script caused by recursively chowning the whole data directory to the app's user
+    # while the database directory sat inside it.
+    #
+    # Repairing it is safe and non-destructive: it changes ownership back to the user
+    # the cluster was created as, and touches nothing else. Runs unconditionally
+    # because a correctly-owned directory is unaffected, and because leaving a broken
+    # one to be noticed by a human is how an outage lasts overnight.
+    if [ -z "${FABULIST_PG:-}" ] && [ -d "${FABULIST_PG_DIR:-./fabulist-pg}" ]; then
+      pgfix_parent="$(cd "$(dirname "${FABULIST_PG_DIR:-./fabulist-pg}")" && pwd)"
+      pgfix_leaf="$(basename "${FABULIST_PG_DIR:-./fabulist-pg}")"
+      pgfix_owner="$(docker run --rm -v "$pgfix_parent:/parent" --user 0 alpine \
+        stat -c '%u' "/parent/$pgfix_leaf" 2>/dev/null || echo unknown)"
+      if [ "$pgfix_owner" != "999" ] && [ "$pgfix_owner" != "unknown" ]; then
+        if docker run --rm -v "$pgfix_parent:/parent" --user 0 alpine \
+          chown -R 999:999 "/parent/$pgfix_leaf" 2>/dev/null; then
+          echo "repaired database directory ownership (was uid $pgfix_owner, now 999)"
+        else
+          echo "note: database directory is owned by uid $pgfix_owner, not 999; Postgres will not start" >&2
+        fi
+      fi
+    fi
 
     # Clear a database directory that holds no cluster.
     #
