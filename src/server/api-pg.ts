@@ -1073,9 +1073,17 @@ route('GET', '/api/stories', async (_req, res, { world, db, user }) => {
  * caller decides whether to open it immediately or leave the current story
  * as it is.
  */
-route('POST', '/api/stories', (_req, res, { world, body, user }) => {
+route('POST', '/api/stories', async (_req, res, { world, db, body, user }) => {
   const { title } = (body ?? {}) as { title?: string };
-  const story = createStory(world.db, { title: title?.trim() ?? '', ownerUserId: user?.id });
+  // The new story reads the same canon worlds the current one does. Under SQLite
+  // that was implicit — every story in a file shared its canon — and omitting it
+  // here produced a story with no sources, which fails as soon as anything tries to
+  // read canon through it. Caught by the story-routes test.
+  const story = await createStory(db, {
+    title: title?.trim() ?? '',
+    worldIds: world.sources.map((src) => src.worldId),
+    ...(user ? { ownerUserId: user.id } : {}),
+  });
   send(res, 201, story);
 });
 
@@ -1970,6 +1978,15 @@ export function createApiServer(opts: ServerOptions) {
   // every per-request `World` needs it to answer `illustrations.absolutePath`.
   const imagesDir = opts.imagesDir ?? join(dataRoot, 'images');
   /**
+   * The fallback world, for requests with no signed-in user and no `?storyId=`.
+   *
+   * A getter rather than a resolved `World`, so a server built over the boot shim
+   * (`serve-pg.ts`) still sees a story created after startup. Not a revived
+   * `CurrentStory`: nothing writes to it, so one request cannot change what another
+   * resolves — which was the entire problem with the singleton.
+   */
+  const getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
+  /**
    * Built per request, from the identity the bearer token proved.
    *
    * The tools are stateless closures, but *which world they resolve* is not:
@@ -2136,10 +2153,22 @@ export function createApiServer(opts: ServerOptions) {
         // every other request saw; `worldFor` makes that unrepresentable.
         // `?storyId=` lets a user with several stories pick one for this request,
         // and `worldFor` verifies it is theirs before honouring it.
-        const world = await worldFor(db, user, {
-          ...(url.searchParams.get('storyId') ? { storyIdOverride: url.searchParams.get('storyId')! } : {}),
-          imagesDir,
-        });
+        //
+        // `opts.world` is honoured when the server was built with an explicit one.
+        // Without this a server constructed around a single fixed story still
+        // resolved "most recently played" per request, so creating a story silently
+        // moved what every subsequent request considered current — which made
+        // `DELETE /api/stories/:id` refuse a brand-new story as "currently open".
+        // Caught by the story-routes test. The per-user resolution is still the
+        // path that matters in production, where `opts.world` is the boot shim and
+        // a signed-in user always resolves their own.
+        const storyIdParam = url.searchParams.get('storyId');
+        const world = user || storyIdParam
+          ? await worldFor(db, user, {
+              ...(storyIdParam ? { storyIdOverride: storyIdParam } : {}),
+              imagesDir,
+            })
+          : getWorld();
         await match.handler(req, res, {
           world,
           db,
