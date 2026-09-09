@@ -94,7 +94,45 @@ Two modes, one compose file:
     docker compose up -d                     # your own Postgres, via FABULIST_PG
     docker compose --profile bundled up -d   # a Postgres container, created for you
 
-**The VPS uses its own.** Create the role and database once, then set `FABULIST_PG`
+**Bundled is a reasonable deployment choice**, not only a convenience: 20 MB idle,
+~32 MB with the app's pools open, and the database's lifecycle stays tied to the
+app's. Two settings in `app.env`:
+
+    COMPOSE_PROFILES=bundled
+    POSTGRES_PASSWORD=<something>
+
+`FABULIST_PG` can then be left unset — compose defaults it to the bundled service.
+
+`COMPOSE_PROFILES` has to reach the *client's* environment, not just the container's:
+`env_file:` is read by the container at start, while profile selection and `${...}`
+substitution are done by the `docker compose` client from its own environment and
+`.env`. `deploy.sh` therefore sources `app.env` before invoking compose, so one file
+stays the single place to configure. Without that the profile selects nothing, the
+database never starts, and the app reports it cannot reach one — quiet rather than
+loud, which is why `deploy.sh` now prints the active profiles.
+
+⚠️ **`POSTGRES_PASSWORD` only applies when the data directory is first created.**
+Changing it later leaves the database on the old password and the app on the new one,
+which surfaces as a bare `password authentication failed`. `serve-pg` detects that
+case and prints the fix; it is:
+
+    docker compose exec postgres psql -U fabulist -c "ALTER USER fabulist PASSWORD '…'"
+
+**Your data is on the host disk, not in a Docker volume.** Both `/data` and the
+database directory are bind mounts (`./fabulist-data` and `./fabulist-pg` next to the
+compose file, overridable with `FABULIST_DATA_DIR`/`FABULIST_PG_DIR`). That is what
+makes `docker compose down -v` survivable: `-v` removes named volumes, and a bind
+mount is not one. Verified directly — 48 MB of real data, then `down -v`, then
+`docker rm -f` of the container, and the prose was still there. `docker volume ls`
+shows nothing for this stack, so `volume prune` has nothing to take either.
+
+Back it up with `pg_dump`, not by copying the directory while the server runs:
+
+    docker compose exec -T postgres pg_dump -U fabulist fabulist | gzip > fabulist-$(date +%F).sql.gz
+
+### Using a Postgres you already run
+
+Create the role and database once, then set `FABULIST_PG`
 as a repo secret — CI passes it through to `app.env` verbatim rather than assembling
 it, because a workflow cannot know your host, port, role or database:
 

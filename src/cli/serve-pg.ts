@@ -91,8 +91,22 @@ async function boot(): Promise<void> {
     const warning = await checkCapacity(play, PLAY_POOL + INGEST_POOL);
     if (warning) console.warn(`warning: ${warning}`);
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     console.error(`cannot reach Postgres at ${connectionString.replace(/:[^:@/]*@/, ':***@')}`);
-    console.error(err instanceof Error ? err.message : String(err));
+    console.error(message);
+    // A wrong password against a *bundled* Postgres almost always means one specific
+    // thing, and the raw error does not say it: `POSTGRES_PASSWORD` is applied only
+    // when the image initialises an empty data directory. Changing it afterwards
+    // leaves the database with the original password and the app with the new one,
+    // which reads as a mysterious auth failure. Hit this directly while testing the
+    // bundled deployment, hence the hint rather than a comment nobody would find.
+    if (/password authentication failed/i.test(message)) {
+      console.error(
+        'if this is the bundled Postgres: POSTGRES_PASSWORD only takes effect when the data directory is first ' +
+          'created, so changing it later does not change the database. Either set it back, or change it in the ' +
+          "database itself:  docker compose exec postgres psql -U fabulist -c \"ALTER USER fabulist PASSWORD '…'\"",
+      );
+    }
     console.error('set FABULIST_PG (or DATABASE_URL), and see deploy/pg-dev.sh for a local server');
     process.exit(1);
   }

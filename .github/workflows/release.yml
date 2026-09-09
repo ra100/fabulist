@@ -90,11 +90,19 @@ jobs:
           WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
           WORKOS_CLIENT_ID: ${{ vars.WORKOS_CLIENT_ID }}
           WORKOS_COOKIE_PASSWORD: ${{ secrets.WORKOS_COOKIE_PASSWORD }}
-          # A real secret: it carries the database password. Set it to the full
-          # connection string for the VPS's own Postgres — see the comment in
-          # `render_env` below for the `host.docker.internal` form a container needs.
-          # Unset means the deployed instance has no database configured, and
-          # `serve-pg` says so at boot rather than silently trying localhost.
+          # Which Postgres the deployed stack uses. Two supported shapes:
+          #
+          #   bundled  — set COMPOSE_PROFILES=bundled and POSTGRES_PASSWORD. The
+          #              database runs as part of the stack, its data in a bind mount
+          #              on the host disk, and FABULIST_PG can be left unset:
+          #              docker-compose.yml already defaults it to that service.
+          #   external — set FABULIST_PG to the full connection string for a Postgres
+          #              you manage. Leave COMPOSE_PROFILES unset.
+          #
+          # All three are skipped when unset, so an instance configured neither way
+          # boots and says it cannot reach a database rather than guessing.
+          COMPOSE_PROFILES: ${{ vars.COMPOSE_PROFILES }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           FABULIST_PG: ${{ secrets.FABULIST_PG }}
         run: |
           set -euo pipefail
@@ -135,7 +143,7 @@ jobs:
             for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL \
                         AUTH_REQUIRE_LOGIN AUTH_ADMIN_EMAILS \
                         WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD \
-                        FABULIST_PG; do
+                        FABULIST_PG POSTGRES_PASSWORD COMPOSE_PROFILES; do
               value="${!name:-}"
               [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
             done
