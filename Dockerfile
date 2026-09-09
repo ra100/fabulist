@@ -36,12 +36,25 @@ COPY tsconfig.json ./
 COPY --from=build /app/web/dist ./web/dist
 COPY fabulist.config.json ./
 
-# The world lives here. A named volume mounted at /data is the whole point —
-# see db.ts / worlds.ts for why this must never be a `cp`-style copy while a
-# container is running (WAL mode splits an open database across .db/-wal/-shm;
-# see the README's "Copying a save" section).
-RUN mkdir -p /data
+# Data lives here: generated images, and any SQLite world still awaiting import.
+# Never `cp` it while a container is running — WAL mode splits an open database
+# across .db/-wal/-shm (see the README's "Copying a save" section).
+RUN mkdir -p /data && chown node:node /data
 VOLUME ["/data"]
+
+# Runs unprivileged.
+#
+# The image had no `USER`, so it ran as root — Docker's default for the node
+# images, and unnecessary here: the process needs to write `/data` (images, and
+# the `*.pre-pg` renames the importer performs) and bind one port, neither of
+# which requires root. `node` is uid 1000, already present in the base image.
+#
+# A bind-mounted `/data` from an older release is owned by root, and this user
+# cannot write it — so `deploy.sh` chowns that directory to 1000:1000 when it
+# finds it root-owned. Without that step an upgrade would silently fail to save
+# images and fail to rename imported worlds, which is why the two changes ship
+# together.
+USER node
 
 EXPOSE 4317
 ENV PORT=4317
