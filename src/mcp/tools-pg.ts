@@ -26,6 +26,7 @@ import type { WikiCandidate } from '../setup/directory.ts';
 import type { DepthMode } from '../ingest/depth-pg.ts';
 import type { Job } from '../setup/jobs.ts';
 import { World, getWorldBySlug, listWorlds, setStorySources } from '../store/index-pg.ts';
+import { assertWorldAccess, worldsVisibleTo } from '../store/access-pg.ts';
 import type { Db } from '../db/pg.ts';
 import { createStory, getStory, listStories, listStoriesForUser } from '../store/world-pg.ts';
 import type { SessionUser } from '../auth/config.ts';
@@ -85,8 +86,18 @@ function parseVisualStyle(v: unknown): VisualStyle | undefined {
 export async function listWorldsTool(ctx: McpToolContext) {
   const world = await ctx.world();
   const reading = new Set(world.sources.map((src) => src.worldId));
+  // Filtered by visibility, exactly as `GET /api/worlds` is.
+  //
+  // This listed every world unconditionally, which made `/mcp` a way around the
+  // permission model: a private world the web UI correctly hides was readable here,
+  // and its existence and title are the leak the filter exists to prevent. Found while
+  // chasing a different problem — the operator noticed MCP and the web UI showing
+  // different world lists, which is exactly the shape a bypass takes.
+  const visible = new Map((await worldsVisibleTo(ctx.db, ctx.user)).map((v) => [v.worldId, v]));
   return {
-    worlds: (await listWorlds(ctx.db)).map((w) => ({ ...w, reading: reading.has(w.id) })),
+    worlds: (await listWorlds(ctx.db))
+      .filter((w) => visible.has(w.id))
+      .map((w) => ({ ...w, reading: reading.has(w.id), role: visible.get(w.id)?.role ?? null })),
   };
 }
 
@@ -112,6 +123,11 @@ export async function setStorySourcesTool(ctx: McpToolContext, args: { slugs: st
   for (const slug of args.slugs) {
     const found = await getWorldBySlug(ctx.db, slug);
     if (!found) throw new Error(`set_story_sources: no world "${slug}"`);
+    // The same check `PUT /api/story/sources` makes. Without it this tool could attach
+    // a private world to a story and read its canon through the overlay — the read
+    // itself is legitimate once a story sources a world, so the permission has to be
+    // enforced here, at the point the source is added.
+    await assertWorldAccess(ctx.db, ctx.user, found.id, 'reader');
     ids.push(found.id);
   }
   await setStorySources(ctx.db, world.storyId, ids);
