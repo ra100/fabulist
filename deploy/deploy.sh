@@ -157,6 +157,29 @@ case "$action" in
     # data will land before anything writes to it.
     mkdir -p "${FABULIST_DATA_DIR:-./fabulist-data}" "${FABULIST_PG_DIR:-./fabulist-pg}"
 
+    # Clear a database directory that holds no cluster.
+    #
+    # This is what the diagnostics finally showed: the directory was mode 0700 owned by
+    # 999 *containing a stale root-owned `18/`* from an earlier failed init, and the
+    # entrypoint's `mkdir` kept failing against it no matter who ran it. Debris from a
+    # failed initialisation is worthless by definition — `pg_initialised` is false, so
+    # there is no cluster and nothing anyone wrote — and leaving it in place is what
+    # made three consecutive fixes appear to do nothing.
+    #
+    # Guarded on `pg_initialised` so this can never touch a real database: the moment a
+    # cluster exists, this branch does not run. Done from a root container because the
+    # debris is root-owned and the deploy user is not root.
+    if [ "${pg_initialised:-false}" != true ] && [ -n "$(ls -A "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null || echo probe)" ]; then
+      pg_parent="$(cd "$(dirname "${FABULIST_PG_DIR:-./fabulist-pg}")" && pwd)"
+      pg_leaf="$(basename "${FABULIST_PG_DIR:-./fabulist-pg}")"
+      if docker run --rm -v "$pg_parent:/parent" --user 0 alpine sh -c \
+        "rm -rf '/parent/$pg_leaf' && mkdir -p '/parent/$pg_leaf'"; then
+        echo "cleared an uninitialised database directory (failed-init debris, no cluster present)"
+      else
+        echo "note: could not clear ${FABULIST_PG_DIR:-./fabulist-pg}; Postgres may fail to initialise" >&2
+      fi
+    fi
+
     # Ownership of the database directory is deliberately *not* handled here.
     #
     # Four releases were spent trying: chowning the bind mount to 999:999 before
@@ -228,11 +251,16 @@ case "$action" in
     if ! docker compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null | grep -q "fabulist-postgres.*healthy"; then
       echo "--- mount diagnostics ---"
       echo "host selinux: $(getenforce 2>/dev/null || echo 'not present')"
-      echo "host dir:     $(ls -ldnZ "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null || ls -ldn "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null)"
+      echo "host dir:     $(ls -ldn "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null)"
       echo "filesystem:   $(df -T "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null | tail -1)"
+      # Mounted via the *parent* directory: the previous version did
+      # `cd "$pg_dir" && pwd` to get an absolute path, which fails with
+      # `Permission denied` when the directory is mode 0700 and owned by someone else —
+      # so the probe that was meant to explain the failure was itself defeated by it,
+      # and then passed an empty path to `docker run`.
       echo "as seen inside a root container:"
-      docker run --rm -v "$(cd "${FABULIST_PG_DIR:-./fabulist-pg}" && pwd):/m" --user 0 alpine sh -c \
-        'id; ls -ldn /m; touch /m/.probe 2>&1 && echo "root CAN write the mount" && rm -f /m/.probe || echo "root CANNOT write the mount"' 2>&1 || true
+      docker run --rm -v "$(cd "$(dirname "${FABULIST_PG_DIR:-./fabulist-pg}")" && pwd):/parent" --user 0 alpine sh -c \
+        "d=/parent/$(basename "${FABULIST_PG_DIR:-./fabulist-pg}"); ls -ldn \"\$d\"; ls -an \"\$d\" | head -5; touch \"\$d/.probe\" 2>&1 && echo 'root CAN write the mount' && rm -f \"\$d/.probe\" || echo 'root CANNOT write the mount'" 2>&1 || true
     fi
     echo "--- end ---"
     # Drops now-unreferenced image layers from the previous release. Neither the
