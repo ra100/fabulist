@@ -51,6 +51,7 @@
  * canon table and no full Sort, because a unit test on the *results* passes
  * either way — the naive form returns exactly the same rows.
  */
+import type { QueryResultRow } from 'pg';
 import type { Queryable } from './pg.ts';
 
 /** A canon world a story reads from, in precedence order. */
@@ -94,12 +95,12 @@ const ENTITY_COLUMNS =
  * order to rank. Both are cheap because the input is already at most
  * `limit * (1 + sources)` rows.
  */
-export async function overlayEntities(
+export async function overlayEntities<R extends QueryResultRow = QueryResultRow>(
   db: Queryable,
   storyId: string,
   sources: OverlaySource[],
   opts: { limit?: number; type?: string; minSalience?: number } = {},
-): Promise<Array<Record<string, unknown>>> {
+): Promise<R[]> {
   const limit = opts.limit ?? 500;
 
   // One filter descriptor per predicate, re-numbered per arm by
@@ -124,7 +125,7 @@ export async function overlayEntities(
   // the outer query re-ranks. DISTINCT ON requires its own leading ORDER BY
   // (`id, pri`), which is why the caller's ranking cannot be folded into it.
   const sql = `
-    SELECT ${ENTITY_COLUMNS} FROM (
+    SELECT ${ENTITY_COLUMNS}, pri FROM (
       SELECT DISTINCT ON (id) ${ENTITY_COLUMNS}, pri
       FROM (
       ${built.sql}
@@ -134,7 +135,7 @@ export async function overlayEntities(
     ORDER BY salience DESC, name
     LIMIT $${built.next}
   `;
-  const { rows } = await db.query<Record<string, unknown>>(sql, [...built.params, limit]);
+  const { rows } = await db.query<R>(sql, [...built.params, limit]);
   return rows;
 }
 
@@ -186,12 +187,12 @@ function buildFilteredArms(opts: {
  * 0.99 ms at 100 clients) and has no use for the salience index or a per-arm
  * LIMIT. Folding the two would give the point lookup the list query's plan.
  */
-export async function overlayEntity(
+export async function overlayEntity<R extends QueryResultRow = QueryResultRow>(
   db: Queryable,
   storyId: string,
   sources: OverlaySource[],
   id: string,
-): Promise<Record<string, unknown> | undefined> {
+): Promise<R | undefined> {
   const params: unknown[] = [];
   let n = 1;
   const p = (v: unknown) => {
@@ -207,8 +208,8 @@ export async function overlayEntity(
          WHERE world_id = ${p(s.worldId)} AND id = ${p(id)} AND retired_at_revision IS NULL`,
     );
   }
-  const { rows } = await db.query<Record<string, unknown>>(
-    `SELECT ${ENTITY_COLUMNS} FROM (${arms.join(' UNION ALL ')}) q ORDER BY pri LIMIT 1`,
+  const { rows } = await db.query<R>(
+    `SELECT ${ENTITY_COLUMNS}, pri FROM (${arms.join(' UNION ALL ')}) q ORDER BY pri LIMIT 1`,
     params,
   );
   return rows[0];
@@ -233,12 +234,12 @@ const EDGE_COLUMNS = 'subject, predicate, object, valid_from, valid_to, weight, 
  * valid_to > scene`, which is what makes "who is their ally *now*" a
  * time-filtered traversal rather than a snapshot.
  */
-export async function overlayEdges(
+export async function overlayEdges<R extends QueryResultRow = QueryResultRow>(
   db: Queryable,
   storyId: string,
   sources: OverlaySource[],
   opts: { subject?: string; object?: string; scene?: number; limit?: number },
-): Promise<Array<Record<string, unknown>>> {
+): Promise<R[]> {
   const col = opts.subject !== undefined ? 'subject' : 'object';
   const value = opts.subject ?? opts.object;
   if (value === undefined) throw new Error('overlayEdges needs a subject or an object');
@@ -249,18 +250,30 @@ export async function overlayEdges(
     params.push(v);
     return `$${n++}`;
   };
+  /**
+   * "Live at this point in story time" is two conditions, not one: the edge must
+   * already exist (`valid_from <= scene`) *and* not yet have expired
+   * (`valid_to IS NULL OR valid_to > scene`). Omitting the first would report an
+   * edge asserted at scene 9 as live when asked about scene 2 — a subtle enough
+   * error that the SQLite version spelled both out, and this port initially did
+   * not.
+   */
   const live = (t: string) =>
-    opts.scene === undefined ? `${t}.valid_to IS NULL` : `(${t}.valid_to IS NULL OR ${t}.valid_to > ${p(opts.scene)})`;
+    opts.scene === undefined
+      ? `${t}.valid_to IS NULL`
+      : `${t}.valid_from <= ${p(opts.scene)} AND (${t}.valid_to IS NULL OR ${t}.valid_to > ${p(opts.scene)})`;
 
+  // `pri` rides along so the caller can tell a chronicle edge from a canon one —
+  // that is the `layer` field on the Edge domain type, not internal bookkeeping.
   const arms = [
-    `SELECT ${EDGE_COLUMNS} FROM chron_edges c
+    `SELECT ${EDGE_COLUMNS}, 0 AS pri FROM chron_edges c
        WHERE c.story_id = ${p(storyId)} AND c.${col} = ${p(value)} AND ${live('c')}`,
   ];
   for (const s of sources) {
     // The mask: skip a canon edge whose identity this story has already
     // asserted or retired. Indexed by idx_chron_edges_identity.
     arms.push(
-      `SELECT ${EDGE_COLUMNS} FROM canon_edges e
+      `SELECT ${EDGE_COLUMNS}, ${p(s.ordinal)} AS pri FROM canon_edges e
          WHERE e.world_id = ${p(s.worldId)} AND e.${col} = ${p(value)} AND ${live('e')}
            AND NOT EXISTS (
              SELECT 1 FROM chron_edges m
@@ -269,8 +282,14 @@ export async function overlayEdges(
            )`,
     );
   }
+  // Wrapped in a subquery so LIMIT applies to the whole union rather than to the
+  // last arm — a bare trailing LIMIT after UNION ALL binds to the final SELECT,
+  // which would silently return more rows than asked for.
   const limitSql = opts.limit ? ` LIMIT ${p(opts.limit)}` : '';
-  const { rows } = await db.query<Record<string, unknown>>(`${arms.join('\n    UNION ALL\n    ')}${limitSql}`, params);
+  const { rows } = await db.query<R>(
+    `SELECT * FROM (${arms.join('\n    UNION ALL\n    ')}) q${limitSql}`,
+    params,
+  );
   return rows;
 }
 
@@ -278,12 +297,12 @@ export async function overlayEdges(
  * A sheet by entity id, resolved through the overlay. Same precedence, same
  * reasoning as `overlayEntity`.
  */
-export async function overlaySheet(
+export async function overlaySheet<R extends QueryResultRow = QueryResultRow>(
   db: Queryable,
   storyId: string,
   sources: OverlaySource[],
   entityId: string,
-): Promise<Record<string, unknown> | undefined> {
+): Promise<R | undefined> {
   const cols = 'entity_id, identity, contract, voice, condition, appearance, locks';
   const params: unknown[] = [];
   let n = 1;
@@ -303,8 +322,8 @@ export async function overlaySheet(
          WHERE world_id = ${p(s.worldId)} AND entity_id = ${p(entityId)}`,
     );
   }
-  const { rows } = await db.query<Record<string, unknown>>(
-    `SELECT ${cols}, is_player FROM (${arms.join(' UNION ALL ')}) q ORDER BY pri LIMIT 1`,
+  const { rows } = await db.query<R>(
+    `SELECT ${cols}, is_player, pri FROM (${arms.join(' UNION ALL ')}) q ORDER BY pri LIMIT 1`,
     params,
   );
   return rows[0];
