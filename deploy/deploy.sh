@@ -192,6 +192,30 @@ case "$action" in
     # data will land before anything writes to it.
     mkdir -p "${FABULIST_DATA_DIR:-./fabulist-data}" "${FABULIST_PG_DIR:-./fabulist-pg}"
 
+    # Make /data writable by the app's unprivileged user (uid 1000).
+    #
+    # The image now runs as `node` rather than root. A `/data` created by an earlier
+    # release is owned by root, and the new user cannot write it — which would fail
+    # silently in the two places that matter: saved illustrations, and the importer's
+    # rename of `world.db` to `*.pre-pg` after a successful import.
+    #
+    # Idempotent and additive: `chown -R` to 1000:1000 every deploy. Unlike the
+    # database directory, there is no ambiguity to get wrong here — nothing about this
+    # deletes anything, and the worst case of running it when it was already correct is
+    # that it does nothing. That is deliberately a different shape from the cluster
+    # check that once read "I cannot tell" as "safe to delete".
+    if [ -d "${FABULIST_DATA_DIR:-./fabulist-data}" ]; then
+      data_parent="$(cd "$(dirname "${FABULIST_DATA_DIR:-./fabulist-data}")" && pwd)"
+      data_leaf="$(basename "${FABULIST_DATA_DIR:-./fabulist-data}")"
+      if docker run --rm -v "$data_parent:/parent" --user 0 alpine \
+        chown -R 1000:1000 "/parent/$data_leaf" 2>/dev/null; then
+        echo "data directory owned by uid 1000 (the app no longer runs as root)"
+      else
+        echo "note: could not set ownership on ${FABULIST_DATA_DIR:-./fabulist-data}; the app may fail to write images" >&2
+      fi
+    fi
+
+
     # Clear a database directory that holds no cluster.
     #
     # This is what the diagnostics finally showed: the directory was mode 0700 owned by
