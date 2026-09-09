@@ -60,6 +60,12 @@ pnpm typecheck
 pnpm lint                 # biome, TypeScript only
 ```
 
+Provided as-is, free, no paid tier, no ads, no analytics
+(`.design/SAAS-MULTIUSER.md` §7). [`docs/privacy-policy.md`](docs/privacy-policy.md),
+[`docs/terms-of-service.md`](docs/terms-of-service.md), and
+[`docs/support.md`](docs/support.md) cover a shared/hosted instance; a self-hosted
+copy is governed only by the [MIT license](LICENSE).
+
 ---
 
 ## The idea in two sentences

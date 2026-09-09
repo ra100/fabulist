@@ -128,6 +128,35 @@ test('a real MCP client connects, lists tools, and finds propose_turn among them
   });
 });
 
+test('every listed tool carries readOnly/destructive/openWorld annotations, matching its actual behaviour', async () => {
+  await withServer(async (baseUrl) => {
+    const { client, transport } = connect(baseUrl);
+    await client.connect(transport);
+    try {
+      const { tools } = await client.listTools();
+      // Required for OpenAI's plugin review (readOnlyHint/openWorldHint/destructiveHint on
+      // every tool, per developers.openai.com/plugins/deploy/app-review) — this is the one
+      // place that would actually notice a new tool landing with no annotations at all.
+      const missing = tools.filter((t) => t.annotations === undefined).map((t) => t.name);
+      assert.deepEqual(missing, [], `tools missing annotations entirely: ${missing.join(', ')}`);
+
+      const byName = new Map(tools.map((t) => [t.name, t.annotations]));
+      // Spot-check a representative read tool, write tool, and destructive tool rather than
+      // asserting the whole map here — the exhaustive map lives in the per-tool doc comments
+      // in tools.ts/server.ts, and duplicating it in the test would just be a second place to
+      // forget to update.
+      assert.equal(byName.get('get_state')?.readOnlyHint, true);
+      assert.equal(byName.get('get_state')?.destructiveHint, false);
+      assert.equal(byName.get('propose_turn')?.destructiveHint, false);
+      assert.equal(byName.get('reset_world')?.destructiveHint, true);
+      assert.equal(byName.get('resolve_wiki')?.openWorldHint, true);
+      assert.equal(byName.get('update_sheet')?.readOnlyHint, false);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 test('a wrong bearer token is rejected even after a successful connection elsewhere', async () => {
   await withServer(async (baseUrl) => {
     const { client, transport } = connect(baseUrl, 'not-the-right-token');

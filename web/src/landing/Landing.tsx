@@ -927,6 +927,9 @@ dropped: 18 unevidenced, 12 off-vocabulary, 11 unknown target`}
           <div className="lp-foot-links">
             <a href={REPO}>github.com/ra100/fabulist</a>
             <a href={KOFI}>ko-fi</a>
+            <a href={`${REPO}/blob/main/docs/privacy-policy.md`}>privacy</a>
+            <a href={`${REPO}/blob/main/docs/terms-of-service.md`}>terms</a>
+            <a href={`${REPO}/blob/main/docs/support.md`}>support</a>
             <a href="#top">back to top</a>
           </div>
         </div>
