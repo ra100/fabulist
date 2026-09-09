@@ -179,6 +179,33 @@ case "$action" in
 
     docker compose pull
     docker compose up -d
+
+    # Report what actually happened, in the deploy output.
+    #
+    # Added after v0.7.0 and v0.7.1 both deployed "successfully" and then 502'd: the
+    # job log showed compose starting containers and nothing else, so diagnosing meant
+    # SSH access that CI does not have and I could not reach. A deploy that cannot say
+    # why it is broken costs a release per guess.
+    #
+    # `|| true` throughout: this is diagnostics, and a failure to *report* must never
+    # fail a deploy that otherwise worked.
+    echo "--- waiting for the app to answer (up to 180s) ---"
+    for _ in $(seq 1 60); do
+      if docker compose exec -T fabulist node -e \
+        "require('http').get('http://127.0.0.1:4317/api/meta',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))" \
+        >/dev/null 2>&1; then
+        echo "app is answering"
+        break
+      fi
+      sleep 3
+    done
+    echo "--- container status ---"
+    docker compose ps --format '{{.Name}}\t{{.Status}}' || true
+    echo "--- app log (last 40) ---"
+    docker compose logs --tail 40 --no-log-prefix fabulist 2>&1 || true
+    echo "--- database log (last 15) ---"
+    docker compose logs --tail 15 --no-log-prefix postgres 2>&1 || true
+    echo "--- end ---"
     # Drops now-unreferenced image layers from the previous release. Neither the
     # app's /data nor the database directory is touched by `image prune` — both are
     # bind mounts on the host disk, not volumes, and `image prune` only removes
