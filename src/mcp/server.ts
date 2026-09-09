@@ -142,8 +142,41 @@ Ingesting a world
 writes canon. \`maxPages\`/\`passBMaxPages\` are separate budgets — reading pages is cheap, relation
 extraction is one model call per page.`;
 
-function buildServer(ctx: McpToolContext): McpServer {
-  const server = new McpServer({ name: 'fabulist', version: '0.1.0' }, { instructions: INSTRUCTIONS });
+/**
+ * What a connector-picker UI (Claude Desktop's "Add connector" list, ChatGPT's connector
+ * card, ...) shows *before* anyone has connected — as opposed to `INSTRUCTIONS`, which the
+ * model sees only after a session is already live. The MCP spec carries this as optional
+ * fields on `initialize`'s `serverInfo` (`Implementation extends BaseMetadata, Icons`); most
+ * clients ignore them, but the first-party ones (Claude, ChatGPT) render `title`/`description`
+ * and the first usable `icons` entry, the same way Box/Airtable/Google Drive's own connectors
+ * do. Mirrors `web/public/manifest.webmanifest`'s copy and icon set exactly, so the connector
+ * card and the installed-PWA icon are the one asset a designer already approved, not a second
+ * one invented here — the icons resolve against `resourceUrl`'s origin because that is the
+ * only base URL this stateless, per-request handler is ever given (see `McpRouteOptions`
+ * below); `web/public/*` is served unauthenticated (`PUBLIC_FILES`, `src/server/api.ts`), so a
+ * client that has not connected yet can still fetch them.
+ */
+function serverInfo(resourceUrl: string) {
+  const icon = (path: string, mimeType: string, sizes: string[]) => ({
+    src: new URL(path, resourceUrl).toString(),
+    mimeType,
+    sizes,
+  });
+  return {
+    name: 'fabulist',
+    title: 'Fabulist',
+    version: '0.1.0',
+    description: 'A state-first fiction engine: the prose is a view, the world is the graph underneath.',
+    icons: [
+      icon('/favicon.svg', 'image/svg+xml', ['any']),
+      icon('/icon-192.png', 'image/png', ['192x192']),
+      icon('/icon-512.png', 'image/png', ['512x512']),
+    ],
+  };
+}
+
+function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
+  const server = new McpServer(serverInfo(resourceUrl), { instructions: INSTRUCTIONS });
 
   server.registerTool(
     'list_worlds',
@@ -904,7 +937,7 @@ export async function handleMcpRequest(
   };
   const reqWithAuth = Object.assign(req, { auth: authInfo });
 
-  const server = buildServer(opts.toolContext(verified));
+  const server = buildServer(opts.toolContext(verified), opts.resourceUrl);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   try {
     await server.connect(transport);
