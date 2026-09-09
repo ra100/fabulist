@@ -796,6 +796,25 @@ export const api = {
     switchTo: (slug: string) => post<{ current: string }>(`/worlds/${encodeURIComponent(slug)}/switch`),
     rename: (slug: string, title: string) => put<WorldSummary>(`/worlds/${encodeURIComponent(slug)}/title`, { title }),
     remove: (slug: string) => req<{ ok: boolean }>(`/worlds/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+    /**
+     * Replaces a (non-open) world's database file with `file`'s raw bytes —
+     * admin-only server-side (`requireAdmin` in `src/server/api.ts`), for
+     * handing a save recovered elsewhere (`sqlite3 .recover`, most
+     * concretely) back to a deployed instance with no `content-type:
+     * application/json` in sight. Deliberately not built on the shared `req`
+     * helper above: that helper always sets `content-type:
+     * application/json` and `JSON.stringify`s the body, both wrong for a
+     * SQLite file's raw bytes.
+     */
+    upload: async (slug: string, file: Blob): Promise<WorldSummary> => {
+      const res = await fetch(`/api/worlds/${encodeURIComponent(slug)}/upload`, {
+        method: 'POST',
+        body: file,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((body as { error?: string }).error ?? `${res.status} on /worlds/${slug}/upload`);
+      return body as WorldSummary;
+    },
   },
 
   setup: {

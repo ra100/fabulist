@@ -13,7 +13,7 @@ import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { forkStory, rollback } from '../loop/branch.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export.ts';
 import { createStory, deleteStory, getStory, listStories, listStoriesForUser } from '../store/world.ts';
-import { createWorldFile, deleteWorldFile, listWorlds, renameWorldFile } from '../store/worlds.ts';
+import { createWorldFile, deleteWorldFile, listWorlds, renameWorldFile, replaceWorldFile } from '../store/worlds.ts';
 import {
   applyDirectiveRecalc,
   seedConsequences,
@@ -107,6 +107,8 @@ interface RouteContext {
   dataRoot: string;
   url: URL;
   body: unknown;
+  /** Raw request bytes, populated only for routes listed in `RAW_BODY_ROUTES` — `undefined` for every other route, which reads `body` instead. */
+  rawBody: Buffer | undefined;
   params: Record<string, string>;
   /** The signed-in user, once the session gate already verified them for this request — `null` when login is off entirely (see `src/auth/config.ts`), never re-verified here since the gate above already paid that cost. */
   user: SessionUser | null;
@@ -144,9 +146,34 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   }
 }
 
+/**
+ * Reads a request body as raw bytes, no JSON parsing.
+ *
+ * A world upload is a SQLite file, not a JSON document — `readBody` above
+ * would try `JSON.parse` on it, fail (a SQLite file starts with the literal
+ * bytes `SQLite format 3\0`, never valid JSON), and silently hand the route
+ * `undefined`. `rawBodyRoutes` below marks which routes need this instead, so
+ * the dispatch loop can pick the right reader per route without every other
+ * handler's `body` changing shape.
+ */
+async function readRawBody(req: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  return Buffer.concat(chunks);
+}
+
 // ------------------------------------------------------------------- routes
 
 const routes: Array<{ method: string; path: string; pattern: RegExp; handler: Handler }> = [];
+
+/**
+ * Routes whose body must reach the handler as raw bytes (`ctx.rawBody`)
+ * rather than JSON-parsed into `ctx.body` — currently just the world upload
+ * route. A `Set` keyed by `"METHOD path"` rather than a flag on `route()`
+ * itself: every other call site stays exactly as it was, and the dispatch
+ * loop below has one place to ask "does this one need bytes instead."
+ */
+const RAW_BODY_ROUTES = new Set<string>();
 
 /** Set once per process, so the client can tell a restart from a reload. */
 const STARTED_AT = new Date().toISOString();
@@ -1184,6 +1211,44 @@ route('DELETE', '/api/worlds/:slug', (_req, res, { currentWorld, dataRoot, param
 });
 
 /**
+ * Replaces a world's database file with an uploaded one — a save recovered
+ * elsewhere (`sqlite3 .recover` after corruption, most concretely) handed
+ * back to a deployed instance over HTTP, for an operator with no SSH access
+ * to the box it runs on. See `store/worlds.ts`'s `replaceWorldFile` for the
+ * validate-before-touching-disk sequence and why the existing file is backed
+ * up rather than overwritten outright.
+ *
+ * Admin-only, for the same reason `/api/config/*` is: this replaces a file
+ * every story in that world shares, not something scoped to the caller's own
+ * story. Refuses the currently-open world exactly like `DELETE
+ * /api/worlds/:slug` above, for the identical live-handle hazard.
+ *
+ * 512 MB cap: generous for a SQLite world file at this app's scale (the
+ * largest real one seen in development, a multi-wiki Star Trek ingest, is
+ * ~64 MB) while still bounding how much an admin-only-but-still-a-network-
+ * caller route will buffer into memory from one request — `readRawBody`
+ * has no cap of its own, so this is the one place that matters.
+ */
+route('POST', '/api/worlds/:slug/upload', (_req, res, { currentWorld, dataRoot, params, rawBody, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
+  const cw = requireCurrentWorld(res, currentWorld);
+  if (!cw) return;
+  const slug = decodeURIComponent(params.slug ?? '');
+  if (!rawBody?.length) return send(res, 400, { error: 'request body is empty; upload the .db file as raw bytes' });
+  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
+  if (rawBody.length > MAX_UPLOAD_BYTES) {
+    return send(res, 413, { error: `upload too large (${rawBody.length} bytes; limit is ${MAX_UPLOAD_BYTES})` });
+  }
+  try {
+    const summary = replaceWorldFile(slug, rawBody, { dataRoot, openSlug: cw.slug() });
+    send(res, 200, summary);
+  } catch (err) {
+    send(res, 409, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+RAW_BODY_ROUTES.add('POST /api/worlds/:slug/upload');
+
+/**
  * What is usable on this machine. Read-only and slightly slow (it touches local
  * servers and credential helpers), so the UI fetches it on demand rather than
  * with the rest of the state. Admin-only: this probes and reports on the
@@ -1897,8 +1962,11 @@ export function createApiServer(opts: ServerOptions) {
       const match = routes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
       if (!match) return send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
       const params = url.pathname.match(match.pattern)?.groups ?? {};
+      const isRawBody = RAW_BODY_ROUTES.has(`${match.method} ${match.path}`);
       try {
-        const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
+        const body =
+          isRawBody || req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
+        const rawBody = isRawBody ? await readRawBody(req) : undefined;
         // Resolved fresh per request, not once at server construction: a
         // story switch must take effect on the very next request, not after
         // a restart. Every route body still just reads `world` as a plain
@@ -1928,6 +1996,7 @@ export function createApiServer(opts: ServerOptions) {
           dataRoot,
           url,
           body,
+          rawBody,
           params,
           user,
           authConfig,
