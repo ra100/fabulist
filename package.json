@@ -44,6 +44,7 @@
     "format": "biome format --write",
     "format:check": "biome format src test web/src",
     "serve": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/cli/serve.ts",
+    "serve-pg": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/cli/serve-pg.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "build:web": "vite build --config web/vite.config.ts",
     "typecheck": "tsc --noEmit",
