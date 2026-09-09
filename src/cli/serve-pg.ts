@@ -83,11 +83,53 @@ const connectionString =
 const play = new Db({ connectionString, kind: 'play', max: PLAY_POOL });
 const ingest = new Db({ connectionString, kind: 'ingest', max: INGEST_POOL });
 
+/**
+ * Waits for the database to accept connections, rather than exiting the moment it
+ * does not.
+ *
+ * Written after the first real deploy failed this way. The database container was
+ * still initialising, `depends_on` gave up on it, and this process then exited — so
+ * `restart: unless-stopped` turned a few seconds of ordinary startup into a restart
+ * loop and a 502. The orchestration bug is fixed separately (a healthcheck missing
+ * `start_interval`), but relying on perfect startup ordering was the deeper mistake:
+ * a database that is briefly unavailable is a normal event, including on a restart or
+ * a failover, and the right response is to wait a bounded time.
+ *
+ * Bounded, not forever: after `timeoutMs` this gives up so the failure is still
+ * visible rather than a container that hangs pretending to be fine. Authentication
+ * failures are *not* retried — a wrong password will never become right by waiting,
+ * and looping on it would bury the specific hint printed below.
+ */
+async function waitForDatabase(timeoutMs = 120_000): Promise<void> {
+  const started = Date.now();
+  let announced = false;
+  for (;;) {
+    try {
+      await play.query('SELECT 1');
+      if (announced) console.log(`database ready after ${((Date.now() - started) / 1000).toFixed(0)}s`);
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Not worth retrying: credentials, or a database that does not exist. Both need
+      // a human, and both are reported with a specific hint by the caller.
+      if (/password authentication failed|does not exist|role .* does not exist/i.test(message)) throw err;
+      if (Date.now() - started > timeoutMs) throw err;
+      if (!announced) {
+        console.log('waiting for the database to accept connections…');
+        announced = true;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
 async function boot(): Promise<void> {
-  // 1. Reachability and capacity. Both fatal: there is nothing to serve without a
-  //    database, and starting with too few connections just defers the failure to
-  //    whichever player happens to be mid-turn when the pool runs dry.
+  // 1. Reachability and capacity. Fatal only after waiting: a database that is still
+  //    starting is an ordinary event, while too few connections is a real
+  //    misconfiguration that would otherwise surface as a mid-turn failure for
+  //    whichever player happens to exhaust the pool.
   try {
+    await waitForDatabase();
     const warning = await checkCapacity(play, PLAY_POOL + INGEST_POOL);
     if (warning) console.warn(`warning: ${warning}`);
   } catch (err) {

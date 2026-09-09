@@ -218,6 +218,16 @@ services:
       timeout: 5s
       retries: 5
       # initdb plus the entrypoint's own restart takes a few seconds on a cold
-      # volume; failures here do not count toward `retries`.
-      start_period: 30s
+      # volume, so the container is legitimately not ready for a while.
+      start_period: 60s
+      # `start_interval` is what makes `start_period` actually work, and leaving it
+      # out broke the first real deploy: without it the first check does not run until
+      # `interval` (10s) has elapsed, so `depends_on` observed a container with *no
+      # health result yet*, read that as unhealthy, and gave up one second after
+      # starting it — logged verbatim as
+      # `optional dependency "postgres" failed to start: container fabulist-postgres
+      # is unhealthy` at 16:14:13 against a `Started` at 16:14:12. With it, checks run
+      # every second during the start period, so readiness is detected as soon as it
+      # is true. Requires Docker 25+/Compose 2.20+, which the VPS has.
+      start_interval: 1s
 
