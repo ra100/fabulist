@@ -152,13 +152,46 @@ case "$action" in
       set +a
     fi
 
-    # The bind mounts, created before compose so Docker does not have to. Docker
-    # would create them anyway, but only as bare root-owned directories at the
-    # moment of first use — making them here means a fresh box and an upgraded one
-    # take the same path, and an operator can see where the data will land before
-    # anything writes to it. The Postgres image's own entrypoint chowns its
-    # directory on first init, so root ownership is not a problem for it.
+    # The bind mounts, created before compose so Docker does not have to — a fresh
+    # box and an upgraded one then take the same path, and it is visible where the
+    # data will land before anything writes to it.
     mkdir -p "${FABULIST_DATA_DIR:-./fabulist-data}" "${FABULIST_PG_DIR:-./fabulist-pg}"
+
+    # The database directory must be writable by the postgres user *inside* the
+    # container, uid 999.
+    #
+    # This is what broke v0.7.0 through v0.7.2 in production, and my comment here
+    # previously asserted the opposite — that "the Postgres image's own entrypoint
+    # chowns its directory, so root ownership is not a problem". That was true of the
+    # pre-18 images, which mounted `/var/lib/postgresql/data` and chowned it. The 18
+    # images mount `/var/lib/postgresql` and create a `18/` subdirectory inside it,
+    # and creating that subdirectory happens *after* the entrypoint has dropped from
+    # root to postgres — so a root-owned mount fails with
+    # `mkdir: can't create directory '/var/lib/postgresql/18/': Permission denied`,
+    # in a restart loop, with the app beside it reporting `getaddrinfo ENOTFOUND
+    # postgres`.
+    #
+    # It passed every local test because Rancher Desktop's VM maps bind mounts with
+    # permissive ownership, so uid 999 could write regardless. A real Linux host is
+    # the only place this shows up — which is exactly why the diagnostics added in
+    # 0.7.2 were worth a release of their own.
+    #
+    # Only when the directory is still empty: an initialised cluster already has the
+    # right ownership, and chowning a live data directory is not something a deploy
+    # should do unasked. `|| true` because a box where this is not permitted (an
+    # unprivileged deploy user) should still get the clearer failure from the database
+    # log rather than an opaque abort here.
+    if [ -z "$(ls -A "${FABULIST_PG_DIR:-./fabulist-pg}" 2>/dev/null)" ]; then
+      pg_abs="$(cd "${FABULIST_PG_DIR:-./fabulist-pg}" && pwd)"
+      # Done through a throwaway root container rather than `chown`/`sudo`: the deploy
+      # user owns the directory it just created but is not necessarily root, and
+      # requiring passwordless sudo for a deploy is a worse dependency than borrowing
+      # root from Docker — which this user demonstrably already has, since it is
+      # running compose.
+      docker run --rm -v "$pg_abs:/pgdata" alpine chown 999:999 /pgdata \
+        && echo "database directory prepared for uid 999" \
+        || echo "note: could not set ownership on $pg_abs — Postgres may fail to initialise" >&2
+    fi
 
     if [ -n "${COMPOSE_PROFILES:-}" ]; then
       echo "profiles: $COMPOSE_PROFILES"
