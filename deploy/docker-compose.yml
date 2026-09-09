@@ -88,3 +88,55 @@ services:
       # is serving.
       start_period: 120s
 
+    # The app cannot serve without a database, so it waits for one that is
+    # actually accepting connections rather than merely started. `service_healthy`
+    # and not `service_started`: Postgres' own entrypoint runs an initdb and a
+    # restart on first boot, so the port exists well before it will answer, and
+    # `service_started` would let the app race it and exit.
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    # Pinned to a major version, not `latest`: a Postgres major upgrade needs
+    # pg_upgrade or a dump/restore, so silently moving between them on a
+    # `docker compose pull` would leave the container unable to open its own data
+    # directory. 18 is what the schema was developed and load-tested against.
+    image: postgres:18-alpine
+    container_name: fabulist-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fabulist
+      POSTGRES_USER: fabulist
+      # Required. No default on purpose: a compose file that shipped a fallback
+      # password would be one `docker compose up` away from a database open to
+      # anything that can reach the container network.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in app.env}
+    # 300, not the default 100. Measured: 100 concurrent players plus one wiki
+    # ingest against max_connections=100 does not degrade, it *aborts* with
+    # `FATAL: sorry, too many clients already` on arbitrary requests. The app
+    # warns at boot when the server cannot supply what its pools want, but a
+    # warning is not a fix.
+    command: postgres -c max_connections=300
+    # Deliberately not published to the host at all: only the app needs to reach
+    # it, and it does so over the compose network by service name. An operator
+    # wanting psql uses `docker compose exec postgres psql -U fabulist`.
+    volumes:
+      # A bind mount for the same reasons the app's /data is one — an ordinary
+      # host directory that rsync, a cron backup and `ls` all work on, rather
+      # than a root-owned path under Docker's own storage that only `docker cp`
+      # can reach. Back this up with `pg_dump`, not by copying the directory
+      # while the server is running.
+      - ${FABULIST_PG_DIR:-./fabulist-pg}:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` against the app's own database and user, not the defaults:
+      # `pg_isready` with no arguments succeeds as soon as the *server* is up,
+      # which on first boot is true before initdb has created this database.
+      test: ["CMD-SHELL", "pg_isready -U fabulist -d fabulist"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # initdb plus the entrypoint's own restart takes a few seconds on a cold
+      # volume; failures here do not count toward `retries`.
+      start_period: 30s
+

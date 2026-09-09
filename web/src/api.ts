@@ -138,13 +138,30 @@ export interface Knobs {
 }
 
 export interface WorldSummary {
+  /** Numeric row id. A world is a row now, not a directory. */
+  id: number;
   slug: string;
   title: string;
   storyCount: number;
   entityCount: number;
-  lastPlayedAt: string;
-  bytes: number;
-  current: boolean;
+  edgeCount: number;
+  lastPlayedAt: string | null;
+  lastRefreshedAt: string | null;
+  /** Which wikis this world was built from, for attribution and refresh. */
+  sources: Array<{ wiki: string; baseUrl: string; pageCount: number; revisionWatermark: string }>;
+  /**
+   * Whether *this story* reads this world — not whether the server has it open.
+   *
+   * Replaces `current`, and the rename is the point: there is no single open
+   * world any more. A story composes the worlds it reads, so more than one can
+   * be true at once (that is what a crossover is), and another user's story
+   * reading a different world changes nothing here.
+   */
+  reading: boolean;
+  visibility: 'public' | 'private';
+  /** What the signed-in caller may do with it, so a control can be hidden rather than offered and then refused. */
+  role: 'reader' | 'ingest' | 'owner' | null;
+  /** `bytes` is gone: a world was a file, and file size is not a property of a row. */
 }
 
 export interface Story {
@@ -574,7 +591,10 @@ export const REQUIRED_ROUTES = [
   'DELETE /api/stories/:id',
   'GET /api/worlds',
   'POST /api/worlds',
-  'POST /api/worlds/:slug/switch',
+  // `POST /api/worlds/:slug/switch` is deliberately absent: a world is a row now
+  // and there is no server-wide "open world" to switch. `PUT /api/story/sources`
+  // replaced it, per story rather than per process.
+  'PUT /api/story/sources',
   'PUT /api/worlds/:slug/title',
   'DELETE /api/worlds/:slug',
   'GET /api/images/providers',
@@ -786,35 +806,63 @@ export const api = {
   },
 
   /**
-   * Worlds are files; stories are rows inside one. Switching a world closes one
-   * database and opens another, so unlike a story switch it invalidates every
-   * cached view — callers should refetch state wholesale afterwards.
+   * Canon worlds: the source material a story reads.
+   *
+   * Worlds used to be *files*, and switching one closed a database and opened
+   * another — a process-wide change that invalidated every cached view and, on a
+   * shared server, moved every other user too. A world is a row now, and which
+   * ones a story reads is a property of that story, so there is no switch here at
+   * all: `setSources` on the story is what changes what you are reading, and it
+   * affects nobody else.
    */
   worlds: {
-    list: () => req<{ current: string | null; worlds: WorldSummary[] }>('/worlds'),
+    list: () => req<{ worlds: WorldSummary[] }>('/worlds'),
+    /** Admin-only server-side: a world is system data, shared by every story that reads it. */
     create: (title?: string) => post<WorldSummary>('/worlds', title ? { title } : {}),
-    switchTo: (slug: string) => post<{ current: string }>(`/worlds/${encodeURIComponent(slug)}/switch`),
     rename: (slug: string, title: string) => put<WorldSummary>(`/worlds/${encodeURIComponent(slug)}/title`, { title }),
+    /** Refused while any story still reads it — enforced by a foreign key, not a check. */
     remove: (slug: string) => req<{ ok: boolean }>(`/worlds/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+    setVisibility: (slug: string, visibility: 'public' | 'private') =>
+      put<{ slug: string; visibility: string }>(`/worlds/${encodeURIComponent(slug)}/visibility`, { visibility }),
+    access: (slug: string) =>
+      req<{ slug: string; visibility: string; grants: Array<{ userId: string; role: string; grantedAt: string }> }>(
+        `/worlds/${encodeURIComponent(slug)}/access`,
+      ),
+    grant: (slug: string, userId: string, role: 'reader' | 'ingest' | 'owner' = 'reader') =>
+      post<{ slug: string; userId: string; role: string }>(`/worlds/${encodeURIComponent(slug)}/access`, { userId, role }),
+    revoke: (slug: string, userId: string) =>
+      req<{ ok: boolean }>(`/worlds/${encodeURIComponent(slug)}/access/${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+      }),
+  },
+
+  /** This story's own settings: which worlds it reads, and starting it over. */
+  story: {
     /**
-     * Replaces a (non-open) world's database file with `file`'s raw bytes —
-     * admin-only server-side (`requireAdmin` in `src/server/api.ts`), for
-     * handing a save recovered elsewhere (`sqlite3 .recover`, most
-     * concretely) back to a deployed instance with no `content-type:
-     * application/json` in sight. Deliberately not built on the shared `req`
-     * helper above: that helper always sets `content-type:
-     * application/json` and `JSON.stringify`s the body, both wrong for a
-     * SQLite file's raw bytes.
+     * Points this story at a list of canon worlds, in precedence order.
+     *
+     * The replacement for the old world switch, and strictly more capable: it
+     * takes a *list*, so this is also how a crossover is assembled. The first
+     * world wins on any id two of them share.
      */
-    upload: async (slug: string, file: Blob): Promise<WorldSummary> => {
-      const res = await fetch(`/api/worlds/${encodeURIComponent(slug)}/upload`, {
-        method: 'POST',
-        body: file,
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((body as { error?: string }).error ?? `${res.status} on /worlds/${slug}/upload`);
-      return body as WorldSummary;
-    },
+    setSources: (slugs: string[]) =>
+      put<{ storyId: string; sources: Array<{ worldId: number; ordinal: number; alias: string }> }>(
+        '/story/sources',
+        { slugs },
+      ),
+  },
+
+  /**
+   * The personal prose blocklist: phrases this user does not want to read.
+   *
+   * Per user, not per server — a phrase one player is tired of is not a property
+   * of the machine.
+   */
+  blocklist: {
+    list: () => req<Array<{ pattern: string; note: string }>>('/blocklist'),
+    add: (pattern: string, note = '') => post<{ pattern: string; note: string }>('/blocklist', { pattern, note }),
+    remove: (pattern: string) =>
+      req<{ ok: boolean }>(`/blocklist/${encodeURIComponent(pattern)}`, { method: 'DELETE' }),
   },
 
   setup: {
@@ -848,7 +896,19 @@ export const api = {
     cancel: (id: string) => post<{ cancelled: boolean }>(`/setup/job/${encodeURIComponent(id)}/cancel`),
     characters: () => req<CandidateCharacter[]>('/setup/characters'),
     setPlayer: (sketch: Partial<CharacterSketch>) => post<{ playerCharacterId: string; created: boolean; warnings: string[]; opening: string }>('/setup/player', sketch),
-    reset: () => post<{ ok: boolean }>('/setup/reset'),
+    /**
+     * Starts *this book* over. Canon and every other book are untouched.
+     *
+     * Narrower than it used to be, and deliberately: the old route deleted every
+     * story in the world and its canon together, because they shared one file.
+     * Rebuilding canon is `rebuildCanon` below.
+     */
+    reset: () => post<{ ok: boolean; storyId: string }>('/setup/reset'),
+    /**
+     * Empties this world's canon so the wizard can rebuild it, leaving every
+     * book's prose and chronicle intact. Admin-only server-side.
+     */
+    rebuildCanon: () => post<{ worldId: number; entities: number; edges: number }>('/canon/rebuild'),
     ingestHealth: () => req<IngestHealth>('/setup/ingest-health'),
     continue: (
       overrides: { seeds?: string[]; mode?: string; excludeCategories?: string[] } & IngestBudgetOverrides = {},

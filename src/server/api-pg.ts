@@ -65,7 +65,7 @@ export interface ServerOptions {
    * `IllustrationService` already accepting this shape, applied to the
    * routes that read/write `world` directly rather than through one of those.
    */
-  world: World | (() => World);
+  world: World | (() => World | Promise<World>);
   engine: Engine;
   port?: number;
   /** Directory of built UI assets; when absent the API runs alone. */
@@ -411,7 +411,12 @@ route('GET', '/api/export', async (_req, res, { world, url }) => {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '') || 'book';
-  const body = format === 'text' ? exportPlainText(world) : exportMarkdown(world);
+  // Awaited. Unawaited, `res.end(body)` wrote the string "[object Promise]" as the
+  // downloaded manuscript, and the rejected promise then reached the dispatcher's
+  // catch — which tried to send a 500 over a response already sent, crashing the
+  // process with ERR_HTTP_HEADERS_SENT. Two failures from one missing keyword, and
+  // neither visible to typecheck: `res.end` accepts anything stringifiable.
+  const body = format === 'text' ? await exportPlainText(world) : await exportMarkdown(world);
   const ext = format === 'text' ? 'txt' : 'md';
   res.writeHead(200, {
     'content-type': format === 'text' ? 'text/plain; charset=utf-8' : 'text/markdown; charset=utf-8',
@@ -1730,7 +1735,11 @@ route('GET', '/api/setup/status', async (_req, res, { setup, world }) => {
   if (!svc) return;
   const session = await world.session.get();
   send(res, 200, {
-    fresh: svc.isFresh(),
+    // Awaited. Unawaited, this serialised as `{}` — a truthy value — so the UI
+    // opened the setup wizard over a perfectly populated world and there was no
+    // way past it. Caught by loading the real page against a real server, which is
+    // the only place a JSON-shape bug like this is visible.
+    fresh: await svc.isFresh(),
     playerCharacterId: session.playerCharacterId,
     hasPlayer: !!(await world.cast.player()),
   });
@@ -1852,10 +1861,10 @@ route('POST', '/api/setup/custom', (_req, res, { setup, body }) => {
   send(res, 200, svc.startCustomWorld(description.trim(), style));
 });
 
-route('POST', '/api/setup/sample', (_req, res, { setup }) => {
+route('POST', '/api/setup/sample', async (_req, res, { setup }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  send(res, 200, svc.useSample());
+  send(res, 200, await svc.useSample());
 });
 
 /**
@@ -1958,11 +1967,11 @@ route('POST', '/api/setup/player', async (_req, res, { setup, world, body }) => 
  * above), which stays open to any signed-in user since starting a *fresh*
  * world is a per-user action, not a mutation of an existing shared one.
  */
-route('GET', '/api/setup/ingest-health', (_req, res, { setup, user, authConfig }) => {
+route('GET', '/api/setup/ingest-health', async (_req, res, { setup, user, authConfig }) => {
   if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  send(res, 200, svc.ingestHealth());
+  send(res, 200, await svc.ingestHealth());
 });
 
 /**
@@ -2301,7 +2310,7 @@ export function createApiServer(opts: ServerOptions) {
               ...(storyIdParam ? { storyIdOverride: storyIdParam } : {}),
               imagesDir,
             })
-          : getWorld();
+          : await getWorld();
         await match.handler(req, res, {
           world,
           db,
@@ -2322,7 +2331,19 @@ export function createApiServer(opts: ServerOptions) {
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.
-        send(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        //
+        // `headersSent` guard: a route that has already replied and *then* throws
+        // used to take the whole process down with ERR_HTTP_HEADERS_SENT, because
+        // this tried to send a second response. A streaming route or a bug like the
+        // unawaited export above is enough to get here, and one bad request should
+        // not stop the server for everyone else. The error is still reported —
+        // logged rather than sent, since the client already has its answer.
+        if (res.headersSent) {
+          console.error(`error after the response was sent for ${req.method} ${url.pathname}:`, err);
+          res.end();
+        } else {
+          send(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        }
       }
       return;
     }
