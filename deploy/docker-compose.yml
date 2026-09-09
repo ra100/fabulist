@@ -199,12 +199,26 @@ services:
     # against max_connections=300, and the default of 100 genuinely *aborts* there
     # with `FATAL: sorry, too many clients already` rather than degrading.
     command: postgres -c max_connections=50 -c shared_buffers=64MB
-    # A hard ceiling, so a runaway query cannot starve the app container on a small
-    # box. Generous against the ~32 MB measured above; Postgres will not use it.
-    deploy:
-      resources:
-        limits:
-          memory: 256M
+    # No memory limit.
+    #
+    # There was a 256M ceiling here, added from measurements on an *empty* database —
+    # "generous against the ~32 MB measured above" — which is exactly the kind of
+    # number that looks safe and is not evidence. On the deployed instance Postgres
+    # then died mid-checkpoint with no error, no shutdown message and no signal
+    # report, which is the signature of an external kill rather than a Postgres
+    # refusal, and the first *timed* checkpoint (300s, the default
+    # `checkpoint_timeout`) is precisely when it happened.
+    #
+    # I could not reproduce the kill locally — 600k rows across several tables with a
+    # GIN index and a forced CHECKPOINT peaked at 88 MB — so I am not going to assert
+    # the cause. What is certain is that the limit was set on weak evidence, is not
+    # needed (the measured working set is tens of MB), and is the only thing in this
+    # file capable of killing a healthy Postgres without leaving a message. Removing
+    # it removes that possibility; the host's own memory remains the real bound, and a
+    # container OOM is not the failure mode a single-tenant box needs protecting from.
+    #
+    # `docker inspect fabulist-postgres --format '{{.State.OOMKilled}}'` is the one
+    # question that settles it if this recurs.
     # Deliberately not published to the host at all: only the app needs to reach
     # it, and it does so over the compose network by service name. An operator
     # wanting psql uses `docker compose exec postgres psql -U fabulist`.
