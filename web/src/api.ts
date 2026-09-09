@@ -584,6 +584,8 @@ export interface CurrentUser {
 export const REQUIRED_ROUTES = [
   'GET /api/meta',
   'GET /api/stories',
+  'GET /api/stories/unowned',
+  'POST /api/stories/claim',
   'POST /api/stories',
   'POST /api/stories/fork',
   'POST /api/stories/:id/switch',
@@ -803,6 +805,16 @@ export const api = {
     switchTo: (id: string) => post<{ current: string }>(`/stories/${encodeURIComponent(id)}/switch`),
     rename: (id: string, title: string) => put<{ id: string; title: string }>(`/stories/${encodeURIComponent(id)}/title`, { title }),
     remove: (id: string) => req<{ ok: boolean }>(`/stories/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    /**
+     * Books with no owner — imported saves, which arrive unowned on purpose.
+     *
+     * They are invisible to the ordinary list, because `owner_user_id = $1` never
+     * matches NULL, so without this they exist in the database and nowhere in the UI.
+     */
+    unowned: () => req<Story[]>('/stories/unowned'),
+    /** Takes ownership: all unowned books, or one by id. */
+    claim: (id?: string) =>
+      post<{ claimed: number }>(`/stories/claim${id ? `?storyId=${encodeURIComponent(id)}` : ''}`),
   },
 
   /**

@@ -22,7 +22,7 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { makeWorld, withPg } from './pg-harness.ts';
 import { World, createWorld, worldFor } from '../src/store/index-pg.ts';
-import { createStory, listStories } from '../src/store/world-pg.ts';
+import { claimUnownedStories, createStory, listStories } from '../src/store/world-pg.ts';
 import { seedWorld } from '../src/seed/verrow-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
@@ -459,6 +459,71 @@ test('/api/health answers 503 when the database is gone', async (t) => {
       await new Promise<void>((r) => server.close(() => r()));
       await dead.close().catch(() => {});
     }
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * Imported books must be findable and claimable, not silently invisible.
+ *
+ * Imported SQLite saves arrive with `owner_user_id` NULL, deliberately: attributing
+ * them automatically would hand one person's writing to whoever signs in first. But
+ * `WHERE owner_user_id = $1` never matches NULL, so on a logged-in instance they
+ * vanished from the library — 13 imported books present in the database and absent from
+ * the UI. Reported by the operator as "I only see our generated worlds".
+ */
+test('unowned stories are listed separately and can be claimed', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(db, async (base) => {
+      // `withServer` already made a story; make it unowned, as an import would, plus
+      // one owned by somebody else that must never appear.
+      const all = await listStories(db);
+      const orphanId = all[0]!.id;
+      await db.query(`UPDATE stories SET owner_user_id = NULL WHERE id = $1`, [orphanId]);
+      const worldId = await makeWorld(db, 'other-world');
+      const theirs = await createStory(db, { worldIds: [worldId], title: 'Someone else' });
+      await db.query(`UPDATE stories SET owner_user_id = 'user-other' WHERE id = $1`, [theirs.id]);
+
+      const unowned = await get(base, '/api/stories/unowned');
+      assert.equal(unowned.status, 200);
+      const ids = (unowned.body as { id: string }[]).map((st) => st.id);
+      assert.deepEqual(ids, [orphanId], "only the unowned one, never another user's");
+
+      // Without a signed-in user there is nobody to claim for, and saying so beats
+      // silently doing nothing.
+      const claim = await send(base, 'POST', '/api/stories/claim');
+      assert.equal(claim.status, 400);
+      assert.match(claim.body.error as string, /sign in/i);
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('claiming only ever takes stories nobody owns', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'claimsafe');
+    const orphan = await createStory(db, { worldIds: [worldId], title: 'Unowned' });
+    const theirs = await createStory(db, { worldIds: [worldId], title: 'Theirs' });
+    await db.query(`UPDATE stories SET owner_user_id = NULL WHERE id = $1`, [orphan.id]);
+    await db.query(`UPDATE stories SET owner_user_id = 'user-other' WHERE id = $1`, [theirs.id]);
+
+    const claimed = await claimUnownedStories(db, 'user-me');
+    assert.equal(claimed, 1, 'exactly the one unowned story');
+
+    const mine = await db.query<{ owner_user_id: string }>(`SELECT owner_user_id FROM stories WHERE id = $1`, [
+      orphan.id,
+    ]);
+    assert.equal(mine.rows[0]!.owner_user_id, 'user-me');
+
+    // The other user's story is untouched — the NULL guard in the UPDATE is what
+    // makes this a claim rather than a transfer.
+    const other = await db.query<{ owner_user_id: string }>(`SELECT owner_user_id FROM stories WHERE id = $1`, [
+      theirs.id,
+    ]);
+    assert.equal(other.rows[0]!.owner_user_id, 'user-other', 'never reassigns an owned story');
+
+    // And a second claim finds nothing left to do.
+    assert.equal(await claimUnownedStories(db, 'user-me'), 0);
   });
   if (!ran) t.skip('no Postgres configured');
 });
