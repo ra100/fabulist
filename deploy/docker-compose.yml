@@ -72,16 +72,18 @@ services:
       # still work.
       - ${FABULIST_DATA_DIR:-./fabulist-data}:/data
     healthcheck:
-      # Any HTTP response below 500 counts as healthy, not just 200. What this
-      # needs to answer is "is the process up and serving HTTP", and with
-      # AUTH_REQUIRE_LOGIN=true (v0.2.4) every /api/ route including
-      # /api/meta correctly returns 401 to an unauthenticated caller — the
-      # session gate in src/server/api.ts sits ahead of them by design. The
-      # original `statusCode === 200` check therefore marked a perfectly
-      # healthy container unhealthy from the moment login was switched on.
-      # Caught by booting the released image with production-shaped env and
-      # watching /api/meta return 401, not by reading the file.
-      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4317/api/meta', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      # `/api/health`, and strictly 200 — not `/api/meta` with "anything under 500".
+      #
+      # `/api/meta` renders the route table from memory and never touches Postgres, so
+      # it reported `healthy` throughout a database outage. Worse, with login on it
+      # returns 401 to an unauthenticated probe, so the check had to accept any status
+      # below 500 — which meant it could not distinguish "up" from "unauthorised" from
+      # "database gone". After a storage migration that is the wrong bit to measure.
+      #
+      # `/api/health` runs `SELECT 1` and answers before the session gate, so a plain
+      # 200 means the process is up *and* the database is reachable, and 503 means it
+      # is not.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4317/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
