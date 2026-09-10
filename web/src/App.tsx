@@ -76,6 +76,12 @@ export function App() {
   const [hasPlayer, setHasPlayer] = useState<boolean | null>(null);
   // Non-null when the server predates this bundle. See `checkServerFreshness`.
   const [stale, setStale] = useState<StaleServer | null>(null);
+  // `package.json`'s version on the running server — null while unknown, and
+  // stays null (rather than 'unknown') on a server old enough to predate the
+  // field, so the badge can simply not render instead of showing a
+  // misleading literal string. Purely informational: never feeds the
+  // staleness check above, which compares routes, not this.
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
   // null while unknown, `{ user: null }` when login is off or this browser
   // has no session — SettingsTab reads `.isAdmin` off this to decide
   // whether to render the system-wide panels at all (the actual boundary
@@ -124,6 +130,16 @@ export function App() {
   // everything else looks fine, because the symptom appears later and elsewhere.
   useEffect(() => {
     void checkServerFreshness().then(setStale).catch(() => {});
+  }, []);
+
+  // Separate call from the freshness check above rather than threading the
+  // version through `checkServerFreshness`'s return value: that function's
+  // whole contract is "routes missing, or null", and overloading it with an
+  // unrelated field just to save one more `/api/meta` hit (cheap, no body to
+  // speak of) would make a reader wonder why a staleness check also carries
+  // a version string.
+  useEffect(() => {
+    void api.meta().then((m) => setServerVersion(m.version ?? null)).catch(() => {});
   }, []);
 
   // Also independent of the world check: who is signed in has nothing to do
@@ -175,6 +191,11 @@ export function App() {
               and cannot be inlined as artwork on transparency. */}
           <img className="masthead-badge" src="/favicon.svg" width={30} height={30} alt="" />
           {state?.worldTitle ?? 'Fabulist'}
+          {serverVersion ? (
+            <span className="mono dimmer app-version" title="package.json version on the running server">
+              v{serverVersion}
+            </span>
+          ) : null}
         </h1>
         {state ? (
           <div className="meta">

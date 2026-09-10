@@ -371,6 +371,9 @@ test('every route the web client demands is actually served', async (t) => {
       const served = new Set(meta.body.routes as string[]);
       const missing = REQUIRED_ROUTES.filter((r) => !served.has(r));
       assert.deepEqual(missing, [], `the client would warn about routes that do exist: ${missing.join(', ')}`);
+      // The Postgres server's own APP_VERSION, read from the same package.json
+      // as the SQLite server's — see test/api.test.ts's equivalent assertion.
+      assert.match(String(meta.body.version), /^\d+\.\d+\.\d+$/, 'version should be a real semver string, not the unknown fallback');
     });
   });
   if (!ran) t.skip('no Postgres configured');

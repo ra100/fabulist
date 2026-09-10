@@ -549,6 +549,14 @@ const put = <T>(path: string, body: unknown) => req<T>(path, { method: 'PUT', bo
 export interface ServerMeta {
   routes: string[];
   startedAt: string;
+  /**
+   * `package.json`'s `version` on the running server. Optional, not just
+   * `'unknown'`, because a server built between `/api/meta` existing and this
+   * field being added responds 200 with no `version` key at all — the type
+   * says so rather than letting a real `undefined` masquerade as a `string`
+   * the moment such a server answers.
+   */
+  version?: string;
 }
 
 /**
