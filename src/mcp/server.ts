@@ -27,6 +27,7 @@ import {
   commitIngestTool,
   commitNarrationTool,
   compactTool,
+  composeIllustrationPromptTool,
   createCustomWorldTool,
   createStoryTool,
   deleteDirectiveTool,
@@ -618,6 +619,31 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   );
 
   server.registerTool(
+    'compose_illustration_prompt',
+    {
+      description:
+        'The copy-pasteable prompt/negativePrompt for a portrait or scene, with no provider call \u2014 works even with no image provider ' +
+        'configured. Use this when generate_portrait/generate_scene_illustration fail with "no image provider configured", so an ' +
+        'illustration request never dead-ends into prose-only without offering the prompt first.',
+      inputSchema: {
+        subject: z.enum(['portrait', 'scene']),
+        entityId: z.string().optional().describe('A character entity id. Required when subject is "portrait".'),
+        turnId: z.string().optional().describe('A turn id. Required when subject is "scene".'),
+        visualStyle: z.enum(['realistic', 'drawing', 'sketch', 'draft', 'animation']).optional(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ subject, entityId, turnId, visualStyle }) => {
+      if (subject === 'portrait') {
+        if (!entityId) throw new Error('compose_illustration_prompt: entityId is required when subject is "portrait"');
+        return toolResult(await composeIllustrationPromptTool(ctx, { subject, entityId, visualStyle }));
+      }
+      if (!turnId) throw new Error('compose_illustration_prompt: turnId is required when subject is "scene"');
+      return toolResult(await composeIllustrationPromptTool(ctx, { subject, turnId, visualStyle }));
+    },
+  );
+
+  server.registerTool(
     'delete_illustration',
     { description: 'Delete a generated illustration.', inputSchema: { id: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
@@ -923,6 +949,33 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
               '',
               'Write in the style the frame asks for, not your own. Keep the player in the fiction:',
               'do not narrate the tool calls.',
+              '',
+              'Keep the world honest — run this pass at the start of the session and again after any turn',
+              'that introduces a new name, place, relationship, or revelation:',
+              '',
+              '- Read before writing: get_state (position, counts, pending consequences) and get_book',
+              '  (recent committed prose), so you know what is already true before adding anything.',
+              '- Search before inventing: search_entities for any name/place you are about to introduce —',
+              '  do not create a second entity for something that already exists under a slightly',
+              '  different name.',
+              '- Verify before asserting: cross-check with get_entity/get_facts before treating something as',
+              '  established. Do not narrate a new fact that contradicts one already on record.',
+              '- Keep dossiers current: when a turn changes what is true about a character — a new wound,',
+              '  a revealed allegiance, a broken vow — call update_sheet (identity/contract/voice/condition/',
+              '  appearance) rather than letting the prose drift ahead of the sheet. appearance.referenceImagePath',
+              '  and .seed are read-only through update_sheet; only generate_portrait writes those.',
+              '- Relationships record themselves: commit_narration\u2019s extraction step reads what the prose',
+              '  actually depicts and creates the connections — there is no separate "create a connection"',
+              '  call. Write the relationship plainly enough in the prose for extraction to catch it, then',
+              '  spot-check with get_entity (its neighbours field) that the edge actually landed.',
+              '- Respect pace and stakes: before improvising tone or intensity, check get_state\u2019s knobs',
+              '  (danger, pacing, characterStrictness, canonFidelity, propagationDepth, ignoranceBudget,',
+              '  proseDensity) and get_threads\u2019 stakes/tension for every open thread. Follow those dials —',
+              '  do not silently drift them. update_knobs/update_thread exist for when the player explicitly',
+              '  asks to change one.',
+              '- If generate_portrait or generate_scene_illustration fail with "no image provider configured",',
+              '  call compose_illustration_prompt instead — it returns the same prompt/negativePrompt with no',
+              '  provider needed, ready to paste into any image tool, before falling back to prose-only.',
             ].join('\n'),
           },
         },

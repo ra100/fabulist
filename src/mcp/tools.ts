@@ -740,6 +740,43 @@ export async function generateSceneIllustrationTool(ctx: McpToolContext, args: {
   }
 }
 
+/**
+ * `compose_illustration_prompt`. The MCP-side counterpart of
+ * `GET /api/illustrate/{portrait,scene}/.../prompt` — the copy-pasteable
+ * fallback `.design/ILLUSTRATIONS.md` §6 requires: composition and
+ * generation are deliberately split in `IllustrationService`, and this tool
+ * only ever calls `composePortrait`/`composeScene`, never `illustratePortrait`/
+ * `illustrateScene` — so it returns a real prompt/negative-prompt pair
+ * whether or not an image provider is configured, unlike `generate_portrait`/
+ * `generate_scene_illustration` which need one. The one thing this *cannot*
+ * fix is illustration being disabled outright (`ctx.illustrations` absent,
+ * i.e. no `IllustrationService` wired into this server at all) — that still
+ * throws, same as the other two illustration tools, because there is no
+ * `composePortrait`/`composeScene` to call without a service instance.
+ */
+export async function composeIllustrationPromptTool(
+  ctx: McpToolContext,
+  args: { subject: 'portrait'; entityId: string; visualStyle?: string } | { subject: 'scene'; turnId: string; visualStyle?: string },
+) {
+  if (!ctx.illustrations) {
+    throw new Error('compose_illustration_prompt: illustration is not enabled on this server');
+  }
+  const style = parseVisualStyle(args.visualStyle);
+  const note = 'Copy-pasteable fallback — no provider was called and nothing was generated or stored. Paste prompt/negativePrompt into whatever image tool is available.';
+  if (args.subject === 'portrait') {
+    const composed = ctx.illustrations.composePortrait(args.entityId, style);
+    return { ...composed, note };
+  }
+  const world = ctx.world();
+  const turn = world.chronicle.getTurn(args.turnId);
+  if (!turn) throw new Error(`compose_illustration_prompt: no turn ${args.turnId}`);
+  const firstEvent = turn.delta?.events[0];
+  const locationId = (firstEvent?.locationId ?? world.session.get().currentLocationId ?? null) as EntityId | null;
+  const presentIds = (firstEvent?.participants ?? []) as EntityId[];
+  const composed = ctx.illustrations.composeScene(args.turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style);
+  return { ...composed, note };
+}
+
 /** `delete_illustration`. The MCP-side counterpart of `DELETE /api/illustration/:id`. */
 export function deleteIllustrationTool(ctx: McpToolContext, args: { id: string }) {
   ctx.world().illustrations.delete(args.id);
