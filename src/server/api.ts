@@ -8,6 +8,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Engine } from '../loop/engine.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { forkStory, rollback } from '../loop/branch.ts';
@@ -178,6 +179,27 @@ const RAW_BODY_ROUTES = new Set<string>();
 /** Set once per process, so the client can tell a restart from a reload. */
 const STARTED_AT = new Date().toISOString();
 
+/**
+ * `package.json`'s own `version`, read once at import time rather than
+ * hand-duplicated here — a second copy of the version string is one more
+ * place a release could forget to bump. Resolved from this file's own
+ * location, not `process.cwd()`: `pnpm serve`/`serve-sqlite` already run from
+ * the repo root, but the Docker image's `WORKDIR` and a systemd unit's
+ * `WorkingDirectory` are exactly the kind of thing that drifts, and
+ * `import.meta.url` is the one thing about this file's location that cannot.
+ * Falls back to `'unknown'` rather than throwing — a missing or unreadable
+ * `package.json` should degrade the version badge, not the whole server.
+ */
+const APP_VERSION: string = (() => {
+  try {
+    const here = fileURLToPath(new URL('.', import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(here, '..', '..', 'package.json'), 'utf8')) as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+})();
+
 function route(method: string, path: string, handler: Handler): void {
   // `:name` becomes a named capture, so params come out typed as strings.
   const pattern = new RegExp(
@@ -201,15 +223,22 @@ function route(method: string, path: string, handler: Handler): void {
  * rendered perfectly — a 404 that looks like a broken feature rather than a
  * stale process.
  *
- * Route paths rather than a version number: a hand-bumped version is one more
- * thing to forget, and the inventory answers "can this page's features work
- * here" directly instead of by proxy.
+ * Route paths, not a version number, remain the staleness *check*
+ * (`checkServerFreshness` in `web/src/api.ts`): a hand-bumped version is one
+ * more thing to forget, and the inventory answers "can this page's features
+ * work here" directly instead of by proxy. `version` below is purely
+ * informational — what a human reads in the settings tab to confirm which
+ * release is actually running — and costs nothing to keep honest since
+ * `APP_VERSION` is read straight from `package.json`, the same field a
+ * release already bumps for its git tag, not a second copy hand-maintained
+ * here.
  */
 route('GET', '/api/meta', (_req, res) => {
   send(res, 200, {
     // Sorted so two servers can be diffed by eye.
     routes: routes.map((r) => `${r.method} ${r.path}`).sort(),
     startedAt: STARTED_AT,
+    version: APP_VERSION,
   });
 });
 

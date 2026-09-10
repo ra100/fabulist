@@ -1208,6 +1208,11 @@ test('the meta endpoint reports the route inventory this build serves', async ()
     assert.ok(routes.includes('POST /api/stories/:id/switch'));
     assert.deepEqual([...routes].sort(), routes, 'sorted, so two servers can be diffed by eye');
     assert.match(String(body.startedAt), /^\d{4}-\d{2}-\d{2}T/);
+    // Read straight from package.json (see APP_VERSION in src/server/api.ts),
+    // not hand-duplicated — a real semver string, and specifically not the
+    // 'unknown' fallback, since this test runs from the checkout that owns
+    // that package.json.
+    assert.match(String(body.version), /^\d+\.\d+\.\d+$/, 'version should be a real semver string, not the unknown fallback');
   });
 });
 
