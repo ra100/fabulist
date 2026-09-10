@@ -30,6 +30,7 @@ import {
   commitIngestTool,
   commitNarrationTool,
   compactTool,
+  composeIllustrationPromptTool,
   createCustomWorldTool,
   createStoryTool,
   deleteDirectiveTool,
@@ -620,6 +621,50 @@ test('deleteIllustrationTool removes a generated illustration', async () => {
   const illus = await generatePortraitTool(ctx, { entityId: 'char:brother-anselm' });
   deleteIllustrationTool(ctx, { id: illus.id });
   assert.equal(world.illustrations.get(illus.id), undefined);
+  world.close();
+});
+
+test('composeIllustrationPromptTool returns a portrait prompt with no provider call, even with no image provider configured', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const mock = new MockProvider();
+  const engine = new Engine({ world, providers: new ProviderRegistry(mock) });
+  // Illustration is enabled (a service exists) but its registry resolves to
+  // no provider at all — the exact "no image provider configured" state the
+  // ask was written against. composePortrait must still work.
+  const illustrations = new IllustrationService({ world, providers: { get: () => null } });
+  const ctx: McpToolContext = { world: () => world, engine, illustrations, dataRoot: 'data' };
+  const out = await composeIllustrationPromptTool(ctx, { subject: 'portrait', entityId: 'char:brother-anselm' });
+  assert.match(out.prompt, /Brother Anselm/);
+  assert.ok(out.negativePrompt.length > 0);
+  assert.match(out.note, /Copy-pasteable fallback/);
+  assert.equal(world.illustrations.forEntity('char:brother-anselm').length, 0, 'composing writes nothing to the illustrations table');
+  world.close();
+});
+
+test('composeIllustrationPromptTool returns a scene prompt for an already-committed turn', async () => {
+  const { world, ctx, engine } = fullSetup();
+  const outcome = await engine.takeTurn('i warm the ink and keep copying');
+  assert.equal(outcome.kind, 'narrated');
+  if (outcome.kind !== 'narrated') return;
+  const out = await composeIllustrationPromptTool(ctx, { subject: 'scene', turnId: outcome.turn.id });
+  assert.ok(out.prompt.length > 0);
+  assert.match(out.note, /Copy-pasteable fallback/);
+  world.close();
+});
+
+test('composeIllustrationPromptTool throws on an unknown turn', async () => {
+  const { world, ctx } = fullSetup();
+  await assert.rejects(() => composeIllustrationPromptTool(ctx, { subject: 'scene', turnId: 'turn:nope' }), /no turn/);
+  world.close();
+});
+
+test('composeIllustrationPromptTool throws a clear message when illustration is not enabled at all', async () => {
+  const { world, ctx } = setup(); // setup() never sets ctx.illustrations
+  await assert.rejects(
+    () => composeIllustrationPromptTool(ctx, { subject: 'portrait', entityId: 'char:brother-anselm' }),
+    /illustration is not enabled/,
+  );
   world.close();
 });
 

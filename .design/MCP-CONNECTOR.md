@@ -255,6 +255,7 @@ for a similar reason — "no single call does three incompatible jobs."
 | `update_style` / `update_knobs` | `PUT /api/style`, `/knobs` | Partial patch, merged over the current values |
 | `add_anchor` | `POST /api/anchor` | Records a style-anchor passage |
 | `generate_portrait` / `generate_scene_illustration` / `delete_illustration` | `POST /api/illustrate/portrait/:id`, `/scene/:turnId`, `DELETE /api/illustration/:id` | Requires an image provider configured |
+| `compose_illustration_prompt` | `GET /api/illustrate/portrait/:id/prompt`, `/scene/:turnId/prompt` | The copy-pasteable fallback — no provider call, works even with none configured; call this when the two tools above report "no image provider configured" |
 | `tick` / `compact` / `close_scene` | `POST /api/tick`, `/compact`, `/scene/close` | World-clock advancement, scene summarisation, manual scene close |
 | `branch_story_to_file` | `POST /api/branch` | Forks the *save file* at a scene to a different path on disk — distinct from `fork_story`, which stays in the same world file |
 | `play` | `POST /api/play` | Server-narrated alternative to `propose_turn`/`commit_narration`: one call, this server's own provider writes the prose |
