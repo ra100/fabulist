@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { makeWorld, withPg } from './pg-harness.ts';
 import { World } from '../src/store/index-pg.ts';
 import { createStory } from '../src/store/world-pg.ts';
-import { commitDelta } from '../src/loop/commit-pg.ts';
+import { commitDelta, commitTurn } from '../src/loop/commit-pg.ts';
 import { validateDelta } from '../src/loop/validate-pg.ts';
 import {
   applyDirectiveRecalc,
@@ -56,6 +56,15 @@ function sheet(entityId: string, over: Partial<CharacterSheet> = {}): CharacterS
     ...over,
   };
 }
+
+const turnMeta = {
+  integrity: null,
+  referee: null,
+  move: null,
+  frameLog: null,
+  lint: null,
+  providerCalls: [],
+};
 
 // ----------------------------------------------------------------- commit
 
@@ -173,6 +182,74 @@ test('sceneAdvance moves the session and opens the next scene', async (t) => {
     assert.equal((await world.session.get()).scene, 2);
     assert.equal((await world.session.get()).turn, 0);
     assert.ok((await world.chronicle.scenes()).some((s) => s.scene === 2));
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('a complete turn commits prose, delta, and session position atomically', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    const delta = {
+      ...emptyDelta(),
+      entityUpserts: [{ id: 'item:bell', type: 'Item' as const, name: 'Bell', summary: '' }],
+    };
+
+    await assert.rejects(() =>
+      commitTurn(db, world, {
+        rawInput: 'ring it',
+        intent: null,
+        delta,
+        bookProse: null as unknown as string,
+        meta: turnMeta,
+      }),
+    );
+
+    assert.equal(await world.graph.get('item:bell'), undefined);
+    assert.equal((await world.chronicle.turns()).length, 0);
+    assert.deepEqual(
+      { scene: (await world.session.get()).scene, turn: (await world.session.get()).turn },
+      { scene: 1, turn: 1 },
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('concurrent turn commits on one story receive distinct positions', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    await Promise.all(
+      ['first', 'second'].map((rawInput) =>
+        commitTurn(db, world, {
+          rawInput,
+          intent: null,
+          delta: emptyDelta(),
+          bookProse: rawInput,
+          meta: turnMeta,
+        }),
+      ),
+    );
+
+    const turns = await world.chronicle.turns();
+    assert.deepEqual(turns.map((turn) => turn.turn), [2, 3]);
+    assert.equal((await world.session.get()).turn, 3);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('scene-advancing turn remains on the closed scene and resets the next scene', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    const { turn } = await commitTurn(db, world, {
+      rawInput: 'leave',
+      intent: null,
+      delta: { ...emptyDelta(), sceneAdvance: true },
+      bookProse: 'They left.',
+      meta: turnMeta,
+    });
+
+    assert.deepEqual({ scene: turn.scene, turn: turn.turn }, { scene: 1, turn: 2 });
+    const session = await world.session.get();
+    assert.deepEqual({ scene: session.scene, turn: session.turn }, { scene: 2, turn: 0 });
   });
   if (!ran) t.skip('no Postgres configured');
 });
