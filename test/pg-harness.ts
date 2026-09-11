@@ -24,7 +24,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Db } from '../src/db/pg.ts';
+import { Db, applyMigrations } from '../src/db/pg.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_SQL = readFileSync(join(here, '..', 'src', 'db', 'schema-pg.sql'), 'utf8');
@@ -93,6 +93,7 @@ export async function withPg(fn: (db: Db, schema: string) => Promise<void>): Pro
 
   try {
     await db.query(SCHEMA_SQL);
+    await applyMigrations(db);
     await db.query(ROLES_SQL);
     await fn(db, schema);
   } finally {
