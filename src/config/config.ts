@@ -7,7 +7,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { MockProvider } from '../providers/mock.ts';
 import { ProviderRegistry, SwappableRegistry, type Provider } from '../providers/provider.ts';
-import { buildProvider, MECHANIC_ROLES, PRESETS, PROFILES, type ProviderSpec } from '../providers/http.ts';
+import { buildProvider, MECHANIC_ROLES, PRESETS, profilesFor, type ProviderSpec } from '../providers/http.ts';
 import { buildImageProvider, IMAGE_PRESETS, type ImageProviderSpec } from '../providers/imageConfig.ts';
 import { SwappableImageRegistry } from '../providers/image.ts';
 
@@ -148,7 +148,9 @@ export function buildRegistry(cfg: Config, env = process.env): { registry: Provi
     }
   };
 
-  const profile = PROFILES[cfg.profile];
+  // Configured providers are profiles in their own right, so a model that no
+  // built-in profile names (one on another host, say) is still selectable.
+  const profile = profilesFor(cfg.providers)[cfg.profile];
   if (!profile) {
     notes.push(`unknown profile "${cfg.profile}", falling back to mock`);
     return { registry: new ProviderRegistry(new MockProvider()), notes };

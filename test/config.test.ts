@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
+import { createServer } from 'node:http';
 import { ConfigService, validateSpec, ROUTABLE_ROLES } from '../src/config/service.ts';
 import { defaultConfig, loadConfig, localPathFor, saveConfig, type Config } from '../src/config/config.ts';
 import { ProviderRegistry, SwappableRegistry } from '../src/providers/provider.ts';
@@ -530,6 +531,63 @@ test('profile switches write the server\'s own config file, not the default path
       world.close();
     }
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The setup wizard's model step offers `usableProfiles` and nothing else, and
+ * every built-in profile names presets pinned to 127.0.0.1. So an Ollama living
+ * anywhere else — another host, another container — could be added in settings,
+ * pass its Test, and still leave the wizard with only the mock to pick, because
+ * no profile mentioned it. The field workaround was a 127.0.0.1→ollama TCP
+ * shim, which is the tell: nothing was wrong with the provider.
+ */
+test('a provider on a custom base url is selectable as a profile once it tests green', async () => {
+  // Stands in for an Ollama that is not on the preset's 127.0.0.1:11434.
+  const ollama = createServer((req, res) => {
+    res.writeHead(req.url === '/api/tags' ? 200 : 404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ models: [{ name: 'qwen2.5:14b' }] }));
+  });
+  await new Promise<void>((r) => ollama.listen(0, '127.0.0.1', r));
+  const baseUrl = `http://127.0.0.1:${(ollama.address() as AddressInfo).port}`;
+
+  const dir = mkdtempSync(join(tmpdir(), 'story-cfg-'));
+  const world = World.open(':memory:');
+  seedWorld(world);
+  // A real file, on a throwaway path: `switchProfile` reads and writes config
+  // through the module functions rather than the service, so the two have to be
+  // pointed at the same place for the switch below to mean anything.
+  const config = new ConfigService({ path: join(dir, 'cfg.json') });
+  const registry = new SwappableRegistry(new ProviderRegistry(new MockProvider()), 'mock');
+  const server = createApiServer({ world, engine: new Engine({ world, providers: registry }), registry, config });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const spec = { kind: 'ollama', model: 'qwen2.5:14b', baseUrl };
+
+    const tested = await send(base, 'POST', '/api/config/provider/test', { key: 'ollama:remote', spec });
+    assert.equal(tested.body.status, 'ready', "the wizard's own Test button says this model works");
+
+    const kept = await send(base, 'PUT', '/api/config/provider/ollama%3Aremote', spec);
+    assert.deepEqual(kept.body.issues, []);
+
+    const report = await send(base, 'GET', '/api/providers');
+    assert.ok(
+      (report.body.usableProfiles as string[]).includes('ollama:remote'),
+      'the model step lists usable profiles, so a provider that tested green has to be one',
+    );
+
+    const switched = await send(base, 'POST', '/api/providers/profile', { profile: 'ollama:remote' });
+    assert.equal(switched.status, 200);
+    assert.equal(switched.body.ok, true, 'selecting it is what lets the wizard advance');
+    assert.equal(registry.profile(), 'ollama:remote');
+    assert.equal(registry.get('narrate').id, 'ollama', 'and the world is written by that model, not the mock');
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    await new Promise<void>((r) => ollama.close(() => r()));
+    world.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
