@@ -122,6 +122,7 @@ test('a real MCP client connects, lists tools, and finds propose_turn among them
       assert.ok(names.includes('get_state'));
       assert.ok(names.includes('commit_narration'));
       assert.ok(names.includes('resolve_interrupt'));
+      assert.ok(names.includes('create_story'));
     } finally {
       await client.close();
     }
@@ -151,6 +152,19 @@ test('every listed tool carries readOnly/destructive/openWorld annotations, matc
       assert.equal(byName.get('reset_world')?.destructiveHint, true);
       assert.equal(byName.get('resolve_wiki')?.openWorldHint, true);
       assert.equal(byName.get('update_sheet')?.readOnlyHint, false);
+      const addAnchor = tools.find((tool) => tool.name === 'add_anchor');
+      const schema = addAnchor?.outputSchema;
+      assert.ok(schema && typeof schema === 'object' && 'type' in schema && schema.type === 'object');
+      assert.ok(
+        'properties' in schema &&
+        schema.properties &&
+        typeof schema.properties === 'object' &&
+        'ok' in schema.properties &&
+        schema.properties.ok &&
+        typeof schema.properties.ok === 'object' &&
+        'const' in schema.properties.ok &&
+        schema.properties.ok.const === true,
+      );
     } finally {
       await client.close();
     }
