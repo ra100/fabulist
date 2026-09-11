@@ -162,6 +162,31 @@ test('a duplicated relation within one batch does not abort the statement', asyn
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('two pages that normalise to one entity id do not abort the batch', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await fresh(db);
+    // A disambiguation variant and the plain title slugify to the same id — the
+    // parenthetical is stripped — which is exactly what redirects and retitled
+    // articles do on a real wiki. The entity writer sees the same id twice in one
+    // batch, and Postgres refuses to ON CONFLICT DO UPDATE a row twice in one
+    // statement, so without collapsing the batch a 496-page ingest dies at the
+    // final flush with "cannot affect row a second time".
+    const pages = [
+      characterPage('Anselm', { occupation: 'Scribe' }),
+      characterPage('Anselm (monk)', { occupation: 'Monk' }, 'The same man, under his other title.'),
+    ];
+
+    await runPassA(db, world, pages, { wiki: 'w' });
+
+    assert.equal((await world.graph.counts()).canon, 1, 'both pages resolve to the one canon row');
+    const anselm = await world.graph.getCanon('char:anselm');
+    assert.ok(anselm, 'the collapsed entity was written');
+    // Last occurrence wins, matching what sequential `upsert` calls would leave.
+    assert.equal(anselm?.props?.occupation, 'Monk');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('a secondary source merges rather than overwriting the primary', async (t) => {
   const ran = await withPg(async (db) => {
     const world = await fresh(db);
