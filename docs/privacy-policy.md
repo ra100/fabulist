@@ -30,7 +30,7 @@ it means the maintainer operating the deployment you connected to.
 | Email, first/last name | WorkOS (AuthKit) sign-in, or an MCP OAuth token issued by the same identity provider | To tell your stories apart from everyone else's, and nothing else — see §3 |
 | A session cookie (browser) or a bearer token (MCP connector) | Set at login/authorization | Keeps you signed in; contains no password |
 | Your stories: turns, character sheets, threads, facts, directives, illustrations you generate | Written by you, playing | This *is* the product — a story you're writing |
-| Encryption rollout state (pilot flags and story format version) | Fabulist app database (`encryption_rollout`, `stories.encryption_version`) | Gradual per-user rollout of encrypted story storage, starting with pilot users |
+| Encryption rollout state and opaque browser-created key wraps | Fabulist app database (`encryption_rollout`, `user_encryption_keys`, `story_encryption_keys`) | Gradual per-user rollout. Key-wrap records contain salts, nonces, and ciphertext, not a passphrase, recovery code, master key, or story key |
 | Which worlds you may access, and your role on each | `world_access` table, set by an admin or a world's owner | Access control — decides which shared canon you can read or ingest |
 | A personal "prose blocklist" (phrases you never want to see) | Something you added | A per-user preference, nothing else |
 | Token usage totals per story | Computed from your own turns | Informational only — lets you see what your own configured provider is costing you (§4). Never billed by us. |
@@ -85,13 +85,19 @@ Transport security is HTTPS/TLS when you use the hosted deployment, and OAuth
 tokens for browser/MCP access are transmitted over that same encrypted
 channel.
 
-At-rest protection is being rolled out in stages. The app now carries
-per-user rollout controls and per-story storage-version metadata so encrypted
-story storage can be enabled safely for selected accounts first, then expanded.
-During this rollout period, not all stored story content is cryptographically
-opaque to the operator yet, and we do **not** claim a zero-knowledge design.
-Because a turn must be processed to generate a response, plaintext also exists
-in application memory during request handling.
+At-rest protection is being rolled out in stages. The private-storage pilot
+creates a random browser-held master key and lets the browser wrap it
+independently with a passphrase and a recovery code. The database receives
+only those encrypted wraps and public derivation metadata; there is no
+maintainer recovery or escrow key. Losing both the passphrase and recovery
+code makes future encrypted content unrecoverable.
+
+Key enrollment is not content encryption. Until a selected story has completed
+and verified its content migration, its existing durable content remains
+plaintext and is not cryptographically opaque to the operator. We therefore
+do **not** claim a zero-knowledge design. Because a turn must be processed to
+generate a response, plaintext also exists in application memory during
+request handling.
 
 ## 6. What the MCP connector, specifically, can see and do
 

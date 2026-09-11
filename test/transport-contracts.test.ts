@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   forkStoryBodySchema,
+  encryptionEnrollmentBodySchema,
   illustrationBodySchema,
   knowledgeBodySchema,
   playResponseSchema,
@@ -27,6 +28,10 @@ test('mutation contracts reject unknown fields and invalid nested values', () =>
     worldAccessBodySchema.safeParse({ userId: 'user:a', role: 'writer' }),
     setupPreviewBodySchema.safeParse({ baseUrl: 'not a url', seeds: ['start'] }),
     setupPreviewBodySchema.safeParse({ baseUrl: 'https://example.test', seeds: ['start'], maxPages: 0 }),
+    encryptionEnrollmentBodySchema.safeParse({
+      userKey: { version: 1, passphraseKdf: 'pbkdf2-sha256', passphraseKdfParams: { iterations: 1 } },
+      storyKeys: [],
+    }),
   ];
 
   assert.ok(invalid.every((result) => !result.success));
@@ -42,6 +47,23 @@ test('mutation contracts preserve documented defaults and valid clients', () => 
     seeds: ['Start'],
   });
   assert.deepEqual(illustrationBodySchema.parse({}), {});
+  assert.equal(encryptionEnrollmentBodySchema.safeParse({
+    userKey: {
+      version: 1,
+      passphraseKdf: 'pbkdf2-sha256',
+      passphraseKdfParams: { iterations: 600_000 },
+      passphraseSalt: 'AAAAAAAAAAAAAAAAAAAAAA==',
+      passphraseWrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+      recoverySalt: 'AAAAAAAAAAAAAAAAAAAAAA==',
+      recoveryWrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+      recoveryCodeHint: 'abcdefgh',
+    },
+    storyKeys: [{
+      storyId: 'story-private',
+      version: 1,
+      wrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+    }],
+  }).success, true);
 });
 
 test('play response contract detects server drift', () => {
