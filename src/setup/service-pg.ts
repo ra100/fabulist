@@ -6,7 +6,7 @@
  * silently pulls three thousand pages of a continuity nobody cares about is the
  * likeliest way this whole step goes wrong, so the preview is not skippable.
  */
-import type { World } from '../store/index-pg.ts';
+import { ensureCanonWorldFor, type World } from '../store/index-pg.ts';
 import type { Db } from '../db/pg.ts';
 import { createStory, defaultWorldIds } from '../store/world-pg.ts';
 import type { StoryId } from '../domain/types.ts';
@@ -422,7 +422,7 @@ export class SetupService {
       // re-resolved per step: an ingest is one continuous act of writing canon,
       // and letting the target world change mid-write would split the ingest
       // across two stories/worlds, which is a real corruption, not a stale-read.
-      const world = await this.getWorld();
+      const world = await this.authoringWorld(title || wikiName);
       await world.chronicle.setMeta('worldTitle', title || wikiName);
       // Persisted so a later session can offer "continue reading this wiki"
       // without asking the player to re-enter the universe, seeds and mode —
@@ -780,7 +780,7 @@ export class SetupService {
       // Resolved after the (only) await in this job, same reasoning as
       // startIngest: one continuous act of authoring canon, held for its
       // whole lifetime rather than re-resolved mid-write.
-      const world = await this.getWorld();
+      const world = await this.authoringWorld(String(raw.title ?? ''));
       handle.stage('writing it down');
       const result = await applyCustomWorld(world, raw);
       handle.log(`${result.entities} entities, ${result.edges} relations, ${result.threads} threads`);
@@ -796,7 +796,7 @@ export class SetupService {
 
   /** The built-in example, for trying the engine without any setup at all. */
   async useSample(): Promise<{ playerCharacterId: string; opening: string }> {
-    const world = await this.getWorld();
+    const world = await this.authoringWorld('Saint Verrow');
     await seedWorld(world);
     await world.chronicle.setMeta('worldTitle', 'Saint Verrow');
     return {
@@ -836,7 +836,7 @@ export class SetupService {
     const pack = packById(packId);
     if (!pack) throw new Error(`no such world pack: ${packId}`);
 
-    const world = await this.getWorld();
+    const world = await this.authoringWorld(pack.title);
     const result = await installPack(this.db, world, pack);
     if (!result.scenarios.length) throw new Error(`${packId} installed no playable scenario`);
 
@@ -963,5 +963,35 @@ export class SetupService {
       throw new Error('this story has no canon world; ingest needs a world to write into');
     }
     return id;
+  }
+
+  /**
+   * The world to author into — this service's current one, bound to a canon
+   * world if it has none yet.
+   *
+   * Every route below that *creates* canon goes through this rather than
+   * `getWorld()` directly. A brand-new story has no `story_sources` row (see
+   * `createStory`), and the stores refuse to pick a world for it: an ingest
+   * failed on its first line, `setMeta('worldTitle')`, and an authored world on
+   * its last, after the model had already been paid to invent one. Both read
+   * "no world for story …" and neither was recoverable from the wizard, which
+   * cannot retry a step.
+   *
+   * Deliberately the only place in the service that resolves a world this way.
+   * Reading canon must keep answering "nothing", because a story with no
+   * sources on a populated instance is a library problem — pick a world — and
+   * binding one behind the player's back would answer it wrongly. Writing canon
+   * is the one act that genuinely needs somewhere to put it.
+   *
+   * The returned `World` is re-resolved, not the one passed around before:
+   * `World` reads `story_sources` once, when it builds its stores, so the
+   * instance captured before the binding would still carry an empty source
+   * list.
+   */
+  private async authoringWorld(title = ''): Promise<World> {
+    const world = await this.getWorld();
+    if (world.sources.length) return world;
+    await ensureCanonWorldFor(this.db, world.storyId, title);
+    return world.withStory(world.storyId);
   }
 }
