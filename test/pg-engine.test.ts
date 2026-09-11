@@ -111,6 +111,8 @@ test('a plain turn narrates, extracts a delta, and commits it', async (t) => {
     const turns = await world.chronicle.turns();
     assert.equal(turns.length, 1);
     assert.equal(turns[0]!.bookProse, out.prose);
+    assert.ok(turns[0]!.meta.frames?.narrate, 'frame diagnostics are persisted on this story turn');
+    assert.ok(turns[0]!.meta.frames?.extract, 'each role keeps its own frame budget');
     assert.equal((await world.session.get()).turn, 1, 'the turn counter advanced');
     assert.ok((await world.chronicle.events()).length > 0);
   });

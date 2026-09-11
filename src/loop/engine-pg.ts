@@ -151,6 +151,7 @@ interface PendingNarration {
   agreedBeat: string;
   overrideIntegrity: boolean;
   calls: TurnMeta['providerCalls'];
+  frames: Record<string, Frame>;
   createdAt: number;
 }
 
@@ -175,8 +176,6 @@ export class Engine {
   private onInterrupt: ((i: Interrupt) => void) | undefined;
   private compactor: Compactor;
   private autoCompact: boolean;
-  /** Frames from the last turn, for the "why?" panel. */
-  lastFrames: Record<string, Frame> = {};
   /** See `PendingNarration`. Keyed by `resumeToken`, a random id — not the turn's own eventual id, which does not exist until commit. */
   private pending = new Map<string, PendingNarration>();
 
@@ -189,7 +188,6 @@ export class Engine {
     this.onInterrupt = opts.onInterrupt;
     this.autoCompact = opts.autoCompact !== false;
     this.compactor = new Compactor({
-      world: this.getWorld,
       provider: opts.providers.get('summarize'),
       ...(opts.chapterSize === undefined ? {} : { chapterSize: opts.chapterSize }),
     });
@@ -216,11 +214,15 @@ export class Engine {
     session: SessionState,
     data: FrameData,
     calls: TurnMeta['providerCalls'],
+    frames: Record<string, Frame>,
   ): RoleDeps {
     const providers = this.providers;
     return {
       world,
       data,
+      recordFrame: (role, frame) => {
+        frames[role] = frame;
+      },
       provider: (role) => providers.get(role),
       ctx: (role, extra) => this.frameContext(world, session, role, providers.get(role), extra),
       log: (role, provider, model, tokensIn, tokensOut) => {
@@ -272,12 +274,13 @@ export class Engine {
 
   private async takeTurnOn(world: World, rawInput: string, opts: TakeTurnOptions): Promise<TurnOutcome> {
     const calls: TurnMeta['providerCalls'] = [];
+    const frames: Record<string, Frame> = {};
     // One read of the session and one load of the world snapshot for the whole
     // turn. Every role and every frame below is built from these, so five frames
     // cost one fetch rather than five — see `frame/builders-pg.ts`.
     const session = await world.session.get();
     const data = await loadFrameData(world, session);
-    const deps = this.deps(world, session, data, calls);
+    const deps = this.deps(world, session, data, calls, frames);
     const actorId = opts.actorId ?? session.playerCharacterId;
 
     // 1. CLASSIFY
@@ -366,6 +369,7 @@ export class Engine {
         agreedBeat,
         overrideIntegrity: opts.overrideIntegrity ?? false,
         calls,
+        frames,
         createdAt: Date.now(),
       });
       this.sweepExpiredPending();
@@ -388,6 +392,7 @@ export class Engine {
       overrideIntegrity: opts.overrideIntegrity ?? false,
       prose,
       calls,
+      frames,
       deps,
       onStage: opts.onStage,
     });
@@ -413,6 +418,7 @@ export class Engine {
     overrideIntegrity: boolean;
     prose: string;
     calls: TurnMeta['providerCalls'];
+    frames: Record<string, Frame>;
     deps: RoleDeps;
     onStage?: (stage: string) => void;
   }): Promise<TurnOutcome> {
@@ -453,7 +459,8 @@ export class Engine {
       integrity: integrityVerdict,
       referee: refereeVerdict,
       move: plan.move,
-      frameLog: this.lastFrames.narrate?.log ?? null,
+      frameLog: args.frames.narrate?.log ?? null,
+      frames: Object.fromEntries(Object.entries(args.frames).map(([role, frame]) => [role, frame.log])),
       lint,
       providerCalls: args.calls,
     };
@@ -472,7 +479,7 @@ export class Engine {
     // Compaction is derived data and runs only after the authoritative turn
     // transaction succeeds.
     if (this.autoCompact && delta.sceneAdvance) {
-      await this.compactor.onSceneClosed(session.scene);
+      await this.compactor.onSceneClosed(world, session.scene);
     }
 
     return { kind: 'narrated', turn, prose, delta, commit, validation };
@@ -529,7 +536,7 @@ export class Engine {
       // stale view of the world would be worse than paying for one more read.
       const session = await world.session.get();
       const data = await loadFrameData(world, session);
-      const deps = this.deps(world, session, data, pending.calls);
+      const deps = this.deps(world, session, data, pending.calls, pending.frames);
       return await this.finishTurn({
         world,
         session,
@@ -542,6 +549,7 @@ export class Engine {
         overrideIntegrity: pending.overrideIntegrity,
         prose,
         calls: pending.calls,
+        frames: pending.frames,
         deps,
       });
     } finally {
@@ -580,7 +588,8 @@ export class Engine {
     // recent prose exactly as before.
     const session = await world.session.get();
     const data = await loadFrameData(world, session);
-    const deps = this.deps(world, session, data, calls);
+    const frames: Record<string, Frame> = {};
+    const deps = this.deps(world, session, data, calls, frames);
 
     const agreedBeat = [
       turn.meta.referee ? `ruling: ${turn.meta.referee.ruling}${turn.meta.referee.cost ? ` (cost: ${turn.meta.referee.cost})` : ''}` : '',

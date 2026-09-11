@@ -46,7 +46,6 @@ threads are still open. Preserve entity ids exactly as supplied. Five sentences
 at most. Reply with JSON only.`;
 
 export interface CompactorOptions {
-  world: World | (() => World | Promise<World>);
   provider: Provider;
   /** Scenes per chapter. */
   chapterSize?: number;
@@ -61,23 +60,12 @@ export interface CompactionResult {
 }
 
 export class Compactor {
-  /**
-   * A getter, not a resolved `World`. Same reasoning as `SetupPlanner`'s
-   * provider getter: `Engine` holds this `Compactor` for the process
-   * lifetime, but which story is "current" can change under it (a save
-   * switch, a story switch) without a restart. Capturing a `World` once at
-   * construction would mean every later compaction call silently keeps
-   * writing to whichever story was current when the server started —
-   * exactly the bug shape the SetupPlanner fix caught, one level up.
-   */
-  private getWorld: () => World | Promise<World>;
   private provider: Provider;
   private chapterSize: number;
   private minTurns: number;
   private onError: ((scope: string, err: unknown) => void) | undefined;
 
   constructor(opts: CompactorOptions) {
-    this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
     this.provider = opts.provider;
     this.chapterSize = opts.chapterSize ?? 8;
     this.minTurns = opts.minTurns ?? 2;
@@ -89,8 +77,7 @@ export class Compactor {
    * has a summary is left alone unless `force` is set, so this is safe to call
    * on every scene advance.
    */
-  async summariseScene(scene: number, force = false): Promise<string | null> {
-    const world = await this.getWorld();
+  async summariseScene(world: World, scene: number, force = false): Promise<string | null> {
     const existing = (await world.chronicle.scenes()).find((s) => s.scene === scene);
     if (existing?.summary && !force) return existing.summary;
 
@@ -143,8 +130,7 @@ export class Compactor {
   }
 
   /** Rolls completed scene summaries into a chapter summary. */
-  async summariseChapter(chapter: number, force = false): Promise<string | null> {
-    const world = await this.getWorld();
+  async summariseChapter(world: World, chapter: number, force = false): Promise<string | null> {
     const existing = await world.chronicle.chapter(chapter);
     if (existing?.summary && !force) return existing.summary;
 
@@ -168,15 +154,15 @@ export class Compactor {
    * Called after a scene advance. Summarises the scene that just closed, and the
    * chapter if that scene completed one.
    */
-  async onSceneClosed(closedScene: number): Promise<CompactionResult> {
+  async onSceneClosed(world: World, closedScene: number): Promise<CompactionResult> {
     const result: CompactionResult = { scenesSummarised: [], chaptersSummarised: [] };
 
-    const summary = await this.summariseScene(closedScene);
+    const summary = await this.summariseScene(world, closedScene);
     if (summary) result.scenesSummarised.push(closedScene);
 
     const chapter = this.chapterOf(closedScene);
     if (closedScene % this.chapterSize === 0) {
-      const chapterSummary = await this.summariseChapter(chapter);
+      const chapterSummary = await this.summariseChapter(world, chapter);
       if (chapterSummary) result.chaptersSummarised.push(chapter);
     }
 
@@ -189,8 +175,7 @@ export class Compactor {
   }
 
   /** Catches up any scene that closed without being summarised. */
-  async backfill(currentScene: number): Promise<CompactionResult> {
-    const world = await this.getWorld();
+  async backfill(world: World, currentScene: number): Promise<CompactionResult> {
     const result: CompactionResult = { scenesSummarised: [], chaptersSummarised: [] };
     const have = new Map((await world.chronicle.scenes()).map((s) => [s.scene, s.summary]));
 
@@ -198,7 +183,7 @@ export class Compactor {
     for (const scene of [...scenesWithTurns].sort((a, b) => a - b)) {
       if (scene >= currentScene) continue; // the current scene stays verbatim
       if (have.get(scene)) continue;
-      const summary = await this.summariseScene(scene);
+      const summary = await this.summariseScene(world, scene);
       if (summary) result.scenesSummarised.push(scene);
     }
     return result;
