@@ -20,6 +20,7 @@ import { withEncryptionRollout } from '../src/auth/encryption-rollout-pg.ts';
 import { encryptStoryValue } from '../src/crypto/story-envelope.ts';
 import { CastStore, emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../src/store/cast-pg.ts';
 import { ChronicleStore } from '../src/store/chronicle-pg.ts';
+import { GraphStore } from '../src/store/graph-pg.ts';
 import { IllustrationStore } from '../src/store/illustration-pg.ts';
 import { ConsequenceStore, DirectiveStore, StoryStore, ThreadStore, createStory, deleteStory, getStory, listStoriesForUser, resolveOrCreateStoryForUser } from '../src/store/world-pg.ts';
 import {
@@ -290,6 +291,91 @@ test('encrypted chronicle sheets and relationship notes round-trip without base-
       0,
       'deleting a story cascades its encrypted cast values',
     );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('encrypted private graph entities use opaque ids and decrypt names only in memory', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { storyId } = await setup(db);
+    const canon = new GraphStore({ db, storyId, sources: await sourcesFor(db, storyId) });
+    await canon.upsert({ id: 'char:canon', type: 'Character', name: 'Canon Keeper' }, 'canon');
+    await canon.upsert({ id: 'char:canon-peer', type: 'Character', name: 'Canon Peer' }, 'canon');
+    await canon.assertEdge(
+      { subject: 'char:canon', predicate: 'KNOWS', object: 'char:canon-peer', evidence: 'Canon evidence.' },
+      1,
+      'canon',
+    );
+    await canon.assertEdge(
+      { subject: 'char:canon', predicate: 'TRUSTS', object: 'char:canon-peer', evidence: 'Another canon edge.' },
+      1,
+      'canon',
+    );
+    await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [storyId]);
+
+    const key = randomBytes(32);
+    const graph = (await World.forStory(db, storyId, undefined, {
+      keyForStory: (id: string) => (id === storyId ? key : null),
+    })).graph;
+    await graph.upsert({
+      id: 'char:secret', type: 'Character', name: 'Mara Vell', summary: 'The hidden archivist.',
+      props: { secret: 'The crown is below the well.' }, provenance: 'authored', createdScene: 2,
+    });
+    await graph.upsert({ id: 'char:other', type: 'Character', name: 'Ivo Renn', summary: 'Mara’s ally.' });
+    await graph.upsert({ id: 'char:canon', type: 'Character', name: 'The Keeper', summary: 'A private revision.' });
+    const mara = (await graph.get('char:secret'))!;
+    assert.match(mara.id, /^ent:/, 'private entity id is opaque rather than the caller’s semantic id');
+    assert.equal(mara.name, 'Mara Vell');
+    assert.deepEqual(mara.props, { secret: 'The crown is below the well.' });
+    assert.equal((await graph.resolveName('Mara Vell'))?.id, mara.id);
+    assert.deepEqual((await graph.search('archivist')).map((entity) => entity.name), ['Mara Vell']);
+    assert.equal((await graph.get('char:canon'))?.name, 'The Keeper');
+    assert.equal((await graph.list()).some((entity) => entity.name === 'Canon Keeper'), false);
+    assert.equal((await graph.edgesFrom('char:canon'))[0]?.evidence, 'Canon evidence.');
+
+    await graph.upsert({ ...mara, summary: 'The archivist protects the crown.' });
+    await graph.assertEdge(
+      { subject: 'char:secret', predicate: 'TRUSTS', object: 'char:other', evidence: 'Mara gave Ivo the key.' },
+      2,
+    );
+    await graph.assertEdge(
+      { subject: 'char:canon', predicate: 'KNOWS', object: 'char:canon-peer', evidence: 'Private evidence.' },
+      2,
+    );
+    assert.equal((await graph.get('char:secret'))?.summary, 'The archivist protects the crown.');
+    assert.equal((await graph.edgesFrom('char:secret'))[0]?.evidence, 'Mara gave Ivo the key.');
+    assert.equal((await graph.edgesFrom('char:canon'))[0]?.evidence, 'Private evidence.');
+    assert.equal(await graph.retireEdge('char:canon', 'TRUSTS', 'char:canon-peer', 2), true);
+    assert.equal((await graph.edgesFrom('char:canon')).some((edge) => edge.predicate === 'TRUSTS'), false);
+    assert.equal((await graph.getCanon('char:canon'))?.name, 'Canon Keeper');
+
+    const base = await db.one<{ id: string; name: string; summary: string; props: unknown; evidence: string | null }>(
+      `SELECT e.id, e.name, e.summary, e.props, x.evidence
+         FROM chron_entities e JOIN chron_edges x ON x.story_id = e.story_id AND x.subject = e.id
+        WHERE e.story_id = $1 AND e.id = $2`,
+      [storyId, mara.id],
+    );
+    assert.match(base!.id, /^ent:/);
+    assert.deepEqual(base, { id: mara.id, name: '', summary: '', props: {}, evidence: null });
+    const privateEntities = await db.query<{ id: string; name: string; summary: string; props: unknown }>(
+      `SELECT id, name, summary, props FROM chron_entities WHERE story_id = $1`,
+      [storyId],
+    );
+    assert.ok(privateEntities.rows.length >= 3);
+    assert.ok(privateEntities.rows.every((entity) => entity.id.startsWith('ent:')));
+    assert.ok(privateEntities.rows.every((entity) => entity.name === '' && entity.summary === ''));
+    assert.ok(privateEntities.rows.every((entity) => JSON.stringify(entity.props) === '{}'));
+    const encrypted = await db.query<{ ciphertext: Buffer }>(
+      `SELECT ciphertext FROM encrypted_story_values WHERE story_id = $1 AND table_name IN ('chron_entities', 'chron_edges')`,
+      [storyId],
+    );
+    assert.ok(encrypted.rows.every((row) => !row.ciphertext.toString('utf8').includes('Mara')));
+
+    const locked = (await World.forStory(db, storyId)).graph;
+    await assert.rejects(() => locked.get('char:secret'), /locked/);
+    await assert.rejects(() => locked.search('Mara'), /locked/);
+    await assert.rejects(() => locked.assertEdge({ subject: 'char:secret', predicate: 'KNOWS', object: 'char:other' }, 3), /locked/);
+    assert.equal((await locked.getCanon('char:canon'))?.name, 'Canon Keeper');
   });
   if (!ran) t.skip('no Postgres configured');
 });
