@@ -9,7 +9,11 @@ export function postgresDirectiveRepository(world: World): DirectiveRepository {
     recalculate: (id, text) => applyDirectiveRecalc(world, id, text),
     threadTitles: async (ids) => {
       const wanted = new Set(ids);
-      return new Map((await world.threads.all()).filter((thread) => wanted.has(thread.id)).map((thread) => [thread.id, thread.title]));
+      return new Map(
+        (await world.threads.all())
+          .filter((thread) => wanted.has(thread.id))
+          .map((thread) => [thread.id, thread.title]),
+      );
     },
   };
 }
