@@ -24,7 +24,7 @@
  * Connection comes from DATABASE_URL, matching every other Postgres tool.
  */
 import { statSync } from 'node:fs';
-import { Db, NO_CONNECTION_STRING, applySchema, connectionStringFromEnv } from '../db/pg.ts';
+import { Db, NO_CONNECTION_STRING, applyMigrations, applySchema, connectionStringFromEnv } from '../db/pg.ts';
 import { findSqliteWorlds, importSqliteWorlds } from '../db/import-sqlite.ts';
 
 const args = process.argv.slice(2);
@@ -59,6 +59,7 @@ if (!connectionString) {
 const db = new Db({ connectionString, kind: 'ingest', applicationName: 'fabulist-import' });
 try {
   await applySchema(db);
+  await applyMigrations(db);
   const report = await importSqliteWorlds(db, {
     dataRoot,
     only: reimport,

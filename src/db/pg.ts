@@ -42,7 +42,7 @@
  * request error under load.
  */
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from 'pg';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -229,6 +229,48 @@ export class Db implements Queryable {
  */
 export async function applySchema(db: Queryable): Promise<void> {
   await db.query(readFileSync(join(here, 'schema-pg.sql'), 'utf8'));
+}
+
+/**
+ * Applies ordered PostgreSQL migrations exactly once.
+ *
+ * `schema-pg.sql` remains the fast fresh-install snapshot. Existing databases
+ * need explicit migrations because `CREATE TABLE IF NOT EXISTS` cannot add a
+ * column, constraint, or corrected index to a table that is already present.
+ * One session-level advisory lock serialises startup across app replicas, and
+ * each migration plus its version marker commits atomically.
+ */
+export async function applyMigrations(db: Db): Promise<void> {
+  const dir = join(here, 'migrations-pg');
+  const files = readdirSync(dir)
+    .filter((name) => /^\d{3}-.+\.sql$/.test(name))
+    .sort();
+
+  await db.withClient(async (client) => {
+    await client.query(`SELECT pg_advisory_lock(hashtext('fabulist-schema-migrations'))`);
+    try {
+      for (const file of files) {
+        const version = Number(file.slice(0, 3));
+        const applied = await client.query<{ version: number }>(
+          'SELECT version FROM migrations WHERE version = $1',
+          [version],
+        );
+        if (applied.rowCount) continue;
+
+        await client.query('BEGIN');
+        try {
+          await client.query(readFileSync(join(dir, file), 'utf8'));
+          await client.query('INSERT INTO migrations (version, name) VALUES ($1, $2)', [version, file]);
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw new Error(`PostgreSQL migration ${file} failed`, { cause: err });
+        }
+      }
+    } finally {
+      await client.query(`SELECT pg_advisory_unlock(hashtext('fabulist-schema-migrations'))`);
+    }
+  });
 }
 
 /**
