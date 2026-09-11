@@ -2,7 +2,7 @@ name: release
 
 # Publishes to Docker Hub and deploys to the VPS on a version tag — nothing
 # runs on an ordinary push to main, so a release is a deliberate `git tag
-# vX.Y.Z && git push --tags`, not a side effect of merging.
+# vX.Y.Z && git push origin vX.Y.Z`, not a side effect of merging.
 #
 # No npm job: `npm publish` from CI needs either a fully non-interactive
 # Automation token or an OTP prompt neither this workflow nor a headless
@@ -15,7 +15,28 @@ on:
       - 'v*'
 
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        run: |
+          set -euo pipefail
+          package_tag="v$(node -p "require('./package.json').version")"
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must use vMAJOR.MINOR.PATCH, got: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "$package_tag" ]]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package.json ($package_tag)" >&2
+            exit 1
+          fi
+
   docker:
+    needs: metadata
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -45,28 +66,10 @@ jobs:
   # before the push lands would pull the previous tag under a new name and
   # look like a successful no-op release.
   #
-  # Every deploy/ file the VPS needs (deploy.sh, docker-compose.yml) is
-  # scp'd fresh from this checkout before anything else runs — the VPS is
-  # never the source of truth for its own deploy scripts, only a target this
-  # job overwrites every time. This closes a real gap: v0.2.2's deploy.sh fix
-  # was committed here but never reached the VPS, because nothing re-synced
-  # it after the one-time vps-setup.sh copy — the "successful" v0.2.2 deploy
-  # run was silently still executing the *old* deploy.sh the whole time.
-  #
-  # Invokes deploy.sh by its real path with a real argument (upload-env /
-  # deploy), rather than an authorized_keys `command=` forced command read
-  # back out of $SSH_ORIGINAL_COMMAND. That was the original design, but it
-  # never actually worked: the `command=` restriction was never added to
-  # this key's authorized_keys line, so sshd ran the account's own login
-  # shell (fish) on the literal string "upload-env" instead of deploy.sh —
-  # confirmed directly from a failed run's own logs ("fish: Unknown command:
-  # upload-env"), not guessed at.
-  #
-  # SECURITY NOTE: without that `command=` restriction in place, this key
-  # can run *any* SSH command on the box, not just these actions —
-  # deploy/README.md documents the exact authorized_keys line to add when
-  # there's time to restore that restriction. Tracked as a known gap, not
-  # silently dropped.
+  # The forced SSH command first downloads deploy.sh and docker-compose.yml
+  # from this exact repository tag. The key cannot upload an arbitrary script:
+  # it can only request a non-downgrade release already controlled by this
+  # repository, then invoke upload-env or deploy.
   deploy:
     needs: docker
     runs-on: ubuntu-latest
@@ -81,7 +84,6 @@ jobs:
           SSH_DOMAIN: ${{ vars.SSH_DOMAIN }}
           SSH_PORT: ${{ vars.SSH_PORT }}
           SSH_USER: ${{ vars.SSH_USER }}
-          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           MCP_OAUTH_ISSUER: ${{ vars.MCP_OAUTH_ISSUER }}
           MCP_OAUTH_AUDIENCE: ${{ vars.MCP_OAUTH_AUDIENCE }}
           MCP_RESOURCE_URL: ${{ vars.MCP_RESOURCE_URL }}
@@ -110,16 +112,8 @@ jobs:
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
           ssh-keyscan -p "$SSH_PORT" "$SSH_DOMAIN" >> "$HOME/.ssh/known_hosts" 2>/dev/null
 
-          # Falls back to the path every other deploy/ doc assumes, so this
-          # keeps working even before DEPLOY_PATH is set as a repo variable.
-          deploy_path="${DEPLOY_PATH:-/home/ra100/Development/fabulist}"
-
-          scp -i "$HOME/.ssh/deploy_key" -P "$SSH_PORT" -o StrictHostKeyChecking=yes \
-            deploy/deploy.sh deploy/docker-compose.yml \
-            "$SSH_USER@$SSH_DOMAIN:$deploy_path/"
-
           ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
-            "$SSH_USER@$SSH_DOMAIN" "chmod +x $deploy_path/deploy.sh"
+            "$SSH_USER@$SSH_DOMAIN" "sync $GITHUB_REF_NAME"
 
           # Some of these are real secrets now (WORKOS_API_KEY,
           # WORKOS_COOKIE_PASSWORD, for src/auth/config.ts's web login
@@ -175,7 +169,7 @@ jobs:
           }
 
           render_env | ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
-            "$SSH_USER@$SSH_DOMAIN" "$deploy_path/deploy.sh upload-env"
+            "$SSH_USER@$SSH_DOMAIN" upload-env
 
           ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
-            "$SSH_USER@$SSH_DOMAIN" "$deploy_path/deploy.sh deploy"
+            "$SSH_USER@$SSH_DOMAIN" deploy
