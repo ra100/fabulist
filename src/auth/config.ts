@@ -174,6 +174,16 @@ export interface SessionUser {
   lastName: string | null;
   /** True when `email` (case-insensitively) is in `AuthConfig.adminEmails`. See that field's own doc comment for what "admin" actually gates — system-wide settings, not per-story data every user already only sees their own copy of. */
   isAdmin: boolean;
+  /**
+   * Whether this identity is enrolled in the encryption rollout.
+   *
+   * Set by the Postgres API layer (`src/server/api-pg.ts`) from
+   * `encryption_rollout`, not by WorkOS itself: identity decides who you are;
+   * rollout state decides whether this account should create encrypted stories.
+   */
+  encryptionPilot?: boolean;
+  /** Whether new stories this user creates should default to encryption v1. */
+  encryptNewStories?: boolean;
 }
 
 /**

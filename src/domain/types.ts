@@ -580,6 +580,8 @@ export interface Story extends SessionState {
   forkedAtScene: number | null;
   createdAt: string;
   lastPlayedAt: string;
+  /** Storage format for this story: `0` plaintext (legacy), `1` encrypted-at-rest. */
+  encryptionVersion: number;
   /**
    * The WorkOS user id that created this story, or `null` for every story
    * created before this column existed and every story created while login

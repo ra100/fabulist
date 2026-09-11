@@ -169,20 +169,17 @@ async function assertOwned(db: Db, storyId: string, user: SessionUser | null | u
  * whether to open it immediately (`switch_story`) or leave the current story
  * as it is.
  *
- * Ownership (`owner_user_id`) is deliberately left unset here — see
- * `.design/MCP-CONNECTOR.md` and this tool's own test for why: the REST
- * route attributes a created story to the verified session user, but no
- * such identity reaches an individual MCP tool call today (the OAuth
- * verification in `handleMcpRequest` authenticates the *connection*, not
- * each call), and this server currently only runs with login off in
- * practice. Wiring per-user ownership through here is future work, not a
- * silent gap this tool should paper over with a wrong owner.
+ * Ownership matches the REST route: when an authenticated user is present in
+ * this tool context, the new story is attributed to them. Login-off/dev-token
+ * mode still leaves `owner_user_id` null, preserving the single-user legacy
+ * shape where ownership is intentionally not enforced.
  */
 export async function createStoryTool(ctx: McpToolContext, args: { title?: string }) {
   const world = await ctx.world();
-  const story = createStory(world.db, {
+  const story = await createStory(world.db, {
     title: args.title?.trim() ?? '',
     ...(ctx.user ? { ownerUserId: ctx.user.id } : {}),
+    ...(ctx.user?.encryptNewStories ? { encryptionVersion: 1 } : {}),
   });
   // Scene 1 comes with the story now — see `createStory`, which opens it for
   // every creation path rather than leaving each one to remember.
