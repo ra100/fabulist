@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # One-time *bootstrap* for fabulist on this VPS — installs Docker and starts
 # the container for the first time. Not the ongoing sync mechanism: every
-# tag push re-syncs deploy.sh/docker-compose.yml itself via scp from
-# release.yml's deploy job, so this script's own copy step only matters
-# before that pipeline has run even once.
+# tag push asks the root-owned forced-command dispatcher to fetch
+# deploy.sh/docker-compose.yml from the matching repository tag, so this
+# script's own copy step only matters before that pipeline has run even once.
 #
 # Assumes the reverse proxy (openresty) and the *.rast.io wildcard TLS cert
 # already exist and are managed outside this script — this box terminates
@@ -15,6 +15,9 @@
 #   scp -P 25 deploy/vps-setup.sh deploy/docker-compose.yml deploy/deploy.sh ra100@omnius.rast.io:~/
 #   ssh -p 25 ra100@omnius.rast.io
 #   chmod +x vps-setup.sh && ./vps-setup.sh
+#
+# Restricting the GitHub Actions SSH key is a separate root-owned installation;
+# see "Restricting the deploy SSH key" in deploy/README.md.
 #
 # It is idempotent — safe to re-run if a step fails partway through.
 set -euo pipefail

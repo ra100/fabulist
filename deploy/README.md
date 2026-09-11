@@ -26,13 +26,17 @@ mixing pip into the apt install breaks). Renews unattended via its own
 | `docker-compose.yml` | The one service, pinned to `ra100/fabulist:latest`, `/data` as a bind mount to an ordinary directory on the VPS's own disk (`scp`/`rsync`/`ls` work on it directly, no `docker cp` needed) — defaults to `./fabulist-data` next to this file, override with `FABULIST_DATA_DIR` if you want it elsewhere; deliberately relative so this repo never discloses the operator's real host layout — `app.env` as an optional (`required: false`) env file |
 | `nginx/fabulist.conf` | Reference openresty/nginx server block — **not necessarily the live config**; the operator manages that directly |
 | `vps-setup.sh` | One-time: installs Docker, copies the compose file + `deploy.sh`, starts the app. Does **not** touch openresty or certbot |
-| `deploy.sh` | Runs on the VPS, invoked over SSH with a real argument (`deploy/deploy.sh upload-env` / `deploy/deploy.sh deploy`) — **not** an `authorized_keys` forced command (see "Known gaps" below for why, and the security tradeoff that follows from it) |
+| `deploy.sh` | Runs the existing `upload-env` and `deploy` actions on the VPS; direct operator use remains supported |
+| `ssh-command.sh` | Root-owned `authorized_keys` forced-command dispatcher for the deploy key; permits only repository-tag sync, `upload-env`, and `deploy` |
 
 ## Already done (as of this doc)
 
 - [x] `*.rast.io` wildcard cert, renewing unattended.
 - [x] SSH deploy key generated; `SSH_PRIVATE_KEY` secret and
       `SSH_DOMAIN`/`SSH_PORT`/`SSH_USER` repo variables set.
+- [ ] Install `ssh-command.sh` root-owned and restrict the existing deploy key
+      as described below. This is a host-side privilege change and cannot be
+      performed by the deploy key itself.
 - [x] `MCP_OAUTH_ISSUER`, `MCP_OAUTH_AUDIENCE`, `MCP_RESOURCE_URL` set as repo
       variables (`https://fastidious-attic-52.authkit.app`,
       `client_01M1YFPQ054SZ2DD5HFTB22MK1`, `https://fabulist.rast.io/mcp` —
@@ -45,10 +49,48 @@ mixing pip into the apt install breaks). Renews unattended via its own
       runs `upload-env` before `deploy` on every tag push — see
       "Continuous deployment" below.
 
+## Restricting the deploy SSH key
+
+The release workflow deliberately sends only three commands: `sync vX.Y.Z`,
+`upload-env`, and `deploy`. Install the dispatcher outside the deploy user's
+writable tree so possession of the key cannot replace the command that restricts
+it:
+
+```bash
+sudo install -d -o root -g root -m 0755 /usr/local/libexec
+sudo install -o root -g root -m 0755 \
+  deploy/ssh-command.sh /usr/local/libexec/fabulist-deploy-command
+```
+
+Then replace the existing deploy key's line in `~/.ssh/authorized_keys`, preserving
+the complete `ssh-ed25519 ...` public key:
+
+```text
+restrict,command="/usr/local/libexec/fabulist-deploy-command /home/ra100/Development/fabulist" ssh-ed25519 AAAA... github-actions-fabulist
+```
+
+Substitute the real absolute deploy path in the forced command if it differs.
+Keep the dispatcher root-owned. `restrict` disables PTY allocation and agent, X11,
+socket, and port forwarding; `command=` makes sshd pass the requested command only
+as `SSH_ORIGINAL_COMMAND` to the dispatcher.
+
+`sync` accepts only a `vMAJOR.MINOR.PATCH` tag at or above `v0.8.10`, refuses
+downgrades after the first deployment, downloads only `deploy.sh` and
+`docker-compose.yml` from `ra100/fabulist` at that tag over HTTPS, validates both,
+and installs them atomically. The key therefore cannot use file upload to replace
+the deploy script with arbitrary code. `app.env` uploads are limited to the
+documented variable allowlist and are parsed as data rather than sourced as shell.
+
+Do this host-side installation before triggering the first release that contains
+the new workflow. The old unrestricted key is needed only to place the dispatcher
+where an administrator can install it; after the `authorized_keys` edit, `scp` and
+all unlisted SSH commands are rejected.
+
 ## What's left to actually make it run
 
-Nothing for a fresh box — `git tag vX.Y.Z && git push --tags` builds+pushes the
-Docker image, uploads the rendered `app.env`, and redeploys, end to end.
+Nothing for a fresh box after the deploy key restriction is installed —
+`git tag vX.Y.Z && git push origin vX.Y.Z` builds+pushes the Docker image,
+uploads the rendered `app.env`, and redeploys, end to end.
 
 **One-time, manual, on the existing VPS only**: this deployment originally used a
 named Docker volume (`fabulist-data`) instead of the bind mount above. If that
@@ -370,24 +412,10 @@ which is what finally identified this.
 
 ## Known gaps, called out on purpose
 
-- **The deploy key has no `authorized_keys` restriction.** The original design
-  had `deploy.sh` read `$SSH_ORIGINAL_COMMAND` under a forced
-  `command="/path/deploy.sh"` entry, so a leaked key could only ever run one
-  of two fixed actions. That restriction was never actually added to the
-  key's `authorized_keys` line (confirmed directly: `v0.2.0`'s deploy run
-  failed with `fish: Unknown command: upload-env` — sshd was running the
-  account's own login shell, `fish`, on the raw command string, because
-  there was no forced command overriding it). Rather than block the whole
-  pipeline on fixing that immediately, `deploy.sh` now takes its action as a
-  real `$1` (`deploy/deploy.sh upload-env`), which works under any login
-  shell with no `authorized_keys` change required — at the cost that this
-  key can currently run *any* SSH command on the box, not just these two.
-  To close this gap: add
-  `command="/home/ra100/Development/fabulist/deploy.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty`
-  before the `ssh-ed25519 ...` on this key's line in `~/.ssh/authorized_keys`,
-  then switch `deploy.sh` back to reading `$SSH_ORIGINAL_COMMAND` (git
-  history has the exact prior version) and the workflow back to sending bare
-  `upload-env`/`deploy` instead of the full path.
+- **The deploy key restriction requires the one-time host installation above.**
+  The repository now contains the forced-command implementation and the workflow
+  uses it, but CI cannot safely grant itself the root access needed to install its
+  own SSH restriction or edit `authorized_keys`.
 - **Provider auth**: the deployed instance boots with no `fabulist.config.json`
   in the fresh volume, so `loadConfig()` defaults to `profile: "mock"` —
   offline, deterministic, no credentials needed. This deployment
@@ -408,15 +436,16 @@ which is what finally identified this.
 
 `release.yml`'s `deploy` job, after `docker` publishes a new image:
 
-1. Renders `MCP_OAUTH_ISSUER`/`MCP_OAUTH_AUDIENCE`/`MCP_RESOURCE_URL` from
+1. Requests `sync <tag>` through the forced command. The VPS fetches the two
+   deployment files from that exact repository tag and refuses malformed tags
+   and release downgrades.
+2. Renders `MCP_OAUTH_ISSUER`/`MCP_OAUTH_AUDIENCE`/`MCP_RESOURCE_URL` from
    repo variables into an `app.env`-shaped stream (skipping any that are
    unset, rather than writing an empty value that `buildMcpAuth()` would
    misread as "configured").
-2. Pipes that over SSH, running `<DEPLOY_PATH>/deploy.sh upload-env` on the
-   VPS, which writes it to `<DEPLOY_PATH>/app.env` atomically.
-   `DEPLOY_PATH` is a repo variable, falling back to
-   `/home/ra100/Development/fabulist` if unset.
-3. SSHes again to run `<DEPLOY_PATH>/deploy.sh deploy`, which does
+3. Pipes that over SSH as the bare `upload-env` action, which writes it to
+   `<DEPLOY_PATH>/app.env` atomically after validating every variable name.
+4. SSHes again with the bare `deploy` action, which does
    `docker compose pull && up -d`. Compose recreates the container
    automatically because `app.env`'s *contents* changed (confirmed
    directly — this needs no explicit restart step), so the new env vars
@@ -428,8 +457,11 @@ change needed.
 
 ## Cutting a release
 
+Update `package.json` first. The workflow requires the tag to exactly match its
+version and rejects anything other than `vMAJOR.MINOR.PATCH`.
+
 ```bash
-git tag vX.Y.Z && git push --tags
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 Watch it with `gh run watch --repo ra100/fabulist` or
@@ -453,4 +485,3 @@ the container healthcheck no longer uses it.
 ssh -p 25 ra100@omnius.rast.io 'cd Development/fabulist && docker compose ps && docker compose logs --tail 20'
 curl -s https://fabulist.rast.io/api/meta
 ```
-
