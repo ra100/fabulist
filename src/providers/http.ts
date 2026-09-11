@@ -732,4 +732,30 @@ export const PROFILES: Record<string, { narrate: string; mechanics: string; extr
   copilot: { narrate: 'copilot:gpt-4o', mechanics: 'copilot:gpt-4o', extract: 'copilot:gpt-4o' },
 };
 
+/**
+ * The profiles a given configuration can actually offer: the built-ins, plus one
+ * per provider the operator added themselves.
+ *
+ * `PROFILES` names *preset keys*, and every local preset is pinned to
+ * 127.0.0.1 — so a model living anywhere else (an Ollama on the LAN, a vLLM in
+ * the next container) could be added, tested green, and still leave the setup
+ * wizard with nothing but the mock to offer, because no built-in profile
+ * mentions it. Configuring a provider is already the statement "I want to use
+ * this one", so it gets a profile of its own name routing every role at it.
+ *
+ * Reserved names win a collision: `local` has to keep meaning the two-model
+ * Ollama profile even if someone names a provider `local`, and `mock` stays the
+ * offline one.
+ */
+export function profilesFor(
+  providers: Record<string, ProviderSpec> = {},
+): Record<string, { narrate: string; mechanics: string; extract: string }> {
+  const derived: Record<string, { narrate: string; mechanics: string; extract: string }> = {};
+  for (const key of Object.keys(providers)) {
+    if (key === 'mock' || key in PROFILES) continue;
+    derived[key] = { narrate: key, mechanics: key, extract: key };
+  }
+  return { ...derived, ...PROFILES };
+}
+
 export const MECHANIC_ROLES = ['classify', 'integrity', 'referee', 'director', 'humanize', 'summarize', 'setup'] as const;

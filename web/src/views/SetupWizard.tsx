@@ -1004,9 +1004,15 @@ function ModelsStep({
               </button>
             ))}
           </div>
+          {/*
+            A model added below shows up here under its own name, which is the
+            whole point: the built-in profiles all name servers on 127.0.0.1, so
+            a model anywhere else used to be addable, testable and then
+            unselectable.
+          */}
           <p className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
             {usable.filter((p) => p !== 'mock').length === 0
-              ? 'Only the mock is usable right now. Add a model below — a local server needs no key at all.'
+              ? 'Only the mock is usable right now. Add a model below — a local server needs no key at all, and whatever you add is selectable here by name.'
               : `Ready to use: ${usable.filter((p) => p !== 'mock').join(', ')}.`}
           </p>
         </>
