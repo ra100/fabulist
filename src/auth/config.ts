@@ -182,7 +182,7 @@ export interface SessionUser {
    * rollout state decides whether this account should create encrypted stories.
    */
   encryptionPilot?: boolean;
-  /** Whether new stories this user creates should default to encryption v1. */
+  /** Reserved rollout switch for encrypted-story creation after content migration ships. */
   encryptNewStories?: boolean;
 }
 

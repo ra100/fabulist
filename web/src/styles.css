@@ -1129,6 +1129,15 @@ hr {
 }
 .private-storage-status p { margin: 0; font-size: 12px; line-height: 1.55; color: var(--ink-2); }
 .private-storage-mark { color: var(--accent); font-size: 13px; line-height: 1.45; }
+.private-unlock { margin-top: var(--s3); border-top: 1px solid var(--rule); }
+.private-storage-footnote {
+  margin: var(--s3) 0 0;
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
 .private-recovery { border-top: 1px solid var(--rule); padding-top: var(--s3); }
 .private-recovery > .eyebrow { display: block; margin-bottom: var(--s1); color: var(--accent-muted); }
 .private-recovery-intro { max-width: 38rem; margin: 0 0 var(--s3); font-size: 12px; line-height: 1.55; color: var(--ink-2); }

@@ -93,7 +93,8 @@ DECLARE
     -- User-scoped encryption rollout and key-wrap state. The key tables contain
     -- browser-produced ciphertext only; no role, including the operator's app
     -- process, can derive the plaintext key from them.
-    'encryption_rollout', 'user_encryption_keys', 'story_encryption_keys'];
+    'encryption_rollout', 'user_encryption_keys', 'story_encryption_keys',
+    'encrypted_story_values'];
   system_tables TEXT[] := ARRAY[
     -- `world_access` is system data: who may see a world is not something a play
     -- connection may edit, or a user could grant themselves access to a private

@@ -35,6 +35,11 @@ export interface UnlockedStoryKeys {
   storyKeys: Map<string, Uint8Array>;
 }
 
+export interface StoryKeyHandoff {
+  storyId: string;
+  key: string;
+}
+
 function requireCrypto(): Crypto {
   if (!globalThis.crypto?.subtle || !globalThis.crypto.getRandomValues) {
     throw new Error('this browser does not support Web Crypto');
@@ -220,4 +225,18 @@ export async function unlockWithRecoveryCode(
 ): Promise<UnlockedStoryKeys> {
   const key = await deriveRecoveryKey(recoveryCode, fromBase64(userKey.recoverySalt));
   return unlock(userId, userKey, storyKeys, key, 'recovery');
+}
+
+/** Converts browser-unwrapped keys to a one-request TLS handoff, never storage. */
+export function storyKeyHandoff(storyKeys: Map<string, Uint8Array>): StoryKeyHandoff[] {
+  return [...storyKeys]
+    .map(([storyId, key]) => ({ storyId, key: toBase64(key) }))
+    .sort((a, b) => a.storyId.localeCompare(b.storyId));
+}
+
+/** Clear temporary browser byte arrays after handing them to the active server session. */
+export function eraseUnlockedStoryKeys(unlocked: UnlockedStoryKeys): void {
+  unlocked.masterKey.fill(0);
+  for (const key of unlocked.storyKeys.values()) key.fill(0);
+  unlocked.storyKeys.clear();
 }

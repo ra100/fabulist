@@ -141,6 +141,9 @@ const encryptedKeyEnvelopeSchema = z.object({
   nonce: z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64'),
   ciphertext: z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64'),
 }).strict();
+const base64BytesSchema = z.string()
+  .max(512)
+  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64');
 export const encryptionEnrollmentBodySchema = z.object({
   userKey: z.object({
     version: z.literal(1),
@@ -158,6 +161,15 @@ export const encryptionEnrollmentBodySchema = z.object({
     wrap: encryptedKeyEnvelopeSchema,
   }).strict()).min(1),
 }).strict();
+export const encryptionUnlockBodySchema = z.object({
+  storyKeys: z.array(z.object({
+    storyId: nonEmptyText,
+    key: base64BytesSchema,
+  }).strict()).min(1).max(100),
+}).strict();
+export const encryptionLockBodySchema = z.object({
+  storyId: nonEmptyText.optional(),
+}).strict().default({});
 export const forkStoryBodySchema = z.object({
   title: optionalTitle,
   atScene: z.number().int().nonnegative().optional(),

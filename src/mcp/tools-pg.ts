@@ -132,7 +132,7 @@ export async function setStorySourcesTool(ctx: McpToolContext, args: { slugs: st
     ids.push(found.id);
   }
   await setStorySources(ctx.db, world.storyId, ids);
-  const refreshed = await World.forStory(ctx.db, world.storyId);
+  const refreshed = await World.forStory(ctx.db, world.storyId, undefined, world.crypto);
   return { storyId: world.storyId, sources: refreshed.sources };
 }
 

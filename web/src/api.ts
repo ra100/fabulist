@@ -18,7 +18,7 @@ import {
   worldsResponseSchema,
 } from '../../src/server/contracts.ts';
 import type { ZodTypeAny } from 'zod';
-import type { EncryptionEnrollment, StoryKeyRecord, UserKeyRecord } from './crypto/keys.ts';
+import type { EncryptionEnrollment, StoryKeyHandoff, StoryKeyRecord, UserKeyRecord } from './crypto/keys.ts';
 
 /**
  * Which of *this user's own* stories the current browser tab is looking at,
@@ -552,6 +552,12 @@ export interface EncryptionKeyBundle {
   enrolled: boolean;
   userKey: UserKeyRecord | null;
   storyKeys: StoryKeyRecord[];
+  grants: StoryKeyGrant[];
+}
+
+export interface StoryKeyGrant {
+  storyId: string;
+  expiresAt: string;
 }
 
 /**
@@ -579,6 +585,8 @@ export const REQUIRED_ROUTES = [
   'DELETE /api/stories/:id',
   'GET /api/encryption/keys',
   'POST /api/encryption/enroll',
+  'POST /api/encryption/unlock',
+  'POST /api/encryption/lock',
   'GET /api/worlds',
   'POST /api/worlds',
   // `POST /api/worlds/:slug/switch` is deliberately absent: a world is a row now
@@ -638,6 +646,8 @@ export const api = {
     keys: () => req<EncryptionKeyBundle>('/encryption/keys'),
     enroll: ({ recoveryCode: _recoveryCode, ...enrollment }: EncryptionEnrollment) =>
       post<{ enrolled: true }>('/encryption/enroll', enrollment),
+    unlock: (storyKeys: StoryKeyHandoff[]) => post<{ grants: StoryKeyGrant[] }>('/encryption/unlock', { storyKeys }),
+    lock: (storyId?: string) => post<{ lockedStoryIds: string[] }>('/encryption/lock', storyId ? { storyId } : {}),
   },
   state: () => parsedReq<State>('/state', stateResponseSchema),
   /**

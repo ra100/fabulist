@@ -10,6 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +34,7 @@ import {
   worldFor,
 } from '../src/store/index-pg.ts';
 import type { Db } from '../src/db/pg.ts';
-import { defaultKnobs, defaultStyleContract, type CharacterSheet } from '../src/domain/types.ts';
+import { defaultKnobs, defaultStyleContract, emptyDelta, type CharacterSheet } from '../src/domain/types.ts';
 import type { SessionUser } from '../src/auth/config.ts';
 
 function testUser(id: string, email = `${id}@example.com`): SessionUser {
@@ -227,6 +228,80 @@ test('turns round-trip jsonb meta, pinning and prose', async (t) => {
 
     await chron.appendRerollMeta(turn.id, { providerCalls: [{ role: 'narrator', provider: 'mock', model: 'm', tokensIn: 1, tokensOut: 2 }], lint: null });
     assert.equal((await chron.getTurn(turn.id))?.meta.providerCalls.length, 1, 'pinned meta is protected too');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('encrypted chronicles keep personal prose and turn JSON out of base tables', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { storyId } = await setup(db);
+    await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [storyId]);
+    const key = randomBytes(32);
+    const crypto = { keyForStory: (id: string) => (id === storyId ? key : null) };
+    const chron = (await World.forStory(db, storyId, undefined, crypto)).chronicle;
+    const meta = {
+      integrity: null,
+      referee: null,
+      move: null,
+      frameLog: null,
+      lint: null,
+      providerCalls: [{ role: 'narrator' as const, provider: 'private-provider', model: 'private-model', tokensIn: 3, tokensOut: 5 }],
+    };
+
+    const event = await chron.addEvent({
+      scene: 1, turn: 1, text: 'The hidden bell rings.', participants: ['char:a'],
+      locationId: null, significance: 0.5, visibility: 'onscreen', fromConsequenceId: null,
+    });
+    const turn = await chron.addTurn({
+      scene: 1, turn: 1, rawInput: 'Open the hidden door.',
+      intent: { class: 'action', actorId: 'char:a', action: 'open', targetIds: ['door'], manner: '', dialogueGist: null, verbatim: false },
+      delta: emptyDelta(),
+      bookProse: 'A concealed passage opens.', pinned: false, meta,
+    });
+    await chron.upsertScene(1, { title: 'Hidden Hall', summary: 'The bell reveals a door.' });
+    await chron.upsertChapter(1, { title: 'Secrets', summary: 'Nothing stays buried.' });
+    const fact = await chron.addFact('The bell is a key.', 1);
+    await chron.addDivergence(1, 'choice', 'The player opened the hidden door.', 'The door stays closed.');
+    await chron.addAnchor('Use short, tense sentences.', 'Preferred voice', 1);
+
+    const base = await db.one<{
+      event_text: string; raw_input: string; intent: unknown; delta: unknown; book_prose: string; meta: unknown; fact_text: string;
+    }>(
+      `SELECT e.text event_text, t.raw_input, t.intent, t.delta, t.book_prose, t.meta, f.text fact_text
+         FROM events e JOIN turns t ON t.story_id = e.story_id JOIN facts f ON f.story_id = e.story_id
+        WHERE e.id = $1 AND t.id = $2 AND f.id = $3`,
+      [event.id, turn.id, fact.id],
+    );
+    assert.deepEqual(base, {
+      event_text: '', raw_input: '', intent: null, delta: null, book_prose: '', meta: {}, fact_text: '',
+    });
+    const values = await db.query<{ ciphertext: Buffer }>(
+      `SELECT ciphertext FROM encrypted_story_values WHERE story_id = $1`,
+      [storyId],
+    );
+    assert.equal(values.rows.length, 15);
+    assert.ok(values.rows.every((row) => !row.ciphertext.toString('utf8').includes('hidden')));
+
+    assert.equal((await chron.events())[0]?.text, 'The hidden bell rings.');
+    const restoredTurn = await chron.getTurn(turn.id);
+    assert.equal(restoredTurn?.rawInput, 'Open the hidden door.');
+    assert.deepEqual(restoredTurn?.intent, turn.intent);
+    assert.deepEqual(restoredTurn?.delta, turn.delta);
+    assert.deepEqual(restoredTurn?.meta, meta);
+    assert.equal((await chron.facts())[0]?.text, 'The bell is a key.');
+    assert.deepEqual(await chron.scenes(), [{ scene: 1, title: 'Hidden Hall', summary: 'The bell reveals a door.', locationId: null, chapter: 1 }]);
+    assert.deepEqual(await chron.chapter(1), { chapter: 1, title: 'Secrets', summary: 'Nothing stays buried.' });
+    assert.deepEqual((await chron.divergences()).map(({ kind, detail, canon }) => ({ kind, detail, canon })), [
+      { kind: 'choice', detail: 'The player opened the hidden door.', canon: 'The door stays closed.' },
+    ]);
+    assert.deepEqual((await chron.anchors()).map(({ text, note }) => ({ text, note })), [
+      { text: 'Use short, tense sentences.', note: 'Preferred voice' },
+    ]);
+
+    const locked = new ChronicleStore({ db, storyId });
+    await assert.rejects(() => locked.getTurn(turn.id), /locked/);
+    const wrongKey = new ChronicleStore({ db, storyId, crypto: { keyForStory: () => randomBytes(32) } });
+    await assert.rejects(() => wrongKey.getTurn(turn.id), /cannot be decrypted/);
   });
   if (!ran) t.skip('no Postgres configured');
 });

@@ -7,6 +7,7 @@ import {
   type CurrentUser,
   type DepthMode,
   type Edge,
+  type EncryptionKeyBundle,
   type Entity,
   type EntityDetail,
   type ImageProvidersReport,
@@ -34,7 +35,14 @@ import { FactsView } from './views/FactsView.tsx';
 import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
-import { createEncryptionEnrollment, type EncryptionEnrollment } from './crypto/keys.ts';
+import {
+  createEncryptionEnrollment,
+  eraseUnlockedStoryKeys,
+  storyKeyHandoff,
+  unlockWithPassphrase,
+  unlockWithRecoveryCode,
+  type EncryptionEnrollment,
+} from './crypto/keys.ts';
 
 type Tab = 'book' | 'timeline' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'library' | 'settings';
 
@@ -286,17 +294,25 @@ export function App() {
 
 function PrivateStoragePanel({ user }: { user: CurrentUser }) {
   const [enrolled, setEnrolled] = useState<boolean | null>(null);
+  const [keyBundle, setKeyBundle] = useState<EncryptionKeyBundle | null>(null);
   const [passphrase, setPassphrase] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [draft, setDraft] = useState<EncryptionEnrollment | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [unlockWithRecovery, setUnlockWithRecovery] = useState(false);
+  const [unlockSecret, setUnlockSecret] = useState('');
+  const [grants, setGrants] = useState<EncryptionKeyBundle['grants']>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void api.encryption.keys()
-      .then((keys) => setEnrolled(keys.enrolled))
+      .then((keys) => {
+        setEnrolled(keys.enrolled);
+        setKeyBundle(keys);
+        setGrants(keys.grants);
+      })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, []);
 
@@ -326,8 +342,43 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
     setError(null);
     try {
       await api.encryption.enroll(draft);
+      setKeyBundle({ enrolled: true, userKey: draft.userKey, storyKeys: draft.storyKeys, grants: [] });
       setEnrolled(true);
       setDraft(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unlock = async () => {
+    if (!keyBundle?.userKey) return;
+    setBusy(true);
+    setError(null);
+    let unlocked: Awaited<ReturnType<typeof unlockWithPassphrase>> | null = null;
+    try {
+      unlocked = unlockWithRecovery
+        ? await unlockWithRecoveryCode(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret)
+        : await unlockWithPassphrase(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret);
+      const result = await api.encryption.unlock(storyKeyHandoff(unlocked.storyKeys));
+      setGrants(result.grants);
+      setUnlockSecret('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (unlocked) eraseUnlockedStoryKeys(unlocked);
+      setBusy(false);
+    }
+  };
+
+  const lock = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.encryption.lock();
+      setGrants([]);
+      setUnlockSecret('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -347,19 +398,56 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
 
   if (enrolled === null && !error) return null;
   if (enrolled) {
+    const expiry = grants[0]?.expiresAt ? new Date(grants[0].expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
     return (
       <section className="card private-storage">
         <div className="private-storage-heading">
           <h3>private storage</h3>
-          <span className="tag locked">recovery configured</span>
+          <span className={`tag${grants.length ? ' locked' : ''}`}>{grants.length ? 'unlocked' : 'recovery configured'}</span>
         </div>
         <div className="private-storage-status">
           <span className="private-storage-mark" aria-hidden="true">◆</span>
           <p>
-            <b>Your recovery path is ready.</b> The browser-derived key wraps are stored, but the story-content
-            migration has not begun yet.
+            <b>{grants.length ? 'Private-story access is active.' : 'Your recovery path is ready.'}</b>{' '}
+            {grants.length
+              ? `The temporary processing grant expires at ${expiry}. Lock it when you finish using MCP.`
+              : 'This prepares the short-lived server-memory grant private MCP use will need after content migration ships.'}
           </p>
         </div>
+        {grants.length ? (
+          <div className="private-storage-actions">
+            <button onClick={() => void lock()} disabled={busy}>{busy ? 'locking…' : 'lock private stories'}</button>
+          </div>
+        ) : (
+          <div className="private-unlock">
+            <label className="field-row">
+              <span>unlock with</span>
+              <select value={unlockWithRecovery ? 'recovery' : 'passphrase'} onChange={(event) => setUnlockWithRecovery(event.target.value === 'recovery')} disabled={busy}>
+                <option value="passphrase">passphrase</option>
+                <option value="recovery">recovery code</option>
+              </select>
+            </label>
+            <label className="field-row">
+              <span>{unlockWithRecovery ? 'recovery code' : 'passphrase'}</span>
+              <input
+                type={unlockWithRecovery ? 'text' : 'password'}
+                autoComplete="off"
+                value={unlockSecret}
+                onChange={(event) => setUnlockSecret(event.target.value)}
+                disabled={busy}
+              />
+            </label>
+            <div className="private-storage-actions">
+              <button className="primary" onClick={() => void unlock()} disabled={busy || !unlockSecret}>
+                {busy ? 'unlocking…' : 'unlock for MCP'}
+              </button>
+              <span className="small dimmer">The passphrase and recovery code never leave this browser.</span>
+            </div>
+          </div>
+        )}
+        <p className="private-storage-footnote">
+          Content migration is not available yet, so existing stories are still plaintext despite the configured recovery path.
+        </p>
       </section>
     );
   }
