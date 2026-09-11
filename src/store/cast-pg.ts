@@ -27,6 +27,8 @@
  */
 import { jsonGet, type Queryable } from '../db/pg.ts';
 import { overlaySheet, type OverlaySource } from '../db/overlay.ts';
+import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
+import type { ChronicleCrypto } from './chronicle-pg.ts';
 import type {
   Appearance,
   CharacterSheet,
@@ -40,6 +42,108 @@ import type {
   VoiceCard,
   Vow,
 } from '../domain/types.ts';
+
+type EncryptedValue = { field: string; value: unknown };
+type DecryptedValues = Map<string, Map<string, unknown>>;
+
+class CastPrivateValues {
+  private encryptionVersion: number | undefined;
+  private db: Queryable;
+  private storyId: StoryId;
+  private crypto: ChronicleCrypto | undefined;
+
+  constructor(db: Queryable, storyId: StoryId, crypto: ChronicleCrypto | undefined) {
+    this.db = db;
+    this.storyId = storyId;
+    this.crypto = crypto;
+  }
+
+  async key(): Promise<Buffer | null> {
+    if (this.encryptionVersion === undefined) {
+      const { rows } = await this.db.query<{ encryption_version: number }>(
+        `SELECT encryption_version FROM stories WHERE id = $1`,
+        [this.storyId],
+      );
+      const version = rows[0]?.encryption_version;
+      if (version === undefined) throw new Error(`no story ${this.storyId}`);
+      if (version !== 0 && version !== 1) throw new Error(`unsupported private-story format ${version}`);
+      this.encryptionVersion = version;
+    }
+    if (this.encryptionVersion === 0) return null;
+    const key = this.crypto?.keyForStory(this.storyId) ?? null;
+    if (!key) throw new Error(`private story ${this.storyId} is locked`);
+    if (key.length !== 32) throw new Error('invalid private-story key');
+    return Buffer.from(key);
+  }
+
+  async write(
+    statement: string,
+    statementParams: unknown[],
+    table: string,
+    recordId: string,
+    key: Buffer,
+    values: EncryptedValue[],
+  ): Promise<void> {
+    const envelopes = values.map(({ field, value }) => ({
+      field,
+      ...encryptStoryValue(key, { storyId: this.storyId, table, recordId, field }, value),
+    }));
+    const first = statementParams.length;
+    const valueParams: unknown[] = [];
+    const tuples = envelopes
+      .map((envelope, index) => {
+        const offset = first + 4 + index * 4;
+        valueParams.push(envelope.field, envelope.version, envelope.nonce, envelope.ciphertext);
+        return `($${offset}::text,$${offset + 1}::integer,$${offset + 2}::bytea,$${offset + 3}::bytea)`;
+      })
+      .join(', ');
+    await this.db.query(
+      `WITH written AS (${statement})
+       INSERT INTO encrypted_story_values (story_id, table_name, record_id, field_name, version, nonce, ciphertext)
+       SELECT $${first + 1}, $${first + 2}, $${first + 3}, value.field_name, value.version, value.nonce, value.ciphertext
+         FROM written CROSS JOIN (VALUES ${tuples}) AS value(field_name, version, nonce, ciphertext)
+       ON CONFLICT (story_id, table_name, record_id, field_name) DO UPDATE SET
+         version = EXCLUDED.version, nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, updated_at = now()`,
+      [...statementParams, this.storyId, table, recordId, ...valueParams],
+    );
+  }
+
+  async read(table: string, recordIds: string[], fields: string[], key: Buffer): Promise<DecryptedValues> {
+    const values: DecryptedValues = new Map();
+    if (!recordIds.length) return values;
+    const { rows } = await this.db.query<{
+      record_id: string;
+      field_name: string;
+      version: number;
+      nonce: Buffer;
+      ciphertext: Buffer;
+    }>(
+      `SELECT record_id, field_name, version, nonce, ciphertext
+         FROM encrypted_story_values
+        WHERE story_id = $1 AND table_name = $2
+          AND record_id = ANY($3::text[]) AND field_name = ANY($4::text[])`,
+      [this.storyId, table, recordIds, fields],
+    );
+    for (const row of rows) {
+      const fieldsForRecord = values.get(row.record_id) ?? new Map<string, unknown>();
+      fieldsForRecord.set(
+        row.field_name,
+        decryptStoryValue(
+          key,
+          { storyId: this.storyId, table, recordId: row.record_id, field: row.field_name },
+          { version: row.version, nonce: row.nonce, ciphertext: row.ciphertext },
+        ),
+      );
+      values.set(row.record_id, fieldsForRecord);
+    }
+    for (const recordId of recordIds) {
+      for (const field of fields) {
+        if (!values.get(recordId)?.has(field)) throw new Error(`missing encrypted private story value ${table}.${field}`);
+      }
+    }
+    return values;
+  }
+}
 
 interface SheetRow {
   entity_id: string;
@@ -115,6 +219,8 @@ export interface CastStoreOptions {
   sources: OverlaySource[];
   /** Where `put(sheet, 'canon')` writes; defaults to the primary source. */
   canonWorldId?: number;
+  /** Process-local access to an unlocked private-story key, when one exists. */
+  crypto?: ChronicleCrypto;
 }
 
 export class CastStore {
@@ -122,12 +228,14 @@ export class CastStore {
   private storyId: StoryId;
   readonly sources: OverlaySource[];
   private canonWorldId: number | undefined;
+  private privateValues: CastPrivateValues;
 
   constructor(opts: CastStoreOptions) {
     this.db = opts.db;
     this.storyId = opts.storyId;
     this.sources = opts.sources;
     this.canonWorldId = opts.canonWorldId ?? opts.sources[0]?.worldId;
+    this.privateValues = new CastPrivateValues(opts.db, opts.storyId, opts.crypto);
   }
 
   /** Same reasoning as `GraphStore.requireCanonWorld`: never guess a target. */
@@ -143,7 +251,8 @@ export class CastStore {
   /** Overlay read: this story's chronicle sheet wins over the canon baseline. */
   async get(entityId: EntityId): Promise<CharacterSheet | undefined> {
     const r = await overlaySheet<SheetRow>(this.db, this.storyId, this.sources, entityId);
-    return r ? toSheet(r) : undefined;
+    if (!r) return undefined;
+    return (await this.toSheets([r], r.pri === 0))[0];
   }
 
   /** The canon baseline, ignoring every story's playthrough. In source order. */
@@ -195,7 +304,7 @@ export class CastStore {
       `SELECT DISTINCT ON (entity_id) * FROM (${arms.join(' UNION ALL ')}) q ORDER BY entity_id, pri`,
       params,
     );
-    for (const r of rows) out.set(r.entity_id, toSheet(r));
+    for (const sheet of await this.toSheets(rows, true)) out.set(sheet.entityId, sheet);
     for (const id of unique) if (!out.has(id)) out.set(id, blankSheet(id));
     return out;
   }
@@ -225,6 +334,32 @@ export class CastStore {
            voice = EXCLUDED.voice, condition = EXCLUDED.condition,
            appearance = EXCLUDED.appearance, locks = EXCLUDED.locks`,
         [this.requireCanonWorld(), sheet.entityId, ...json],
+      );
+      return;
+    }
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `INSERT INTO chron_sheets (story_id, entity_id, identity, contract, voice, condition, appearance, locks, is_player)
+         VALUES ($1,$2,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'[]'::jsonb,$3)
+         ON CONFLICT (story_id, entity_id) DO UPDATE SET
+           identity = EXCLUDED.identity, contract = EXCLUDED.contract,
+           voice = EXCLUDED.voice, condition = EXCLUDED.condition,
+           appearance = EXCLUDED.appearance, locks = EXCLUDED.locks,
+           is_player = EXCLUDED.is_player
+         RETURNING 1`,
+        [this.storyId, sheet.entityId, sheet.isPlayer],
+        'chron_sheets',
+        sheet.entityId,
+        key,
+        [
+          { field: 'identity', value: sheet.identity },
+          { field: 'contract', value: sheet.contract },
+          { field: 'voice', value: sheet.voice },
+          { field: 'condition', value: sheet.condition },
+          { field: 'appearance', value: sheet.appearance },
+          { field: 'locks', value: sheet.locks },
+        ],
       );
       return;
     }
@@ -261,6 +396,13 @@ export class CastStore {
     const rows = [...unique.values()];
 
     const canon = layer === 'canon';
+    if (!canon) {
+      const key = await this.privateValues.key();
+      if (key) {
+        for (const sheet of rows) await this.put(sheet);
+        return rows.length;
+      }
+    }
     const scopeCol = canon ? 'world_id' : 'story_id';
     const scope: string | number = canon ? this.requireCanonWorld() : this.storyId;
     const table = canon ? 'canon_sheets' : 'chron_sheets';
@@ -327,7 +469,7 @@ export class CastStore {
       `SELECT DISTINCT ON (entity_id) * FROM (${arms.join(' UNION ALL ')}) q ORDER BY entity_id, pri`,
       params,
     );
-    return rows.map(toSheet);
+    return this.toSheets(rows, true);
   }
 
   /**
@@ -343,7 +485,39 @@ export class CastStore {
          FROM chron_sheets WHERE story_id = $1 AND is_player LIMIT 1`,
       [this.storyId],
     );
-    return rows[0] ? toSheet(rows[0]) : undefined;
+    if (!rows[0]) return undefined;
+    return (await this.toSheets(rows, true))[0];
+  }
+
+  /**
+   * Canon rows remain ordinary JSON. Only a selected chronicle row is resolved
+   * from envelopes; `player()` selects chronicle directly and therefore has no
+   * overlay priority to inspect.
+   */
+  private async toSheets(rows: SheetRow[], includeUnmarkedChronicle: boolean): Promise<CharacterSheet[]> {
+    const encryptedRows = rows.filter((row) => row.pri === 0 || (includeUnmarkedChronicle && row.pri === undefined));
+    if (!encryptedRows.length) return rows.map(toSheet);
+    const key = await this.privateValues.key();
+    if (!key) return rows.map(toSheet);
+    const values = await this.privateValues.read(
+      'chron_sheets',
+      encryptedRows.map((row) => row.entity_id),
+      ['identity', 'contract', 'voice', 'condition', 'appearance', 'locks'],
+      key,
+    );
+    return rows.map((row) => {
+      if (!encryptedRows.includes(row)) return toSheet(row);
+      const privateValues = values.get(row.entity_id)!;
+      return toSheet({
+        ...row,
+        identity: privateValues.get('identity'),
+        contract: privateValues.get('contract'),
+        voice: privateValues.get('voice'),
+        condition: privateValues.get('condition'),
+        appearance: privateValues.get('appearance'),
+        locks: privateValues.get('locks'),
+      });
+    });
   }
 
   /**
@@ -399,7 +573,8 @@ export class CastStore {
          WHERE story_id = $1 AND from_id = $2 AND to_id = $3`,
       [this.storyId, fromId, toId],
     );
-    return rows[0] ? toRel(rows[0]) : { fromId, toId, trust: 0, affection: 0, respect: 0, note: '' };
+    if (!rows[0]) return { fromId, toId, trust: 0, affection: 0, respect: 0, note: '' };
+    return (await this.toRelationships(rows))[0]!;
   }
 
   async relationshipsOf(fromId: EntityId): Promise<Relationship[]> {
@@ -408,7 +583,7 @@ export class CastStore {
          WHERE story_id = $1 AND from_id = $2`,
       [this.storyId, fromId],
     );
-    return rows.map(toRel);
+    return this.toRelationships(rows);
   }
 
   /** Anyone who holds a strong feeling about this entity: the propagation frontier. */
@@ -418,7 +593,7 @@ export class CastStore {
          WHERE story_id = $1 AND to_id = $2`,
       [this.storyId, toId],
     );
-    return rows.map(toRel);
+    return this.toRelationships(rows);
   }
 
   async adjustRelationship(
@@ -436,6 +611,23 @@ export class CastStore {
       respect: clamp(cur.respect + (deltas.respect ?? 0)),
       note: deltas.note ?? cur.note,
     };
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `INSERT INTO relationships (story_id, from_id, to_id, trust, affection, respect, note)
+         VALUES ($1,$2,$3,$4,$5,$6,'')
+         ON CONFLICT (story_id, from_id, to_id) DO UPDATE SET
+           trust = EXCLUDED.trust, affection = EXCLUDED.affection,
+           respect = EXCLUDED.respect, note = EXCLUDED.note
+         RETURNING 1`,
+        [this.storyId, fromId, toId, next.trust, next.affection, next.respect],
+        'relationships',
+        relationshipRecordId(fromId, toId),
+        key,
+        [{ field: 'note', value: next.note }],
+      );
+      return next;
+    }
     await this.db.query(
       `INSERT INTO relationships (story_id, from_id, to_id, trust, affection, respect, note)
        VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -445,6 +637,19 @@ export class CastStore {
       [this.storyId, fromId, toId, next.trust, next.affection, next.respect, next.note],
     );
     return next;
+  }
+
+  private async toRelationships(rows: RelRow[]): Promise<Relationship[]> {
+    if (!rows.length) return [];
+    const key = await this.privateValues.key();
+    if (!key) return rows.map(toRel);
+    const ids = rows.map((row) => relationshipRecordId(row.from_id, row.to_id));
+    const values = await this.privateValues.read('relationships', ids, ['note'], key);
+    return rows.map((row) => {
+      const note = values.get(relationshipRecordId(row.from_id, row.to_id))!.get('note');
+      if (typeof note !== 'string') throw new Error('invalid encrypted private story value relationships.note');
+      return toRel({ ...row, note });
+    });
   }
 }
 
@@ -466,4 +671,8 @@ function toRel(r: RelRow): Relationship {
     respect: r.respect,
     note: r.note,
   };
+}
+
+function relationshipRecordId(fromId: EntityId, toId: EntityId): string {
+  return JSON.stringify([fromId, toId]);
 }

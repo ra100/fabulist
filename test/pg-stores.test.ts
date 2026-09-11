@@ -191,6 +191,109 @@ test('relationships are directional, asymmetric and clamped', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('encrypted chronicle sheets and relationship notes round-trip without base-table prose', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { storyId } = await setup(db);
+    const sources = await sourcesFor(db, storyId);
+    const plain = new CastStore({ db, storyId, sources });
+    const sheet = blankSheet('char:player');
+    sheet.identity = {
+      goals: ['Find the buried crown'], wounds: ['Lost a brother'], fears: ['The crypt'], allegiances: ['The city'],
+      competencies: ['Lockpicking'], secrets: ['Knows the traitor'], arc: 'Learns to trust again.',
+    };
+    sheet.contract = {
+      vows: [{ id: 'vow:mercy', text: 'Never kill a prisoner.', rank: 1, broken: false, brokenScene: null }],
+      drives: ['Protect the innocent'], breakingPoint: 'The traitor threatens the city.', costOfBreak: 'Exile.',
+    };
+    sheet.voice = { diction: 'Careful and dry.', tics: ['counts doors'], samples: ['Nothing is free.'], never: ['begs'] };
+    sheet.condition = {
+      locationId: 'loc:crypt', mood: 'afraid', injuries: ['cut hand'], inventory: ['rusted key'],
+      intent: 'Find the crown', presentWith: ['char:guide'],
+    };
+    sheet.appearance = {
+      description: 'A scarred scholar.', attire: 'Dusty coat.', markers: ['silver ring'],
+      referenceImagePath: null, seed: 42,
+    };
+    sheet.locks = ['condition.mood'];
+    sheet.isPlayer = true;
+    await plain.put(sheet);
+    await plain.adjustRelationship('char:player', 'char:guide', {
+      trust: 0.5, affection: 0.2, respect: 0.4, note: 'The guide hid the map.',
+    });
+
+    const canon = blankSheet('char:canon');
+    canon.identity.arc = 'Unchanged source material.';
+    await plain.put(canon, 'canon');
+
+    const key = randomBytes(32);
+    await Promise.all([
+      encryptStoryValueForTest(db, key, storyId, 'chron_sheets', sheet.entityId, 'identity', sheet.identity),
+      encryptStoryValueForTest(db, key, storyId, 'chron_sheets', sheet.entityId, 'contract', sheet.contract),
+      encryptStoryValueForTest(db, key, storyId, 'chron_sheets', sheet.entityId, 'voice', sheet.voice),
+      encryptStoryValueForTest(db, key, storyId, 'chron_sheets', sheet.entityId, 'condition', sheet.condition),
+      encryptStoryValueForTest(db, key, storyId, 'chron_sheets', sheet.entityId, 'appearance', sheet.appearance),
+      encryptStoryValueForTest(db, key, storyId, 'chron_sheets', sheet.entityId, 'locks', sheet.locks),
+      encryptStoryValueForTest(
+        db,
+        key,
+        storyId,
+        'relationships',
+        JSON.stringify(['char:player', 'char:guide']),
+        'note',
+        'The guide hid the map.',
+      ),
+    ]);
+    await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [storyId]);
+    await db.query(
+      `UPDATE chron_sheets SET identity = '{}'::jsonb, contract = '{}'::jsonb, voice = '{}'::jsonb,
+         condition = '{}'::jsonb, appearance = '{}'::jsonb, locks = '[]'::jsonb
+       WHERE story_id = $1 AND entity_id = $2`,
+      [storyId, sheet.entityId],
+    );
+    await db.query(`UPDATE relationships SET note = '' WHERE story_id = $1`, [storyId]);
+
+    const crypto = { keyForStory: (id: string) => (id === storyId ? key : null) };
+    const cast = (await World.forStory(db, storyId, undefined, crypto)).cast;
+    assert.deepEqual(await cast.get(sheet.entityId), sheet);
+    assert.deepEqual(await cast.getManyOrBlank([sheet.entityId]).then((sheets) => sheets.get(sheet.entityId)), sheet);
+    assert.deepEqual(await cast.player(), sheet);
+    assert.equal((await cast.getCanon(canon.entityId))?.identity.arc, 'Unchanged source material.');
+    assert.equal((await cast.relationship('char:player', 'char:guide')).note, 'The guide hid the map.');
+
+    await cast.unlock(sheet.entityId, 'condition.mood');
+    await cast.updateCondition(sheet.entityId, { mood: 'resolved', inventory: ['crown'] });
+    await cast.breakVow(sheet.entityId, 'vow:mercy', 3);
+    const relationship = await cast.adjustRelationship('char:player', 'char:guide', { note: 'The guide returned the map.' });
+    assert.equal((await cast.get(sheet.entityId))?.condition.mood, 'resolved');
+    assert.equal((await cast.get(sheet.entityId))?.contract.vows[0]?.brokenScene, 3);
+    assert.equal(relationship.note, 'The guide returned the map.');
+
+    const base = await db.one<{ identity: unknown; contract: unknown; voice: unknown; condition: unknown; appearance: unknown; locks: unknown; note: string }>(
+      `SELECT s.identity, s.contract, s.voice, s.condition, s.appearance, s.locks, r.note
+         FROM chron_sheets s JOIN relationships r ON r.story_id = s.story_id
+        WHERE s.story_id = $1 AND s.entity_id = $2`,
+      [storyId, sheet.entityId],
+    );
+    assert.deepEqual(base, {
+      identity: {}, contract: {}, voice: {}, condition: {}, appearance: {}, locks: [], note: '',
+    });
+
+    const locked = (await World.forStory(db, storyId)).cast;
+    await assert.rejects(() => locked.get(sheet.entityId), /locked/);
+    await assert.rejects(() => locked.relationshipsOf('char:player'), /locked/);
+    await assert.rejects(() => locked.updateCondition(sheet.entityId, { mood: 'fleeing' }), /locked/);
+    assert.equal((await locked.getCanon(canon.entityId))?.identity.arc, 'Unchanged source material.');
+
+    await deleteStory(db, storyId);
+    assert.equal(
+      Number((await db.one<{ n: string }>(`SELECT count(*) n FROM encrypted_story_values WHERE story_id = $1`, [storyId]))!.n),
+      0,
+      'deleting a story cascades its encrypted cast values',
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 // -------------------------------------------------------------- chronicle
 
 test('witnessed events are POV-masked without prefix collisions', async (t) => {
