@@ -295,7 +295,7 @@ test('encrypted chronicle sheets and relationship notes round-trip without base-
   if (!ran) t.skip('no Postgres configured');
 });
 
-test('encrypted private graph entities use opaque ids and decrypt names only in memory', async (t) => {
+test('encrypted private graph entities retain stable ids with keyed blind lookup', async (t) => {
   const ran = await withPg(async (db) => {
     const { storyId } = await setup(db);
     const canon = new GraphStore({ db, storyId, sources: await sourcesFor(db, storyId) });
@@ -324,16 +324,20 @@ test('encrypted private graph entities use opaque ids and decrypt names only in 
     await graph.upsert({ id: 'char:other', type: 'Character', name: 'Ivo Renn', summary: 'Mara’s ally.' });
     await graph.upsert({ id: 'char:canon', type: 'Character', name: 'The Keeper', summary: 'A private revision.' });
     const mara = (await graph.get('char:secret'))!;
-    assert.match(mara.id, /^ent:/, 'private entity id is opaque rather than the caller’s semantic id');
+    assert.equal(mara.id, 'char:secret', 'v1 retains stable cross-store entity references');
     assert.equal(mara.name, 'Mara Vell');
     assert.deepEqual(mara.props, { secret: 'The crown is below the well.' });
     assert.equal((await graph.resolveName('Mara Vell'))?.id, mara.id);
+    assert.equal((await graph.resolveName('The Mara, Vell'))?.id, mara.id);
+    assert.equal((await graph.get('CHAR:SECRET'))?.id, mara.id, 'logical-id fallback uses the keyed index');
     assert.deepEqual((await graph.search('archivist')).map((entity) => entity.name), ['Mara Vell']);
     assert.equal((await graph.get('char:canon'))?.name, 'The Keeper');
     assert.equal((await graph.list()).some((entity) => entity.name === 'Canon Keeper'), false);
     assert.equal((await graph.edgesFrom('char:canon'))[0]?.evidence, 'Canon evidence.');
 
-    await graph.upsert({ ...mara, summary: 'The archivist protects the crown.' });
+    await graph.upsert({ ...mara, name: 'Mara Vell the Archivist', summary: 'The archivist protects the crown.' });
+    assert.equal(await graph.resolveName('Mara Vell'), undefined, 'renaming replaces the old blind-index token');
+    assert.equal((await graph.resolveName('Mara Vell the Archivist'))?.id, mara.id);
     await graph.assertEdge(
       { subject: 'char:secret', predicate: 'TRUSTS', object: 'char:other', evidence: 'Mara gave Ivo the key.' },
       2,
@@ -355,14 +359,13 @@ test('encrypted private graph entities use opaque ids and decrypt names only in 
         WHERE e.story_id = $1 AND e.id = $2`,
       [storyId, mara.id],
     );
-    assert.match(base!.id, /^ent:/);
     assert.deepEqual(base, { id: mara.id, name: '', summary: '', props: {}, evidence: null });
     const privateEntities = await db.query<{ id: string; name: string; summary: string; props: unknown }>(
       `SELECT id, name, summary, props FROM chron_entities WHERE story_id = $1`,
       [storyId],
     );
     assert.ok(privateEntities.rows.length >= 3);
-    assert.ok(privateEntities.rows.every((entity) => entity.id.startsWith('ent:')));
+    assert.deepEqual(privateEntities.rows.map((entity) => entity.id).sort(), ['char:canon', 'char:other', 'char:secret']);
     assert.ok(privateEntities.rows.every((entity) => entity.name === '' && entity.summary === ''));
     assert.ok(privateEntities.rows.every((entity) => JSON.stringify(entity.props) === '{}'));
     const encrypted = await db.query<{ ciphertext: Buffer }>(
@@ -370,12 +373,26 @@ test('encrypted private graph entities use opaque ids and decrypt names only in 
       [storyId],
     );
     assert.ok(encrypted.rows.every((row) => !row.ciphertext.toString('utf8').includes('Mara')));
+    const indexes = await db.query<{ token: string }>(
+      `SELECT token FROM chron_entity_blind_indexes WHERE story_id = $1`,
+      [storyId],
+    );
+    assert.equal(indexes.rows.length, 6);
+    assert.ok(indexes.rows.every((row) => /^[A-Za-z0-9_-]{43}$/.test(row.token)));
+    assert.ok(indexes.rows.every((row) => !row.token.includes('Mara')));
 
     const locked = (await World.forStory(db, storyId)).graph;
     await assert.rejects(() => locked.get('char:secret'), /locked/);
     await assert.rejects(() => locked.search('Mara'), /locked/);
     await assert.rejects(() => locked.assertEdge({ subject: 'char:secret', predicate: 'KNOWS', object: 'char:other' }, 3), /locked/);
     assert.equal((await locked.getCanon('char:canon'))?.name, 'Canon Keeper');
+
+    await deleteStory(db, storyId);
+    assert.equal(
+      Number((await db.one<{ n: string }>(`SELECT count(*) n FROM chron_entity_blind_indexes WHERE story_id = $1`, [storyId]))!.n),
+      0,
+      'deleting a story cascades its blind indexes',
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });
@@ -836,7 +853,7 @@ test('deleting a story cascades every scoped table, with no hand-maintained list
     // Asserted by sweeping every story-scoped table rather than spot-checking:
     // this is the exact failure SetupService.reset() had twice, where a table
     // added later was missing from a hand-written list.
-    const tables = ['turns', 'events', 'facts', 'threads', 'consequences', 'directives', 'divergences', 'style_anchors', 'scenes', 'chapters', 'relationships', 'chron_entities', 'chron_sheets', 'illustrations', 'story_sources'];
+    const tables = ['turns', 'events', 'facts', 'threads', 'consequences', 'directives', 'divergences', 'style_anchors', 'scenes', 'chapters', 'relationships', 'chron_entities', 'chron_entity_blind_indexes', 'chron_sheets', 'illustrations', 'story_sources'];
     for (const table of tables) {
       const { rows } = await db.query<{ n: string }>(`SELECT count(*) n FROM ${table} WHERE story_id = $1`, [storyId]);
       assert.equal(Number(rows[0]!.n), 0, `${table} should have cascaded`);

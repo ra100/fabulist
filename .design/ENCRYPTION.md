@@ -368,10 +368,13 @@ plaintext, so the client never needs `normaliseName`. Canon resolution is
 unchanged (canon is plaintext). Both of `resolveName`'s passes collapse into one
 indexed equality lookup, which is also faster than the LIKE scan it replaces.
 
-Blind indexes leak equality: the operator learns that two rows share a name, and
-can confirm a guessed name by computing the tag — but only with `IK_s`, which is
-derived from the wrapped `DEK_s`. Without the key the tags are opaque. This is the
-standard, accepted trade, and it is confined to entity names.
+The implementation uses a domain-separated HMAC-SHA256 over the per-story DEK
+(`fabulist:story-blind-index:v1:graph:name` or `graph:logical-id`), encoded as
+base64url. Without the DEK, the tag is opaque and cannot be correlated across
+stories. The deliberate cost is equality/frequency leakage within one story: an
+operator can see when the same normalized lookup value recurs and how often each
+token occurs. This is the accepted trade for indexed equality lookup; substring
+search still decrypts chronicle rows in memory.
 
 ### 5.2 Substring search has to move
 
@@ -390,28 +393,21 @@ round trip.
 The MCP `search` tool (`src/mcp/tools-pg.ts:1129-1145`, matching fact text and
 thread titles) has no client to do this in. See §7.
 
-### 5.3 Entity ids leak the content they name
+### 5.3 Stable entity ids are structural metadata
 
-Emergent entities are minted with ids derived from their names — `char:jane-doe`,
-`loc:the-drowned-chapel`. Encrypting `name` while the primary key spells it out is
-theatre. And ids are load-bearing: they are foreign keys in `chron_edges`,
+Entity ids are load-bearing cross-store references: they occur in `chron_edges`,
 `events.participants` (GIN-indexed, `schema-pg.sql:476`), `relationships`,
 `fact_knowledge`, and the `char:`/`loc:` prefix is parsed in
 `src/setup/apply.ts` and `web/src/App.tsx`.
 
-For encrypted stories, mint opaque ids for chronicle-only entities:
-`char:e7f3a91b` — random suffix, prefix preserved so the prefix assumptions and
-the type-routing keep working, display name in the encrypted envelope. Canon ids
-are untouched (canon is public; that is the point of a world).
-
-Consequence: ids stop being human-readable in the graph view and in MCP output.
-Since the client decrypts names anyway it can render them, but any debugging that
-relied on reading an id from a log entry loses that. Worth it; a leak this direct
-cannot stay.
-
-`story_id_aliases.composed_id` needs the same treatment when the alias is minted
-from a chronicle name. `facts.id`, `threads.id`, `directives.id` need auditing for
-the same pattern.
+V1 deliberately preserves those stable ids rather than transforming them to
+opaque values. It keeps every story-owned reference compatible and makes future
+conversion resumable without a cross-table identifier rewrite. This is a bounded
+privacy tradeoff: ids that themselves contain a human name remain visible, as do
+the graph's edge topology, predicates, timing, weights, type, salience and row
+counts. New encrypted prose is kept in AEAD envelopes; equality lookup uses the
+per-story blind indexes in §5.1, never a raw value or unkeyed hash. A future
+opaque-id migration remains a separate, explicitly scoped project.
 
 ### 5.4 Four smaller SQL and JS dependencies
 
