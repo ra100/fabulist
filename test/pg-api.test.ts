@@ -337,14 +337,12 @@ test('a 404 and a bad body are answered, not crashed', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(db, async (base) => {
       assert.equal((await get(base, '/api/nonsense')).status, 404);
-      // A malformed body reaches the handler as undefined rather than throwing in
-      // the reader, so the route's own validation answers.
       const res = await fetch(`${base}/api/threads`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: '{not json',
       });
-      assert.ok(res.status === 400 || res.status === 500, `expected a handled error, got ${res.status}`);
+      assert.equal(res.status, 400);
     });
   });
   if (!ran) t.skip('no Postgres configured');
@@ -530,4 +528,3 @@ test('claiming only ever takes stories nobody owns', async (t) => {
   });
   if (!ran) t.skip('no Postgres configured');
 });
-
