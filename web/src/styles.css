@@ -1063,9 +1063,17 @@ hr {
   overflow: auto;
   padding: var(--s5) var(--s4) var(--s7);
 }
-/* tool views obey a measure; they do not stretch to the window */
+/* tool views obey a measure; they do not stretch to the window. Centred in
+   whatever width the pane actually has — the same reasoning `.book` already
+   applies to itself — rather than left-anchored, which is what a `max-width`
+   with no auto margins does: on any pane wider than the measure (any window
+   above roughly 1000px, more once an aside is not competing for the space)
+   every tool view — settings, library, threads, timeline, causality, facts —
+   sat flush against the left rule with the whole right half of the pane
+   standing empty. */
 .pane > .measure-tool {
   max-width: var(--measure-tool);
+  margin: 0 auto;
 }
 .side {
   width: 336px;
@@ -1638,6 +1646,43 @@ td:first-child, th:first-child { padding-left: 0; }
 td.num, th.num { font-variant-numeric: tabular-nums; text-align: right; }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover { background: var(--surface-1); }
+/* The row for whichever book this reader currently has open — a rubric rule
+   at the left edge, same device as `.timeline-scene.current` and the
+   pinned-turn marker in the book itself, rather than a background tint that
+   would fight the header's own hover state. */
+tr.current > td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
+  padding-left: calc(var(--s3) - 2px);
+}
+
+/* A row's action buttons: right-hand column, allowed to wrap onto a second
+   line rather than forcing the table wider than its measure or the row
+   taller by clipping. `white-space: normal` overrides the table-wide
+   `nowrap` a bare `<th>` would otherwise inherit from nothing — buttons are
+   inline-block already, so wrapping between them costs nothing visually. */
+td.actions, th.actions {
+  text-align: right;
+  white-space: normal;
+}
+td.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s1);
+  flex-wrap: wrap;
+}
+td.actions button { flex: none; }
+/* The row's name and its dim metadata line, stacked in one cell — replaces
+   the ad hoc `<br />` + inline `<span>` this used to be, so the metadata
+   wraps as a block rather than running on past the name at whatever width
+   was left on the name's own line. */
+.row-name { display: block; }
+.row-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
 
 .kv {
   display: grid;
@@ -1818,6 +1863,7 @@ tr.clickable:hover { background: var(--surface-1); }
   gap: var(--s3);
   align-items: stretch;
   max-width: 84rem;
+  margin: 0 auto;
 }
 .cast-grid > .card {
   margin-bottom: 0;
