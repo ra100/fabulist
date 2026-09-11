@@ -122,6 +122,8 @@ export interface Story {
   forkedAtScene: number | null;
   createdAt: string;
   lastPlayedAt: string;
+  /** `0` legacy plaintext rows, `1` encrypted-at-rest. */
+  encryptionVersion?: number;
 }
 
 export interface ForkResult {
@@ -541,6 +543,8 @@ export interface CurrentUser {
   firstName: string | null;
   lastName: string | null;
   isAdmin: boolean;
+  encryptionPilot?: boolean;
+  encryptNewStories?: boolean;
 }
 
 /**

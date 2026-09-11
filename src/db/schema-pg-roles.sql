@@ -89,7 +89,9 @@ DECLARE
     'stories', 'story_sources', 'story_id_aliases', 'chron_entities', 'chron_edges',
     'chron_sheets', 'relationships', 'facts', 'fact_knowledge', 'threads', 'events',
     'consequences', 'turns', 'scenes', 'chapters', 'directives', 'divergences',
-    'style_anchors', 'prose_blocklist', 'illustrations'];
+    'style_anchors', 'prose_blocklist', 'illustrations',
+    -- User-scoped rollout state read and bound by the play path at login time.
+    'encryption_rollout'];
   system_tables TEXT[] := ARRAY[
     -- `world_access` is system data: who may see a world is not something a play
     -- connection may edit, or a user could grant themselves access to a private

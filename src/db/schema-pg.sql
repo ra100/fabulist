@@ -274,6 +274,9 @@ CREATE INDEX IF NOT EXISTS idx_ingest_pages_title  ON ingest_pages (world_id, wi
 CREATE TABLE IF NOT EXISTS stories (
   id                  TEXT PRIMARY KEY,
   owner_user_id       TEXT,
+  -- Storage format per story. `0` is legacy plaintext rows, `1` is encrypted
+  -- envelopes. Kept on the story so a mixed fleet can exist during rollout.
+  encryption_version  INTEGER NOT NULL DEFAULT 0,
   title               TEXT NOT NULL DEFAULT '',
   scene               INTEGER NOT NULL DEFAULT 1,
   turn                INTEGER NOT NULL DEFAULT 0,
@@ -289,6 +292,33 @@ CREATE TABLE IF NOT EXISTS stories (
 
 CREATE INDEX IF NOT EXISTS idx_stories_owner  ON stories (owner_user_id, last_played_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stories_played ON stories (last_played_at DESC, created_at DESC);
+
+-- Additive migration for databases created before `encryption_version` existed.
+ALTER TABLE stories
+  ADD COLUMN IF NOT EXISTS encryption_version INTEGER NOT NULL DEFAULT 0;
+
+-- Per-user encryption rollout controls.
+--
+-- `bootstrap_email` lets an operator pre-enrol one address before knowing the
+-- stable WorkOS id. On first login, the app binds that row to `user_id` and
+-- all later checks key off the id, not the mutable email.
+CREATE TABLE IF NOT EXISTS encryption_rollout (
+  bootstrap_email     TEXT PRIMARY KEY,
+  user_id             TEXT UNIQUE,
+  enabled             BOOLEAN NOT NULL DEFAULT false,
+  encrypt_new_stories BOOLEAN NOT NULL DEFAULT false,
+  bound_at            TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_encryption_rollout_user_id ON encryption_rollout (user_id);
+
+-- Initial pilot account: enabled for encrypted story creation once that user
+-- first signs in and the row is bound to their WorkOS id.
+INSERT INTO encryption_rollout (bootstrap_email, enabled, encrypt_new_stories, updated_at)
+VALUES ('fabulist@rast.io', true, true, now())
+ON CONFLICT (bootstrap_email) DO NOTHING;
 
 -- Which canon worlds a story reads, in precedence order. THE crossover table.
 --

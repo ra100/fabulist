@@ -342,6 +342,7 @@ interface StoryRow {
   forked_at_scene: number | null;
   created_at: string;
   last_played_at: string;
+  encryption_version?: number;
   owner_user_id: string | null;
 }
 
@@ -359,6 +360,7 @@ function toStory(r: StoryRow): Story {
     forkedAtScene: r.forked_at_scene,
     createdAt: r.created_at,
     lastPlayedAt: r.last_played_at,
+    encryptionVersion: r.encryption_version ?? 0,
     ownerUserId: r.owner_user_id,
   };
 }
@@ -571,4 +573,3 @@ export class StoryStore {
     this.db.prepare(`UPDATE stories SET title = ? WHERE id = ?`).run(title, this.storyId);
   }
 }
-
