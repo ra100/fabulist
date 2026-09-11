@@ -411,6 +411,17 @@ function toStory(r: StoryRow): Story {
   };
 }
 
+function toSession(story: Story): SessionState {
+  return {
+    scene: story.scene,
+    turn: story.turn,
+    playerCharacterId: story.playerCharacterId,
+    currentLocationId: story.currentLocationId,
+    style: story.style,
+    knobs: story.knobs,
+  };
+}
+
 /** Every story, most recently played first. Used by the save browser. */
 /**
  * `NULLS LAST` is defensive, not a fix.
@@ -694,7 +705,7 @@ export class StoryStore {
   }
 
   async get(): Promise<SessionState> {
-    return toStory(await this.require());
+    return toSession(toStory(await this.require()));
   }
 
   /** Full record, including identity and lineage — what the save browser wants. */
