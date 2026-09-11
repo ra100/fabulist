@@ -142,6 +142,10 @@ export class IllustrationService {
     // portrait without a seed change is how "regenerate" would silently drift
     // from the character players already recognise.
     const seed = provider.capabilities.seedControl ? sheet.appearance.seed : null;
+    const priorPortrait = provider.capabilities.imageConditioning
+      ? await world.illustrations.latestPortrait(entityId)
+      : undefined;
+    const reference = priorPortrait ? await world.illustrations.referenceInput(priorPortrait) : { path: null, bytes: null };
 
     const reserved = await world.illustrations.reserve({
       subject: { kind: 'portrait', entityId },
@@ -158,7 +162,8 @@ export class IllustrationService {
         prompt,
         negativePrompt,
         seed,
-        referenceImagePath: provider.capabilities.imageConditioning ? sheet.appearance.referenceImagePath : null,
+        referenceImagePath: reference.path,
+        referenceImageBytes: reference.bytes,
         referenceStrength: 0.55,
       });
       const done = await world.illustrations.complete(reserved.id, result.bytes, result.mimeType, result.seed);
@@ -206,7 +211,9 @@ export class IllustrationService {
     // a prior scene image and the provider can condition on one, hand it the
     // last real look of the place rather than only its restated description.
     const reference = locationId ? await world.illustrations.latestLocationReference(locationId) : undefined;
-    const referencePath = reference ? world.illustrations.absolutePath(reference) : null;
+    const referenceInput = reference && provider.capabilities.imageConditioning
+      ? await world.illustrations.referenceInput(reference)
+      : { path: null, bytes: null };
 
     const reserved = await world.illustrations.reserve({
       subject: { kind: 'scene', turnId, locationId },
@@ -222,7 +229,8 @@ export class IllustrationService {
       const result = await provider.generate({
         prompt,
         negativePrompt,
-        referenceImagePath: provider.capabilities.imageConditioning ? referencePath : null,
+        referenceImagePath: referenceInput.path,
+        referenceImageBytes: referenceInput.bytes,
         referenceStrength: 0.4, // looser than a portrait's: a scene should evolve, not repeat
       });
       const done = await world.illustrations.complete(reserved.id, result.bytes, result.mimeType, result.seed);

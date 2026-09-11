@@ -108,7 +108,7 @@ export class World {
     // Explicit rather than derived: tests must not write real files into the
     // repository just because they touched illustrations, so the default is a
     // fixed path a caller overrides on purpose.
-    this.illustrations = new IllustrationStore(db, storyId, opts.imagesDir ?? 'data/images');
+    this.illustrations = new IllustrationStore(db, storyId, opts.imagesDir ?? 'data/images', opts.crypto);
   }
 
   /**

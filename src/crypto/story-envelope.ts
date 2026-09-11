@@ -11,6 +11,8 @@ export interface StoryValueEnvelope {
   ciphertext: Buffer;
 }
 
+const BINARY_MAGIC = Buffer.from('FSEB', 'ascii');
+
 function assertKey(key: Buffer): void {
   if (key.length !== KEY_BYTES) throw new Error('invalid private-story key');
 }
@@ -44,5 +46,43 @@ export function decryptStoryValue(key: Buffer, context: StoryValueContext, envel
     return JSON.parse(Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8'));
   } catch {
     throw new Error('private story value cannot be decrypted');
+  }
+}
+
+/**
+ * AES-GCM envelope for a private file. It deliberately reuses story-value AAD
+ * so a file cannot be moved to another story, record, or field and still
+ * decrypt. The compact on-disk framing is magic, version, nonce, ciphertext.
+ */
+export function encryptStoryBytes(key: Buffer, context: StoryValueContext, value: Uint8Array): Buffer {
+  assertKey(key);
+  const nonce = randomBytes(NONCE_BYTES);
+  const cipher = createCipheriv('aes-256-gcm', key, nonce, { authTagLength: TAG_BYTES });
+  cipher.setAAD(Buffer.from(storyValueAad(context), 'utf8'));
+  const ciphertext = Buffer.concat([cipher.update(value), cipher.final(), cipher.getAuthTag()]);
+  return Buffer.concat([BINARY_MAGIC, Buffer.from([STORY_ENVELOPE_VERSION]), nonce, ciphertext]);
+}
+
+export function decryptStoryBytes(key: Buffer, context: StoryValueContext, envelope: Uint8Array): Buffer {
+  assertKey(key);
+  const bytes = Buffer.from(envelope);
+  const header = BINARY_MAGIC.length + 1 + NONCE_BYTES;
+  if (
+    bytes.length <= header + TAG_BYTES ||
+    !bytes.subarray(0, BINARY_MAGIC.length).equals(BINARY_MAGIC) ||
+    bytes[BINARY_MAGIC.length] !== STORY_ENVELOPE_VERSION
+  ) {
+    throw new Error('invalid encrypted story bytes');
+  }
+  try {
+    const nonce = bytes.subarray(BINARY_MAGIC.length + 1, header);
+    const ciphertext = bytes.subarray(header, -TAG_BYTES);
+    const tag = bytes.subarray(-TAG_BYTES);
+    const decipher = createDecipheriv('aes-256-gcm', key, nonce, { authTagLength: TAG_BYTES });
+    decipher.setAAD(Buffer.from(storyValueAad(context), 'utf8'));
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  } catch {
+    throw new Error('private story bytes cannot be decrypted');
   }
 }

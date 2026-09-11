@@ -208,9 +208,10 @@ export class UnslothImageProvider implements ImageProvider {
     // file is read here — the same shape `bedrockImage.ts` uses for its
     // `image` field, and gated on the same capability flag so a spec that
     // turns conditioning off genuinely stops sending it.
-    if (this.capabilities.imageConditioning && req.referenceImagePath) {
-      const { readFile } = await import('node:fs/promises');
-      const raw = await readFile(req.referenceImagePath);
+    if (this.capabilities.imageConditioning && (req.referenceImageBytes || req.referenceImagePath)) {
+      const raw = req.referenceImageBytes
+        ? Buffer.from(req.referenceImageBytes)
+        : await (await import('node:fs/promises')).readFile(req.referenceImagePath!);
       body.init_image = `data:image/png;base64,${raw.toString('base64')}`;
       // `strength` is img2img *denoise* strength: low stays close to the
       // source. `referenceStrength` is documented the same way round in

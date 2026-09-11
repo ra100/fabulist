@@ -41,6 +41,8 @@ export interface ImageRequest {
   seed?: number | null;
   /** Absolute path to a reference image, honoured only when `imageConditioning` is true. */
   referenceImagePath?: string | null;
+  /** Decrypted reference bytes for stores that never expose a plaintext file at rest. */
+  referenceImageBytes?: Uint8Array | null;
   /** How strongly to follow the reference vs. the prompt, 0..1. Ignored without conditioning. */
   referenceStrength?: number;
 }
