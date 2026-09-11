@@ -180,7 +180,6 @@ export async function createStoryTool(ctx: McpToolContext, args: { title?: strin
   const story = await createStory(world.db, {
     title: args.title?.trim() ?? '',
     ...(ctx.user ? { ownerUserId: ctx.user.id } : {}),
-    ...(ctx.user?.encryptNewStories ? { encryptionVersion: 1 } : {}),
   });
   // Scene 1 comes with the story now — see `createStory`, which opens it for
   // every creation path rather than leaving each one to remember.

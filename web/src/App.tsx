@@ -34,6 +34,7 @@ import { FactsView } from './views/FactsView.tsx';
 import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
+import { createEncryptionEnrollment, type EncryptionEnrollment } from './crypto/keys.ts';
 
 type Tab = 'book' | 'timeline' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'library' | 'settings';
 
@@ -261,6 +262,8 @@ export function App() {
 
       {error ? <div className="card warn" style={{ margin: 12 }}>{error}</div> : null}
 
+      {currentUser?.encryptionPilot ? <PrivateStorageSetup user={currentUser} /> : null}
+
       {tab === 'book' ? <BookTab state={state} hasPlayer={hasPlayer} onChanged={refresh} /> : null}
       {tab === 'timeline' ? <TimelineView /> : null}
       {tab === 'graph' ? <GraphTab /> : null}
@@ -280,6 +283,108 @@ export function App() {
       ) : null}
       {tab === 'settings' ? <SettingsTab state={state} onChanged={refresh} currentUser={currentUser} /> : null}
     </div>
+  );
+}
+
+function PrivateStorageSetup({ user }: { user: CurrentUser }) {
+  const [enrolled, setEnrolled] = useState<boolean | null>(null);
+  const [passphrase, setPassphrase] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [draft, setDraft] = useState<EncryptionEnrollment | null>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void api.encryption.keys()
+      .then((keys) => setEnrolled(keys.enrolled))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  const prepare = async () => {
+    if (passphrase !== confirmation) {
+      setError('the passphrase confirmation does not match');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const stories = await api.stories.list();
+      const next = await createEncryptionEnrollment(user.id, passphrase, stories.map((story) => story.id));
+      setDraft(next);
+      setPassphrase('');
+      setConfirmation('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const enroll = async () => {
+    if (!draft || !acknowledged) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.encryption.enroll(draft);
+      setEnrolled(true);
+      setDraft(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (enrolled === null && !error) return null;
+  if (enrolled) {
+    return (
+      <section className="card" style={{ margin: 12 }}>
+        <b>Private storage pilot: key recovery is configured.</b>{' '}
+        <span className="small">Your browser holds the passphrase and recovery-code capability; Fabulist stores only their encrypted key wraps. Existing story content is not migrated yet.</span>
+      </section>
+    );
+  }
+
+  return (
+    <section className="card warn" style={{ margin: 12 }}>
+      <b>Private storage pilot</b>
+      <p className="small">
+        Create a passphrase and recovery code in this browser. Fabulist stores only encrypted key wraps, never either secret.
+        Keep both: losing both makes future encrypted stories permanently unrecoverable.
+      </p>
+      {!draft ? (
+        <div className="row">
+          <label>
+            passphrase
+            <input type="password" autoComplete="new-password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} disabled={busy} />
+          </label>
+          <label>
+            confirm passphrase
+            <input type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} disabled={busy} />
+          </label>
+          <button className="primary" onClick={() => void prepare()} disabled={busy || !passphrase || !confirmation}>
+            {busy ? 'preparing…' : 'create recovery code'}
+          </button>
+        </div>
+      ) : (
+        <div className="stack">
+          <p>Record this recovery code now. It will not be shown again.</p>
+          <code className="mono" style={{ overflowWrap: 'anywhere' }}>{draft.recoveryCode}</code>
+          <label>
+            <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />
+            {' '}I recorded this recovery code securely.
+          </label>
+          <div className="row">
+            <button className="primary" onClick={() => void enroll()} disabled={!acknowledged || busy}>
+              {busy ? 'saving…' : 'enable key recovery'}
+            </button>
+            <button onClick={() => { setDraft(null); setAcknowledged(false); }}>start over</button>
+          </div>
+        </div>
+      )}
+      {error ? <p className="danger">{error}</p> : null}
+    </section>
   );
 }
 

@@ -525,7 +525,8 @@ export async function getStory(db: Queryable, id: StoryId): Promise<Story | unde
  * with an already-verified SessionUser, or nothing) is the only place that knows.
  *
  * `encryptionVersion` controls storage format for this story only. `0` is the
- * legacy plaintext shape; `1` is the encrypted-at-rest rollout path.
+ * legacy plaintext shape; `1` is reserved for a verified encrypted-at-rest
+ * row and must not be selected merely because a user joined the pilot.
  */
 export async function createStory(
   db: Queryable,
