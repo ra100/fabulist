@@ -11,6 +11,13 @@ import type {
   VisualStyle as DomainVisualStyle,
   Vow as DomainVow,
 } from '../../src/domain/types.ts';
+import {
+  playResponseSchema,
+  stateResponseSchema,
+  storiesResponseSchema,
+  worldsResponseSchema,
+} from '../../src/server/contracts.ts';
+import type { ZodTypeAny } from 'zod';
 
 /**
  * Which of *this user's own* stories the current browser tab is looking at,
@@ -475,9 +482,31 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
   });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `${res.status} on ${path}`);
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error(`malformed JSON response from ${path} (${res.status})`);
+  }
+  if (!res.ok) {
+    const message =
+      typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string'
+        ? body.error
+        : `${res.status} on ${path}`;
+    throw new Error(message);
+  }
   return body as T;
+}
+
+async function parsedReq<T>(path: string, schema: ZodTypeAny, init?: RequestInit): Promise<T> {
+  const body = await req<unknown>(path, init);
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const location = issue?.path.length ? ` at ${issue.path.join('.')}` : '';
+    throw new Error(`malformed response from ${path}${location}: ${issue?.message ?? 'schema mismatch'}`);
+  }
+  return parsed.data as T;
 }
 
 const post = <T>(path: string, body?: unknown) =>
@@ -592,7 +621,7 @@ export const api = {
      */
     logout: () => fetch('/auth/logout', { method: 'POST' }),
   },
-  state: () => req<State>('/state'),
+  state: () => parsedReq<State>('/state', stateResponseSchema),
   /**
    * `minWeight` omitted lets the server apply its own default (0.5 — typed
    * relationships only, mentions excluded). Pass 0 to include everything.
@@ -608,7 +637,11 @@ export const api = {
   entity: (id: string) => req<EntityDetail>(`/entity/${encodeURIComponent(id)}`),
   cast: () => req<Array<{ sheet: Sheet; entity: Entity | null }>>('/cast'),
   book: () => req<{ scenes: State['scenes']; turns: BookTurn[] }>('/book'),
-  play: (input: string, overrideIntegrity = false) => post<PlayResponse>('/play', { input, overrideIntegrity }),
+  play: (input: string, overrideIntegrity = false) =>
+    parsedReq<PlayResponse>('/play', playResponseSchema, {
+      method: 'POST',
+      body: JSON.stringify({ input, overrideIntegrity }),
+    }),
   turn: (id: string) => req<{ id: string; meta: TurnMeta; delta: unknown }>(`/turn/${encodeURIComponent(id)}`),
   pin: (id: string, pinned: boolean) => post(`/turn/${encodeURIComponent(id)}/pin`, { pinned }),
   /** Re-renders a turn's prose from its stored delta; what happened never changes. */
@@ -740,15 +773,27 @@ export const api = {
           event = line.slice(6).trim();
         } else if (line.startsWith('data:')) {
           const payload = line.slice(5).trim();
+          let data: Record<string, unknown>;
           try {
-            const data = JSON.parse(payload) as Record<string, never>;
-            if (event === 'stage') handlers.onStage?.(String(data.stage));
-            else if (event === 'token') handlers.onToken?.(String(data.chunk));
-            else if (event === 'done') handlers.onDone?.(data as unknown as PlayResponse);
-            else if (event === 'error') handlers.onError?.(String(data.error));
+            data = JSON.parse(payload) as Record<string, unknown>;
           } catch {
-            // A partial event; the next read completes it.
+            handlers.onError?.(`malformed ${event || 'unnamed'} stream event: invalid JSON`);
+            return;
           }
+          if (event === 'stage') handlers.onStage?.(String(data.stage));
+          else if (event === 'token') handlers.onToken?.(String(data.chunk));
+          else if (event === 'done') {
+            const parsed = playResponseSchema.safeParse(data);
+            if (!parsed.success) {
+              const issue = parsed.error.issues[0];
+              const location = issue?.path.length ? ` at ${issue.path.join('.')}` : '';
+              handlers.onError?.(`malformed play completion${location}: ${issue?.message ?? 'schema mismatch'}`);
+              return;
+            } else {
+              handlers.onDone?.(parsed.data as PlayResponse);
+            }
+          }
+          else if (event === 'error') handlers.onError?.(String(data.error));
         }
         newline = buffer.indexOf('\n');
       }
@@ -756,7 +801,7 @@ export const api = {
   },
 
   stories: {
-    list: () => req<Story[]>('/stories'),
+    list: () => parsedReq<Story[]>('/stories', storiesResponseSchema),
     create: (title?: string) => post<Story>('/stories', title ? { title } : {}),
     /** `fromStoryId` defaults server-side to whichever story is current; pass it explicitly to fork a story other than the one currently open, with no switch required. */
     fork: (fromStoryId: string, title?: string, atScene?: number) =>
@@ -770,7 +815,7 @@ export const api = {
      * They are invisible to the ordinary list, because `owner_user_id = $1` never
      * matches NULL, so without this they exist in the database and nowhere in the UI.
      */
-    unowned: () => req<Story[]>('/stories/unowned'),
+    unowned: () => parsedReq<Story[]>('/stories/unowned', storiesResponseSchema),
     /** Takes ownership: all unowned books, or one by id. */
     claim: (id?: string) =>
       post<{ claimed: number }>(`/stories/claim${id ? `?storyId=${encodeURIComponent(id)}` : ''}`),
@@ -787,7 +832,7 @@ export const api = {
    * affects nobody else.
    */
   worlds: {
-    list: () => req<{ worlds: WorldSummary[] }>('/worlds'),
+    list: () => parsedReq<{ worlds: WorldSummary[] }>('/worlds', worldsResponseSchema),
     /** Admin-only server-side: a world is system data, shared by every story that reads it. */
     create: (title?: string) => post<WorldSummary>('/worlds', title ? { title } : {}),
     rename: (slug: string, title: string) => put<WorldSummary>(`/worlds/${encodeURIComponent(slug)}/title`, { title }),
