@@ -302,7 +302,7 @@ test('epistemics: knowledge is per-entity, distortion only improves, revoking fo
   if (!ran) t.skip('no Postgres configured');
 });
 
-test('world meta is per world, and refuses to guess which one', async (t) => {
+test('world meta resolves the story\u2019s world, and refuses to guess when there is none', async (t) => {
   const ran = await withPg(async (db) => {
     const w1 = await makeWorld(db, 'one');
     const w2 = await makeWorld(db, 'two');
@@ -318,7 +318,21 @@ test('world meta is per world, and refuses to guess which one', async (t) => {
     assert.equal(await c2.getMeta('palette'), 'starfield');
     assert.equal(await c1.getMeta('missing', 'fallback'), 'fallback');
 
-    const noWorld = new ChronicleStore({ db, storyId: s.id });
+    // Not told which world, but the story says: falls back to its primary
+    // source, exactly as `GraphStore`/`CastStore` fall back for `canonWorldId`.
+    // `World` reads `story_sources` once when it builds its stores, so a store
+    // built before the story was bound held `undefined` while the answer sat in
+    // the table — and this store alone turned that into a throw, which is what
+    // killed setup on a fresh story.
+    const late = new ChronicleStore({ db, storyId: s.id });
+    await late.setMeta('palette', 'resolved');
+    assert.equal(await c1.getMeta('palette'), 'resolved', 'resolved to the story\u2019s own world');
+
+    // With no binding at all there is still nothing to resolve, and guessing is
+    // the bug this refusal exists for. Choosing a world is one layer up
+    // (`ensureCanonWorldFor`), never here.
+    const unbound = await createStory(db, {});
+    const noWorld = new ChronicleStore({ db, storyId: unbound.id });
     await assert.rejects(() => noWorld.setMeta('palette', 'x'), /needs a target world/);
     assert.equal(await noWorld.getMeta('palette', 'fallback'), 'fallback', 'reads degrade rather than throw');
   });

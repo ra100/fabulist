@@ -15,6 +15,9 @@ import assert from 'node:assert/strict';
 import { makeWorld, withPg } from './pg-harness.ts';
 import { World, createWorld } from '../src/store/index-pg.ts';
 import { createStory, getStory } from '../src/store/world-pg.ts';
+import { SetupService } from '../src/setup/service-pg.ts';
+import { MockProvider } from '../src/providers/mock.ts';
+import { ProviderRegistry } from '../src/providers/provider.ts';
 import { installPack } from '../src/packs/apply-pg.ts';
 import { PACKS } from '../src/packs/index.ts';
 import { seedWorld } from '../src/seed/verrow-pg.ts';
@@ -191,6 +194,55 @@ test('a described world becomes canon, a cast, and an opening scene', async (t) 
     assert.equal(await world.chronicle.knows('char:mara', facts[0]!.id), true);
     assert.equal(await world.chronicle.knows('char:oren', facts[0]!.id), false);
 
+    assert.equal((await checkIntegrity(db)).ok, true);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * The wizard's own path, on the story the wizard actually runs against: a brand
+ * new one, bound to no canon world at all.
+ *
+ * `createStory` writes no `story_sources` row, because until the wizard runs
+ * there is nothing to point at — so every canon write in this path had nowhere
+ * to go, and the stores refuse to guess. On a fresh instance an ingest died on
+ * its first statement, `setMeta('worldTitle')`, and an authored world on its
+ * last, after the model had already been paid to invent one; both said "no world
+ * for story …", and the wizard offers no way to retry a step.
+ *
+ * Driven through `SetupService` rather than `applyCustomWorld` directly, because
+ * the binding is the service's decision and calling the applier with an
+ * already-bound world is exactly the assumption that hid this.
+ */
+test('the custom-world wizard binds a canon world to a story that has none', async (t) => {
+  const ran = await withPg(async (db) => {
+    // The placeholder `serve-pg` creates at boot, and a story with no sources.
+    await createWorld(db, '');
+    const story = await createStory(db, { title: '' });
+    const world = await World.forStory(db, story.id);
+    assert.deepEqual(world.sources, [], 'precondition: nothing bound yet');
+
+    const service = new SetupService({
+      world: () => World.forStory(db, story.id),
+      db,
+      providers: new ProviderRegistry(new MockProvider()),
+    });
+
+    const job = service.startCustomWorld('A city where the weights-and-measures office decides what may be sold.');
+    for (let i = 0; i < 200 && service.jobs.get(job.id)?.status === 'running'; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const settled = service.jobs.get(job.id)!;
+    assert.equal(settled.status, 'done', settled.error ?? '');
+
+    // The story is bound, and the canon went into the world it was bound to.
+    const bound = await World.forStory(db, story.id);
+    assert.equal(bound.sources.length, 1, 'the wizard bound exactly one canon world');
+    assert.ok((await bound.graph.counts()).canon > 0, 'canon landed in that world');
+
+    // The write that failed last, and the reason this test exists: world-level
+    // meta with no pre-existing `story_sources` binding.
+    assert.equal(await bound.chronicle.getMeta('worldTitle'), 'The Long Silence');
     assert.equal((await checkIntegrity(db)).ok, true);
   });
   if (!ran) t.skip('no Postgres configured');

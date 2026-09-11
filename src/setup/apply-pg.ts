@@ -197,7 +197,10 @@ export async function applyCustomWorld(world: World, raw: Record<string, unknown
 
   await world.session.set({ scene: 1, turn: 0, playerCharacterId: result.playerCharacterId, currentLocationId: startLocation });
   await world.chronicle.upsertScene(1, { title: String(raw.title ?? ''), summary: '', locationId: startLocation, chapter: 1 });
-  if (raw.title) world.chronicle.setMeta('worldTitle', String(raw.title));
+  // Awaited, unlike the SQLite original this was converted from, where `setMeta`
+  // was synchronous. Unawaited it could only ever fail as an unhandled
+  // rejection — the job reported success and the process took the throw.
+  if (raw.title) await world.chronicle.setMeta('worldTitle', String(raw.title));
 
   return result;
 }
