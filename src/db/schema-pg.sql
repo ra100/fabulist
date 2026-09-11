@@ -446,6 +446,20 @@ CREATE INDEX IF NOT EXISTS idx_chron_entities_salience
 CREATE INDEX IF NOT EXISTS idx_chron_entities_type ON chron_entities (story_id, type);
 CREATE INDEX IF NOT EXISTS idx_chron_entities_name ON chron_entities (story_id, lower(name));
 
+-- Keyed, per-story tokens for private entity-name and logical-id equality
+-- lookups. They intentionally reveal equality/frequency within one story only.
+CREATE TABLE IF NOT EXISTS chron_entity_blind_indexes (
+  story_id   TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  entity_id  TEXT NOT NULL,
+  index_kind TEXT NOT NULL CHECK (index_kind IN ('name', 'logical_id')),
+  token      TEXT NOT NULL,
+  PRIMARY KEY (story_id, entity_id, index_kind),
+  UNIQUE (story_id, index_kind, token, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chron_entity_blind_lookup
+  ON chron_entity_blind_indexes (story_id, index_kind, token);
+
 -- Chronicle edges. Once a story touches a (subject, predicate, object)
 -- identity at all — asserts it, retires it, whatever — that identity is
 -- masked from canon entirely and only this story's rows answer for it. See
