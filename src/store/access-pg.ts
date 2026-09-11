@@ -24,7 +24,10 @@
  * paid on the busiest read in the world picker.
  */
 import type { Queryable } from '../db/pg.ts';
+import { randomUUID } from 'node:crypto';
 import type { SessionUser } from '../auth/config.ts';
+import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
+import type { ChronicleCrypto } from './chronicle-pg.ts';
 
 /** What a user may do with a world, in increasing order of power. */
 export type WorldRole = 'reader' | 'ingest' | 'owner';
@@ -212,6 +215,120 @@ export interface BlockedPhrase {
   note: string;
 }
 
+export interface StoryBlocklistOptions {
+  storyId: string;
+  crypto?: ChronicleCrypto;
+}
+
+const PRIVATE_BLOCKLIST_PREFIX = 'private:';
+
+async function privateStoryKey(
+  db: Queryable,
+  storyId: string,
+  crypto: ChronicleCrypto | undefined,
+): Promise<Buffer | null> {
+  const { rows } = await db.query<{ encryption_version: number }>(
+    `SELECT encryption_version FROM stories WHERE id = $1`,
+    [storyId],
+  );
+  const version = rows[0]?.encryption_version;
+  if (version === undefined) throw new Error(`no story ${storyId}`);
+  if (version !== 0 && version !== 1) throw new Error(`unsupported private-story format ${version}`);
+  if (version === 0) return null;
+  const key = crypto?.keyForStory(storyId) ?? null;
+  if (!key) throw new Error(`private story ${storyId} is locked`);
+  if (key.length !== 32) throw new Error('invalid private-story key');
+  return Buffer.from(key);
+}
+
+function privateRecordPrefix(storyId: string): string {
+  return `${PRIVATE_BLOCKLIST_PREFIX}${storyId}:`;
+}
+
+async function privateBlocklistFor(
+  db: Queryable,
+  userId: string,
+  storyId: string,
+  key: Buffer,
+): Promise<Array<BlockedPhrase & { id: string }>> {
+  const { rows } = await db.query<{ pattern: string }>(
+    `SELECT pattern FROM prose_blocklist WHERE user_id = $1 AND pattern LIKE $2 ORDER BY added`,
+    [userId, `${privateRecordPrefix(storyId)}%`],
+  );
+  if (!rows.length) return [];
+  const recordIds = rows.map((row) => row.pattern);
+  const { rows: encrypted } = await db.query<{
+    record_id: string;
+    field_name: string;
+    version: number;
+    nonce: Buffer;
+    ciphertext: Buffer;
+  }>(
+    `SELECT record_id, field_name, version, nonce, ciphertext
+       FROM encrypted_story_values
+      WHERE story_id = $1 AND table_name = 'prose_blocklist'
+        AND record_id = ANY($2::text[]) AND field_name IN ('pattern', 'note')`,
+    [storyId, recordIds],
+  );
+  const values = new Map<string, Map<string, unknown>>();
+  for (const row of encrypted) {
+    const fields = values.get(row.record_id) ?? new Map<string, unknown>();
+    fields.set(
+      row.field_name,
+      decryptStoryValue(
+        key,
+        { storyId, table: 'prose_blocklist', recordId: row.record_id, field: row.field_name },
+        { version: row.version, nonce: row.nonce, ciphertext: row.ciphertext },
+      ),
+    );
+    values.set(row.record_id, fields);
+  }
+  return recordIds.map((id) => {
+    const fields = values.get(id);
+    const pattern = fields?.get('pattern');
+    const note = fields?.get('note');
+    if (typeof pattern !== 'string' || typeof note !== 'string') {
+      throw new Error('missing encrypted private story value prose_blocklist');
+    }
+    return { id, pattern, note };
+  });
+}
+
+async function writePrivateBlocklist(
+  db: Queryable,
+  userId: string,
+  storyId: string,
+  key: Buffer,
+  id: string,
+  pattern: string,
+  note: string,
+): Promise<void> {
+  const fields = [
+    { field: 'pattern', ...encryptStoryValue(key, { storyId, table: 'prose_blocklist', recordId: id, field: 'pattern' }, pattern) },
+    { field: 'note', ...encryptStoryValue(key, { storyId, table: 'prose_blocklist', recordId: id, field: 'note' }, note) },
+  ];
+  await db.query(
+    `WITH written AS (
+       INSERT INTO prose_blocklist (user_id, pattern, note) VALUES ($1,$2,'')
+       ON CONFLICT (user_id, pattern) DO UPDATE SET note = ''
+       RETURNING 1
+     )
+     INSERT INTO encrypted_story_values (story_id, table_name, record_id, field_name, version, nonce, ciphertext)
+     SELECT $3, 'prose_blocklist', $2, value.field_name, value.version, value.nonce, value.ciphertext
+       FROM written CROSS JOIN (VALUES
+         ($4::text,$5::integer,$6::bytea,$7::bytea),
+         ($8::text,$9::integer,$10::bytea,$11::bytea)
+       ) AS value(field_name, version, nonce, ciphertext)
+     ON CONFLICT (story_id, table_name, record_id, field_name) DO UPDATE SET
+       version = EXCLUDED.version, nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, updated_at = now()`,
+    [
+      userId, id, storyId,
+      fields[0]!.field, fields[0]!.version, fields[0]!.nonce, fields[0]!.ciphertext,
+      fields[1]!.field, fields[1]!.version, fields[1]!.nonce, fields[1]!.ciphertext,
+    ],
+  );
+}
+
 /**
  * This user's personal prose blocklist.
  *
@@ -224,7 +341,12 @@ export interface BlockedPhrase {
 export async function blocklistFor(
   db: Queryable,
   user: SessionUser | null | undefined,
+  opts?: StoryBlocklistOptions,
 ): Promise<BlockedPhrase[]> {
+  if (opts) {
+    const key = await privateStoryKey(db, opts.storyId, opts.crypto);
+    if (key) return (await privateBlocklistFor(db, idOf(user), opts.storyId, key)).map(({ pattern, note }) => ({ pattern, note }));
+  }
   const { rows } = await db.query<{ pattern: string; note: string }>(
     `SELECT pattern, note FROM prose_blocklist WHERE user_id = $1 ORDER BY added`,
     [idOf(user)],
@@ -238,9 +360,27 @@ export async function blockPhrase(
   user: SessionUser | null | undefined,
   pattern: string,
   note = '',
+  opts?: StoryBlocklistOptions,
 ): Promise<void> {
   const trimmed = pattern.trim();
   if (!trimmed) throw new Error('a blocked phrase cannot be empty');
+  if (opts) {
+    const key = await privateStoryKey(db, opts.storyId, opts.crypto);
+    if (key) {
+      const entries = await privateBlocklistFor(db, idOf(user), opts.storyId, key);
+      const existing = entries.find((entry) => entry.pattern === trimmed);
+      await writePrivateBlocklist(
+        db,
+        idOf(user),
+        opts.storyId,
+        key,
+        existing?.id ?? `${privateRecordPrefix(opts.storyId)}${randomUUID()}`,
+        trimmed,
+        note,
+      );
+      return;
+    }
+  }
   await db.query(
     `INSERT INTO prose_blocklist (user_id, pattern, note) VALUES ($1,$2,$3)
      ON CONFLICT (user_id, pattern) DO UPDATE SET note = EXCLUDED.note`,
@@ -252,6 +392,23 @@ export async function unblockPhrase(
   db: Queryable,
   user: SessionUser | null | undefined,
   pattern: string,
+  opts?: StoryBlocklistOptions,
 ): Promise<void> {
+  if (opts) {
+    const key = await privateStoryKey(db, opts.storyId, opts.crypto);
+    if (key) {
+      const entry = (await privateBlocklistFor(db, idOf(user), opts.storyId, key)).find(
+        (candidate) => candidate.pattern === pattern.trim(),
+      );
+      if (!entry) return;
+      await db.query(
+        `DELETE FROM encrypted_story_values
+          WHERE story_id = $1 AND table_name = 'prose_blocklist' AND record_id = $2`,
+        [opts.storyId, entry.id],
+      );
+      await db.query(`DELETE FROM prose_blocklist WHERE user_id = $1 AND pattern = $2`, [idOf(user), entry.id]);
+      return;
+    }
+  }
   await db.query(`DELETE FROM prose_blocklist WHERE user_id = $1 AND pattern = $2`, [idOf(user), pattern.trim()]);
 }
