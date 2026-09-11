@@ -370,24 +370,15 @@ which is what finally identified this.
 
 ## Known gaps, called out on purpose
 
-- **The deploy key has no `authorized_keys` restriction.** The original design
-  had `deploy.sh` read `$SSH_ORIGINAL_COMMAND` under a forced
-  `command="/path/deploy.sh"` entry, so a leaked key could only ever run one
-  of two fixed actions. That restriction was never actually added to the
-  key's `authorized_keys` line (confirmed directly: `v0.2.0`'s deploy run
-  failed with `fish: Unknown command: upload-env` — sshd was running the
-  account's own login shell, `fish`, on the raw command string, because
-  there was no forced command overriding it). Rather than block the whole
-  pipeline on fixing that immediately, `deploy.sh` now takes its action as a
-  real `$1` (`deploy/deploy.sh upload-env`), which works under any login
-  shell with no `authorized_keys` change required — at the cost that this
-  key can currently run *any* SSH command on the box, not just these two.
-  To close this gap: add
-  `command="/home/ra100/Development/fabulist/deploy.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty`
-  before the `ssh-ed25519 ...` on this key's line in `~/.ssh/authorized_keys`,
-  then switch `deploy.sh` back to reading `$SSH_ORIGINAL_COMMAND` (git
-  history has the exact prior version) and the workflow back to sending bare
-  `upload-env`/`deploy` instead of the full path.
+- **Deploy-script sync may be skipped under restricted keys.** `release.yml`
+  now supports both key shapes:
+  - unrestricted key: workflow can `scp` `deploy.sh`/`docker-compose.yml`
+    before deploy.
+  - forced-command key (`command="/.../deploy.sh",...`): deploy still works
+    through `$SSH_ORIGINAL_COMMAND`, but `scp`/`chmod` are denied by design,
+    so that sync step is best-effort and can be skipped.
+  If you run a forced-command key, keep `/home/ra100/Development/fabulist/deploy.sh`
+  current by updating it out-of-band whenever deploy logic changes.
 - **Provider auth**: the deployed instance boots with no `fabulist.config.json`
   in the fresh volume, so `loadConfig()` defaults to `profile: "mock"` —
   offline, deterministic, no credentials needed. This deployment
@@ -453,4 +444,3 @@ the container healthcheck no longer uses it.
 ssh -p 25 ra100@omnius.rast.io 'cd Development/fabulist && docker compose ps && docker compose logs --tail 20'
 curl -s https://fabulist.rast.io/api/meta
 ```
-
