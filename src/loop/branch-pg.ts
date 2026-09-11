@@ -134,7 +134,7 @@ export async function truncateToScene(db: Db, world: World, scene: number): Prom
 
     // Vows broken in the discarded future are unbroken again: the break was an
     // event, and that event is gone.
-    const w = new World({ db: tx, storyId, sources: world.sources });
+    const w = new World({ db: tx, storyId, sources: world.sources, crypto: world.crypto });
     for (const sheet of await w.cast.list()) {
       const vows = sheet.contract.vows.map((v) =>
         v.broken && v.brokenScene !== null && v.brokenScene >= scene ? { ...v, broken: false, brokenScene: null } : v,

@@ -101,10 +101,10 @@ export class World {
     this.graph = new GraphStore({ db, storyId, sources });
     this.cast = new CastStore({ db, storyId, sources });
     this.chronicle = new ChronicleStore({ db, storyId, worldId, crypto: opts.crypto });
-    this.threads = new ThreadStore(db, storyId);
-    this.consequences = new ConsequenceStore(db, storyId);
-    this.directives = new DirectiveStore(db, storyId);
-    this.session = new StoryStore(db, storyId);
+    this.threads = new ThreadStore(db, storyId, opts.crypto);
+    this.consequences = new ConsequenceStore(db, storyId, opts.crypto);
+    this.directives = new DirectiveStore(db, storyId, opts.crypto);
+    this.session = new StoryStore(db, storyId, opts.crypto);
     // Explicit rather than derived: tests must not write real files into the
     // repository just because they touched illustrations, so the default is a
     // fixed path a caller overrides on purpose.

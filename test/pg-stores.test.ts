@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { makeWorld, withPg } from './pg-harness.ts';
 import { sourcesFor } from '../src/db/overlay.ts';
 import { withEncryptionRollout } from '../src/auth/encryption-rollout-pg.ts';
+import { encryptStoryValue } from '../src/crypto/story-envelope.ts';
 import { CastStore, emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../src/store/cast-pg.ts';
 import { ChronicleStore } from '../src/store/chronicle-pg.ts';
 import { IllustrationStore } from '../src/store/illustration-pg.ts';
@@ -52,6 +53,23 @@ function blankSheet(entityId: string): CharacterSheet {
     locks: [],
     isPlayer: false,
   };
+}
+
+async function encryptStoryValueForTest(
+  db: Db,
+  key: Buffer,
+  storyId: string,
+  table: string,
+  recordId: string,
+  field: string,
+  value: unknown,
+): Promise<void> {
+  const envelope = encryptStoryValue(key, { storyId, table, recordId, field }, value);
+  await db.query(
+    `INSERT INTO encrypted_story_values (story_id, table_name, record_id, field_name, version, nonce, ciphertext)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [storyId, table, recordId, field, envelope.version, envelope.nonce, envelope.ciphertext],
+  );
 }
 
 /** A world plus a story reading it, the shape every test below starts from. */
@@ -302,6 +320,118 @@ test('encrypted chronicles keep personal prose and turn JSON out of base tables'
     await assert.rejects(() => locked.getTurn(turn.id), /locked/);
     const wrongKey = new ChronicleStore({ db, storyId, crypto: { keyForStory: () => randomBytes(32) } });
     await assert.rejects(() => wrongKey.getTurn(turn.id), /cannot be decrypted/);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('encrypted story-owned stores envelope personal fields and fail closed when locked', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { storyId } = await setup(db);
+    const plainStory = new StoryStore(db, storyId);
+    await plainStory.rename('Private book');
+    const plainSession = await plainStory.set({
+      playerCharacterId: 'char:player',
+      currentLocationId: 'loc:cellar',
+      style: { ...(await plainStory.get()).style, pov: 'first' },
+      knobs: { ...(await plainStory.get()).knobs, pacing: 0.7 },
+    });
+    const plainThreads = new ThreadStore(db, storyId);
+    const thread = await plainThreads.create({
+      title: 'Find the traitor', stakes: 'The city may fall.', tension: 0.8,
+      parties: ['char:player', 'char:spymaster'], resolutions: ['expose them', 'join them'],
+      status: 'open', createdScene: 2,
+    });
+    const plainConsequences = new ConsequenceStore(db, storyId);
+    const consequence = await plainConsequences.enqueue({
+      causeEventId: 'ev:secret', trigger: { kind: 'on-learn', entityId: 'char:player', factId: 'fact:secret' },
+      actorId: 'char:spymaster', action: 'Send the assassins.', visibility: 'offscreen-hidden',
+      maturity: 'pending', depth: 1, significance: 0.9, createdScene: 2,
+    });
+    const plainDirectives = new DirectiveStore(db, storyId);
+    const directive = await plainDirectives.create({
+      text: 'Keep the traitor unnamed.', scope: 'scene', strength: 'mandate',
+      lifetimeScenes: 2, status: 'active', createdScene: 2,
+    });
+
+    const key = randomBytes(32);
+    await Promise.all([
+      encryptStoryValueForTest(db, key, storyId, 'stories', storyId, 'title', 'Private book'),
+      encryptStoryValueForTest(db, key, storyId, 'stories', storyId, 'player_character_id', plainSession.playerCharacterId),
+      encryptStoryValueForTest(db, key, storyId, 'stories', storyId, 'current_location_id', plainSession.currentLocationId),
+      encryptStoryValueForTest(db, key, storyId, 'stories', storyId, 'style', plainSession.style),
+      encryptStoryValueForTest(db, key, storyId, 'stories', storyId, 'knobs', plainSession.knobs),
+      encryptStoryValueForTest(db, key, storyId, 'threads', thread.id, 'title', thread.title),
+      encryptStoryValueForTest(db, key, storyId, 'threads', thread.id, 'stakes', thread.stakes),
+      encryptStoryValueForTest(db, key, storyId, 'threads', thread.id, 'parties', thread.parties),
+      encryptStoryValueForTest(db, key, storyId, 'threads', thread.id, 'resolutions', thread.resolutions),
+      encryptStoryValueForTest(db, key, storyId, 'consequences', consequence.id, 'trigger', consequence.trigger),
+      encryptStoryValueForTest(db, key, storyId, 'consequences', consequence.id, 'action', consequence.action),
+      encryptStoryValueForTest(db, key, storyId, 'directives', directive.id, 'text', directive.text),
+    ]);
+    await db.query(
+      `UPDATE stories SET encryption_version = 1, title = '', player_character_id = '', current_location_id = NULL,
+         style = '{}'::jsonb, knobs = '{}'::jsonb WHERE id = $1`,
+      [storyId],
+    );
+    await db.query(`UPDATE threads SET title = '', stakes = '', parties = '[]'::jsonb, resolutions = '[]'::jsonb WHERE id = $1`, [
+      thread.id,
+    ]);
+    await db.query(`UPDATE consequences SET trigger = '{}'::jsonb, action = '' WHERE id = $1`, [consequence.id]);
+    await db.query(`UPDATE directives SET text = '' WHERE id = $1`, [directive.id]);
+
+    const crypto = { keyForStory: (id: string) => (id === storyId ? key : null) };
+    const world = await World.forStory(db, storyId, undefined, crypto);
+    assert.equal((await world.session.info()).title, 'Private book');
+    assert.deepEqual(await world.session.get(), plainSession);
+    assert.deepEqual(await world.threads.get(thread.id), thread);
+    assert.deepEqual(await world.consequences.get(consequence.id), consequence);
+    assert.deepEqual(await world.directives.active(), [directive]);
+
+    await world.session.rename('Retitled private book');
+    await world.session.set({ currentLocationId: 'loc:roof' });
+    await world.threads.update(thread.id, { stakes: 'The city will burn.', resolutions: ['flee'] });
+    await world.consequences.retime(consequence.id, { kind: 'after-scenes', scenes: 3 });
+    await world.directives.setStatus(directive.id, 'retired');
+
+    assert.equal((await world.session.info()).title, 'Retitled private book');
+    assert.equal((await world.session.get()).currentLocationId, 'loc:roof');
+    assert.equal((await world.threads.get(thread.id))?.stakes, 'The city will burn.');
+    assert.deepEqual((await world.threads.get(thread.id))?.resolutions, ['flee']);
+    assert.deepEqual((await world.consequences.get(consequence.id))?.trigger, { kind: 'after-scenes', scenes: 3 });
+    assert.deepEqual(await world.directives.active(), []);
+
+    const base = await db.one<{
+      title: string; player_character_id: string; current_location_id: string | null; style: unknown; knobs: unknown;
+      thread_title: string; stakes: string; parties: unknown; resolutions: unknown; trigger: unknown; action: string; directive_text: string;
+    }>(
+      `SELECT s.title, s.player_character_id, s.current_location_id, s.style, s.knobs,
+              t.title thread_title, t.stakes, t.parties, t.resolutions, c.trigger, c.action, d.text directive_text
+         FROM stories s JOIN threads t ON t.story_id = s.id JOIN consequences c ON c.story_id = s.id
+              JOIN directives d ON d.story_id = s.id
+        WHERE s.id = $1`,
+      [storyId],
+    );
+    assert.deepEqual(base, {
+      title: '', player_character_id: '', current_location_id: null, style: {}, knobs: {},
+      thread_title: '', stakes: '', parties: [], resolutions: [], trigger: {}, action: '', directive_text: '',
+    });
+    assert.equal(
+      Number((await db.one<{ n: string }>(`SELECT count(*) n FROM encrypted_story_values WHERE story_id = $1`, [storyId]))!.n),
+      12,
+    );
+
+    const locked = await World.forStory(db, storyId);
+    await assert.rejects(() => locked.session.get(), /locked/);
+    await assert.rejects(() => locked.threads.open(), /locked/);
+    await assert.rejects(() => locked.consequences.setMaturity(consequence.id, 'fired', 3), /locked/);
+    await assert.rejects(() => locked.directives.setStatus(directive.id, 'active'), /locked/);
+
+    await deleteStory(db, storyId);
+    assert.equal(
+      Number((await db.one<{ n: string }>(`SELECT count(*) n FROM encrypted_story_values WHERE story_id = $1`, [storyId]))!.n),
+      0,
+      'story deletion cascades its encrypted values',
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });
