@@ -161,7 +161,7 @@ export async function resolveStoryFor(
     }
     return story.id;
   }
-  if (user) return resolveOrCreateStoryForUser(db, user.id, opts.worldIds ?? []);
+  if (user) return resolveOrCreateStoryForUser(db, user.id, opts.worldIds ?? [], user.encryptNewStories ? 1 : 0);
   return resolveCurrentStory(db, opts.worldIds ?? []);
 }
 

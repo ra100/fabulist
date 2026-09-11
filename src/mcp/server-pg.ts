@@ -1013,7 +1013,7 @@ export interface McpRouteOptions {
    * why an MCP-created story ended up owned by nobody while the verified `sub`
    * sat unused in `AuthInfo`.
    */
-  toolContext: (user: VerifiedUser) => McpToolContext;
+  toolContext: (user: VerifiedUser) => McpToolContext | Promise<McpToolContext>;
   auth: McpAuth;
   /** The canonical URL of this MCP endpoint, e.g. `https://fabulist.example.com/mcp` \u2014 what `WWW-Authenticate` and the protected-resource metadata point back at (MCP spec's own resource-indicator requirement, RFC 8707; see `.design/MCP-CONNECTOR.md` \u00a71). */
   resourceUrl: string;
@@ -1065,7 +1065,7 @@ export async function handleMcpRequest(
   };
   const reqWithAuth = Object.assign(req, { auth: authInfo });
 
-  const server = buildServer(opts.toolContext(verified), opts.resourceUrl);
+  const server = buildServer(await opts.toolContext(verified), opts.resourceUrl);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   try {
     await server.connect(transport);
