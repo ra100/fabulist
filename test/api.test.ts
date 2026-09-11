@@ -156,6 +156,15 @@ test('empty input is rejected', async () => {
   });
 });
 
+test('play rejects structurally invalid input instead of throwing in the handler', async () => {
+  await withServer(async (base) => {
+    const wrongInput = await send(base, 'POST', '/api/play', { input: 42 });
+    assert.equal(wrongInput.status, 400);
+    const wrongOverride = await send(base, 'POST', '/api/play', { input: 'wait', overrideIntegrity: 'yes' });
+    assert.equal(wrongOverride.status, 400);
+  });
+});
+
 test('a directive returns the recalculation diff rather than moving things silently', async () => {
   await withServer(async (base) => {
     const { status, body } = await send(base, 'POST', '/api/directive', {
@@ -577,6 +586,32 @@ test('an unknown api route is a clear 404', async () => {
     const { status, body } = await get(base, '/api/nope');
     assert.equal(status, 404);
     assert.match((body as { error: string }).error, /no route/);
+  });
+});
+
+test('malformed and oversized JSON bodies are rejected at the HTTP boundary', async () => {
+  await withServer(async (base) => {
+    const malformed = await fetch(`${base}/api/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{not json',
+    });
+    assert.equal(malformed.status, 400);
+    assert.match(((await malformed.json()) as { error: string }).error, /valid JSON/);
+
+    const wrongType = await fetch(`${base}/api/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: '{}',
+    });
+    assert.equal(wrongType.status, 415);
+
+    const oversized = await fetch(`${base}/api/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'x'.repeat(1024 * 1024) }),
+    });
+    assert.equal(oversized.status, 413);
   });
 });
 

@@ -39,6 +39,8 @@ import type { McpToolContext } from '../mcp/tools.ts';
 import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
+import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
+import { playBodySchema } from './contracts.ts';
 
 export interface ServerOptions {
   /**
@@ -129,39 +131,6 @@ const MIME: Record<string, string> = {
   '.png': 'image/png',
   '.webmanifest': 'application/manifest+json',
 };
-
-function send(res: ServerResponse, status: number, body: unknown): void {
-  const text = JSON.stringify(body);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-  res.end(text);
-}
-
-async function readBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
-  if (!chunks.length) return undefined;
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Reads a request body as raw bytes, no JSON parsing.
- *
- * A world upload is a SQLite file, not a JSON document — `readBody` above
- * would try `JSON.parse` on it, fail (a SQLite file starts with the literal
- * bytes `SQLite format 3\0`, never valid JSON), and silently hand the route
- * `undefined`. `rawBodyRoutes` below marks which routes need this instead, so
- * the dispatch loop can pick the right reader per route without every other
- * handler's `body` changing shape.
- */
-async function readRawBody(req: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
-  return Buffer.concat(chunks);
-}
 
 // ------------------------------------------------------------------- routes
 
@@ -442,8 +411,7 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, world, par
 });
 
 route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
-  const { input, overrideIntegrity } = (body ?? {}) as { input?: string; overrideIntegrity?: boolean };
-  if (!input?.trim()) return send(res, 400, { error: 'input required' });
+  const { input, overrideIntegrity } = parseBody(playBodySchema, body);
 
   // `world` explicit: the per-request (per-user, when login is on) world —
   // see `TakeTurnOptions.world`'s own doc comment for why this must not be
@@ -1308,8 +1276,7 @@ route('GET', '/api/providers', async (_req, res, ctx) => {
  * short-lived, and SSE reconnects itself.
  */
 route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => {
-  const { input, overrideIntegrity } = (body ?? {}) as { input?: string; overrideIntegrity?: boolean };
-  if (!input?.trim()) return send(res, 400, { error: 'input required' });
+  const { input, overrideIntegrity } = parseBody(playBodySchema, body);
 
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -1915,10 +1882,10 @@ export function createApiServer(opts: ServerOptions) {
     // It is deliberately reached *before* the session gate, not gated by it.
     if (mcpAuth && mcpResourceUrl && url.pathname === '/mcp') {
       try {
-        const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
+        const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readJsonBody(req);
         await handleMcpRequest(req, res, body, { toolContext: mcpToolContextFor, auth: mcpAuth, resourceUrl: mcpResourceUrl });
       } catch (err) {
-        if (!res.headersSent) send(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        if (!res.headersSent) send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
       }
       return;
     }
@@ -1994,7 +1961,7 @@ export function createApiServer(opts: ServerOptions) {
       const isRawBody = RAW_BODY_ROUTES.has(`${match.method} ${match.path}`);
       try {
         const body =
-          isRawBody || req.method === 'GET' || req.method === 'DELETE' ? undefined : await readBody(req);
+          isRawBody || req.method === 'GET' || req.method === 'DELETE' ? undefined : await readJsonBody(req);
         const rawBody = isRawBody ? await readRawBody(req) : undefined;
         // Resolved fresh per request, not once at server construction: a
         // story switch must take effect on the very next request, not after
@@ -2033,7 +2000,7 @@ export function createApiServer(opts: ServerOptions) {
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.
-        send(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
       }
       return;
     }
