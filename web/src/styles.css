@@ -1098,6 +1098,70 @@ hr {
   background: var(--surface-2);
 }
 
+/* Private storage is a setting, not an alarm. Its small-cap header matches the
+   other instrument panels; the recovery code is the only deliberately emphatic
+   object because it is the one thing a person must preserve. */
+.private-storage { max-width: 46rem; }
+.private-storage-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+.private-storage-heading h3 { margin: 0; }
+.private-storage-intro { margin: 0 0 var(--s3); }
+.private-storage-form { border-top: 1px solid var(--rule); }
+.private-storage-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  padding-top: var(--s3);
+}
+.private-storage-status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s3);
+  border-left: 2px solid var(--accent-line);
+  background: var(--accent-veil);
+}
+.private-storage-status p { margin: 0; font-size: 12px; line-height: 1.55; color: var(--ink-2); }
+.private-storage-mark { color: var(--accent); font-size: 13px; line-height: 1.45; }
+.private-recovery { border-top: 1px solid var(--rule); padding-top: var(--s3); }
+.private-recovery > .eyebrow { display: block; margin-bottom: var(--s1); color: var(--accent-muted); }
+.private-recovery-intro { max-width: 38rem; margin: 0 0 var(--s3); font-size: 12px; line-height: 1.55; color: var(--ink-2); }
+.private-recovery-code {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s2);
+  align-items: center;
+  padding: var(--s2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-md);
+  background: var(--ground);
+  box-shadow: var(--elev-well);
+}
+.private-recovery-code code {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.private-recovery-check {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.private-recovery-check input { width: auto; }
+.private-storage-error { margin: var(--s3) 0 0; color: var(--danger); font-size: 12px; }
+
 /* An engraved section label. Never a name. */
 .card h3,
 .eyebrow {

@@ -262,8 +262,6 @@ export function App() {
 
       {error ? <div className="card warn" style={{ margin: 12 }}>{error}</div> : null}
 
-      {currentUser?.encryptionPilot ? <PrivateStorageSetup user={currentUser} /> : null}
-
       {tab === 'book' ? <BookTab state={state} hasPlayer={hasPlayer} onChanged={refresh} /> : null}
       {tab === 'timeline' ? <TimelineView /> : null}
       {tab === 'graph' ? <GraphTab /> : null}
@@ -286,12 +284,13 @@ export function App() {
   );
 }
 
-function PrivateStorageSetup({ user }: { user: CurrentUser }) {
+function PrivateStoragePanel({ user }: { user: CurrentUser }) {
   const [enrolled, setEnrolled] = useState<boolean | null>(null);
   const [passphrase, setPassphrase] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [draft, setDraft] = useState<EncryptionEnrollment | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -336,54 +335,99 @@ function PrivateStorageSetup({ user }: { user: CurrentUser }) {
     }
   };
 
+  const copyRecoveryCode = async () => {
+    if (!draft) return;
+    try {
+      await navigator.clipboard.writeText(draft.recoveryCode);
+      setCopied(true);
+    } catch {
+      setError('your browser could not copy the code; select and copy it manually');
+    }
+  };
+
   if (enrolled === null && !error) return null;
   if (enrolled) {
     return (
-      <section className="card" style={{ margin: 12 }}>
-        <b>Private storage pilot: key recovery is configured.</b>{' '}
-        <span className="small">Your browser holds the passphrase and recovery-code capability; Fabulist stores only their encrypted key wraps. Existing story content is not migrated yet.</span>
+      <section className="card private-storage">
+        <div className="private-storage-heading">
+          <h3>private storage</h3>
+          <span className="tag locked">recovery configured</span>
+        </div>
+        <div className="private-storage-status">
+          <span className="private-storage-mark" aria-hidden="true">◆</span>
+          <p>
+            <b>Your recovery path is ready.</b> The browser-derived key wraps are stored, but the story-content
+            migration has not begun yet.
+          </p>
+        </div>
       </section>
     );
   }
 
   return (
-    <section className="card warn" style={{ margin: 12 }}>
-      <b>Private storage pilot</b>
-      <p className="small">
-        Create a passphrase and recovery code in this browser. Fabulist stores only encrypted key wraps, never either secret.
-        Keep both: losing both makes future encrypted stories permanently unrecoverable.
-      </p>
+    <section className="card private-storage">
+      <div className="private-storage-heading">
+        <h3>private storage</h3>
+        <span className="tag">pilot</span>
+      </div>
       {!draft ? (
-        <div className="row">
-          <label>
-            passphrase
-            <input type="password" autoComplete="new-password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} disabled={busy} />
-          </label>
-          <label>
-            confirm passphrase
-            <input type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} disabled={busy} />
-          </label>
-          <button className="primary" onClick={() => void prepare()} disabled={busy || !passphrase || !confirmation}>
-            {busy ? 'preparing…' : 'create recovery code'}
-          </button>
-        </div>
-      ) : (
-        <div className="stack">
-          <p>Record this recovery code now. It will not be shown again.</p>
-          <code className="mono" style={{ overflowWrap: 'anywhere' }}>{draft.recoveryCode}</code>
-          <label>
-            <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />
-            {' '}I recorded this recovery code securely.
-          </label>
-          <div className="row">
-            <button className="primary" onClick={() => void enroll()} disabled={!acknowledged || busy}>
-              {busy ? 'saving…' : 'enable key recovery'}
+        <>
+          <p className="lede private-storage-intro">
+            Set a passphrase and keep a recovery code. Both are created in this browser; Fabulist receives only
+            encrypted key wraps, never either secret.
+          </p>
+          <div className="private-storage-form">
+            <label className="field-row">
+              <span>passphrase</span>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={passphrase}
+                onChange={(event) => setPassphrase(event.target.value)}
+                disabled={busy}
+              />
+            </label>
+            <label className="field-row">
+              <span>confirm it</span>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+                disabled={busy}
+              />
+            </label>
+          </div>
+          <div className="private-storage-actions">
+            <button className="primary" onClick={() => void prepare()} disabled={busy || !passphrase || !confirmation}>
+              {busy ? 'preparing…' : 'continue'}
             </button>
-            <button onClick={() => { setDraft(null); setAcknowledged(false); }}>start over</button>
+            <span className="small dimmer">Use 12 or more characters.</span>
+          </div>
+        </>
+      ) : (
+        <div className="private-recovery">
+          <span className="eyebrow">your recovery code</span>
+          <p className="private-recovery-intro">
+            Save this somewhere you control. It is displayed once and can restore access if you forget the passphrase.
+          </p>
+          <div className="private-recovery-code">
+            <code className="mono">{draft.recoveryCode}</code>
+            <button onClick={() => void copyRecoveryCode()}>{copied ? 'copied' : 'copy'}</button>
+          </div>
+          <label className="private-recovery-check">
+            <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />
+            <span>I saved this code somewhere secure.</span>
+          </label>
+          <div className="private-storage-actions">
+            <button className="primary" onClick={() => void enroll()} disabled={!acknowledged || busy}>
+              {busy ? 'saving…' : 'save recovery setup'}
+            </button>
+            <button onClick={() => { setDraft(null); setAcknowledged(false); setCopied(false); }}>start over</button>
           </div>
         </div>
       )}
-      {error ? <p className="danger">{error}</p> : null}
+      {error ? <p className="private-storage-error" role="alert">{error}</p> : null}
     </section>
   );
 }
@@ -1528,6 +1572,7 @@ function SettingsTab({ state, onChanged, currentUser }: { state: State | null; o
       <div className="pane">
         <div className="measure-tool">
         <PalettePicker />
+        {currentUser?.encryptionPilot ? <PrivateStoragePanel user={currentUser} /> : null}
         {style ? (
           <div className="card">
             <h3>style contract</h3>
