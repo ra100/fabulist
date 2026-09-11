@@ -21,8 +21,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Verify tag matches package version
+      - name: Verify tag matches package version and main
         run: |
           set -euo pipefail
           package_tag="v$(node -p "require('./package.json').version")"
@@ -32,6 +34,11 @@ jobs:
           fi
           if [[ "$GITHUB_REF_NAME" != "$package_tag" ]]; then
             echo "Release tag $GITHUB_REF_NAME does not match package.json ($package_tag)" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "Release tag $GITHUB_REF_NAME points to a commit that is not on main" >&2
             exit 1
           fi
 
