@@ -9,6 +9,7 @@
  * and it is the cheapest call in the loop.
  */
 import { randomUUID } from 'node:crypto';
+import { StoryActivity } from '../application/activity.ts';
 import type {
   Delta,
   EntityId,
@@ -167,6 +168,7 @@ export class Engine {
   lastFrames: Record<string, Frame> = {};
   /** See `PendingNarration`. Keyed by `resumeToken`, a random id — not the turn's own eventual id, which does not exist until commit. */
   private pending = new Map<string, PendingNarration>();
+  readonly activity = new StoryActivity();
 
 
   constructor(opts: EngineOptions) {
@@ -187,8 +189,10 @@ export class Engine {
     return this.compactor;
   }
 
-  /** True mid-turn: a save or story switch should wait rather than race a commit. */
-  busy = false;
+  /** Compatibility aggregate. Prefer `activity.isBusy(storyId)` for request-scoped status. */
+  get busy(): boolean {
+    return this.activity.busy;
+  }
 
   private deps(world: World, calls: TurnMeta['providerCalls']): RoleDeps {
     const providers = this.providers;
@@ -229,11 +233,13 @@ export class Engine {
    * `TakeTurnOptions` for why a per-request override exists at all.
    */
   async takeTurn(rawInput: string, opts: TakeTurnOptions = {}): Promise<TurnOutcome> {
-    this.busy = true;
+    const activity = this.activity.begin();
     try {
-      return await this.takeTurnOn(opts.world ?? this.getWorld(), rawInput, opts);
+      const world = opts.world ?? this.getWorld();
+      activity.scope(world.storyId);
+      return await this.takeTurnOn(world, rawInput, opts);
     } finally {
-      this.busy = false;
+      activity.end();
     }
   }
 
@@ -482,9 +488,10 @@ export class Engine {
     if (!pending) throw new Error(`no pending narration for token ${resumeToken} (expired or already resolved)`);
     this.pending.delete(resumeToken);
 
-    this.busy = true;
+    const activity = this.activity.begin();
     try {
       const world = worldOverride ?? this.getWorld();
+      activity.scope(world.storyId);
       if (world.storyId !== pending.storyId) {
         // The story switched under this pending turn (a save switch mid-
         // conversation). Committing against the wrong story's graph would be
@@ -507,7 +514,7 @@ export class Engine {
         deps,
       });
     } finally {
-      this.busy = false;
+      activity.end();
     }
   }
 

@@ -561,6 +561,27 @@ test('engine.busy is true only while a turn is actually in flight', async () => 
   world.close();
 });
 
+test('engine activity identifies the story whose turn is in flight', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const storyB = createStory(world.db, { title: 'B' }).id;
+  const other = world.withStory(storyB);
+  other.session.set({ playerCharacterId: 'char:brother-anselm' });
+  const engine = new Engine({ world, providers: new ProviderRegistry(new MockProvider()) });
+
+  const first = engine.takeTurn('i warm the ink', { world });
+  const second = engine.takeTurn('i check the door', { world: other });
+  assert.equal(engine.activity.isBusy(world.storyId), true);
+  assert.equal(engine.activity.isBusy(other.storyId), true);
+  assert.equal(engine.busy, true);
+
+  await Promise.all([first, second]);
+  assert.equal(engine.activity.isBusy(world.storyId), false);
+  assert.equal(engine.activity.isBusy(other.storyId), false);
+  assert.equal(engine.busy, false);
+  world.close();
+});
+
 test('compaction follows the same live story switch as the engine it belongs to', async () => {
   const world = World.open(':memory:');
   seedWorld(world);
