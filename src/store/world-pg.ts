@@ -14,7 +14,9 @@
  * hand-maintained 17-table sweep that twice went stale.
  */
 import { randomUUID } from 'node:crypto';
+import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
 import { jsonGet, type Queryable } from '../db/pg.ts';
+import type { ChronicleCrypto } from './chronicle-pg.ts';
 import {
   defaultKnobs,
   defaultStyleContract,
@@ -34,6 +36,118 @@ import {
   type Trigger,
   type Visibility,
 } from '../domain/types.ts';
+
+type EncryptedValue = { field: string; value: unknown };
+type DecryptedValues = Map<string, Map<string, unknown>>;
+
+/**
+ * Private-value access shared by the story-owned stores in this file. The
+ * encryption version remains database-authoritative so a missing capability
+ * cannot downgrade a verified encrypted story to plaintext.
+ */
+class StoryPrivateValues {
+  private encryptionVersion: number | undefined;
+  private db: Queryable;
+  private storyId: StoryId;
+  private crypto: ChronicleCrypto | undefined;
+
+  constructor(db: Queryable, storyId: StoryId, crypto: ChronicleCrypto | undefined) {
+    this.db = db;
+    this.storyId = storyId;
+    this.crypto = crypto;
+  }
+
+  async key(): Promise<Buffer | null> {
+    if (this.encryptionVersion === undefined) {
+      const { rows } = await this.db.query<{ encryption_version: number }>(
+        `SELECT encryption_version FROM stories WHERE id = $1`,
+        [this.storyId],
+      );
+      const version = rows[0]?.encryption_version;
+      if (version === undefined) throw new Error(`no story ${this.storyId}`);
+      if (version !== 0 && version !== 1) throw new Error(`unsupported private-story format ${version}`);
+      this.encryptionVersion = version;
+    }
+    if (this.encryptionVersion === 0) return null;
+    const key = this.crypto?.keyForStory(this.storyId) ?? null;
+    if (!key) throw new Error(`private story ${this.storyId} is locked`);
+    if (key.length !== 32) throw new Error('invalid private-story key');
+    return Buffer.from(key);
+  }
+
+  async write(
+    statement: string,
+    statementParams: unknown[],
+    table: string,
+    recordId: string,
+    key: Buffer,
+    values: EncryptedValue[],
+  ): Promise<void> {
+    const envelopes = values.map(({ field, value }) => ({
+      field,
+      ...encryptStoryValue(key, { storyId: this.storyId, table, recordId, field }, value),
+    }));
+    const first = statementParams.length;
+    const valueParams: unknown[] = [];
+    const tuples = envelopes
+      .map((envelope, index) => {
+        const offset = first + 4 + index * 4;
+        valueParams.push(envelope.field, envelope.version, envelope.nonce, envelope.ciphertext);
+        return `($${offset}::text,$${offset + 1}::integer,$${offset + 2}::bytea,$${offset + 3}::bytea)`;
+      })
+      .join(', ');
+    await this.db.query(
+      `WITH written AS (${statement})
+       INSERT INTO encrypted_story_values (story_id, table_name, record_id, field_name, version, nonce, ciphertext)
+       SELECT $${first + 1}, $${first + 2}, $${first + 3}, value.field_name, value.version, value.nonce, value.ciphertext
+         FROM written CROSS JOIN (VALUES ${tuples}) AS value(field_name, version, nonce, ciphertext)
+       ON CONFLICT (story_id, table_name, record_id, field_name) DO UPDATE SET
+         version = EXCLUDED.version, nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, updated_at = now()`,
+      [...statementParams, this.storyId, table, recordId, ...valueParams],
+    );
+  }
+
+  async read(table: string, recordIds: string[], fields: string[], key: Buffer): Promise<DecryptedValues> {
+    const values: DecryptedValues = new Map();
+    if (!recordIds.length) return values;
+    const { rows } = await this.db.query<{
+      record_id: string;
+      field_name: string;
+      version: number;
+      nonce: Buffer;
+      ciphertext: Buffer;
+    }>(
+      `SELECT record_id, field_name, version, nonce, ciphertext
+         FROM encrypted_story_values
+        WHERE story_id = $1 AND table_name = $2
+          AND record_id = ANY($3::text[]) AND field_name = ANY($4::text[])`,
+      [this.storyId, table, recordIds, fields],
+    );
+    for (const row of rows) {
+      const fieldsForRecord = values.get(row.record_id) ?? new Map<string, unknown>();
+      fieldsForRecord.set(
+        row.field_name,
+        decryptStoryValue(
+          key,
+          { storyId: this.storyId, table, recordId: row.record_id, field: row.field_name },
+          { version: row.version, nonce: row.nonce, ciphertext: row.ciphertext },
+        ),
+      );
+      values.set(row.record_id, fieldsForRecord);
+    }
+    for (const recordId of recordIds) {
+      for (const field of fields) {
+        if (!values.get(recordId)?.has(field)) throw new Error(`missing encrypted private story value ${table}.${field}`);
+      }
+    }
+    return values;
+  }
+
+  string(value: unknown, field: string): string {
+    if (typeof value !== 'string') throw new Error(`invalid encrypted private story value ${field}`);
+    return value;
+  }
+}
 
 // ------------------------------------------------------------------ threads
 
@@ -66,14 +180,34 @@ function toThread(r: ThreadRow): Thread {
 export class ThreadStore {
   private db: Queryable;
   private storyId: StoryId;
+  private privateValues: StoryPrivateValues;
 
-  constructor(db: Queryable, storyId: StoryId) {
+  constructor(db: Queryable, storyId: StoryId, crypto?: ChronicleCrypto) {
     this.db = db;
     this.storyId = storyId;
+    this.privateValues = new StoryPrivateValues(db, storyId, crypto);
   }
 
   async create(t: Omit<Thread, 'id'> & { id?: ThreadId }): Promise<Thread> {
     const id = t.id ?? `thread:${randomUUID()}`;
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `INSERT INTO threads (id, story_id, title, stakes, tension, parties, resolutions, status, created_scene)
+         VALUES ($1,$2,'','',$3,'[]'::jsonb,'[]'::jsonb,$4,$5) RETURNING 1`,
+        [id, this.storyId, t.tension, t.status, t.createdScene],
+        'threads',
+        id,
+        key,
+        [
+          { field: 'title', value: t.title },
+          { field: 'stakes', value: t.stakes },
+          { field: 'parties', value: t.parties },
+          { field: 'resolutions', value: t.resolutions },
+        ],
+      );
+      return { ...t, id };
+    }
     await this.db.query(
       `INSERT INTO threads (id, story_id, title, stakes, tension, parties, resolutions, status, created_scene)
        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9)`,
@@ -93,34 +227,55 @@ export class ThreadStore {
   }
 
   async get(id: ThreadId): Promise<Thread | undefined> {
+    const key = await this.privateValues.key();
     const { rows } = await this.db.query<ThreadRow>(
       `SELECT ${THREAD_COLS} FROM threads WHERE id = $1 AND story_id = $2`,
       [id, this.storyId],
     );
-    return rows[0] ? toThread(rows[0]) : undefined;
+    return rows[0] ? (await this.toThreads(rows, key))[0] : undefined;
   }
 
   /** Open threads ranked by tension: the Director's menu. */
   async open(limit = 12): Promise<Thread[]> {
+    const key = await this.privateValues.key();
     const { rows } = await this.db.query<ThreadRow>(
       `SELECT ${THREAD_COLS} FROM threads WHERE story_id = $1 AND status = 'open' ORDER BY tension DESC LIMIT $2`,
       [this.storyId, limit],
     );
-    return rows.map(toThread);
+    return this.toThreads(rows, key);
   }
 
   async all(): Promise<Thread[]> {
+    const key = await this.privateValues.key();
     const { rows } = await this.db.query<ThreadRow>(
       `SELECT ${THREAD_COLS} FROM threads WHERE story_id = $1 ORDER BY tension DESC`,
       [this.storyId],
     );
-    return rows.map(toThread);
+    return this.toThreads(rows, key);
   }
 
   async update(id: ThreadId, patch: Partial<Omit<Thread, 'id'>>): Promise<void> {
     const cur = await this.get(id);
     if (!cur) return;
     const next = { ...cur, ...patch };
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `UPDATE threads SET title='', stakes='', tension=$1, parties='[]'::jsonb, resolutions='[]'::jsonb, status=$2
+           WHERE id=$3 AND story_id=$4 RETURNING 1`,
+        [Math.max(0, Math.min(1, next.tension)), next.status, id, this.storyId],
+        'threads',
+        id,
+        key,
+        [
+          { field: 'title', value: next.title },
+          { field: 'stakes', value: next.stakes },
+          { field: 'parties', value: next.parties },
+          { field: 'resolutions', value: next.resolutions },
+        ],
+      );
+      return;
+    }
     await this.db.query(
       `UPDATE threads SET title=$1, stakes=$2, tension=$3, parties=$4::jsonb, resolutions=$5::jsonb, status=$6
          WHERE id=$7 AND story_id=$8`,
@@ -141,6 +296,26 @@ export class ThreadStore {
     const cur = await this.get(id);
     if (!cur) return;
     await this.update(id, { tension: cur.tension + delta });
+  }
+
+  private async toThreads(rows: ThreadRow[], key: Buffer | null): Promise<Thread[]> {
+    if (!key) return rows.map(toThread);
+    const values = await this.privateValues.read(
+      'threads',
+      rows.map((row) => row.id),
+      ['title', 'stakes', 'parties', 'resolutions'],
+      key,
+    );
+    return rows.map((row) => {
+      const privateValues = values.get(row.id)!;
+      return toThread({
+        ...row,
+        title: this.privateValues.string(privateValues.get('title'), 'threads.title'),
+        stakes: this.privateValues.string(privateValues.get('stakes'), 'threads.stakes'),
+        parties: privateValues.get('parties'),
+        resolutions: privateValues.get('resolutions'),
+      });
+    });
   }
 }
 
@@ -184,16 +359,45 @@ function toConsequence(r: ConsequenceRow): Consequence {
 export class ConsequenceStore {
   private db: Queryable;
   private storyId: StoryId;
+  private privateValues: StoryPrivateValues;
 
-  constructor(db: Queryable, storyId: StoryId) {
+  constructor(db: Queryable, storyId: StoryId, crypto?: ChronicleCrypto) {
     this.db = db;
     this.storyId = storyId;
+    this.privateValues = new StoryPrivateValues(db, storyId, crypto);
   }
 
   async enqueue(
     c: Omit<Consequence, 'id' | 'firedScene' | 'supersededBy'> & { id?: string },
   ): Promise<Consequence> {
     const id = c.id ?? `cons:${randomUUID()}`;
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `INSERT INTO consequences
+           (id, story_id, cause_event_id, trigger, actor_id, action, visibility, maturity, depth, significance, created_scene, fired_scene, superseded_by)
+         VALUES ($1,$2,$3,'{}'::jsonb,$4,'',$5,$6,$7,$8,$9,NULL,NULL) RETURNING 1`,
+        [
+          id,
+          this.storyId,
+          c.causeEventId,
+          c.actorId,
+          c.visibility,
+          c.maturity,
+          c.depth,
+          c.significance,
+          c.createdScene,
+        ],
+        'consequences',
+        id,
+        key,
+        [
+          { field: 'trigger', value: c.trigger },
+          { field: 'action', value: c.action },
+        ],
+      );
+      return { ...c, id, firedScene: null, supersededBy: null };
+    }
     await this.db.query(
       `INSERT INTO consequences
          (id, story_id, cause_event_id, trigger, actor_id, action, visibility, maturity, depth, significance, created_scene, fired_scene, superseded_by)
@@ -216,38 +420,43 @@ export class ConsequenceStore {
   }
 
   async get(id: ConsequenceId): Promise<Consequence | undefined> {
+    const key = await this.privateValues.key();
     const { rows } = await this.db.query<ConsequenceRow>(
       `SELECT ${CONS_COLS} FROM consequences WHERE id = $1 AND story_id = $2`,
       [id, this.storyId],
     );
-    return rows[0] ? toConsequence(rows[0]) : undefined;
+    return rows[0] ? (await this.toConsequences(rows, key))[0] : undefined;
   }
 
   async pending(): Promise<Consequence[]> {
+    const key = await this.privateValues.key();
     const { rows } = await this.db.query<ConsequenceRow>(
       `SELECT ${CONS_COLS} FROM consequences WHERE story_id = $1 AND maturity IN ('pending','ripening') ORDER BY created_scene`,
       [this.storyId],
     );
-    return rows.map(toConsequence);
+    return this.toConsequences(rows, key);
   }
 
   async all(limit = 500): Promise<Consequence[]> {
+    const key = await this.privateValues.key();
     const { rows } = await this.db.query<ConsequenceRow>(
       `SELECT ${CONS_COLS} FROM consequences WHERE story_id = $1 ORDER BY created_scene DESC LIMIT $2`,
       [this.storyId, limit],
     );
-    return rows.map(toConsequence);
+    return this.toConsequences(rows, key);
   }
 
   async byCause(eventId: string): Promise<Consequence[]> {
+    const key = await this.privateValues.key();
     const { rows } = await this.db.query<ConsequenceRow>(
       `SELECT ${CONS_COLS} FROM consequences WHERE cause_event_id = $1 AND story_id = $2`,
       [eventId, this.storyId],
     );
-    return rows.map(toConsequence);
+    return this.toConsequences(rows, key);
   }
 
   async setMaturity(id: ConsequenceId, maturity: Maturity, scene?: number): Promise<void> {
+    await this.privateValues.key();
     if (maturity === 'fired') {
       await this.db.query(
         `UPDATE consequences SET maturity = $1, fired_scene = $2 WHERE id = $3 AND story_id = $4`,
@@ -263,6 +472,7 @@ export class ConsequenceStore {
   }
 
   async supersede(id: ConsequenceId, by: string): Promise<void> {
+    await this.privateValues.key();
     await this.db.query(
       `UPDATE consequences SET maturity = 'superseded', superseded_by = $1 WHERE id = $2 AND story_id = $3`,
       [by, id, this.storyId],
@@ -270,6 +480,18 @@ export class ConsequenceStore {
   }
 
   async retime(id: ConsequenceId, trigger: Trigger): Promise<void> {
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `UPDATE consequences SET trigger = '{}'::jsonb WHERE id = $1 AND story_id = $2 RETURNING 1`,
+        [id, this.storyId],
+        'consequences',
+        id,
+        key,
+        [{ field: 'trigger', value: trigger }],
+      );
+      return;
+    }
     await this.db.query(`UPDATE consequences SET trigger = $1::jsonb WHERE id = $2 AND story_id = $3`, [
       JSON.stringify(trigger),
       id,
@@ -279,11 +501,30 @@ export class ConsequenceStore {
 
   /** How much has matured unseen; drives the ignorance budget (DESIGN §6.5). */
   async hiddenFiredCount(): Promise<number> {
+    await this.privateValues.key();
     const { rows } = await this.db.query<{ n: string }>(
       `SELECT COUNT(*) n FROM consequences WHERE story_id = $1 AND maturity = 'fired' AND visibility <> 'onscreen'`,
       [this.storyId],
     );
     return Number(rows[0]?.n ?? 0);
+  }
+
+  private async toConsequences(rows: ConsequenceRow[], key: Buffer | null): Promise<Consequence[]> {
+    if (!key) return rows.map(toConsequence);
+    const values = await this.privateValues.read(
+      'consequences',
+      rows.map((row) => row.id),
+      ['trigger', 'action'],
+      key,
+    );
+    return rows.map((row) => {
+      const privateValues = values.get(row.id)!;
+      return toConsequence({
+        ...row,
+        trigger: privateValues.get('trigger'),
+        action: this.privateValues.string(privateValues.get('action'), 'consequences.action'),
+      });
+    });
   }
 }
 
@@ -314,14 +555,29 @@ function toDirective(r: DirectiveRow): Directive {
 export class DirectiveStore {
   private db: Queryable;
   private storyId: StoryId;
+  private privateValues: StoryPrivateValues;
 
-  constructor(db: Queryable, storyId: StoryId) {
+  constructor(db: Queryable, storyId: StoryId, crypto?: ChronicleCrypto) {
     this.db = db;
     this.storyId = storyId;
+    this.privateValues = new StoryPrivateValues(db, storyId, crypto);
   }
 
   async create(d: Omit<Directive, 'id'> & { id?: string }): Promise<Directive> {
     const id = d.id ?? `dir:${randomUUID()}`;
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `INSERT INTO directives (id, story_id, text, scope, strength, lifetime_scenes, status, created_scene)
+         VALUES ($1,$2,'',$3,$4,$5,$6,$7) RETURNING 1`,
+        [id, this.storyId, d.scope, d.strength, d.lifetimeScenes, d.status, d.createdScene],
+        'directives',
+        id,
+        key,
+        [{ field: 'text', value: d.text }],
+      );
+      return { ...d, id };
+    }
     await this.db.query(
       `INSERT INTO directives (id, story_id, text, scope, strength, lifetime_scenes, status, created_scene)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -331,15 +587,24 @@ export class DirectiveStore {
   }
 
   async active(): Promise<Directive[]> {
+    const key = await this.privateValues.key();
     const { rows } = await this.db.query<DirectiveRow>(
       `SELECT id, text, scope, strength, lifetime_scenes, status, created_scene
          FROM directives WHERE story_id = $1 AND status = 'active' ORDER BY created_scene DESC`,
       [this.storyId],
     );
-    return rows.map(toDirective);
+    if (!key) return rows.map(toDirective);
+    const values = await this.privateValues.read('directives', rows.map((row) => row.id), ['text'], key);
+    return rows.map((row) =>
+      toDirective({
+        ...row,
+        text: this.privateValues.string(values.get(row.id)!.get('text'), 'directives.text'),
+      }),
+    );
   }
 
   async setStatus(id: string, status: Directive['status']): Promise<void> {
+    await this.privateValues.key();
     await this.db.query(`UPDATE directives SET status = $1 WHERE id = $2 AND story_id = $3`, [
       status,
       id,
@@ -355,6 +620,7 @@ export class DirectiveStore {
    * a network connection where it was N+1 function calls in-process.
    */
   async expire(scene: number): Promise<string[]> {
+    await this.privateValues.key();
     const { rows } = await this.db.query<{ id: string }>(
       `UPDATE directives SET status = 'retired'
          WHERE story_id = $1 AND status = 'active' AND lifetime_scenes IS NOT NULL
@@ -687,10 +953,12 @@ export async function resolveCurrentStory(db: Queryable, worldIds: number[] = []
 export class StoryStore {
   private db: Queryable;
   private storyId: StoryId;
+  private privateValues: StoryPrivateValues;
 
-  constructor(db: Queryable, storyId: StoryId) {
+  constructor(db: Queryable, storyId: StoryId, crypto?: ChronicleCrypto) {
     this.db = db;
     this.storyId = storyId;
+    this.privateValues = new StoryPrivateValues(db, storyId, crypto);
   }
 
   id(): StoryId {
@@ -706,17 +974,35 @@ export class StoryStore {
   }
 
   async get(): Promise<SessionState> {
-    return toSession(toStory(await this.require()));
+    return toSession(await this.story());
   }
 
   /** Full record, including identity and lineage — what the save browser wants. */
   async info(): Promise<Story> {
-    return toStory(await this.require());
+    return this.story();
   }
 
   async set(patch: Partial<SessionState>): Promise<SessionState> {
     const cur = await this.get();
     const next = { ...cur, ...patch };
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `UPDATE stories SET scene=$1, turn=$2, player_character_id='', current_location_id=NULL,
+           style='{}'::jsonb, knobs='{}'::jsonb, last_played_at=now() WHERE id=$3 RETURNING 1`,
+        [next.scene, next.turn, this.storyId],
+        'stories',
+        this.storyId,
+        key,
+        [
+          { field: 'player_character_id', value: next.playerCharacterId },
+          { field: 'current_location_id', value: next.currentLocationId },
+          { field: 'style', value: next.style },
+          { field: 'knobs', value: next.knobs },
+        ],
+      );
+      return next;
+    }
     await this.db.query(
       `UPDATE stories SET scene=$1, turn=$2, player_character_id=$3, current_location_id=$4,
          style=$5::jsonb, knobs=$6::jsonb, last_played_at=now() WHERE id=$7`,
@@ -734,6 +1020,42 @@ export class StoryStore {
   }
 
   async rename(title: string): Promise<void> {
+    const key = await this.privateValues.key();
+    if (key) {
+      await this.privateValues.write(
+        `UPDATE stories SET title = '' WHERE id = $1 RETURNING 1`,
+        [this.storyId],
+        'stories',
+        this.storyId,
+        key,
+        [{ field: 'title', value: title }],
+      );
+      return;
+    }
     await this.db.query(`UPDATE stories SET title = $1 WHERE id = $2`, [title, this.storyId]);
+  }
+
+  private async story(): Promise<Story> {
+    const key = await this.privateValues.key();
+    const row = await this.require();
+    if (!key) return toStory(row);
+    const values = await this.privateValues.read(
+      'stories',
+      [this.storyId],
+      ['title', 'player_character_id', 'current_location_id', 'style', 'knobs'],
+      key,
+    );
+    const privateValues = values.get(this.storyId)!;
+    return toStory({
+      ...row,
+      title: this.privateValues.string(privateValues.get('title'), 'stories.title'),
+      player_character_id: this.privateValues.string(
+        privateValues.get('player_character_id'),
+        'stories.player_character_id',
+      ),
+      current_location_id: privateValues.get('current_location_id') as string | null,
+      style: privateValues.get('style'),
+      knobs: privateValues.get('knobs'),
+    });
   }
 }
