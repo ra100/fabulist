@@ -6,6 +6,8 @@
  * so most routes are reads.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createDirective } from '../application/directives.ts';
+import { postgresDirectiveRepository } from '../application/directives-pg.ts';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,7 +44,7 @@ import {
   worldGrants,
   worldsVisibleTo,
 } from '../store/access-pg.ts';
-import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
+import { tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
 import type { Entity, VisualStyle } from '../domain/types.ts';
 import { limitsFromWire, type SetupService } from '../setup/service-pg.ts';
 import type { IngestLimits } from '../ingest/depth-pg.ts';
@@ -688,27 +690,7 @@ route('GET', '/api/directives', async (_req, res, { world }) => {
  */
 route('POST', '/api/directive', async (_req, res, { world, body }) => {
   const b = parseBody(directiveBodySchema, body);
-  const created = await world.directives.create({
-    text: b.text,
-    scope: b.scope ?? 'chapter',
-    strength: b.strength ?? 'push',
-    lifetimeScenes: b.lifetimeScenes ?? 5,
-    status: 'active',
-    createdScene: (await world.session.get()).scene,
-  });
-  const diff = await applyDirectiveRecalc(world, created.id, created.text);
-  // Titles for the threads the recalculation touched. `threads.all()` once is
-  // cheaper than a lookup per id, and a story has few enough threads that reading
-  // them all is the simpler correct thing.
-  const allThreads = new Map((await world.threads.all()).map((t) => [t.id, t.title]));
-  send(res, 200, {
-    directive: created,
-    diff: {
-      ...diff,
-      raisedThreadTitles: diff.raisedThreads.map((id) => allThreads.get(id) ?? id),
-      loweredThreadTitles: diff.loweredThreads.map((id) => allThreads.get(id) ?? id),
-    },
-  });
+  send(res, 200, await createDirective(postgresDirectiveRepository(world), b));
 });
 
 route('DELETE', '/api/directive/:id', async (_req, res, { world, params }) => {
