@@ -552,6 +552,12 @@ export function Landing() {
               you who knows what forty turns later, and why a contradiction is a caught error rather
               than a thing you notice in chapter nine.
             </p>
+            <p className="lp-note">
+              Privacy posture: transport is encrypted (HTTPS/TLS), and encrypted story storage is
+              rolling out per account in stages. The current deployment is in pilot mode, so treat this
+              as staged hardening rather than a zero-knowledge guarantee; details are in the{' '}
+              <a href={`${REPO}/blob/main/docs/privacy-policy.md`}>privacy policy</a>.
+            </p>
             <div className="lp-actions">
               <a className="lp-cta primary lg" href={enter.href}>
                 {enter.label}
