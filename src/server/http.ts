@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { ZodType } from 'zod';
+import type { output, ZodTypeAny } from 'zod';
 
 const DEFAULT_JSON_LIMIT = 1024 * 1024;
 const DEFAULT_RAW_LIMIT = 256 * 1024 * 1024;
@@ -60,7 +60,7 @@ export function statusForError(err: unknown): number {
   return err instanceof HttpError ? err.status : 500;
 }
 
-export function parseBody<T>(schema: ZodType<T>, body: unknown): T {
+export function parseBody<T extends ZodTypeAny>(schema: T, body: unknown): output<T> {
   const parsed = schema.safeParse(body);
   if (parsed.success) return parsed.data;
   const issue = parsed.error.issues[0];

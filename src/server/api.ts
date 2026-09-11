@@ -21,10 +21,10 @@ import {
   tickConsequences,
   worldTick,
 } from '../consequence/propagate.ts';
-import type { Condition, Directive, Entity, Knobs, StyleContract, VisualStyle } from '../domain/types.ts';
+import type { Entity, VisualStyle } from '../domain/types.ts';
 import { branchSave } from '../loop/branch.ts';
 import { limitsFromWire, type SetupService } from '../setup/service.ts';
-import type { DepthMode, IngestLimits } from '../ingest/depth.ts';
+import type { IngestLimits } from '../ingest/depth.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
 import { switchImageProfile, switchProfile } from '../config/config.ts';
@@ -42,10 +42,32 @@ import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
 import {
   createThreadBodySchema,
+  createStoryBodySchema,
   directiveBodySchema,
+  forkStoryBodySchema,
+  illustrationBodySchema,
+  imageProfileBodySchema,
+  knowledgeBodySchema,
   knobsBodySchema,
+  profileBodySchema,
   playBodySchema,
+  regenerateBodySchema,
+  renameBodySchema,
+  rollbackBodySchema,
+  setupContinueBodySchema,
+  setupCustomBodySchema,
+  setupDiscoverBodySchema,
+  setupIngestBodySchema,
+  setupPackBodySchema,
+  setupPlanBodySchema,
+  setupPlayerBodySchema,
+  setupPreviewBodySchema,
+  setupResolveBodySchema,
+  sheetBodySchema,
+  sheetLockBodySchema,
+  sqliteBranchBodySchema,
   styleBodySchema,
+  turnPinBodySchema,
   updateThreadBodySchema,
 } from './contracts.ts';
 
@@ -313,13 +335,13 @@ route('PUT', '/api/sheet/:id', (_req, res, { world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
   const existing = world.cast.get(id);
   if (!existing) return send(res, 404, { error: 'no sheet' });
-  const patch = (body ?? {}) as Record<string, unknown>;
+  const patch = parseBody(sheetBodySchema, body);
   world.cast.put({
     ...existing,
-    identity: (patch.identity as typeof existing.identity) ?? existing.identity,
-    contract: (patch.contract as typeof existing.contract) ?? existing.contract,
-    voice: (patch.voice as typeof existing.voice) ?? existing.voice,
-    condition: (patch.condition as Condition) ?? existing.condition,
+    identity: patch.identity ?? existing.identity,
+    contract: patch.contract ?? existing.contract,
+    voice: patch.voice ?? existing.voice,
+    condition: patch.condition ?? existing.condition,
     // A patch's `appearance` never touches `referenceImagePath`/`seed` — those
     // two fields are written exactly once, by `IllustrationService` on a
     // successful portrait generation, not through this general-purpose sheet
@@ -336,8 +358,7 @@ route('PUT', '/api/sheet/:id', (_req, res, { world, params, body }) => {
 
 route('POST', '/api/sheet/:id/lock', (_req, res, { world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
-  const { path, locked } = (body ?? {}) as { path?: string; locked?: boolean };
-  if (!path) return send(res, 400, { error: 'path required' });
+  const { path, locked } = parseBody(sheetLockBodySchema, body);
   if (locked === false) world.cast.unlock(id, path);
   else world.cast.lock(id, path);
   send(res, 200, world.cast.get(id));
@@ -391,7 +412,7 @@ route('GET', '/api/turn/:id', (_req, res, { world, params }) => {
 
 route('POST', '/api/turn/:id/pin', (_req, res, { world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
-  const { pinned } = (body ?? {}) as { pinned?: boolean };
+  const { pinned } = parseBody(turnPinBodySchema, body);
   world.chronicle.setPinned(id, pinned !== false);
   send(res, 200, world.chronicle.getTurn(id));
 });
@@ -405,7 +426,7 @@ route('POST', '/api/turn/:id/pin', (_req, res, { world, params, body }) => {
  */
 route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
-  const { note } = (body ?? {}) as { note?: string };
+  const { note } = parseBody(regenerateBodySchema, body);
   try {
     // `world` explicit: the per-request (per-user, when login is on) world
     // — see `TakeTurnOptions.world`'s own doc comment for why.
@@ -547,11 +568,7 @@ route('GET', '/api/facts', (_req, res, { world }) => {
  */
 route('POST', '/api/fact/:id/knowledge', (_req, res, { world, params, body }) => {
   const factId = decodeURIComponent(params.id ?? '');
-  const b = (body ?? {}) as { entityId?: string; level?: string; distortion?: number; sinceScene?: number };
-  if (!b.entityId) return send(res, 400, { error: 'entityId required' });
-  if (b.level !== 'knows' && b.level !== 'suspects' && b.level !== 'wrong') {
-    return send(res, 400, { error: "level must be 'knows', 'suspects', or 'wrong'" });
-  }
+  const b = parseBody(knowledgeBodySchema, body);
   try {
     world.chronicle.setKnowledge(factId, b.entityId, b.level, b.sinceScene ?? world.session.get().scene, b.distortion ?? 0);
   } catch (err) {
@@ -670,7 +687,7 @@ route('GET', '/api/images/providers', async (_req, res, { imageRegistry, config,
 route('POST', '/api/images/profile', (_req, res, { imageRegistry, body, config, user, authConfig }) => {
   if (!requireAdmin(res, authConfig, user)) return;
   if (!imageRegistry) return send(res, 503, { error: 'no swappable image registry on this server' });
-  const { profile } = (body ?? {}) as { profile?: string | null };
+  const { profile } = parseBody(imageProfileBodySchema, body);
   // Same reason as `/api/providers/profile`: write to the config this server was
   // started with, not to `switchImageProfile`'s default path.
   const result = switchImageProfile(imageRegistry, profile ?? null, config?.path);
@@ -720,7 +737,7 @@ route('POST', '/api/illustrate/portrait/:id', async (_req, res, { world, illustr
   const svc = requireIllustrations(res, illustrations);
   if (!svc) return;
   const entityId = decodeURIComponent(params.id ?? '');
-  const style = parseVisualStyle((body as { visualStyle?: unknown } | undefined)?.visualStyle);
+  const { visualStyle: style } = parseBody(illustrationBodySchema, body);
   try {
     // `world` explicitly, not the service's own captured getter: this is
     // the per-request world (per-user when login is on, via
@@ -741,7 +758,7 @@ route('POST', '/api/illustrate/scene/:turnId', async (_req, res, { world, illust
   const turnId = decodeURIComponent(params.turnId ?? '');
   const turn = world.chronicle.getTurn(turnId);
   if (!turn) return send(res, 404, { error: 'no such turn' });
-  const style = parseVisualStyle((body as { visualStyle?: unknown } | undefined)?.visualStyle);
+  const { visualStyle: style } = parseBody(illustrationBodySchema, body);
 
   // Present cast and location come from the delta the turn already committed,
   // not from a fresh player-supplied list — the illustration must depict what
@@ -910,8 +927,7 @@ route('POST', '/api/scene/close', async (_req, res, { world, engine }) => {
  * leaves the original playthrough intact.
  */
 route('POST', '/api/branch', (_req, res, { world, body }) => {
-  const { atScene, toPath, overwrite } = (body ?? {}) as { atScene?: number; toPath?: string; overwrite?: boolean };
-  if (typeof atScene !== 'number' || !toPath) return send(res, 400, { error: 'atScene and toPath are required' });
+  const { atScene, toPath, overwrite } = parseBody(sqliteBranchBodySchema, body);
 
   const fromPath = world.db.prepare(`PRAGMA database_list`).get() as { file?: string } | undefined;
   if (!fromPath?.file) return send(res, 400, { error: 'cannot branch an in-memory save' });
@@ -985,7 +1001,7 @@ route('GET', '/api/stories', (_req, res, { world, user }) => {
  * as it is.
  */
 route('POST', '/api/stories', (_req, res, { world, body, user }) => {
-  const { title } = (body ?? {}) as { title?: string };
+  const { title } = parseBody(createStoryBodySchema, body);
   const story = createStory(world.db, { title: title?.trim() ?? '', ownerUserId: user?.id });
   send(res, 201, story);
 });
@@ -1008,7 +1024,7 @@ route('POST', '/api/stories', (_req, res, { world, body, user }) => {
  * `ForkOptions.ownerUserId`'s own doc comment for why that is not a bug.
  */
 route('POST', '/api/stories/fork', (_req, res, { world, body, user }) => {
-  const { title, atScene, fromStoryId } = (body ?? {}) as { title?: string; atScene?: number; fromStoryId?: string };
+  const { title, atScene, fromStoryId } = parseBody(forkStoryBodySchema, body);
   const sourceId = fromStoryId || world.storyId;
   if (!ownsStoryOrRespond(res, world, sourceId, user)) return;
   try {
@@ -1045,7 +1061,7 @@ route('POST', '/api/stories/fork', (_req, res, { world, body, user }) => {
  * pulled along too.
  */
 route('POST', '/api/rollback', (_req, res, { world, currentStory, body, user }) => {
-  const { scene, chapter, mode } = (body ?? {}) as { scene?: number; chapter?: number; mode?: 'fork' | 'destructive' };
+  const { scene, chapter, mode } = parseBody(rollbackBodySchema, body);
   if (!ownsStoryOrRespond(res, world, world.storyId, user)) return;
   const effectiveMode = mode ?? 'fork';
   // The switch below only runs in login-off mode (see this route's own doc
@@ -1079,8 +1095,7 @@ route('POST', '/api/stories/:id/switch', (_req, res, { world, currentStory, para
 
 route('PUT', '/api/stories/:id/title', (_req, res, { world, params, body, user }) => {
   const id = decodeURIComponent(params.id ?? '');
-  const { title } = (body ?? {}) as { title?: string };
-  if (typeof title !== 'string') return send(res, 400, { error: 'title is required' });
+  const { title } = parseBody(renameBodySchema, body);
   if (!ownsStoryOrRespond(res, world, id, user)) return;
   // Renaming works on any story in the file, not only the current one — the
   // save browser needs to rename an entry without switching to it first.
@@ -1151,7 +1166,7 @@ route('GET', '/api/worlds', (_req, res, { currentWorld, dataRoot }) => {
 route('POST', '/api/worlds', (_req, res, { currentWorld, dataRoot, body }) => {
   const cw = requireCurrentWorld(res, currentWorld);
   if (!cw) return;
-  const { title } = (body ?? {}) as { title?: string };
+  const { title } = parseBody(createStoryBodySchema, body);
   try {
     send(res, 201, createWorldFile(title?.trim() ?? '', dataRoot));
   } catch (err) {
@@ -1180,8 +1195,7 @@ route('PUT', '/api/worlds/:slug/title', (_req, res, { currentWorld, dataRoot, pa
   const cw = requireCurrentWorld(res, currentWorld);
   if (!cw) return;
   const slug = decodeURIComponent(params.slug ?? '');
-  const { title } = (body ?? {}) as { title?: string };
-  if (typeof title !== 'string' || !title.trim()) return send(res, 400, { error: 'title is required' });
+  const { title } = parseBody(renameBodySchema, body);
   try {
     send(res, 200, renameWorldFile(slug, title, { dataRoot, openSlug: cw.slug() }));
   } catch (err) {
@@ -1457,8 +1471,7 @@ route('POST', '/api/providers/profile', (_req, res, ctx) => {
   if (!requireAdmin(res, ctx.authConfig, ctx.user)) return;
   const { registry, body } = ctx;
   if (!registry) return send(res, 503, { error: 'profile switching is not enabled on this server' });
-  const { profile } = (body ?? {}) as { profile?: string };
-  if (!profile) return send(res, 400, { error: 'profile is required' });
+  const { profile } = parseBody(profileBodySchema, body);
 
   // The config service knows which file this server is actually using;
   // `switchProfile`'s own default points at `fabulist.config.json`, which on a
@@ -1516,8 +1529,7 @@ route('GET', '/api/setup/status', (_req, res, { setup, world }) => {
 route('POST', '/api/setup/resolve', async (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { query } = (body ?? {}) as { query?: string };
-  if (!query?.trim()) return send(res, 400, { error: 'query is required' });
+  const { query } = parseBody(setupResolveBodySchema, body);
   send(res, 200, { candidates: await svc.resolveWiki(query.trim()) });
 });
 
@@ -1525,26 +1537,23 @@ route('POST', '/api/setup/resolve', async (_req, res, { setup, body }) => {
 route('POST', '/api/setup/plan', async (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { wish, wiki } = (body ?? {}) as { wish?: string; wiki?: { name: string; baseUrl: string; articles: number; language: string; via: string; confidence: number } };
-  if (!wish?.trim() || !wiki?.baseUrl) return send(res, 400, { error: 'wish and wiki are required' });
-  send(res, 200, await svc.plan(wish.trim(), wiki as never));
+  const { wish, wiki } = parseBody(setupPlanBodySchema, body);
+  send(res, 200, await svc.plan(wish.trim(), wiki));
 });
 
 /** What it would cost, before anything is spent. */
 route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { baseUrl, seeds, mode, excludeCategories, title } = (body ?? {}) as {
-    baseUrl?: string; seeds?: string[]; mode?: DepthMode; excludeCategories?: string[]; title?: string;
-  };
-  if (!baseUrl || !seeds?.length) return send(res, 400, { error: 'baseUrl and seeds are required' });
+  const parsed = parseBody(setupPreviewBodySchema, body);
+  const { baseUrl, seeds, mode, excludeCategories, title } = parsed;
   // `maxPages`/`hops`/`passBMaxPages` accept a positive integer or "all", and a
   // bad one is a 400 rather than a silent fallback to the mode's preset — see
   // `limitsFromWire`/`parseBudget`. An unlimited budget is refused by the
   // service itself (dump-only), which surfaces here the same way.
   let limits: IngestLimits;
   try {
-    limits = limitsFromWire((body ?? {}) as Record<string, unknown>);
+    limits = limitsFromWire(parsed);
   } catch (e) {
     return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
   }
@@ -1564,14 +1573,11 @@ route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
 route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { baseUrl, seeds, mode, excludeCategories, title, character } = (body ?? {}) as {
-    baseUrl?: string; seeds?: string[]; mode?: DepthMode; excludeCategories?: string[]; title?: string;
-    character?: never;
-  };
-  if (!baseUrl || !seeds?.length) return send(res, 400, { error: 'baseUrl and seeds are required' });
+  const parsed = parseBody(setupDiscoverBodySchema, body);
+  const { baseUrl, seeds, mode, excludeCategories, title, character } = parsed;
   const sketch = character ?? { existing: null, name: '', role: '', goals: [], vows: [] };
   try {
-    const limits = limitsFromWire((body ?? {}) as Record<string, unknown>);
+    const limits = limitsFromWire(parsed);
     send(res, 200, svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? '', limits));
   } catch (e) {
     send(res, 400, { error: e instanceof Error ? e.message : String(e) });
@@ -1582,10 +1588,7 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
 route('POST', '/api/setup/ingest', (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { previewKey, character, style, opening } = (body ?? {}) as {
-    previewKey?: string; character?: never; style?: never; opening?: string;
-  };
-  if (!previewKey) return send(res, 400, { error: 'previewKey is required; preview before committing' });
+  const { previewKey, character, style, opening } = parseBody(setupIngestBodySchema, body);
   try {
     const job = svc.startIngest(previewKey, {
       character: character ?? { existing: null, name: '', role: '', goals: [], vows: [] },
@@ -1601,8 +1604,7 @@ route('POST', '/api/setup/ingest', (_req, res, { setup, body }) => {
 route('POST', '/api/setup/custom', (_req, res, { setup, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { description, style } = (body ?? {}) as { description?: string; style?: never };
-  if (!description?.trim()) return send(res, 400, { error: 'description is required' });
+  const { description, style } = parseBody(setupCustomBodySchema, body);
   send(res, 200, svc.startCustomWorld(description.trim(), style));
 });
 
@@ -1633,8 +1635,7 @@ route('GET', '/api/setup/packs', (_req, res, { setup }) => {
 route('POST', '/api/setup/pack', (_req, res, { setup, currentStory, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { packId, scenarioId } = (body ?? {}) as { packId?: string; scenarioId?: string };
-  if (!packId) return send(res, 400, { error: 'packId is required' });
+  const { packId, scenarioId } = parseBody(setupPackBodySchema, body);
   try {
     const result = svc.usePack(packId, scenarioId);
     currentStory?.switchTo(result.storyId);
@@ -1681,7 +1682,7 @@ route('GET', '/api/setup/characters', (_req, res, { world }) => {
 route('POST', '/api/setup/player', async (_req, res, { setup, world, body }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const sketch = (body ?? {}) as { existing?: string | null; name?: string; role?: string; goals?: string[]; vows?: Array<{ text: string; rank: number }> };
+  const sketch = parseBody(setupPlayerBodySchema, body);
   const { assignPlayerCharacter, proposeOpening } = await import('../setup/apply.ts');
   const assigned = assignPlayerCharacter(world, {
     existing: sketch.existing ?? null,
@@ -1721,15 +1722,14 @@ route('POST', '/api/setup/continue', (_req, res, { setup, body, user, authConfig
   if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const { seeds, mode, excludeCategories } = (body ?? {}) as {
-    seeds?: string[]; mode?: DepthMode; excludeCategories?: string[];
-  };
+  const parsed = parseBody(setupContinueBodySchema, body);
+  const { seeds, mode, excludeCategories } = parsed;
   try {
     // Raising `maxPages` here is the "keep reading, further out" path: the
     // crawl re-runs at the wider budget and Pass B skips every page it already
     // finished, so widening a 600-page world to 20,000 pays only for the new
     // ones.
-    const limits = limitsFromWire((body ?? {}) as Record<string, unknown>);
+    const limits = limitsFromWire(parsed);
     const job = svc.continueIngest({ seeds, mode, excludeCategories, limits });
     send(res, 200, job);
   } catch (err) {
