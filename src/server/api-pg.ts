@@ -957,10 +957,11 @@ route('DELETE', '/api/illustration/:id', async (_req, res, { world, params }) =>
  */
 route('GET', '/api/illustration/:id/image', async (_req, res, { world, params }) => {
   const illus = await world.illustrations.get(decodeURIComponent(params.id ?? ''));
-  const abs = illus ? world.illustrations.absolutePath(illus) : null;
-  if (!abs || !existsSync(abs)) return send(res, 404, { error: 'no image' });
-  res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' });
-  res.end(readFileSync(abs));
+  const bytes = illus ? await world.illustrations.readBytes(illus) : undefined;
+  if (!bytes) return send(res, 404, { error: 'no image' });
+  const mime = illus?.path?.includes('.jpg') ? 'image/jpeg' : 'image/png';
+  res.writeHead(200, { 'content-type': mime, 'cache-control': 'private, no-store' });
+  res.end(bytes);
 });
 
 route('GET', '/api/anchors', async (_req, res, { world }) => {

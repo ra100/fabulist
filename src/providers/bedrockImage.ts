@@ -91,9 +91,11 @@ export class BedrockStabilityProvider implements ImageProvider {
     // The style-conditioning models take the reference as base64 under
     // `image`; this is the honest form of `imageConditioning` for a family
     // that has no dedicated img2img endpoint of its own.
-    if (this.capabilities.imageConditioning && req.referenceImagePath) {
-      const { readFileSync } = await import('node:fs');
-      body.image = readFileSync(req.referenceImagePath).toString('base64');
+    if (this.capabilities.imageConditioning && (req.referenceImageBytes || req.referenceImagePath)) {
+      const raw = req.referenceImageBytes
+        ? Buffer.from(req.referenceImageBytes)
+        : (await import('node:fs')).readFileSync(req.referenceImagePath!);
+      body.image = raw.toString('base64');
       if (req.referenceStrength != null) body.fidelity = req.referenceStrength;
     }
 

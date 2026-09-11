@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeWorld, withPg } from './pg-harness.ts';
@@ -1011,6 +1011,78 @@ test('illustrations keep bytes on disk and delete them with the row', async (t) 
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('encrypted illustrations protect prompts and image bytes at rest', async (t) => {
+  const dir = join('data', '.test-encrypted-illustrations');
+  rmSync(dir, { recursive: true, force: true });
+  let ran = false;
+  try {
+    ran = await withPg(async (db) => {
+    const { storyId } = await setup(db);
+    await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [storyId]);
+    const key = randomBytes(32);
+    const world = await World.forStory(db, storyId, dir, {
+      keyForStory: (id: string) => (id === storyId ? key : null),
+    });
+    const secretPrompt = 'Mara Vell guards the moonlit archive.';
+    const secretBytes = Buffer.from('private illustration bytes: moonlit archive');
+    const reserved = await world.illustrations.reserve({
+      subject: { kind: 'portrait', entityId: 'char:mara' },
+      visualStyle: 'drawing',
+      prompt: secretPrompt,
+      negativePrompt: 'no daylight',
+      seed: 42,
+      provider: 'mock',
+      createdScene: 1,
+    });
+    const done = (await world.illustrations.complete(reserved.id, secretBytes, 'image/png', 42))!;
+    assert.equal((await world.illustrations.get(done.id))?.prompt, secretPrompt);
+    assert.deepEqual(await world.illustrations.readBytes(done), secretBytes);
+    assert.deepEqual(await world.illustrations.referenceInput(done), { path: null, bytes: secretBytes });
+
+    const raw = readFileSync(world.illustrations.absolutePath(done)!);
+    assert.equal(raw.includes(secretBytes), false, 'the private image is never stored as plaintext');
+    const row = await db.one<{ prompt: string; negative_prompt: string }>(
+      `SELECT prompt, negative_prompt FROM illustrations WHERE id = $1`,
+      [done.id],
+    );
+    assert.deepEqual(row, { prompt: '', negative_prompt: '' });
+    assert.equal(
+      Number((await db.one<{ n: string }>(
+        `SELECT count(*) n FROM encrypted_story_values
+          WHERE story_id = $1 AND table_name = 'illustrations' AND record_id = $2`,
+        [storyId, done.id],
+      ))!.n),
+      2,
+    );
+
+    const locked = (await World.forStory(db, storyId, dir)).illustrations;
+    await assert.rejects(() => locked.get(done.id), /locked/);
+    await assert.rejects(() => locked.readBytes(done), /locked/);
+    await assert.rejects(() => locked.reserve({
+      subject: { kind: 'portrait', entityId: 'char:mara' },
+      visualStyle: 'drawing', prompt: 'must not write', negativePrompt: '', seed: null, provider: 'mock', createdScene: 1,
+    }), /locked/);
+    await assert.rejects(() => locked.complete(done.id, Buffer.from('must not write'), 'image/png', null), /locked/);
+    await assert.rejects(() => locked.delete(done.id), /locked/);
+
+    const path = world.illustrations.absolutePath(done)!;
+    await world.illustrations.delete(done.id);
+    assert.equal(existsSync(path), false);
+    assert.equal(
+      Number((await db.one<{ n: string }>(
+        `SELECT count(*) n FROM encrypted_story_values
+          WHERE story_id = $1 AND table_name = 'illustrations' AND record_id = $2`,
+        [storyId, done.id],
+      ))!.n),
+      0,
+    );
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
   if (!ran) t.skip('no Postgres configured');
 });
 
