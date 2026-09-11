@@ -696,7 +696,7 @@ test('a rollout-enabled user auto-creates an encryption v1 story on first visit'
     const world = await worldFor(db, user, { worldIds: [worldId] });
     const created = await getStory(db, world.storyId);
     assert.equal(created?.ownerUserId, 'user_pilot');
-    assert.equal(created?.encryptionVersion, 1);
+    assert.equal(created?.encryptionVersion, 0);
   });
   if (!ran) t.skip('no Postgres configured');
 });

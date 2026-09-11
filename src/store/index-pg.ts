@@ -161,7 +161,10 @@ export async function resolveStoryFor(
     }
     return story.id;
   }
-  if (user) return resolveOrCreateStoryForUser(db, user.id, opts.worldIds ?? [], user.encryptNewStories ? 1 : 0);
+  // A rollout enrollment must not mark a plaintext row as encrypted. A story
+  // moves to format 1 only after browser-side migration verifies every private
+  // field has been replaced by authenticated ciphertext.
+  if (user) return resolveOrCreateStoryForUser(db, user.id, opts.worldIds ?? [], 0);
   return resolveCurrentStory(db, opts.worldIds ?? []);
 }
 

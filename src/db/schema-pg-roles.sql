@@ -90,8 +90,10 @@ DECLARE
     'chron_sheets', 'relationships', 'facts', 'fact_knowledge', 'threads', 'events',
     'consequences', 'turns', 'scenes', 'chapters', 'directives', 'divergences',
     'style_anchors', 'prose_blocklist', 'illustrations',
-    -- User-scoped rollout state read and bound by the play path at login time.
-    'encryption_rollout'];
+    -- User-scoped encryption rollout and key-wrap state. The key tables contain
+    -- browser-produced ciphertext only; no role, including the operator's app
+    -- process, can derive the plaintext key from them.
+    'encryption_rollout', 'user_encryption_keys', 'story_encryption_keys'];
   system_tables TEXT[] := ARRAY[
     -- `world_access` is system data: who may see a world is not something a play
     -- connection may edit, or a user could grant themselves access to a private

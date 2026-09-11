@@ -60,12 +60,14 @@ import { handleMcpRequest, protectedResourceMetadata } from '../mcp/server-pg.ts
 import type { McpToolContext } from '../mcp/tools-pg.ts';
 import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
+import { encryptionKeysForUser, enrollEncryptionKeys } from '../auth/encryption-keys-pg.ts';
 import { withEncryptionRollout } from '../auth/encryption-rollout-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
 import {
   createThreadBodySchema,
   createStoryBodySchema,
+  encryptionEnrollmentBodySchema,
   directiveBodySchema,
   forkStoryBodySchema,
   illustrationBodySchema,
@@ -321,6 +323,27 @@ route('GET', '/api/meta', (_req, res) => {
  */
 route('GET', '/api/auth/me', (_req, res, { user }) => {
   send(res, 200, { user });
+});
+
+route('GET', '/api/encryption/keys', async (_req, res, { db, user }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  if (!user.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
+  const keys = await encryptionKeysForUser(db, user.id);
+  send(res, 200, { enrolled: keys.userKey !== null, ...keys });
+});
+
+route('POST', '/api/encryption/enroll', async (_req, res, { body, db, user }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  if (!user.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
+  const enrollment = parseBody(encryptionEnrollmentBodySchema, body);
+  try {
+    await enrollEncryptionKeys(db, user.id, enrollment.userKey, enrollment.storyKeys);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'could not save encryption keys';
+    const status = message.startsWith('encryption is already configured') ? 409 : 400;
+    return send(res, status, { error: message });
+  }
+  send(res, 201, { enrolled: true });
 });
 
 route('GET', '/api/state', async (_req, res, { world }) => {
@@ -1144,7 +1167,6 @@ route('POST', '/api/stories', async (_req, res, { world, db, body, user }) => {
     title: title?.trim() ?? '',
     worldIds: world.sources.map((src) => src.worldId),
     ...(user ? { ownerUserId: user.id } : {}),
-    ...(user?.encryptNewStories ? { encryptionVersion: 1 } : {}),
   });
   send(res, 201, story);
 });

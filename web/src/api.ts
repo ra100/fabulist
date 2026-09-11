@@ -18,6 +18,7 @@ import {
   worldsResponseSchema,
 } from '../../src/server/contracts.ts';
 import type { ZodTypeAny } from 'zod';
+import type { EncryptionEnrollment, StoryKeyRecord, UserKeyRecord } from './crypto/keys.ts';
 
 /**
  * Which of *this user's own* stories the current browser tab is looking at,
@@ -122,7 +123,7 @@ export interface Story {
   forkedAtScene: number | null;
   createdAt: string;
   lastPlayedAt: string;
-  /** `0` legacy plaintext rows, `1` encrypted-at-rest. */
+  /** `0` legacy plaintext rows; `1` is reserved for verified encrypted-at-rest rows. */
   encryptionVersion?: number;
 }
 
@@ -547,6 +548,12 @@ export interface CurrentUser {
   encryptNewStories?: boolean;
 }
 
+export interface EncryptionKeyBundle {
+  enrolled: boolean;
+  userKey: UserKeyRecord | null;
+  storyKeys: StoryKeyRecord[];
+}
+
 /**
  * Routes this bundle needs that a server predating them will not have.
  *
@@ -570,6 +577,8 @@ export const REQUIRED_ROUTES = [
   'POST /api/stories/:id/switch',
   'PUT /api/stories/:id/title',
   'DELETE /api/stories/:id',
+  'GET /api/encryption/keys',
+  'POST /api/encryption/enroll',
   'GET /api/worlds',
   'POST /api/worlds',
   // `POST /api/worlds/:slug/switch` is deliberately absent: a world is a row now
@@ -624,6 +633,11 @@ export const api = {
      * is already gone.
      */
     logout: () => fetch('/auth/logout', { method: 'POST' }),
+  },
+  encryption: {
+    keys: () => req<EncryptionKeyBundle>('/encryption/keys'),
+    enroll: ({ recoveryCode: _recoveryCode, ...enrollment }: EncryptionEnrollment) =>
+      post<{ enrolled: true }>('/encryption/enroll', enrollment),
   },
   state: () => parsedReq<State>('/state', stateResponseSchema),
   /**

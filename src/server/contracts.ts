@@ -137,6 +137,27 @@ export const imageProfileBodySchema = z.object({ profile: nonEmptyText.nullable(
 export const profileBodySchema = z.object({ profile: nonEmptyText }).strict();
 
 export const createStoryBodySchema = z.object({ title: optionalTitle }).strict().default({});
+const encryptedKeyEnvelopeSchema = z.object({
+  nonce: z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64'),
+  ciphertext: z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64'),
+}).strict();
+export const encryptionEnrollmentBodySchema = z.object({
+  userKey: z.object({
+    version: z.literal(1),
+    passphraseKdf: z.literal('pbkdf2-sha256'),
+    passphraseKdfParams: z.object({ iterations: z.literal(600_000) }).strict(),
+    passphraseSalt: z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64'),
+    passphraseWrap: encryptedKeyEnvelopeSchema,
+    recoverySalt: z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64'),
+    recoveryWrap: encryptedKeyEnvelopeSchema,
+    recoveryCodeHint: z.string().regex(/^[A-Za-z0-9_-]{4,32}$/),
+  }).strict(),
+  storyKeys: z.array(z.object({
+    storyId: nonEmptyText,
+    version: z.literal(1),
+    wrap: encryptedKeyEnvelopeSchema,
+  }).strict()).min(1),
+}).strict();
 export const forkStoryBodySchema = z.object({
   title: optionalTitle,
   atScene: z.number().int().nonnegative().optional(),

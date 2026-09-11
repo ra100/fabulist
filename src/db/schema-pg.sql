@@ -320,6 +320,44 @@ INSERT INTO encryption_rollout (bootstrap_email, enabled, encrypt_new_stories, u
 VALUES ('fabulist@rast.io', true, true, now())
 ON CONFLICT (bootstrap_email) DO NOTHING;
 
+-- Browser-generated encryption material for a user enrolled in the private-story
+-- pilot. This table stores only authenticated ciphertext and public KDF inputs:
+-- the passphrase, recovery code, master key, and story keys never persist here.
+--
+-- A master key has two independent wraps. The passphrase wrap uses the recorded
+-- PBKDF2 parameters; the recovery-code wrap uses a random 256-bit recovery code
+-- as its AES key. The application deliberately cannot decrypt either wrap.
+CREATE TABLE IF NOT EXISTS user_encryption_keys (
+  user_id                 TEXT PRIMARY KEY,
+  version                 INTEGER NOT NULL DEFAULT 1 CHECK (version = 1),
+  passphrase_kdf          TEXT NOT NULL CHECK (passphrase_kdf = 'pbkdf2-sha256'),
+  passphrase_kdf_params   JSONB NOT NULL,
+  passphrase_salt         BYTEA NOT NULL,
+  passphrase_nonce        BYTEA NOT NULL,
+  passphrase_ciphertext   BYTEA NOT NULL,
+  recovery_salt           BYTEA NOT NULL,
+  recovery_nonce          BYTEA NOT NULL,
+  recovery_ciphertext     BYTEA NOT NULL,
+  recovery_code_hint      TEXT NOT NULL,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One random data-encryption key (DEK) per story, wrapped by its owner's
+-- browser-held master key. `story_id` is the key because sharing is outside the
+-- pilot; adding it later can add recipient wraps without changing ciphertext.
+CREATE TABLE IF NOT EXISTS story_encryption_keys (
+  story_id                TEXT PRIMARY KEY REFERENCES stories(id) ON DELETE CASCADE,
+  owner_user_id           TEXT NOT NULL,
+  version                 INTEGER NOT NULL DEFAULT 1 CHECK (version = 1),
+  nonce                   BYTEA NOT NULL,
+  ciphertext              BYTEA NOT NULL,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_story_encryption_keys_owner ON story_encryption_keys (owner_user_id);
+
 -- Which canon worlds a story reads, in precedence order. THE crossover table.
 --
 -- One row per source. `ordinal` 1 is the primary world, 2 the next, and so on;
