@@ -2261,104 +2261,126 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
             {sourceError ? <p className="error">{sourceError}</p> : null}
             {!worlds ? (
               <p className="empty">loading…</p>
+            ) : worlds.length === 0 ? (
+              <p className="empty">no worlds yet</p>
             ) : (
-              worlds.map((w) => (
-                <div key={w.slug} className="field-row" style={{ alignItems: 'flex-start' }}>
-                  <span style={{ flex: 1 }}>
-                    {worldRenaming?.slug === w.slug ? (
-                      <input
-                        autoFocus
-                        value={worldRenaming.title}
-                        onChange={(e) => setWorldRenaming({ slug: w.slug, title: e.target.value })}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Escape') setWorldRenaming(null);
-                          if (e.key === 'Enter') {
-                            void run(w.slug, 'wrename', async () => {
-                              await api.worlds.rename(w.slug, worldRenaming.title);
-                              setWorldRenaming(null);
-                              await load();
-                              onSwitched();
-                            });
-                          }
-                        }}
-                      />
-                    ) : (
-                      <>
-                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <div className="scroll-x">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>reads</th>
+                      <th>world</th>
+                      <th className="num">entities</th>
+                      <th className="num">relations</th>
+                      <th className="num">books</th>
+                      <th className="actions">manage</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {worlds.map((w) => (
+                      <tr key={w.slug}>
+                        <td>
                           <input
                             type="checkbox"
                             checked={reading.includes(w.slug)}
                             disabled={busy === 'sources'}
                             onChange={() => void toggleSource(w.slug)}
+                            title={reading.includes(w.slug) ? 'stop reading this world' : 'read this world'}
                           />
-                          <b>{w.title || 'untitled world'}</b>
-                        </label>
-                        {reading[0] === w.slug && reading.length > 1 ? (
-                          <span className="tag locked" style={{ marginLeft: 6 }} title="wins any id these worlds share">
-                            primary
-                          </span>
-                        ) : null}
-                        {w.visibility === 'private' ? (
-                          <span className="tag" style={{ marginLeft: 6 }} title="only people you have granted access can see this world">
-                            private
-                          </span>
-                        ) : null}
-                        <br />
-                        <span className="small dimmer">
-                          <span className="mono">{w.slug}</span> · {w.entityCount.toLocaleString()} entities ·{' '}
-                          {w.edgeCount.toLocaleString()} relations · {w.storyCount} book{w.storyCount === 1 ? '' : 's'}
-                          {w.sources.length ? ` · from ${w.sources.map((src) => src.wiki).join(', ')}` : ''}
-                        </span>
-                      </>
-                    )}
-                  </span>
-                  <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    <button
-                      disabled={worldRenaming?.slug === w.slug || w.role !== 'owner'}
-                      title={w.role === 'owner' ? 'rename this world' : 'only a world\u2019s owner can rename it'}
-                      onClick={() => setWorldRenaming({ slug: w.slug, title: w.title })}
-                    >
-                      rename
-                    </button>
-                    {w.role === 'owner' ? (
-                      <button
-                        disabled={busy === `${w.slug}wvis`}
-                        title={
-                          w.visibility === 'public'
-                            ? 'hide this world from everyone you have not granted access'
-                            : 'let anyone signed in read this world'
-                        }
-                        onClick={() => void run(w.slug, 'wvis', async () => {
-                          await api.worlds.setVisibility(w.slug, w.visibility === 'public' ? 'private' : 'public');
-                          await load();
-                        })}
-                      >
-                        {w.visibility === 'public' ? 'make private' : 'make public'}
-                      </button>
-                    ) : null}
-                    <button
-                      className="warn"
-                      disabled={w.storyCount > 0 || busy === `${w.slug}wdelete` || w.role !== 'owner'}
-                      title={
-                        w.role !== 'owner'
-                          ? 'only a world\u2019s owner can delete it'
-                          : w.storyCount > 0
-                            ? `${w.storyCount} book${w.storyCount === 1 ? '' : 's'} still read this world \u2014 delete or repoint them first`
-                            : 'delete this world and its canon'
-                      }
-                      onClick={() => {
-                        if (!window.confirm(`Delete the world "${w.title || w.slug}"? This removes its canon. Books are not touched.`)) return;
-                        void run(w.slug, 'wdelete', async () => {
-                          await api.worlds.remove(w.slug);
-                          await load();
-                        });
-                      }}
-                    >
-                      delete
-                    </button>
-                  </span>
-                </div>
-              ))
+                        </td>
+                        <td>
+                          {worldRenaming?.slug === w.slug ? (
+                            <input
+                              autoFocus
+                              value={worldRenaming.title}
+                              onChange={(e) => setWorldRenaming({ slug: w.slug, title: e.target.value })}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') setWorldRenaming(null);
+                                if (e.key === 'Enter') {
+                                  void run(w.slug, 'wrename', async () => {
+                                    await api.worlds.rename(w.slug, worldRenaming.title);
+                                    setWorldRenaming(null);
+                                    await load();
+                                    onSwitched();
+                                  });
+                                }
+                              }}
+                            />
+                          ) : (
+                            <>
+                              <span className="row-name">
+                                <b>{w.title || 'untitled world'}</b>
+                                {reading[0] === w.slug && reading.length > 1 ? (
+                                  <span className="tag locked" style={{ marginLeft: 6 }} title="wins any id these worlds share">
+                                    primary
+                                  </span>
+                                ) : null}
+                                {w.visibility === 'private' ? (
+                                  <span className="tag" style={{ marginLeft: 6 }} title="only people you have granted access can see this world">
+                                    private
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="row-meta">
+                                <span className="mono">{w.slug}</span>
+                                {w.sources.length ? ` · from ${w.sources.map((src) => src.wiki).join(', ')}` : ''}
+                              </span>
+                            </>
+                          )}
+                        </td>
+                        <td className="num mono">{w.entityCount.toLocaleString()}</td>
+                        <td className="num mono">{w.edgeCount.toLocaleString()}</td>
+                        <td className="num mono">{w.storyCount}</td>
+                        <td className="actions">
+                          <button
+                            disabled={worldRenaming?.slug === w.slug || w.role !== 'owner'}
+                            title={w.role === 'owner' ? 'rename this world' : 'only a world\u2019s owner can rename it'}
+                            onClick={() => setWorldRenaming({ slug: w.slug, title: w.title })}
+                          >
+                            rename
+                          </button>
+                          {w.role === 'owner' ? (
+                            <button
+                              disabled={busy === `${w.slug}wvis`}
+                              title={
+                                w.visibility === 'public'
+                                  ? 'hide this world from everyone you have not granted access'
+                                  : 'let anyone signed in read this world'
+                              }
+                              onClick={() => void run(w.slug, 'wvis', async () => {
+                                await api.worlds.setVisibility(w.slug, w.visibility === 'public' ? 'private' : 'public');
+                                await load();
+                              })}
+                            >
+                              {w.visibility === 'public' ? 'make private' : 'make public'}
+                            </button>
+                          ) : null}
+                          <button
+                            className="warn"
+                            disabled={w.storyCount > 0 || busy === `${w.slug}wdelete` || w.role !== 'owner'}
+                            title={
+                              w.role !== 'owner'
+                                ? 'only a world\u2019s owner can delete it'
+                                : w.storyCount > 0
+                                  ? `${w.storyCount} book${w.storyCount === 1 ? '' : 's'} still read this world \u2014 delete or repoint them first`
+                                  : 'delete this world and its canon'
+                            }
+                            onClick={() => {
+                              if (!window.confirm(`Delete the world "${w.title || w.slug}"? This removes its canon. Books are not touched.`)) return;
+                              void run(w.slug, 'wdelete', async () => {
+                                await api.worlds.remove(w.slug);
+                                await load();
+                              });
+                            }}
+                          >
+                            delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
             <div className="field-row" style={{ marginTop: 'var(--s3)' }}>
               <input
@@ -2395,90 +2417,104 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
             ) : stories.length === 0 ? (
               <p className="empty">no stories yet</p>
             ) : (
-              stories.map((s) => (
-                <div key={s.id} className="field-row" style={{ alignItems: 'flex-start' }}>
-                  <span style={{ flex: 1 }}>
-                    {renaming?.id === s.id ? (
-                      <input
-                        autoFocus
-                        value={renaming.title}
-                        onChange={(e) => setRenaming({ id: s.id, title: e.target.value })}
-                        onKeyDown={async (e) => {
-                          if (e.key !== 'Enter') return;
-                          await run(s.id, 'rename', async () => {
-                            await api.stories.rename(s.id, renaming.title);
-                            setRenaming(null);
-                            await load();
-                          });
-                        }}
-                      />
-                    ) : (
-                      <>
-                        <b>{s.title || 'untitled book'}</b>
-                        {s.current ? <span className="tag locked" style={{ marginLeft: 6 }}>reading</span> : null}
-                        {' — '}
-                        scene {s.scene}·{s.turn}
-                        {s.forkedFrom ? (
-                          <span className="dimmer"> · forked at scene {s.forkedAtScene}</span>
-                        ) : null}
-                      </>
-                    )}
-                  </span>
-                  <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    <button
-                      className={s.current ? '' : 'primary'}
-                      disabled={s.current || busy === `${s.id}switch`}
-                      title={s.current ? 'already reading this book' : 'open this book'}
-                      onClick={() => void run(s.id, 'switch', async () => {
-                        await api.stories.switchTo(s.id);
-                        // Client-side selection, not just the server-side
-                        // call above: once login is on, `world.storyId`
-                        // resolution happens per-request from *this user's*
-                        // own stories (`worldFor`, `src/store/index.ts`),
-                        // not from the legacy shared pointer `switchTo`
-                        // still updates for login-off compatibility. Without
-                        // this, every request after a successful switch
-                        // would keep resolving back to "my most recently
-                        // played" rather than the one just picked.
-                        setSelectedStoryId(s.id);
-                        await load();
-                        onSwitched();
-                      })}
-                    >
-                      {s.current ? 'reading' : 'open'}
-                    </button>
-                    <button
-                      disabled={renaming?.id === s.id}
-                      onClick={() => setRenaming({ id: s.id, title: s.title })}
-                    >
-                      rename
-                    </button>
-                    <button
-                      onClick={() => {
-                        setForkFrom({ id: s.id, title: s.title });
-                        setForkScene('');
-                        setForkTitle('');
-                      }}
-                    >
-                      branch…
-                    </button>
-                    <button
-                      className="warn"
-                      disabled={stories.length <= 1 || busy === `${s.id}delete`}
-                      title={stories.length <= 1 ? 'the last story in a world cannot be deleted this way' : 'delete this story only — canon and every other story are unaffected'}
-                      onClick={async () => {
-                        if (!window.confirm(`Delete "${s.title || 'untitled story'}"? This only removes this one story — canon and other stories are unaffected.`)) return;
-                        await run(s.id, 'delete', async () => {
-                          await api.stories.remove(s.id);
-                          await load();
-                        });
-                      }}
-                    >
-                      delete
-                    </button>
-                  </span>
-                </div>
-              ))
+              <div className="scroll-x">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>book</th>
+                      <th>scene · turn</th>
+                      <th className="actions">manage</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stories.map((s) => (
+                      <tr key={s.id} className={s.current ? 'current' : undefined}>
+                        <td>
+                          {renaming?.id === s.id ? (
+                            <input
+                              autoFocus
+                              value={renaming.title}
+                              onChange={(e) => setRenaming({ id: s.id, title: e.target.value })}
+                              onKeyDown={async (e) => {
+                                if (e.key !== 'Enter') return;
+                                await run(s.id, 'rename', async () => {
+                                  await api.stories.rename(s.id, renaming.title);
+                                  setRenaming(null);
+                                  await load();
+                                });
+                              }}
+                            />
+                          ) : (
+                            <>
+                              <span className="row-name">
+                                <b>{s.title || 'untitled book'}</b>
+                                {s.current ? <span className="tag locked" style={{ marginLeft: 6 }}>reading</span> : null}
+                              </span>
+                              {s.forkedFrom ? (
+                                <span className="row-meta">forked at scene {s.forkedAtScene}</span>
+                              ) : null}
+                            </>
+                          )}
+                        </td>
+                        <td className="mono">{s.scene}·{s.turn}</td>
+                        <td className="actions">
+                          <button
+                            className={s.current ? '' : 'primary'}
+                            disabled={s.current || busy === `${s.id}switch`}
+                            title={s.current ? 'already reading this book' : 'open this book'}
+                            onClick={() => void run(s.id, 'switch', async () => {
+                              await api.stories.switchTo(s.id);
+                              // Client-side selection, not just the server-side
+                              // call above: once login is on, `world.storyId`
+                              // resolution happens per-request from *this user's*
+                              // own stories (`worldFor`, `src/store/index.ts`),
+                              // not from the legacy shared pointer `switchTo`
+                              // still updates for login-off compatibility. Without
+                              // this, every request after a successful switch
+                              // would keep resolving back to "my most recently
+                              // played" rather than the one just picked.
+                              setSelectedStoryId(s.id);
+                              await load();
+                              onSwitched();
+                            })}
+                          >
+                            {s.current ? 'reading' : 'open'}
+                          </button>
+                          <button
+                            disabled={renaming?.id === s.id}
+                            onClick={() => setRenaming({ id: s.id, title: s.title })}
+                          >
+                            rename
+                          </button>
+                          <button
+                            onClick={() => {
+                              setForkFrom({ id: s.id, title: s.title });
+                              setForkScene('');
+                              setForkTitle('');
+                            }}
+                          >
+                            branch…
+                          </button>
+                          <button
+                            className="warn"
+                            disabled={stories.length <= 1 || busy === `${s.id}delete`}
+                            title={stories.length <= 1 ? 'the last story in a world cannot be deleted this way' : 'delete this story only — canon and every other story are unaffected'}
+                            onClick={async () => {
+                              if (!window.confirm(`Delete "${s.title || 'untitled story'}"? This only removes this one story — canon and other stories are unaffected.`)) return;
+                              await run(s.id, 'delete', async () => {
+                                await api.stories.remove(s.id);
+                                await load();
+                              });
+                            }}
+                          >
+                            delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
 
