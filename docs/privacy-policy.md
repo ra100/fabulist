@@ -99,6 +99,13 @@ do **not** claim a zero-knowledge design. Because a turn must be processed to
 generate a response, plaintext also exists in application memory during
 request handling.
 
+When an enrolled user unlocks a private story in the browser, the browser may
+send its random story key over HTTPS for a short-lived, owner-scoped processing
+grant. The app keeps that key only in its running process memory; it is neither
+written to Postgres, a cookie, a log, nor a cache, and is cleared on logout,
+explicit lock, expiry, or process restart. This unlock mechanism is in place
+ahead of the separate content-migration release.
+
 ## 6. What the MCP connector, specifically, can see and do
 
 Connecting Fabulist as an MCP server to ChatGPT, Claude, or another client

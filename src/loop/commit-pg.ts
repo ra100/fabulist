@@ -191,6 +191,7 @@ export async function commitDelta(
       storyId: world.storyId,
       sources: world.sources,
       imagesDir: world.illustrations.imagesDir,
+      crypto: world.crypto,
     });
     const session = await w.session.get();
     const result = await applyDelta(w, delta, session.scene, session.turn, visibility);
@@ -214,6 +215,7 @@ export async function commitTurn(db: Db, world: World, input: CommitTurnInput): 
       storyId: world.storyId,
       sources: world.sources,
       imagesDir: world.illustrations.imagesDir,
+      crypto: world.crypto,
     });
     const session = await w.session.get();
     const turnNo = session.turn + 1;

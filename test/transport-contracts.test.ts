@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   forkStoryBodySchema,
   encryptionEnrollmentBodySchema,
+  encryptionLockBodySchema,
+  encryptionUnlockBodySchema,
   illustrationBodySchema,
   knowledgeBodySchema,
   playResponseSchema,
@@ -32,6 +34,7 @@ test('mutation contracts reject unknown fields and invalid nested values', () =>
       userKey: { version: 1, passphraseKdf: 'pbkdf2-sha256', passphraseKdfParams: { iterations: 1 } },
       storyKeys: [],
     }),
+    encryptionUnlockBodySchema.safeParse({ storyKeys: [{ storyId: 'story-a', key: 'not base64!' }] }),
   ];
 
   assert.ok(invalid.every((result) => !result.success));
@@ -63,6 +66,10 @@ test('mutation contracts preserve documented defaults and valid clients', () => 
       version: 1,
       wrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
     }],
+  }).success, true);
+  assert.deepEqual(encryptionLockBodySchema.parse({}), {});
+  assert.equal(encryptionUnlockBodySchema.safeParse({
+    storyKeys: [{ storyId: 'story-private', key: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }],
   }).success, true);
 });
 

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createEncryptionEnrollment,
+  eraseUnlockedStoryKeys,
+  storyKeyHandoff,
   unlockWithPassphrase,
   unlockWithRecoveryCode,
 } from '../web/src/crypto/keys.ts';
@@ -37,6 +39,11 @@ test('browser-generated passphrase and recovery wraps unlock identical story key
       [...(byRecovery.storyKeys.get(storyId) ?? [])],
     );
   }
+  const handoff = storyKeyHandoff(byPassphrase.storyKeys);
+  assert.deepEqual(handoff.map((item) => item.storyId), storyIds);
+  assert.ok(handoff.every((item) => Buffer.from(item.key, 'base64').length === 32));
+  eraseUnlockedStoryKeys(byPassphrase);
+  assert.equal(byPassphrase.storyKeys.size, 0);
 });
 
 test('a wrong passphrase, recovery code, or authenticated context cannot decrypt a master key', async () => {

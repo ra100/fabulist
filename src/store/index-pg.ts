@@ -32,7 +32,7 @@ import { sourcesFor, type OverlaySource } from '../db/overlay.ts';
 import type { StoryId } from '../domain/types.ts';
 import type { SessionUser } from '../auth/config.ts';
 import { CastStore } from './cast-pg.ts';
-import { ChronicleStore } from './chronicle-pg.ts';
+import { ChronicleStore, type ChronicleCrypto } from './chronicle-pg.ts';
 import { GraphStore } from './graph-pg.ts';
 import { IllustrationStore } from './illustration-pg.ts';
 import {
@@ -66,6 +66,8 @@ export interface WorldOptions {
   storyId: StoryId;
   sources: OverlaySource[];
   imagesDir?: string;
+  /** Process-local access to an unlocked private-story key, when one exists. */
+  crypto?: ChronicleCrypto;
 }
 
 export class World {
@@ -86,17 +88,19 @@ export class World {
   readonly db: Queryable;
   readonly storyId: StoryId;
   readonly sources: OverlaySource[];
+  readonly crypto: ChronicleCrypto | undefined;
 
   constructor(opts: WorldOptions) {
     const { db, storyId, sources } = opts;
     this.db = db;
     this.storyId = storyId;
     this.sources = sources;
+    this.crypto = opts.crypto;
     const worldId = sources[0]?.worldId;
 
     this.graph = new GraphStore({ db, storyId, sources });
     this.cast = new CastStore({ db, storyId, sources });
-    this.chronicle = new ChronicleStore({ db, storyId, worldId });
+    this.chronicle = new ChronicleStore({ db, storyId, worldId, crypto: opts.crypto });
     this.threads = new ThreadStore(db, storyId);
     this.consequences = new ConsequenceStore(db, storyId);
     this.directives = new DirectiveStore(db, storyId);
@@ -115,16 +119,21 @@ export class World {
    * `resolveStoryFor` below is the "give me somewhere to land" path, and
    * conflating the two is how a typo'd id silently created a blank story.
    */
-  static async forStory(db: Queryable, storyId: StoryId, imagesDir?: string): Promise<World> {
+  static async forStory(
+    db: Queryable,
+    storyId: StoryId,
+    imagesDir?: string,
+    crypto?: ChronicleCrypto,
+  ): Promise<World> {
     const story = await getStory(db, storyId);
     if (!story) throw new Error(`no story ${storyId}`);
     const sources = await sourcesFor(db, storyId);
-    return new World({ db, storyId, sources, imagesDir });
+    return new World({ db, storyId, sources, imagesDir, crypto });
   }
 
   /** A different story, same connection. Cheap: no file I/O, just new sources. */
   async withStory(storyId: StoryId): Promise<World> {
-    return World.forStory(this.db, storyId, this.illustrations.imagesDir);
+    return World.forStory(this.db, storyId, this.illustrations.imagesDir, this.crypto);
   }
 
   /** The primary canon world's id, for a canon write or a refresh. */
@@ -172,10 +181,10 @@ export async function resolveStoryFor(
 export async function worldFor(
   db: Queryable,
   user: SessionUser | null,
-  opts: { storyIdOverride?: string; worldIds?: number[]; imagesDir?: string } = {},
+  opts: { storyIdOverride?: string; worldIds?: number[]; imagesDir?: string; crypto?: ChronicleCrypto } = {},
 ): Promise<World> {
   const storyId = await resolveStoryFor(db, user, opts);
-  return World.forStory(db, storyId, opts.imagesDir);
+  return World.forStory(db, storyId, opts.imagesDir, opts.crypto);
 }
 
 // ---------------------------------------------------------- world registry

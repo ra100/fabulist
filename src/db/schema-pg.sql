@@ -358,6 +358,22 @@ CREATE TABLE IF NOT EXISTS story_encryption_keys (
 
 CREATE INDEX IF NOT EXISTS idx_story_encryption_keys_owner ON story_encryption_keys (owner_user_id);
 
+-- Authenticated ciphertext for a private story field. Table, record, and
+-- field identity are public routing metadata and are bound into AES-GCM AAD;
+-- the value itself exists only in `ciphertext`, never alongside this row.
+CREATE TABLE IF NOT EXISTS encrypted_story_values (
+  story_id                TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  table_name              TEXT NOT NULL,
+  record_id               TEXT NOT NULL,
+  field_name              TEXT NOT NULL,
+  version                 INTEGER NOT NULL DEFAULT 1 CHECK (version = 1),
+  nonce                   BYTEA NOT NULL CHECK (octet_length(nonce) = 12),
+  ciphertext              BYTEA NOT NULL CHECK (octet_length(ciphertext) > 16),
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (story_id, table_name, record_id, field_name)
+);
+
 -- Which canon worlds a story reads, in precedence order. THE crossover table.
 --
 -- One row per source. `ordinal` 1 is the primary world, 2 the next, and so on;

@@ -61,6 +61,7 @@ import type { McpToolContext } from '../mcp/tools-pg.ts';
 import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
 import { encryptionKeysForUser, enrollEncryptionKeys } from '../auth/encryption-keys-pg.ts';
+import { EphemeralStoryKeyStore } from '../auth/ephemeral-story-keys.ts';
 import { withEncryptionRollout } from '../auth/encryption-rollout-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
@@ -68,6 +69,8 @@ import {
   createThreadBodySchema,
   createStoryBodySchema,
   encryptionEnrollmentBodySchema,
+  encryptionLockBodySchema,
+  encryptionUnlockBodySchema,
   directiveBodySchema,
   forkStoryBodySchema,
   illustrationBodySchema,
@@ -159,6 +162,8 @@ export interface ServerOptions {
    * all.
    */
   authConfig?: AuthConfig;
+  /** Browser-unlocked story keys held in process memory only. */
+  ephemeralStoryKeys?: EphemeralStoryKeyStore;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -190,6 +195,7 @@ interface RouteContext {
   user: SessionUser | null;
   /** Present whenever login is configured at all — `undefined` in login-off mode. `requireAdmin` reads this alongside `user` to distinguish "login is off" from "login is on, but not an admin." */
   authConfig: AuthConfig | undefined;
+  ephemeralStoryKeys: EphemeralStoryKeyStore;
 }
 
 const MIME: Record<string, string> = {
@@ -325,11 +331,11 @@ route('GET', '/api/auth/me', (_req, res, { user }) => {
   send(res, 200, { user });
 });
 
-route('GET', '/api/encryption/keys', async (_req, res, { db, user }) => {
+route('GET', '/api/encryption/keys', async (_req, res, { db, user, ephemeralStoryKeys }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
   if (!user.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
   const keys = await encryptionKeysForUser(db, user.id);
-  send(res, 200, { enrolled: keys.userKey !== null, ...keys });
+  send(res, 200, { enrolled: keys.userKey !== null, grants: ephemeralStoryKeys.list(user.id), ...keys });
 });
 
 route('POST', '/api/encryption/enroll', async (_req, res, { body, db, user }) => {
@@ -344,6 +350,38 @@ route('POST', '/api/encryption/enroll', async (_req, res, { body, db, user }) =>
     return send(res, status, { error: message });
   }
   send(res, 201, { enrolled: true });
+});
+
+route('POST', '/api/encryption/unlock', async (_req, res, { body, db, user, ephemeralStoryKeys }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  if (!user.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
+  const { storyKeys } = parseBody(encryptionUnlockBodySchema, body);
+  if (new Set(storyKeys.map((item) => item.storyId)).size !== storyKeys.length) {
+    return send(res, 400, { error: 'duplicate private-story key' });
+  }
+  const persisted = await encryptionKeysForUser(db, user.id);
+  if (!persisted.userKey) return send(res, 409, { error: 'configure private storage before unlocking it' });
+  const permittedStoryIds = new Set(persisted.storyKeys.map((item) => item.storyId));
+  if (storyKeys.some((item) => !permittedStoryIds.has(item.storyId))) {
+    return send(res, 403, { error: 'can only unlock your enrolled stories' });
+  }
+  try {
+    const grants = ephemeralStoryKeys.unlock(
+      user.id,
+      storyKeys.map((item) => ({ storyId: item.storyId, key: Buffer.from(item.key, 'base64') })),
+    );
+    send(res, 200, { grants });
+  } catch {
+    // Key bytes are deliberately not returned, logged, or placed in an error.
+    send(res, 400, { error: 'invalid private-story key' });
+  }
+});
+
+route('POST', '/api/encryption/lock', async (_req, res, { body, user, ephemeralStoryKeys }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const { storyId } = parseBody(encryptionLockBodySchema, body);
+  const lockedStoryIds = ephemeralStoryKeys.lock(user.id, storyId);
+  send(res, 200, { lockedStoryIds });
 });
 
 route('GET', '/api/state', async (_req, res, { world }) => {
@@ -1398,7 +1436,7 @@ route('PUT', '/api/story/sources', async (_req, res, { world, db, body, user }) 
   }
   try {
     await setStorySources(db, world.storyId, ids);
-    const refreshed = await World.forStory(db, world.storyId, world.illustrations.imagesDir);
+    const refreshed = await World.forStory(db, world.storyId, world.illustrations.imagesDir, world.crypto);
     send(res, 200, { storyId: world.storyId, sources: refreshed.sources });
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -2127,6 +2165,7 @@ export function createApiServer(opts: ServerOptions) {
     mcpResourceUrl,
     authConfig,
   } = opts;
+  const ephemeralStoryKeys = opts.ephemeralStoryKeys ?? new EphemeralStoryKeyStore();
   const dataRoot = opts.dataRoot ?? 'data';
   const db = opts.db;
   // Where illustration bytes live. Resolved once: it is a path, not state, and
@@ -2163,7 +2202,12 @@ export function createApiServer(opts: ServerOptions) {
     // Async now, and resolved per call rather than from a process-wide pointer.
     // `selected` still lives in this closure for exactly the reason it always did:
     // one client switching books must not drag every other reader along.
-    const world = () => worldFor(db, user, { ...(selected ? { storyIdOverride: selected } : {}), imagesDir });
+    const world = () =>
+      worldFor(db, user, {
+        ...(selected ? { storyIdOverride: selected } : {}),
+        imagesDir,
+        crypto: { keyForStory: (storyId) => (user ? ephemeralStoryKeys.get(user.id, storyId) : null) },
+      });
     return {
       world,
       db,
@@ -2245,6 +2289,8 @@ export function createApiServer(opts: ServerOptions) {
       return;
     }
     if (authConfig && url.pathname === '/auth/logout' && req.method === 'POST') {
+      const user = await verifySession(authConfig, req, res);
+      if (user) ephemeralStoryKeys.lock(user.id);
       handleLogout(res);
       return;
     }
@@ -2344,6 +2390,7 @@ export function createApiServer(opts: ServerOptions) {
           ? await worldFor(db, user, {
               ...(storyIdParam ? { storyIdOverride: storyIdParam } : {}),
               imagesDir,
+              ...(user ? { crypto: { keyForStory: (storyId: string) => ephemeralStoryKeys.get(user.id, storyId) } } : {}),
             })
           : await getWorld();
         await match.handler(req, res, {
@@ -2362,6 +2409,7 @@ export function createApiServer(opts: ServerOptions) {
           params,
           user,
           authConfig,
+          ephemeralStoryKeys,
         });
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
