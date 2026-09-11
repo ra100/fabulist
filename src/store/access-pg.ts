@@ -83,7 +83,14 @@ export async function worldsVisibleTo(
     role: WorldRole | null;
   }>(
     `SELECT w.id, w.slug, w.title, w.visibility,
-            COALESCE(a.role, CASE WHEN w.visibility = 'public' THEN 'reader' END) AS role
+            -- Precedence must match \`worldRoleFor\` exactly: an explicit grant always
+            -- wins; absent one, an admin gets 'owner' (checked in SQL, not only in the
+            -- JS fallback below) so a public world with no \`world_access\` row does not
+            -- collapse to 'reader' for an admin before the fallback ever runs — that
+            -- silently downgraded every freshly-ingested world's rename/visibility/
+            -- delete controls for every admin, since a new world starts public with no
+            -- grant row at all.
+            COALESCE(a.role, CASE WHEN $2 THEN 'owner' WHEN w.visibility = 'public' THEN 'reader' END) AS role
        FROM worlds w
        LEFT JOIN world_access a ON a.world_id = w.id AND a.user_id = $1
       WHERE $2 OR a.role IS NOT NULL OR w.visibility = 'public'
@@ -95,9 +102,7 @@ export async function worldsVisibleTo(
     slug: r.slug,
     title: r.title,
     visibility: r.visibility,
-    // An admin with no row on a private world still gets owner: they can reach it,
-    // so pretending otherwise would only make the UI lie about what will work.
-    role: r.role ?? (user?.isAdmin === true ? 'owner' : null),
+    role: r.role,
   }));
 }
 

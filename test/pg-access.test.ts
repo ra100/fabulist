@@ -96,8 +96,17 @@ test('worldsVisibleTo hides private worlds and reports the effective role', asyn
 
     // An admin sees everything: they are the person who has to fix a world nobody
     // else can reach.
-    assert.equal((await worldsVisibleTo(db, admin)).length, 3);
-    assert.equal((await worldsVisibleTo(db, admin)).find((w) => w.slug === 'theirs')!.role, 'owner');
+    const forAdmin = await worldsVisibleTo(db, admin);
+    assert.equal(forAdmin.length, 3);
+    assert.equal(forAdmin.find((w) => w.slug === 'theirs')!.role, 'owner');
+    // A *public* world with no explicit grant row — the common case for a
+    // freshly-ingested world — must still report 'owner' for an admin here, not
+    // merely from `worldRoleFor`. The SQL used to resolve the public-world
+    // default ('reader') before the admin override ever ran, so this list route
+    // reported 'reader' for every admin on every new world and the rename/
+    // visibility/delete controls in the UI stayed disabled despite the mutation
+    // routes (which call `worldRoleFor`, not this function) actually permitting it.
+    assert.equal(forAdmin.find((w) => w.slug === 'open')!.role, 'owner');
 
     // Login-off local mode sees the public worlds, which is the single-user case.
     assert.deepEqual((await worldsVisibleTo(db, null)).map((w) => w.slug), ['open']);
