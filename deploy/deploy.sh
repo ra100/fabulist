@@ -1,31 +1,49 @@
 #!/usr/bin/env bash
-# Runs on the VPS, invoked by GitHub Actions over SSH with a real argument:
+# Runs on the VPS, invoked by GitHub Actions over SSH:
 #   ssh ... "/home/ra100/Development/fabulist/deploy.sh upload-env"
 #   ssh ... "/home/ra100/Development/fabulist/deploy.sh deploy"
 #
-# Uses a real $1, not $SSH_ORIGINAL_COMMAND — this account's login shell is
-# fish (confirmed directly: an earlier version of this script relied on an
-# authorized_keys `command=` restriction that turned out to never actually
-# be in place, so sshd ran the *login shell* on the client's raw command
-# string instead of this script, and fish has no `upload-env` builtin,
-# which is exactly the error that surfaced). Passing the full invocation —
-# interpreter, path, and argument — as one explicit command works under any
-# login shell, fish included, because it's a plain external-command
-# invocation with a real argv, not shell syntax fish has to understand.
-#
-# SECURITY NOTE, stated plainly rather than glossed over: without an
-# authorized_keys `command=` restriction, this SSH key can run *anything* on
-# the box, not just these two actions — this script restricts nothing on its
-# own once invoked with an arbitrary command instead of this fixed one.
-# Add `command="/home/ra100/Development/fabulist/deploy.sh"` (plus
-# no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty) to this
-# key's authorized_keys line when there's time to also switch the workflow
-# back to reading $SSH_ORIGINAL_COMMAND — deploy/README.md has the exact
-# line. Tracked as a known gap, not silently dropped.
+# Also supports authorized_keys forced-command mode, where sshd always runs this
+# script and passes the client's requested command in $SSH_ORIGINAL_COMMAND.
+# The parser below accepts only two actions (`upload-env`, `deploy`) whether
+# they arrive as bare action names or as "<path>/deploy.sh <action>".
 set -euo pipefail
 cd "$(dirname "$0")"
 
-action="${1:-}"
+resolve_action() {
+  local raw="${1:-${SSH_ORIGINAL_COMMAND:-}}"
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  [ -n "$raw" ] || return 1
+
+  local first="" second=""
+  IFS=' ' read -r first second _ <<<"$raw"
+
+  case "$first" in
+    upload-env|deploy)
+      printf '%s\n' "$first"
+      return 0
+      ;;
+  esac
+
+  case "$first $second" in
+    */deploy.sh\ upload-env|deploy.sh\ upload-env)
+      printf 'upload-env\n'
+      return 0
+      ;;
+    */deploy.sh\ deploy|deploy.sh\ deploy)
+      printf 'deploy\n'
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+if ! action="$(resolve_action "${1:-}")"; then
+  got="${1:-${SSH_ORIGINAL_COMMAND:-}}"
+  echo "deploy.sh: unknown action '$got' (expected 'upload-env' or 'deploy')" >&2
+  exit 1
+fi
 
 case "$action" in
   upload-env)
