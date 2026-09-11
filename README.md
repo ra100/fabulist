@@ -60,6 +60,18 @@ pnpm typecheck
 pnpm lint                 # biome, TypeScript only
 ```
 
+PostgreSQL integration tests skip when no test database is configured. To run
+the same database coverage as CI, including the scale and 100-reader concurrency
+checks, start the disposable local cluster and use the connection string it
+prints:
+
+```bash
+pnpm pg:start
+FABULIST_TEST_PG='postgres://postgres@localhost:5433/fabulist_test?host=/tmp' \
+  FABULIST_REQUIRE_TEST_PG=1 FABULIST_TEST_PG_SCALE=1 pnpm test
+pnpm pg:stop
+```
+
 Provided as-is, free, no paid tier, no ads, no analytics
 (`.design/SAAS-MULTIUSER.md` §7). [`docs/privacy-policy.md`](docs/privacy-policy.md),
 [`docs/terms-of-service.md`](docs/terms-of-service.md), and

@@ -47,7 +47,11 @@ const ROLES_SQL = readFileSync(join(here, '..', 'src', 'db', 'schema-pg-roles.sq
  * one running gets the tests without configuring anything.
  */
 export function testConnectionString(): string | null {
-  return process.env.FABULIST_TEST_PG ?? process.env.DATABASE_URL ?? null;
+  const connectionString = process.env.FABULIST_TEST_PG ?? process.env.DATABASE_URL ?? null;
+  if (!connectionString && process.env.FABULIST_REQUIRE_TEST_PG === '1') {
+    throw new Error('PostgreSQL tests are required, but FABULIST_TEST_PG and DATABASE_URL are not set');
+  }
+  return connectionString;
 }
 
 let counter = 0;
@@ -116,10 +120,10 @@ export async function withPg(fn: (db: Db, schema: string) => Promise<void>): Pro
  * `'1'` fails in a way that looks like a data bug rather than a type one.
  */
 export async function makeWorld(db: Db, slug: string, title = slug): Promise<number> {
-  const row = await db.one<{ id: string }>(
-    `INSERT INTO worlds (slug, title) VALUES ($1, $2) RETURNING id`,
-    [slug, title],
-  );
+  const row = await db.one<{ id: string }>(`INSERT INTO worlds (slug, title) VALUES ($1, $2) RETURNING id`, [
+    slug,
+    title,
+  ]);
   return Number(row!.id);
 }
 
