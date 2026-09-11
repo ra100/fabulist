@@ -40,7 +40,14 @@ import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
-import { playBodySchema } from './contracts.ts';
+import {
+  createThreadBodySchema,
+  directiveBodySchema,
+  knobsBodySchema,
+  playBodySchema,
+  styleBodySchema,
+  updateThreadBodySchema,
+} from './contracts.ts';
 
 export interface ServerOptions {
   /**
@@ -445,8 +452,7 @@ route('GET', '/api/threads', (_req, res, { world }) => {
  * later, the way one written by the extractor would be filled in over time.
  */
 route('POST', '/api/threads', (_req, res, { world, body }) => {
-  const b = (body ?? {}) as { title?: string; stakes?: string; tension?: number; parties?: string[]; resolutions?: string[] };
-  if (!b.title?.trim()) return send(res, 400, { error: 'title required' });
+  const b = parseBody(createThreadBodySchema, body);
   const created = world.threads.create({
     title: b.title.trim(),
     stakes: b.stakes ?? '',
@@ -462,8 +468,8 @@ route('POST', '/api/threads', (_req, res, { world, body }) => {
 route('PUT', '/api/thread/:id', (_req, res, { world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
   if (!world.threads.get(id)) return send(res, 404, { error: 'no thread' });
-  const patch = (body ?? {}) as { tension?: number; status?: string; title?: string; stakes?: string };
-  world.threads.update(id, patch as never);
+  const patch = parseBody(updateThreadBodySchema, body);
+  world.threads.update(id, patch);
   send(res, 200, world.threads.get(id));
 });
 
@@ -572,8 +578,7 @@ route('GET', '/api/directives', (_req, res, { world }) => {
  * recalculation in a system with offscreen machinery is how you stop trusting it.
  */
 route('POST', '/api/directive', (_req, res, { world, body }) => {
-  const b = (body ?? {}) as Partial<Directive>;
-  if (!b.text) return send(res, 400, { error: 'text required' });
+  const b = parseBody(directiveBodySchema, body);
   const created = world.directives.create({
     text: b.text,
     scope: b.scope ?? 'chapter',
@@ -604,7 +609,7 @@ route('GET', '/api/style', (_req, res, { world }) => {
 
 route('PUT', '/api/style', (_req, res, { world, body }) => {
   const cur = world.session.get();
-  const next = { ...cur.style, ...((body ?? {}) as Partial<StyleContract>) };
+  const next = { ...cur.style, ...parseBody(styleBodySchema, body) };
   world.session.set({ style: next });
   send(res, 200, next);
 });
@@ -615,7 +620,7 @@ route('GET', '/api/knobs', (_req, res, { world }) => {
 
 route('PUT', '/api/knobs', (_req, res, { world, body }) => {
   const cur = world.session.get();
-  const next = { ...cur.knobs, ...((body ?? {}) as Partial<Knobs>) };
+  const next = { ...cur.knobs, ...parseBody(knobsBodySchema, body) };
   world.session.set({ knobs: next });
   send(res, 200, next);
 });

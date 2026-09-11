@@ -60,7 +60,14 @@ import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
-import { playBodySchema } from './contracts.ts';
+import {
+  createThreadBodySchema,
+  directiveBodySchema,
+  knobsBodySchema,
+  playBodySchema,
+  styleBodySchema,
+  updateThreadBodySchema,
+} from './contracts.ts';
 import { playTurn } from '../application/play-pg.ts';
 
 export interface ServerOptions {
@@ -516,14 +523,7 @@ route('GET', '/api/threads', async (_req, res, { world }) => {
  * later, the way one written by the extractor would be filled in over time.
  */
 route('POST', '/api/threads', async (_req, res, { world, body }) => {
-  const b = (body ?? {}) as {
-    title?: string;
-    stakes?: string;
-    tension?: number;
-    parties?: string[];
-    resolutions?: string[];
-  };
-  if (!b.title?.trim()) return send(res, 400, { error: 'title required' });
+  const b = parseBody(createThreadBodySchema, body);
   const created = await world.threads.create({
     title: b.title.trim(),
     stakes: b.stakes ?? '',
@@ -539,8 +539,8 @@ route('POST', '/api/threads', async (_req, res, { world, body }) => {
 route('PUT', '/api/thread/:id', async (_req, res, { world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
   if (!(await world.threads.get(id))) return send(res, 404, { error: 'no thread' });
-  const patch = (body ?? {}) as { tension?: number; status?: string; title?: string; stakes?: string };
-  await world.threads.update(id, patch as never);
+  const patch = parseBody(updateThreadBodySchema, body);
+  await world.threads.update(id, patch);
   send(res, 200, await world.threads.get(id));
 });
 
@@ -666,8 +666,7 @@ route('GET', '/api/directives', async (_req, res, { world }) => {
  * recalculation in a system with offscreen machinery is how you stop trusting it.
  */
 route('POST', '/api/directive', async (_req, res, { world, body }) => {
-  const b = (body ?? {}) as Partial<Directive>;
-  if (!b.text) return send(res, 400, { error: 'text required' });
+  const b = parseBody(directiveBodySchema, body);
   const created = await world.directives.create({
     text: b.text,
     scope: b.scope ?? 'chapter',
@@ -702,7 +701,7 @@ route('GET', '/api/style', async (_req, res, { world }) => {
 
 route('PUT', '/api/style', async (_req, res, { world, body }) => {
   const cur = await world.session.get();
-  const next = { ...cur.style, ...((body ?? {}) as Partial<StyleContract>) };
+  const next = { ...cur.style, ...parseBody(styleBodySchema, body) };
   await world.session.set({ style: next });
   send(res, 200, next);
 });
@@ -713,7 +712,7 @@ route('GET', '/api/knobs', async (_req, res, { world }) => {
 
 route('PUT', '/api/knobs', async (_req, res, { world, body }) => {
   const cur = await world.session.get();
-  const next = { ...cur.knobs, ...((body ?? {}) as Partial<Knobs>) };
+  const next = { ...cur.knobs, ...parseBody(knobsBodySchema, body) };
   await world.session.set({ knobs: next });
   send(res, 200, next);
 });
