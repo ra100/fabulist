@@ -169,8 +169,20 @@ jobs:
             return 0
           }
 
-          render_env | ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
-            "$SSH_USER@$SSH_DOMAIN" "$deploy_path/deploy.sh upload-env"
+          # Try path-form first (works with unrestricted keys), then bare action
+          # (works with forced-command setups whose server parser expects only
+          # SSH_ORIGINAL_COMMAND=upload-env/deploy).
+          env_payload="$(render_env)"
+          if ! printf '%s\n' "$env_payload" | ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+               "$SSH_USER@$SSH_DOMAIN" "$deploy_path/deploy.sh upload-env"; then
+            echo "note: path-form upload-env failed; retrying bare action" >&2
+            printf '%s\n' "$env_payload" | ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+              "$SSH_USER@$SSH_DOMAIN" "upload-env"
+          fi
 
-          ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
-            "$SSH_USER@$SSH_DOMAIN" "$deploy_path/deploy.sh deploy"
+          if ! ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+               "$SSH_USER@$SSH_DOMAIN" "$deploy_path/deploy.sh deploy"; then
+            echo "note: path-form deploy failed; retrying bare action" >&2
+            ssh -i "$HOME/.ssh/deploy_key" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+              "$SSH_USER@$SSH_DOMAIN" "deploy"
+          fi
