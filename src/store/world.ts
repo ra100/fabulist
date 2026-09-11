@@ -365,6 +365,17 @@ function toStory(r: StoryRow): Story {
   };
 }
 
+function toSession(story: Story): SessionState {
+  return {
+    scene: story.scene,
+    turn: story.turn,
+    playerCharacterId: story.playerCharacterId,
+    currentLocationId: story.currentLocationId,
+    style: story.style,
+    knobs: story.knobs,
+  };
+}
+
 /** Every story in this file, most recently played first. Used by the save browser. */
 export function listStories(db: Db): Story[] {
   return rows<StoryRow>(db.prepare(`SELECT * FROM stories ORDER BY last_played_at DESC, created_at DESC`).all()).map(
@@ -540,7 +551,7 @@ export class StoryStore {
   }
 
   get(): SessionState {
-    return toStory(this.row());
+    return toSession(toStory(this.row()));
   }
 
   /** Full record, including identity and lineage — what the save browser wants. */

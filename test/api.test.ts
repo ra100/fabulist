@@ -80,6 +80,11 @@ test('state endpoint reports the world at a glance', async () => {
     const { status, body } = await get(base, '/api/state');
     assert.equal(status, 200);
     const s = body as Record<string, unknown>;
+    assert.deepEqual(
+      Object.keys(s.session as Record<string, unknown>).sort(),
+      ['currentLocationId', 'knobs', 'playerCharacterId', 'scene', 'style', 'turn'],
+      'session payload should expose play state only',
+    );
     assert.equal((s.session as { scene: number }).scene, 1);
     assert.ok((s.counts as { entities: number }).entities > 15);
     assert.ok((s.threads as unknown[]).length >= 3);

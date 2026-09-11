@@ -101,6 +101,11 @@ test('state, cast, threads and the book all serve from Postgres', async (t) => {
     await withServer(db, async (base) => {
       const state = await get(base, '/api/state');
       assert.equal(state.status, 200);
+      assert.deepEqual(
+        Object.keys(state.body.session as Record<string, unknown>).sort(),
+        ['currentLocationId', 'knobs', 'playerCharacterId', 'scene', 'style', 'turn'],
+        'session payload should expose play state only',
+      );
       assert.ok(state.body.session.playerCharacterId, 'the seeded player should be in the session');
       assert.ok(state.body.counts.canon > 10, `expected populated canon, got ${JSON.stringify(state.body.counts)}`);
 
