@@ -23,7 +23,6 @@ import {
   type State,
   type Story,
   type Thread,
-  type Timeline,
   type TurnMeta,
   type WorldSummary,
 } from './api.ts';
@@ -32,6 +31,7 @@ import { SetupWizard } from './views/SetupWizard.tsx';
 import { ConfigPanels } from './views/ConfigPanels.tsx';
 import { AppearanceEditor, PortraitPanel, SceneIllustration, StylePicker } from './views/Illustration.tsx';
 import { SheetEditor } from './views/SheetEditor.tsx';
+import { TimelineView } from './views/TimelineView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 
@@ -262,7 +262,7 @@ export function App() {
       {error ? <div className="card warn" style={{ margin: 12 }}>{error}</div> : null}
 
       {tab === 'book' ? <BookTab state={state} hasPlayer={hasPlayer} onChanged={refresh} /> : null}
-      {tab === 'timeline' ? <TimelineTab /> : null}
+      {tab === 'timeline' ? <TimelineView /> : null}
       {tab === 'graph' ? <GraphTab /> : null}
       {tab === 'cast' ? <CastTab state={state} /> : null}
       {tab === 'threads' ? <ThreadsTab state={state} onChanged={refresh} /> : null}
@@ -1570,117 +1570,6 @@ function ThreadsTab({ state, onChanged }: { state: State | null; onChanged: () =
             ))}
           </div>
         ) : null}
-      </aside>
-    </div>
-  );
-}
-
-// ------------------------------------------------------------------ timeline
-
-/**
- * §11's "Timeline — chronicle with the divergence points marked" (GAPS.md
- * 3.1, absorbing 3.5). Scenes, chapters and the divergence ledger already
- * existed with nothing rendering them as one connected spine — the book
- * view is a flat turn list, and the divergence ledger only ever appeared
- * in its sidebar when non-empty. This is that spine: one chapter heading
- * per chapter, one row per scene beneath it (turn count, summary when one
- * exists), and every divergence recorded at that scene inline, always
- * visible rather than hidden behind non-emptiness.
- */
-function TimelineTab() {
-  const [timeline, setTimeline] = useState<Timeline | null>(null);
-  const [reveal, setReveal] = useState<Set<number>>(new Set());
-
-  useEffect(() => {
-    void api.timeline().then(setTimeline);
-  }, []);
-
-  if (!timeline) return <div className="main"><div className="pane"><p className="empty">Loading.</p></div></div>;
-
-  const chapterMeta = new Map(timeline.chapters.map((c) => [c.chapter, c]));
-  const byChapter = new Map<number, Timeline['scenes']>();
-  for (const s of timeline.scenes) {
-    const list = byChapter.get(s.chapter) ?? [];
-    list.push(s);
-    byChapter.set(s.chapter, list);
-  }
-  const chapterNumbers = [...byChapter.keys()].sort((a, b) => a - b);
-
-  return (
-    <div className="main">
-      <div className="pane">
-        <div className="measure-tool">
-          <p className="lede">
-            The record of how this playthrough actually went — where it diverged from canon, and by how
-            much, scene by scene.
-          </p>
-          {timeline.scenes.length === 0 ? <p className="empty">Nothing played yet.</p> : null}
-          <div className="timeline">
-            {chapterNumbers.map((chapter) => {
-              const cMeta = chapterMeta.get(chapter);
-              return (
-                <Fragment key={chapter}>
-                  <div className="timeline-chapter-head">
-                    <span>Chapter {chapter}{cMeta?.title ? `: ${cMeta.title}` : ''}</span>
-                  </div>
-                  {cMeta?.summary ? <p className="small dim" style={{ margin: '0 0 var(--s3)' }}>{cMeta.summary}</p> : null}
-                  {byChapter.get(chapter)!.map((s) => (
-                    <div key={s.scene} className={`timeline-scene${s.scene === timeline.currentScene ? ' current' : ''}`}>
-                      <div className="row baseline">
-                        <span className="mono" style={{ minWidth: '3.5rem' }}>s{s.scene}</span>
-                        <span className="grow small">{s.title || (s.turnCount ? '' : 'not yet played')}</span>
-                        <span className="dimmer small">{s.turnCount} turn{s.turnCount === 1 ? '' : 's'}</span>
-                        {s.scene === timeline.currentScene ? <span className="tag locked">current</span> : null}
-                      </div>
-                      {s.summary ? <p className="small dim" style={{ margin: '4px 0 0' }}>{s.summary}</p> : null}
-                      {s.divergences.length ? (
-                        <div className="stack" style={{ marginTop: 'var(--s2)' }}>
-                          {s.divergences.map((d) => {
-                            const open = reveal.has(d.id);
-                            return (
-                              <div key={d.id} className="timeline-divergence">
-                                <div className="row baseline">
-                                  <span className="tag chronicle">{d.kind}</span>
-                                  <span className="small grow">{d.detail}</span>
-                                  {d.canon ? (
-                                    <button
-                                      className="link"
-                                      onClick={() => setReveal((prev) => {
-                                        const next = new Set(prev);
-                                        if (next.has(d.id)) next.delete(d.id); else next.add(d.id);
-                                        return next;
-                                      })}
-                                    >
-                                      {open ? 'hide canon' : 'vs. canon'}
-                                    </button>
-                                  ) : null}
-                                </div>
-                                {open && d.canon ? <p className="small dimmer" style={{ margin: '2px 0 0' }}>{d.canon}</p> : null}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                </Fragment>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-      <aside className="side">
-        <div className="card">
-          <h3>reading this</h3>
-          <p className="small dim">
-            Every divergence here is a real branch point — the story went one way, the source material
-            (or the setup) said another. That gap is what makes this a playthrough of the world rather
-            than a transcript of it.
-          </p>
-          <div className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
-            {timeline.divergenceCount} divergence{timeline.divergenceCount === 1 ? '' : 's'} total
-          </div>
-        </div>
       </aside>
     </div>
   );
