@@ -1,6 +1,7 @@
 import { seedConsequences, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
 import type { Engine, TakeTurnOptions } from '../loop/engine-pg.ts';
 import type { World } from '../store/index-pg.ts';
+import { runPlayTurn } from './play-workflow.ts';
 
 export interface PlayTurnOptions {
   overrideIntegrity?: boolean;
@@ -15,19 +16,28 @@ export interface PlayTurnOptions {
  * forget consequence seeding or the world tick after a successful commit.
  */
 export async function playTurn(engine: Engine, world: World, input: string, opts: PlayTurnOptions = {}) {
-  const outcome = await engine.takeTurn(input, {
-    overrideIntegrity: opts.overrideIntegrity === true,
+  return runPlayTurn(
+    {
+      takeTurn: (resolvedWorld, text, options) =>
+        engine.takeTurn(text, {
+          world: resolvedWorld,
+          overrideIntegrity: options.overrideIntegrity,
+          ...(options.onStage ? { onStage: options.onStage } : {}),
+          ...(options.onToken ? { onToken: options.onToken } : {}),
+        }),
+      seedConsequences: async (resolvedWorld, delta, events) =>
+        (
+          await seedConsequences(
+            resolvedWorld,
+            delta as Parameters<typeof seedConsequences>[1],
+            events as Parameters<typeof seedConsequences>[2],
+          )
+        ).length,
+      tickConsequences,
+      worldTick,
+    },
     world,
-    ...(opts.onStage ? { onStage: opts.onStage } : {}),
-    ...(opts.onToken ? { onToken: opts.onToken } : {}),
-  });
-
-  let seeded = 0;
-  let tick: Awaited<ReturnType<typeof tickConsequences>> | null = null;
-  if (outcome.kind === 'narrated') {
-    seeded = (await seedConsequences(world, outcome.delta, outcome.commit.events)).length;
-    tick = await tickConsequences(world);
-    await worldTick(world);
-  }
-  return { outcome, seeded, tick };
+    input,
+    opts,
+  );
 }

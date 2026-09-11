@@ -6,6 +6,9 @@
  * so most routes are reads.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createDirective } from '../application/directives.ts';
+import { sqliteDirectiveRepository } from '../application/directives-sqlite.ts';
+import { playTurn } from '../application/play.ts';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,12 +18,7 @@ import { forkStory, rollback } from '../loop/branch.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export.ts';
 import { createStory, deleteStory, getStory, listStories, listStoriesForUser } from '../store/world.ts';
 import { createWorldFile, deleteWorldFile, listWorlds, renameWorldFile, replaceWorldFile } from '../store/worlds.ts';
-import {
-  applyDirectiveRecalc,
-  seedConsequences,
-  tickConsequences,
-  worldTick,
-} from '../consequence/propagate.ts';
+import { tickConsequences, worldTick } from '../consequence/propagate.ts';
 import type { Entity, VisualStyle } from '../domain/types.ts';
 import { branchSave } from '../loop/branch.ts';
 import { limitsFromWire, type SetupService } from '../setup/service.ts';
@@ -445,18 +443,7 @@ route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
   // see `TakeTurnOptions.world`'s own doc comment for why this must not be
   // left to the engine's own captured getter once two users can each be
   // mid-turn on their own story at the same time.
-  const outcome = await engine.takeTurn(input, { overrideIntegrity: overrideIntegrity === true, world });
-
-  // Consequence seeding and the world tick run after the turn commits, so the
-  // response can report what the act set in motion.
-  let seeded = 0;
-  let tick = null;
-  if (outcome.kind === 'narrated') {
-    seeded = seedConsequences(world, outcome.delta, outcome.commit.events).length;
-    tick = tickConsequences(world);
-    worldTick(world);
-  }
-  send(res, 200, { outcome, seeded, tick });
+  send(res, 200, await playTurn(engine, world, input, { overrideIntegrity }));
 });
 
 route('GET', '/api/threads', (_req, res, { world }) => {
@@ -594,25 +581,9 @@ route('GET', '/api/directives', (_req, res, { world }) => {
  * A directive steers the future and reports the recalculation, because silent
  * recalculation in a system with offscreen machinery is how you stop trusting it.
  */
-route('POST', '/api/directive', (_req, res, { world, body }) => {
+route('POST', '/api/directive', async (_req, res, { world, body }) => {
   const b = parseBody(directiveBodySchema, body);
-  const created = world.directives.create({
-    text: b.text,
-    scope: b.scope ?? 'chapter',
-    strength: b.strength ?? 'push',
-    lifetimeScenes: b.lifetimeScenes ?? 5,
-    status: 'active',
-    createdScene: world.session.get().scene,
-  });
-  const diff = applyDirectiveRecalc(world, created.id, created.text);
-  send(res, 200, {
-    directive: created,
-    diff: {
-      ...diff,
-      raisedThreadTitles: diff.raisedThreads.map((id) => world.threads.get(id)?.title ?? id),
-      loweredThreadTitles: diff.loweredThreads.map((id) => world.threads.get(id)?.title ?? id),
-    },
-  });
+  send(res, 200, await createDirective(sqliteDirectiveRepository(world), b));
 });
 
 route('DELETE', '/api/directive/:id', (_req, res, { world, params }) => {
