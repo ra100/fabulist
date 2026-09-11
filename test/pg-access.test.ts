@@ -16,6 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { makeWorld, withPg } from './pg-harness.ts';
 import { World, createWorld, getWorldBySlug, worldFor } from '../src/store/index-pg.ts';
 import { createStory } from '../src/store/world-pg.ts';
@@ -37,6 +38,7 @@ import { emptyDelta } from '../src/domain/types.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
+import { lintProse } from '../src/lint/engine.ts';
 import type { Db } from '../src/db/pg.ts';
 import type { SessionUser } from '../src/auth/config.ts';
 
@@ -317,6 +319,50 @@ test('the prose blocklist is per user, not per server', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('private story blocklist prose is enveloped and only matches while unlocked', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'private-blocklist');
+    const story = await createStory(db, { ownerUserId: alice.id, worldIds: [worldId] });
+    await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [story.id]);
+    const key = randomBytes(32);
+    const opts = { storyId: story.id, crypto: { keyForStory: (id: string) => (id === story.id ? key : null) } };
+    const phrase = 'violet lanterns under the bridge';
+    await blockPhrase(db, alice, phrase, 'too distinctive', opts);
+
+    const entries = await blocklistFor(db, alice, opts);
+    assert.deepEqual(entries, [{ pattern: phrase, note: 'too distinctive' }]);
+    assert.equal(
+      lintProse(`They watched violet lanterns under the bridge sway.`, { blocklist: entries.map((entry) => entry.pattern) })
+        .findings.some((finding) => finding.rule === 'user-blocklist'),
+      true,
+    );
+    const raw = await db.one<{ pattern: string; note: string }>(
+      `SELECT pattern, note FROM prose_blocklist WHERE user_id = $1`,
+      [alice.id],
+    );
+    assert.match(raw!.pattern, new RegExp(`^private:${story.id}:`));
+    assert.equal(raw!.note, '');
+    assert.equal(raw!.pattern.includes(phrase), false);
+
+    const locked = { storyId: story.id };
+    await assert.rejects(() => blocklistFor(db, alice, locked), /locked/);
+    await assert.rejects(() => blockPhrase(db, alice, 'must not persist', '', locked), /locked/);
+    await assert.rejects(() => unblockPhrase(db, alice, phrase, locked), /locked/);
+
+    await unblockPhrase(db, alice, phrase, opts);
+    assert.deepEqual(await blocklistFor(db, alice, opts), []);
+    assert.equal(
+      Number((await db.one<{ n: string }>(
+        `SELECT count(*) n FROM encrypted_story_values
+          WHERE story_id = $1 AND table_name = 'prose_blocklist'`,
+        [story.id],
+      ))!.n),
+      0,
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('the blocklist routes round-trip', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(db, null, async (base) => {
@@ -554,4 +600,3 @@ test('the MCP source setter refuses a world the caller may not read', async (t) 
   });
   if (!ran) t.skip('no Postgres configured');
 });
-
