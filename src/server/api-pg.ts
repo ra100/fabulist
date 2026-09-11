@@ -42,7 +42,7 @@ import {
   worldGrants,
   worldsVisibleTo,
 } from '../store/access-pg.ts';
-import { applyDirectiveRecalc, seedConsequences, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
+import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
 import type { Condition, Directive, Entity, Knobs, StyleContract, VisualStyle } from '../domain/types.ts';
 import { limitsFromWire, type SetupService } from '../setup/service-pg.ts';
 import type { DepthMode, IngestLimits } from '../ingest/depth-pg.ts';
@@ -51,11 +51,6 @@ import type { SwappableImageRegistry } from '../providers/image.ts';
 import { switchImageProfile, switchProfile } from '../config/config.ts';
 import { probeImageProviders } from '../providers/imageConfig.ts';
 import { ROUTABLE_ROLES, validateImageSpec, validateSpec, type ConfigService } from '../config/service.ts';
-import {
-  seedConsequences as seedCons,
-  tickConsequences as tickCons,
-  worldTick as wTick,
-} from '../consequence/propagate-pg.ts';
 import { type IllustrationService, NoImageProviderError } from '../illustration/service-pg.ts';
 import { composePortraitPrompt, composeScenePrompt } from '../illustration/composer.ts';
 import { mcpSessionUser, type McpAuth } from '../mcp/auth.ts';
@@ -66,6 +61,7 @@ import { verifySession } from '../auth/config.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
 import { playBodySchema } from './contracts.ts';
+import { playTurn } from '../application/play-pg.ts';
 
 export interface ServerOptions {
   /**
@@ -503,18 +499,7 @@ route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
   // see `TakeTurnOptions.world`'s own doc comment for why this must not be
   // left to the engine's own captured getter once two users can each be
   // mid-turn on their own story at the same time.
-  const outcome = await engine.takeTurn(input, { overrideIntegrity: overrideIntegrity === true, world });
-
-  // Consequence seeding and the world tick run after the turn commits, so the
-  // response can report what the act set in motion.
-  let seeded = 0;
-  let tick = null;
-  if (outcome.kind === 'narrated') {
-    seeded = (await seedConsequences(world, outcome.delta, outcome.commit.events)).length;
-    tick = await tickConsequences(world);
-    await worldTick(world);
-  }
-  send(res, 200, { outcome, seeded, tick });
+  send(res, 200, await playTurn(engine, world, input, { overrideIntegrity }));
 });
 
 route('GET', '/api/threads', async (_req, res, { world }) => {
@@ -1578,21 +1563,12 @@ route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => 
   };
 
   try {
-    const outcome = await engine.takeTurn(input, {
-      overrideIntegrity: overrideIntegrity === true,
+    const result = await playTurn(engine, world, input, {
+      overrideIntegrity,
       onStage: (stage) => emit('stage', { stage }),
       onToken: (chunk) => emit('token', { chunk }),
-      world,
     });
-
-    let seeded = 0;
-    let tick = null;
-    if (outcome.kind === 'narrated') {
-      seeded = (await seedCons(world, outcome.delta, outcome.commit.events)).length;
-      tick = await tickCons(world);
-      await wTick(world);
-    }
-    emit('done', { outcome, seeded, tick });
+    emit('done', result);
   } catch (err) {
     emit('error', { error: err instanceof Error ? err.message : String(err) });
   } finally {

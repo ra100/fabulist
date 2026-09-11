@@ -31,6 +31,7 @@ import type { Db } from '../db/pg.ts';
 import { createStory, getStory, listStories, listStoriesForUser } from '../store/world-pg.ts';
 import type { SessionUser } from '../auth/config.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId } from '../domain/types.ts';
+import { playTurn } from '../application/play-pg.ts';
 
 export interface McpToolContext {
   /**
@@ -580,16 +581,7 @@ export async function resolveInterruptTool(
  */
 export async function playTool(ctx: McpToolContext, args: { input: string; overrideIntegrity?: boolean }) {
   const world = await ctx.world();
-  const outcome = await ctx.engine.takeTurn(args.input, { overrideIntegrity: args.overrideIntegrity === true, world });
-  let seeded = 0;
-  let tick: Awaited<ReturnType<typeof tickConsequences>> | null = null;
-  if (outcome.kind === 'narrated') {
-    const { seedConsequences } = await import('../consequence/propagate-pg.ts');
-    seeded = (await seedConsequences(world, outcome.delta, outcome.commit.events)).length;
-    tick = await tickConsequences(world);
-    await worldTick(world);
-  }
-  return { outcome, seeded, tick };
+  return playTurn(ctx.engine, world, args.input, { overrideIntegrity: args.overrideIntegrity });
 }
 
 /** `pin_turn`. The MCP-side counterpart of `POST /api/turn/:id/pin` \u2014 a pinned turn's prose survives `regenerate_turn`/compaction untouched. */
