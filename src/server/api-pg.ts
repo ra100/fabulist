@@ -1557,22 +1557,22 @@ route('DELETE', '/api/worlds/:slug/access/:userId', async (_req, res, { db, para
 // table looked like a feature and was dead weight. These routes are what make it
 // real.
 
-route('GET', '/api/blocklist', async (_req, res, { db, user }) => {
-  send(res, 200, await blocklistFor(db, user));
+route('GET', '/api/blocklist', async (_req, res, { db, user, world }) => {
+  send(res, 200, await blocklistFor(db, user, { storyId: world.storyId, crypto: world.crypto }));
 });
 
-route('POST', '/api/blocklist', async (_req, res, { db, body, user }) => {
+route('POST', '/api/blocklist', async (_req, res, { db, body, user, world }) => {
   const { pattern, note } = parseBody(personalBlocklistBodySchema, body);
   try {
-    await blockPhrase(db, user, pattern, note ?? '');
+    await blockPhrase(db, user, pattern, note ?? '', { storyId: world.storyId, crypto: world.crypto });
     send(res, 201, { pattern: pattern.trim(), note: note ?? '' });
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
 });
 
-route('DELETE', '/api/blocklist/:pattern', async (_req, res, { db, params, user }) => {
-  await unblockPhrase(db, user, decodeURIComponent(params.pattern ?? ''));
+route('DELETE', '/api/blocklist/:pattern', async (_req, res, { db, params, user, world }) => {
+  await unblockPhrase(db, user, decodeURIComponent(params.pattern ?? ''), { storyId: world.storyId, crypto: world.crypto });
   send(res, 200, { ok: true });
 });
 
