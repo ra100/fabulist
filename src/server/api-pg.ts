@@ -765,12 +765,9 @@ route('PUT', '/api/knobs', async (_req, res, { world, body }) => {
   send(res, 200, next);
 });
 
-route('GET', '/api/frames', (_req, res, { engine }) => {
-  // Slot sizes for the last turn. Sounds like plumbing; it is the fastest way to
-  // diagnose a scene that felt thin.
-  const out: Record<string, unknown> = {};
-  for (const [role, frame] of Object.entries(engine.lastFrames)) out[role] = frame.log;
-  send(res, 200, out);
+route('GET', '/api/frames', async (_req, res, { world }) => {
+  const latest = (await world.chronicle.recentTurns(1))[0];
+  send(res, 200, latest?.meta.frames ?? (latest?.meta.frameLog ? { narrate: latest.meta.frameLog } : {}));
 });
 
 // -------------------------------------------------------------- illustration
@@ -1041,10 +1038,10 @@ route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
   const { scene, force } = (body ?? {}) as { scene?: number; force?: boolean };
   const compactor = engine.compaction();
   if (typeof scene === 'number') {
-    const summary = await compactor.summariseScene(scene, force === true);
+    const summary = await compactor.summariseScene(world, scene, force === true);
     return send(res, 200, { scene, summary });
   }
-  const result = await compactor.backfill((await world.session.get()).scene);
+  const result = await compactor.backfill(world, (await world.session.get()).scene);
   send(res, 200, result);
 });
 
@@ -1055,7 +1052,7 @@ route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
  */
 route('POST', '/api/scene/close', async (_req, res, { world, engine }) => {
   const before = await world.session.get();
-  const result = await engine.compaction().onSceneClosed(before.scene);
+  const result = await engine.compaction().onSceneClosed(world, before.scene);
   await world.session.set({ scene: before.scene + 1, turn: 0 });
   await world.chronicle.upsertScene(before.scene + 1, { chapter: engine.compaction().chapterOf(before.scene + 1) });
   const summary = (await world.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;

@@ -834,10 +834,10 @@ export async function compactTool(ctx: McpToolContext, args: { scene?: number; f
   const world = await ctx.world();
   const compactor = ctx.engine.compaction();
   if (typeof args.scene === 'number') {
-    const summary = await compactor.summariseScene(args.scene, args.force === true);
+    const summary = await compactor.summariseScene(world, args.scene, args.force === true);
     return { scene: args.scene, summary };
   }
-  return compactor.backfill((await world.session.get()).scene);
+  return compactor.backfill(world, (await world.session.get()).scene);
 }
 
 /**
@@ -849,7 +849,7 @@ export async function compactTool(ctx: McpToolContext, args: { scene?: number; f
 export async function closeSceneTool(ctx: McpToolContext) {
   const world = await ctx.world();
   const before = await world.session.get();
-  const result = await ctx.engine.compaction().onSceneClosed(before.scene);
+  const result = await ctx.engine.compaction().onSceneClosed(world, before.scene);
   await world.session.set({ scene: before.scene + 1, turn: 0 });
   await world.chronicle.upsertScene(before.scene + 1, { chapter: ctx.engine.compaction().chapterOf(before.scene + 1) });
   const summary = (await world.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;

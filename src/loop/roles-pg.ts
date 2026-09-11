@@ -16,6 +16,7 @@ import type {
   CoherenceDistance,
   Delta,
   EntityId,
+  Frame,
   IntegrityVerdict,
   Intent,
   Interrupt,
@@ -59,6 +60,7 @@ export interface RoleDeps {
    * disagree about who is in the room.
    */
   data: FrameData;
+  recordFrame: (role: string, frame: Frame) => void;
   log: (role: string, provider: string, model: string, tokensIn: number, tokensOut: number) => void;
 }
 
@@ -183,6 +185,7 @@ export async function integrity(
 
   const ctx = deps.ctx('integrity', { rawInput });
   const frame = buildIntegrityFrame(ctx, deps.data, actorId);
+  deps.recordFrame('integrity', frame);
   const raw = (await callJson(deps, 'integrity', INTEGRITY_SYSTEM, frame.text, integritySchema)) as Record<
     string,
     unknown
@@ -274,6 +277,7 @@ Reply with JSON only.`;
 export async function referee(deps: RoleDeps, rawInput: string): Promise<RefereeVerdict> {
   const ctx = deps.ctx('referee', { rawInput });
   const frame = buildRefereeFrame(ctx, deps.data);
+  deps.recordFrame('referee', frame);
   const raw = (await callJson(deps, 'referee', REFEREE_SYSTEM, frame.text, refereeSchema)) as Record<string, unknown>;
 
   const spawn = Array.isArray(raw.spawn)
@@ -335,6 +339,7 @@ export interface DirectorPlan {
 export async function direct(deps: RoleDeps, rawInput: string): Promise<DirectorPlan> {
   const ctx = deps.ctx('director', { rawInput });
   const frame = buildDirectorFrame(ctx, deps.data);
+  deps.recordFrame('director', frame);
   const raw = (await callJson(deps, 'director', DIRECTOR_SYSTEM, frame.text, directorSchema)) as Record<string, unknown>;
   return {
     move: typeof raw.move === 'string' ? raw.move : GM_MOVES[0],
@@ -406,6 +411,7 @@ export function buildNarratorPrompt(
 ): { system: string; user: string; maxTokens: number } {
   const ctx = deps.ctx('narrate', { rawInput, agreedBeat });
   const frame = buildNarratorFrame(ctx, deps.data);
+  deps.recordFrame('narrate', frame);
   const style = ctx.session.style;
   return {
     system: narratorSystem(style, verbatim),
@@ -468,6 +474,7 @@ export async function extract(
 ): Promise<{ delta: Delta; validation: ValidationResult }> {
   const ctx = deps.ctx('extract', { rawInput });
   const frame = buildExtractFrame(ctx, deps.data, prose);
+  deps.recordFrame('extract', frame);
   const raw = await callJson(deps, 'extract', EXTRACT_SYSTEM, frame.text, deltaSchema, 2);
 
   const { delta, issues } = coerceDelta(raw);

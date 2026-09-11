@@ -385,6 +385,8 @@ export interface TurnMeta {
   referee: RefereeVerdict | null;
   move: string | null;
   frameLog: FrameLog | null;
+  /** Per-role frame budgets for this turn. Persisted so diagnostics stay story-scoped. */
+  frames?: Record<string, FrameLog>;
   lint: LintReport | null;
   providerCalls: Array<{ role: string; provider: string; model: string; tokensIn: number; tokensOut: number }>;
 }
