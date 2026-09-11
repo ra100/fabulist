@@ -197,8 +197,8 @@ function RoutingPanel({
       {open ? (
         <div style={{ marginTop: 10 }}>
           {bundle.roles.map((role) => (
-            <div className="row" key={role} style={{ marginBottom: 6 }}>
-              <span className="dim mono" style={{ width: 92 }}>{role}</span>
+            <label className="field-row" key={role}>
+              <span className="mono">{role}</span>
               <select
                 value={cfg.routes[role] ?? ''}
                 disabled={busy}
@@ -209,7 +209,7 @@ function RoutingPanel({
                   <option key={key} value={key}>{key}</option>
                 ))}
               </select>
-            </div>
+            </label>
           ))}
         </div>
       ) : null}
@@ -280,14 +280,14 @@ export function ProvidersEditor({
   };
 
   const field = (name: keyof ProviderSpec, label: string, placeholder = '') => (
-    <div className="row" key={name} style={{ marginBottom: 6 }}>
-      <span className="dim" style={{ width: 96 }}>{label}</span>
+    <label className="field-row" key={name}>
+      <span>{label}</span>
       <input
         value={String(spec[name] ?? '')}
         placeholder={placeholder}
         onChange={(e) => setSpec({ ...spec, [name]: e.target.value })}
       />
-    </div>
+    </label>
   );
 
   // Only what the user actually configured. The presets are candidates, not
@@ -358,47 +358,47 @@ export function ProvidersEditor({
       ) : null}
 
       {editing !== null ? (
-        <div style={{ marginTop: 13, borderTop: '1px solid var(--line)', paddingTop: 11 }}>
+        <div style={{ marginTop: 13, borderTop: '1px solid var(--rule)', paddingTop: 11 }}>
           <h3 className="eyebrow" style={{ marginTop: 0 }}>
             {editing === '' ? 'add a model' : `editing ${editing}`}
           </h3>
-          <div className="row" style={{ marginBottom: 6 }}>
-            <span className="dim" style={{ width: 96 }}>name</span>
+          <label className="field-row">
+            <span>name</span>
             <input value={key} placeholder="vllm:my-model" onChange={(e) => setKey(e.target.value)} />
-          </div>
-          <div className="row" style={{ marginBottom: 6 }}>
-            <span className="dim" style={{ width: 96 }}>kind</span>
+          </label>
+          <label className="field-row">
+            <span>kind</span>
             <select value={spec.kind} onChange={(e) => setSpec({ ...spec, kind: e.target.value })}>
               {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
-          </div>
+          </label>
           {field('model', 'model id', 'the id the server was launched with')}
 
           {relevantFields(spec.kind).map((name) => {
             if (name === 'allowUnofficial') {
               return (
-                <div className="row" key={name} style={{ marginBottom: 6 }}>
-                  <span className="dim" style={{ width: 96 }}>unofficial</span>
-                  <label className="small grow">
+                <label className="field-row" key={name}>
+                  <span>unofficial</span>
+                  <span className="small" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                     <input
                       type="checkbox"
-                      style={{ width: 'auto', marginRight: 7 }}
+                      style={{ width: 'auto' }}
                       checked={spec.allowUnofficial === true}
                       onChange={(e) => setSpec({ ...spec, allowUnofficial: e.target.checked })}
                     />
                     I understand this uses an undocumented endpoint and may breach Copilot's terms
-                  </label>
-                </div>
+                  </span>
+                </label>
               );
             }
             if (name === 'dialect') {
               return (
-                <div className="row" key={name} style={{ marginBottom: 6 }}>
-                  <span className="dim" style={{ width: 96 }}>dialect</span>
+                <label className="field-row" key={name}>
+                  <span>dialect</span>
                   <select value={spec.dialect ?? 'openai'} onChange={(e) => setSpec({ ...spec, dialect: e.target.value })}>
                     {DIALECTS.map((d) => <option key={d} value={d}>{d}</option>)}
                   </select>
-                </div>
+                </label>
               );
             }
             const labels: Record<string, [string, string]> = {
