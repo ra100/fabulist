@@ -140,6 +140,8 @@ test('every listed tool carries readOnly/destructive/openWorld annotations, matc
       // place that would actually notice a new tool landing with no annotations at all.
       const missing = tools.filter((t) => t.annotations === undefined).map((t) => t.name);
       assert.deepEqual(missing, [], `tools missing annotations entirely: ${missing.join(', ')}`);
+      const missingOutputSchema = tools.filter((tool) => tool.outputSchema === undefined).map((tool) => tool.name);
+      assert.deepEqual(missingOutputSchema, [], `tools missing output schemas: ${missingOutputSchema.join(', ')}`);
 
       const byName = new Map(tools.map((t) => [t.name, t.annotations]));
       // Spot-check a representative read tool, write tool, and destructive tool rather than
