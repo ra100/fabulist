@@ -286,6 +286,25 @@ test('style and knobs round-trip through the api', async () => {
   });
 });
 
+test('mutation contracts reject invalid enums, ranges, and unknown fields', async () => {
+  await withServer(async (base, world) => {
+    const thread = world.threads.all()[0]!;
+    const before = world.session.get();
+    const responses = await Promise.all([
+      send(base, 'POST', '/api/threads', { title: 'bad tension', tension: 2 }),
+      send(base, 'PUT', `/api/thread/${encodeURIComponent(thread.id)}`, { status: 'forgotten' }),
+      send(base, 'POST', '/api/directive', { text: 'go somewhere', strength: 'absolute' }),
+      send(base, 'PUT', '/api/style', { pov: 'cinematic' }),
+      send(base, 'PUT', '/api/knobs', { danger: -0.1 }),
+      send(base, 'PUT', '/api/knobs', { danger: 0.4, typo: true }),
+    ]);
+    assert.deepEqual(responses.map((response) => response.status), [400, 400, 400, 400, 400, 400]);
+    assert.deepEqual(world.session.get().style, before.style);
+    assert.deepEqual(world.session.get().knobs, before.knobs);
+    assert.equal(world.threads.get(thread.id)?.status, thread.status);
+  });
+});
+
 test('pinned prose survives a re-render attempt', async () => {
   await withServer(async (base, world) => {
     await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
