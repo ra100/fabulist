@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { STORY_ENVELOPE_VERSION, storyValueAad, type StoryValueContext } from './story-envelope-format.ts';
 
 const KEY_BYTES = 32;
@@ -9,6 +9,18 @@ export interface StoryValueEnvelope {
   version: number;
   nonce: Buffer;
   ciphertext: Buffer;
+}
+
+/**
+ * Deterministic, per-story lookup token. The caller must supply an already
+ * normalized value; plaintext is never stored with or recoverable from it.
+ */
+export function storyBlindIndex(key: Buffer, domain: string, value: string): string {
+  assertKey(key);
+  if (!domain || !value) throw new Error('incomplete private-story blind-index input');
+  return createHmac('sha256', key)
+    .update(`fabulist:story-blind-index:v1:${domain}\u0000${value}`, 'utf8')
+    .digest('base64url');
 }
 
 const BINARY_MAGIC = Buffer.from('FSEB', 'ascii');

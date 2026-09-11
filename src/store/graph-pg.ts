@@ -40,8 +40,7 @@
  * those exist only in chronicle, so `setDepth` falls back to whichever table
  * actually holds the id rather than silently updating nothing.
  */
-import { randomUUID } from 'node:crypto';
-import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
+import { decryptStoryValue, encryptStoryValue, storyBlindIndex } from '../crypto/story-envelope.ts';
 import { jsonGet, type Queryable } from '../db/pg.ts';
 import { overlayEdges, overlayEntities, overlayEntity, type OverlaySource } from '../db/overlay.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
@@ -57,6 +56,7 @@ import type {
 } from '../domain/types.ts';
 
 type EncryptedValue = { field: string; value: unknown };
+type BlindIndex = { kind: 'name' | 'logical_id'; token: string };
 type DecryptedValues = Map<string, Map<string, unknown>>;
 
 class GraphPrivateValues {
@@ -96,6 +96,7 @@ class GraphPrivateValues {
     recordId: string,
     key: Buffer,
     values: EncryptedValue[],
+    blindIndexes: BlindIndex[] = [],
   ): Promise<void> {
     const envelopes = values.map(({ field, value }) => ({
       field,
@@ -110,14 +111,37 @@ class GraphPrivateValues {
         return `($${offset}::text,$${offset + 1}::integer,$${offset + 2}::bytea,$${offset + 3}::bytea)`;
       })
       .join(', ');
+    const blindOffset = first + 4 + envelopes.length * 4;
+    const blindParams: string[] = [];
+    const blindTuples = blindIndexes
+      .map((index, offset) => {
+        blindParams.push(index.kind, index.token);
+        const position = blindOffset + offset * 2;
+        return `($${first + 1}::text,$${first + 3}::text,$${position}::text,$${position + 1}::text)`;
+      })
+      .join(', ');
+    const blindCte = blindIndexes.length
+      ? `,
+       blind AS (
+         INSERT INTO chron_entity_blind_indexes (story_id, entity_id, index_kind, token)
+         VALUES ${blindTuples}
+         ON CONFLICT (story_id, entity_id, index_kind) DO UPDATE SET token = EXCLUDED.token
+         RETURNING 1
+       )`
+      : '';
+    const finalSelect = blindIndexes.length ? `SELECT 1 FROM encrypted CROSS JOIN blind LIMIT 1` : `SELECT 1 FROM encrypted`;
     await this.db.query(
-      `WITH written AS (${statement})
-       INSERT INTO encrypted_story_values (story_id, table_name, record_id, field_name, version, nonce, ciphertext)
-       SELECT $${first + 1}, $${first + 2}, $${first + 3}, value.field_name, value.version, value.nonce, value.ciphertext
-         FROM written CROSS JOIN (VALUES ${tuples}) AS value(field_name, version, nonce, ciphertext)
-       ON CONFLICT (story_id, table_name, record_id, field_name) DO UPDATE SET
-         version = EXCLUDED.version, nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, updated_at = now()`,
-      [...statementParams, this.storyId, table, recordId, ...valueParams],
+      `WITH written AS (${statement}),
+       encrypted AS (
+         INSERT INTO encrypted_story_values (story_id, table_name, record_id, field_name, version, nonce, ciphertext)
+         SELECT $${first + 1}, $${first + 2}, $${first + 3}, value.field_name, value.version, value.nonce, value.ciphertext
+           FROM written CROSS JOIN (VALUES ${tuples}) AS value(field_name, version, nonce, ciphertext)
+         ON CONFLICT (story_id, table_name, record_id, field_name) DO UPDATE SET
+           version = EXCLUDED.version, nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, updated_at = now()
+         RETURNING 1
+       )${blindCte}
+       ${finalSelect}`,
+      [...statementParams, this.storyId, table, recordId, ...valueParams, ...blindParams],
     );
   }
 
@@ -286,52 +310,13 @@ export class GraphStore {
     return this.canonWorldId;
   }
 
-  private async privateEntityId(
-    id: EntityId,
-    key: Buffer,
-  ): Promise<{ id: EntityId; logicalId: EntityId } | undefined> {
-    const direct = await this.db.query<{ id: string }>(
-      `SELECT id FROM chron_entities WHERE story_id = $1 AND id = $2`,
-      [this.storyId, id],
+  private async blindEntityId(id: EntityId, key: Buffer): Promise<EntityId | undefined> {
+    const { rows } = await this.db.query<{ entity_id: string }>(
+      `SELECT entity_id FROM chron_entity_blind_indexes
+        WHERE story_id = $1 AND index_kind = 'logical_id' AND token = $2`,
+      [this.storyId, storyBlindIndex(key, 'graph:logical-id', normaliseLogicalId(id))],
     );
-    if (direct.rows[0]) {
-      const values = await this.privateValues.read('chron_entities', [id], ['logical_id'], key);
-      return {
-        id,
-        logicalId: this.privateValues.string(values.get(id)!.get('logical_id'), 'chron_entities.logical_id'),
-      };
-    }
-    const { rows } = await this.db.query<{ id: string }>(`SELECT id FROM chron_entities WHERE story_id = $1`, [
-      this.storyId,
-    ]);
-    if (!rows.length) return undefined;
-    const values = await this.privateValues.read('chron_entities', rows.map((row) => row.id), ['logical_id'], key);
-    for (const row of rows) {
-      if (values.get(row.id)?.get('logical_id') === id) return { id: row.id, logicalId: id };
-    }
-    return undefined;
-  }
-
-  private async opaqueEntityId(id: EntityId, key: Buffer): Promise<{ id: EntityId; logicalId: EntityId }> {
-    return (await this.privateEntityId(id, key)) ?? { id: `ent:${randomUUID()}`, logicalId: id };
-  }
-
-  private async privateLogicalEntityIds(key: Buffer): Promise<Map<EntityId, EntityId>> {
-    const { rows } = await this.db.query<{ id: string }>(`SELECT id FROM chron_entities WHERE story_id = $1`, [
-      this.storyId,
-    ]);
-    if (!rows.length) return new Map();
-    const values = await this.privateValues.read('chron_entities', rows.map((row) => row.id), ['logical_id'], key);
-    return new Map(
-      rows.map((row) => [
-        row.id,
-        this.privateValues.string(values.get(row.id)!.get('logical_id'), 'chron_entities.logical_id'),
-      ]),
-    );
-  }
-
-  private async privateLogicalIds(key: Buffer): Promise<Set<EntityId>> {
-    return new Set((await this.privateLogicalEntityIds(key)).values());
+    return rows[0]?.entity_id;
   }
 
   private async toEntities(rows: EntityRow[], key: Buffer | null): Promise<Entity[]> {
@@ -372,47 +357,12 @@ export class GraphStore {
     });
   }
 
-  private async edgeReference(id: EntityId, key: Buffer): Promise<EntityId> {
-    return (await this.privateEntityId(id, key))?.id ?? id;
-  }
-
-  private async encryptedEdges(
-    direction: 'subject' | 'object',
-    id: EntityId,
-    scene: number | undefined,
-    key: Buffer,
-  ): Promise<EdgeRow[]> {
-    const privateEntityIds = await this.privateLogicalEntityIds(key);
-    const logicalId = privateEntityIds.get(id) ?? id;
-    const privateId = (await this.privateEntityId(logicalId, key))?.id;
-    const references = [...new Set([logicalId, privateId].filter((reference): reference is string => !!reference))];
-    const params: unknown[] = [this.storyId, references];
-    const { rows: chronicle } = await this.db.query<EdgeRow>(
-      `SELECT eid, subject, predicate, object, valid_from, valid_to, weight, provenance, confidence, evidence, 0 AS pri
-         FROM chron_edges WHERE story_id = $1 AND ${direction} = ANY($2::text[])`,
-      params,
-    );
-    const visible = await overlayEdges<EdgeRow>(this.db, this.storyId, this.sources, {
-      [direction]: logicalId,
-      scene,
-    });
-    const privateIdentities = new Set(chronicle.map((edge) => edgeLogicalIdentity(edge, privateEntityIds)));
-    const isLive = (edge: EdgeRow) =>
-      scene === undefined
-        ? edge.valid_to === null
-        : edge.valid_from <= scene && (edge.valid_to === null || edge.valid_to > scene);
-    return [
-      ...chronicle.filter(isLive),
-      ...visible.filter((edge) => edge.pri !== 0 && !privateIdentities.has(edgeLogicalIdentity(edge, privateEntityIds))),
-    ];
-  }
-
   private async nextEdgeId(): Promise<string> {
-      const { rows } = await this.db.query<{ eid: string }>(
-        `SELECT nextval(pg_get_serial_sequence('chron_edges', 'eid'))::text AS eid`,
-      );
-      if (!rows[0]) throw new Error('could not allocate chron edge id');
-      return rows[0].eid;
+    const { rows } = await this.db.query<{ eid: string }>(
+      `SELECT nextval(pg_get_serial_sequence('chron_edges', 'eid'))::text AS eid`,
+    );
+    if (!rows[0]) throw new Error('could not allocate chron edge id');
+    return rows[0].eid;
   }
 
   // ------------------------------------------------------------- entities
@@ -421,9 +371,9 @@ export class GraphStore {
   async get(id: EntityId): Promise<Entity | undefined> {
     const key = await this.privateValues.key();
     let r = await overlayEntity<EntityRow>(this.db, this.storyId, this.sources, id);
-    if (key) {
-      const opaque = await this.privateEntityId(id, key);
-      if (opaque) r = await overlayEntity<EntityRow>(this.db, this.storyId, this.sources, opaque.id);
+    if (!r && key) {
+      const stableId = await this.blindEntityId(id, key);
+      if (stableId) r = await overlayEntity<EntityRow>(this.db, this.storyId, this.sources, stableId);
     }
     return r ? (await this.toEntities([r], key))[0] : undefined;
   }
@@ -566,7 +516,6 @@ export class GraphStore {
     if (layer === 'chronicle') {
       const key = await this.privateValues.key();
       if (key) {
-        const opaque = await this.opaqueEntityId(e.id, key);
         await this.privateValues.write(
           `INSERT INTO chron_entities
              (story_id, id, type, name, summary, provenance, confidence, salience, depth_level, props, created_scene)
@@ -579,7 +528,7 @@ export class GraphStore {
            RETURNING 1`,
           [
             this.storyId,
-            opaque.id,
+            e.id,
             e.type,
             e.provenance ?? 'authored',
             e.confidence ?? 1,
@@ -588,13 +537,17 @@ export class GraphStore {
             e.createdScene ?? 0,
           ],
           'chron_entities',
-          opaque.id,
+          e.id,
           key,
           [
             { field: 'name', value: e.name },
             { field: 'summary', value: e.summary ?? '' },
             { field: 'props', value: e.props ?? {} },
-            { field: 'logical_id', value: opaque.logicalId },
+            { field: 'logical_id', value: e.id },
+          ],
+          [
+            { kind: 'name', token: storyBlindIndex(key, 'graph:name', normaliseNameForIndex(e.name)) },
+            { kind: 'logical_id', token: storyBlindIndex(key, 'graph:logical-id', normaliseLogicalId(e.id)) },
           ],
         );
         return;
@@ -766,12 +719,12 @@ export class GraphStore {
     }
 
     if (key) {
-      const chronicle = await this.privateChronicleEntities(opts, key);
-      const canon = await this.list({ ...opts, layer: 'canon' });
-      const privateLogicalIds = await this.privateLogicalIds(key);
-      return [...chronicle, ...canon.filter((entity) => !privateLogicalIds.has(entity.id))]
-        .sort((a, b) => b.salience - a.salience || a.name.localeCompare(b.name))
-        .slice(0, opts.limit ?? 500);
+      const rows = await overlayEntities<EntityRow>(this.db, this.storyId, this.sources, {
+        limit: opts.limit ?? 500,
+        type: opts.type,
+        minSalience: opts.minSalience,
+      });
+      return this.toEntities(rows, key);
     }
 
     const rows = await overlayEntities<EntityRow>(this.db, this.storyId, this.sources, {
@@ -791,17 +744,16 @@ export class GraphStore {
     const key = await this.privateValues.key();
     if (key) {
       const needle = q.toLowerCase();
-      const privateEntityIds = await this.privateLogicalEntityIds(key);
-      const chronicle = (await this.privateChronicleEntities({}, key)).filter(
+      const privateEntities = await this.privateChronicleEntities({}, key);
+      const chronicle = privateEntities.filter(
         (entity) =>
           entity.name.toLowerCase().includes(needle) ||
           entity.summary.toLowerCase().includes(needle) ||
-          entity.id.toLowerCase().includes(needle) ||
-          privateEntityIds.get(entity.id)?.toLowerCase().includes(needle),
+          entity.id.toLowerCase().includes(needle),
       );
       const canon = await this.searchCanon(needle);
-      const privateLogicalIds = new Set(privateEntityIds.values());
-      return [...chronicle, ...canon.filter((entity) => !privateLogicalIds.has(entity.id))]
+      const chronicleIds = new Set(privateEntities.map((entity) => entity.id));
+      return [...chronicle, ...canon.filter((entity) => !chronicleIds.has(entity.id))]
         .sort((a, b) => b.salience - a.salience)
         .slice(0, limit);
     }
@@ -860,14 +812,25 @@ export class GraphStore {
     if (!raw) return undefined;
     const key = await this.privateValues.key();
     if (key) {
-      const chronicle = await this.privateChronicleEntities({}, key);
-      const canon = await this.list({ layer: 'canon', limit: 5000 });
-      const privateLogicalIds = await this.privateLogicalIds(key);
-      const entities = [...chronicle, ...canon.filter((entity) => !privateLogicalIds.has(entity.id))];
-      const exact = entities.find((entity) => entity.name.toLowerCase() === raw.toLowerCase());
+      const token = storyBlindIndex(key, 'graph:name', normaliseNameForIndex(raw));
+      const { rows } = await this.db.query<{ entity_id: string }>(
+        `SELECT entity_id FROM chron_entity_blind_indexes
+          WHERE story_id = $1 AND index_kind = 'name' AND token = $2`,
+        [this.storyId, token],
+      );
+      const chronicle = (
+        await Promise.all(rows.map((row) => overlayEntity<EntityRow>(this.db, this.storyId, this.sources, row.entity_id)))
+      ).filter((row): row is EntityRow => !!row);
+      const privateMatches = await this.toEntities(chronicle, key);
+      const exact = privateMatches.find((entity) => entity.name.toLowerCase() === raw.toLowerCase());
       if (exact) return exact;
-      const norm = normaliseName(raw);
-      return entities.find((entity) => entity.type !== 'Event' && normaliseName(entity.name) === norm);
+      const normalized = privateMatches.find(
+        (entity) => entity.type !== 'Event' && normaliseName(entity.name) === normaliseName(raw),
+      );
+      if (normalized) return normalized;
+      const canon = await this.list({ layer: 'canon', limit: 5000 });
+      return canon.find((entity) => entity.name.toLowerCase() === raw.toLowerCase())
+        ?? canon.find((entity) => entity.type !== 'Event' && normaliseName(entity.name) === normaliseName(raw));
     }
 
     const exact = await this.byNamePredicate(`lower(name) = $2`, raw.toLowerCase(), 1);
@@ -997,11 +960,10 @@ export class GraphStore {
       if ((res.rowCount ?? 0) > 0) return;
     }
     // Emergent: exists only in this story, so canon matched nothing.
-    const key = await this.privateValues.key();
-    const privateId = key ? await this.privateEntityId(id, key) : undefined;
+    await this.privateValues.key();
     await this.db.query(
       `UPDATE chron_entities SET depth_level = GREATEST(depth_level, $1) WHERE story_id = $2 AND id = $3`,
-      [depth, this.storyId, privateId?.id ?? id],
+      [depth, this.storyId, id],
     );
   }
 
@@ -1027,17 +989,13 @@ export class GraphStore {
    */
   async edgesFrom(subject: EntityId, scene?: number): Promise<Edge[]> {
     const key = await this.privateValues.key();
-    const rows = key
-      ? await this.encryptedEdges('subject', subject, scene, key)
-      : await overlayEdges<EdgeRow>(this.db, this.storyId, this.sources, { subject, scene });
+    const rows = await overlayEdges<EdgeRow>(this.db, this.storyId, this.sources, { subject, scene });
     return this.toEdges(rows, key);
   }
 
   async edgesTo(object: EntityId, scene?: number): Promise<Edge[]> {
     const key = await this.privateValues.key();
-    const rows = key
-      ? await this.encryptedEdges('object', object, scene, key)
-      : await overlayEdges<EdgeRow>(this.db, this.storyId, this.sources, { object, scene });
+    const rows = await overlayEdges<EdgeRow>(this.db, this.storyId, this.sources, { object, scene });
     return this.toEdges(rows, key);
   }
 
@@ -1066,12 +1024,10 @@ export class GraphStore {
     if (layer === 'chronicle') {
       const key = await this.privateValues.key();
       if (key) {
-        const subject = await this.edgeReference(a.subject, key);
-        const object = await this.edgeReference(a.object, key);
         const existing = await this.db.query<{ eid: string }>(
           `SELECT eid FROM chron_edges
             WHERE story_id = $1 AND subject = $2 AND predicate = $3 AND object = $4 AND valid_to IS NULL`,
-          [this.storyId, subject, a.predicate, object],
+          [this.storyId, a.subject, a.predicate, a.object],
         );
         const eid = existing.rows[0]?.eid ?? (await this.nextEdgeId());
         if (a.evidence === undefined || a.evidence === null) {
@@ -1089,7 +1045,7 @@ export class GraphStore {
            ON CONFLICT (story_id, subject, predicate, object) WHERE valid_to IS NULL
            DO UPDATE SET weight = EXCLUDED.weight, evidence = NULL
            RETURNING 1`,
-          [eid, this.storyId, subject, a.predicate, object, scene, a.weight ?? 0.5, provenance],
+          [eid, this.storyId, a.subject, a.predicate, a.object, scene, a.weight ?? 0.5, provenance],
           'chron_edges',
           `edge:${eid}`,
           key,
@@ -1179,14 +1135,6 @@ export class GraphStore {
    */
   async retireEdge(subject: EntityId, predicate: string, object: EntityId, scene: number): Promise<boolean> {
     const key = await this.privateValues.key();
-    let logicalSubject = subject;
-    let logicalObject = object;
-    if (key) {
-      logicalSubject = (await this.privateEntityId(subject, key))?.logicalId ?? subject;
-      logicalObject = (await this.privateEntityId(object, key))?.logicalId ?? object;
-      subject = await this.edgeReference(subject, key);
-      object = await this.edgeReference(object, key);
-    }
     const own = await this.db.query(
       `UPDATE chron_edges SET valid_to = $1
          WHERE story_id = $2 AND subject = $3 AND predicate = $4 AND object = $5 AND valid_to IS NULL`,
@@ -1204,7 +1152,7 @@ export class GraphStore {
       }>(
         `SELECT weight, provenance, confidence, evidence, valid_from FROM canon_edges
            WHERE world_id = $1 AND subject = $2 AND predicate = $3 AND object = $4 AND valid_to IS NULL`,
-        [s.worldId, logicalSubject, predicate, logicalObject],
+        [s.worldId, subject, predicate, object],
       );
       const canonLive = rows[0];
       if (!canonLive) continue;
@@ -1276,15 +1224,7 @@ export class GraphStore {
       `SELECT * FROM (${arms.join(' UNION ALL ')}) q LIMIT $${params.length}`,
       params,
     );
-    if (!key) return this.toEdges(rows, key);
-    const privateEntityIds = await this.privateLogicalEntityIds(key);
-    const privateIdentities = new Set(
-      rows.filter((edge) => edge.pri === 0).map((edge) => edgeLogicalIdentity(edge, privateEntityIds)),
-    );
-    return this.toEdges(
-      rows.filter((edge) => edge.pri === 0 || !privateIdentities.has(edgeLogicalIdentity(edge, privateEntityIds))),
-      key,
-    );
+    return this.toEdges(rows, key);
   }
 
   /**
@@ -1368,10 +1308,10 @@ function normaliseName(name: string): string {
     .replace(/^(the|a|an)\s+/, '');
 }
 
-function edgeLogicalIdentity(edge: Pick<EdgeRow, 'subject' | 'predicate' | 'object'>, privateEntityIds: Map<string, string>): string {
-  return JSON.stringify([
-    privateEntityIds.get(edge.subject) ?? edge.subject,
-    edge.predicate,
-    privateEntityIds.get(edge.object) ?? edge.object,
-  ]);
+function normaliseLogicalId(id: string): string {
+  return id.trim().toLowerCase() || '\u0000';
+}
+
+function normaliseNameForIndex(name: string): string {
+  return normaliseName(name) || '\u0000';
 }
