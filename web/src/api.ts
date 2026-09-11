@@ -1,4 +1,16 @@
 /** Typed API client for the inspector. */
+import type {
+  Appearance as DomainAppearance,
+  CharacterSheet,
+  Consequence as DomainConsequence,
+  Edge as DomainEdge,
+  Entity as DomainEntity,
+  Knobs as DomainKnobs,
+  StyleContract as DomainStyleContract,
+  Thread as DomainThread,
+  VisualStyle as DomainVisualStyle,
+  Vow as DomainVow,
+} from '../../src/domain/types.ts';
 
 /**
  * Which of *this user's own* stories the current browser tab is looking at,
@@ -44,79 +56,14 @@ function withStoryId(path: string): string {
   return `${path}${path.includes('?') ? '&' : '?'}storyId=${encodeURIComponent(id)}`;
 }
 
-export interface Entity {
-  id: string;
-  type: string;
-  layer: 'canon' | 'chronicle';
-  name: string;
-  summary: string;
-  provenance: string;
-  confidence: number;
-  salience: number;
-  depthLevel: number;
-  props: Record<string, unknown>;
-  createdScene: number;
-}
-
-export interface Edge {
-  id: number;
-  subject: string;
-  predicate: string;
-  object: string;
-  layer: string;
-  validFrom: number;
-  validTo: number | null;
-  weight: number;
-  evidence: string | null;
-}
-
-export interface Vow {
-  id: string;
-  text: string;
-  rank: number;
-  broken: boolean;
-  brokenScene: number | null;
-}
-
-export interface Appearance {
-  description: string;
-  attire: string;
-  markers: string[];
-  referenceImagePath: string | null;
-  seed: number | null;
-}
-
-export interface Sheet {
-  entityId: string;
-  identity: {
-    goals: string[]; wounds: string[]; fears: string[]; allegiances: string[];
-    competencies: string[]; secrets: string[]; arc: string;
-  };
-  contract: { vows: Vow[]; drives: string[]; breakingPoint: string; costOfBreak: string };
-  voice: { diction: string; tics: string[]; samples: string[]; never: string[] };
-  condition: {
-    locationId: string | null; mood: string; injuries: string[];
-    inventory: string[]; intent: string; presentWith: string[];
-  };
-  appearance: Appearance;
-  locks: string[];
-  isPlayer: boolean;
-}
-
-export interface Thread {
-  id: string; title: string; stakes: string; tension: number;
-  parties: string[]; resolutions: string[]; status: string; createdScene: number;
-}
-
-export interface Consequence {
-  id: string; causeEventId: string; actorId: string; actorName: string; action: string;
-  visibility: 'onscreen' | 'offscreen-discoverable' | 'offscreen-hidden';
-  maturity: 'pending' | 'ripening' | 'fired' | 'expired' | 'superseded';
-  depth: number; significance: number; createdScene: number; firedScene: number | null;
-  trigger: { kind: string; scenes?: number };
-}
-
-export type VisualStyle = 'realistic' | 'drawing' | 'sketch' | 'draft' | 'animation';
+export type Entity = DomainEntity;
+export type Edge = DomainEdge;
+export type Vow = DomainVow;
+export type Appearance = DomainAppearance;
+export type Sheet = CharacterSheet;
+export type Thread = DomainThread;
+export type Consequence = DomainConsequence & { actorName: string };
+export type VisualStyle = DomainVisualStyle;
 export const VISUAL_STYLES: Array<{ key: VisualStyle; label: string }> = [
   { key: 'realistic', label: 'realistic' },
   { key: 'drawing', label: 'drawing' },
@@ -125,17 +72,8 @@ export const VISUAL_STYLES: Array<{ key: VisualStyle; label: string }> = [
   { key: 'animation', label: 'animation' },
 ];
 
-export interface StyleContract {
-  pov: string; tense: string; register: string; density: string; dialogueRatio: number;
-  genreLens: string; humor: string; pacing: string; sceneTarget: number;
-  comparables: string[]; forbidden: string[]; contentBounds: string[];
-  visualStyle: VisualStyle; visualAnchor: string;
-}
-
-export interface Knobs {
-  canonFidelity: string; characterStrictness: string; pacing: number; danger: number;
-  npcAgency: number; propagationDepth: number; ignoranceBudget: number; proseDensity: number;
-}
+export type StyleContract = DomainStyleContract;
+export type Knobs = DomainKnobs;
 
 export interface WorldSummary {
   /** Numeric row id. A world is a row now, not a directory. */

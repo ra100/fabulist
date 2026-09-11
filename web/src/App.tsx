@@ -15,6 +15,7 @@ import {
   type IngestHealth,
   type Interrupt,
   type Job,
+  type Knobs,
   type Sheet,
   type PlayResponse,
   type ProvidersReport,
@@ -1366,7 +1367,7 @@ function ThreadCard({ thread: t, onChanged }: { thread: Thread; onChanged: () =>
   // would resort the card out from under the pointer mid-drag.
   const [tension, setTension] = useState(t.tension);
 
-  async function setStatus(status: string) {
+  async function setStatus(status: Thread['status']) {
     await api.updateThread(t.id, { status });
     onChanged();
   }
@@ -2072,7 +2073,9 @@ function SettingsTab({ state, onChanged, currentUser }: { state: State | null; o
               <label>character strictness</label>
               <select
                 value={knobs.characterStrictness}
-                onChange={(e) => void saveKnobs({ characterStrictness: e.target.value })}
+                onChange={(e) =>
+                  void saveKnobs({ characterStrictness: e.target.value as Knobs['characterStrictness'] })
+                }
               >
                 <option value="permissive">permissive — narrate anything</option>
                 <option value="coaching">coaching — in-fiction nudges only</option>
@@ -2082,7 +2085,10 @@ function SettingsTab({ state, onChanged, currentUser }: { state: State | null; o
             </div>
             <div className="knob">
               <label>canon fidelity</label>
-              <select value={knobs.canonFidelity} onChange={(e) => void saveKnobs({ canonFidelity: e.target.value })}>
+              <select
+                value={knobs.canonFidelity}
+                onChange={(e) => void saveKnobs({ canonFidelity: e.target.value as Knobs['canonFidelity'] })}
+              >
                 <option value="strict">strict</option>
                 <option value="flexible">flexible</option>
                 <option value="au">alternate universe</option>
