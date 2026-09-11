@@ -60,6 +60,7 @@ import { handleMcpRequest, protectedResourceMetadata } from '../mcp/server-pg.ts
 import type { McpToolContext } from '../mcp/tools-pg.ts';
 import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
+import { withEncryptionRollout } from '../auth/encryption-rollout-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
 import {
@@ -1143,6 +1144,7 @@ route('POST', '/api/stories', async (_req, res, { world, db, body, user }) => {
     title: title?.trim() ?? '',
     worldIds: world.sources.map((src) => src.worldId),
     ...(user ? { ownerUserId: user.id } : {}),
+    ...(user?.encryptNewStories ? { encryptionVersion: 1 } : {}),
   });
   send(res, 201, story);
 });
@@ -2129,8 +2131,8 @@ export function createApiServer(opts: ServerOptions) {
    * "most recently played" afterwards, which is the same durability the web
    * UI's own `?storyId=` selection has.
    */
-  const mcpToolContextFor = (verified: { userId: string; raw: Record<string, unknown> }): McpToolContext => {
-    const user = mcpSessionUser(verified, authConfig);
+  const mcpToolContextFor = async (verified: { userId: string; raw: Record<string, unknown> }): Promise<McpToolContext> => {
+    const user = await withEncryptionRollout(db, mcpSessionUser(verified, authConfig));
     let selected: string | undefined;
     // Async now, and resolved per call rather than from a process-wide pointer.
     // `selected` still lives in this closure for exactly the reason it always did:
@@ -2272,6 +2274,7 @@ export function createApiServer(opts: ServerOptions) {
         }
         return send(res, 401, { error: 'sign-in required' });
       }
+      user = await withEncryptionRollout(db, user);
     }
 
     if (url.pathname.startsWith('/api/')) {

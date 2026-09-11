@@ -381,11 +381,12 @@ interface StoryRow {
   forked_at_scene: number | null;
   created_at: Date | string;
   last_played_at: Date | string;
+  encryption_version: number;
   owner_user_id: string | null;
 }
 
 const STORY_COLS =
-  'id, title, scene, turn, player_character_id, current_location_id, style, knobs, forked_from, forked_at_scene, created_at, last_played_at, owner_user_id';
+  'id, title, scene, turn, player_character_id, current_location_id, style, knobs, forked_from, forked_at_scene, created_at, last_played_at, encryption_version, owner_user_id';
 
 function isoOf(v: Date | string): string {
   return v instanceof Date ? v.toISOString() : v;
@@ -405,6 +406,7 @@ function toStory(r: StoryRow): Story {
     forkedAtScene: r.forked_at_scene,
     createdAt: isoOf(r.created_at),
     lastPlayedAt: isoOf(r.last_played_at),
+    encryptionVersion: r.encryption_version,
     ownerUserId: r.owner_user_id,
   };
 }
@@ -510,6 +512,9 @@ export async function getStory(db: Queryable, id: StoryId): Promise<Story | unde
  * `ownerUserId` omitted writes NULL — the login-off path, and any internal
  * caller with no session user in scope. Never inferred here; the caller (a route
  * with an already-verified SessionUser, or nothing) is the only place that knows.
+ *
+ * `encryptionVersion` controls storage format for this story only. `0` is the
+ * legacy plaintext shape; `1` is the encrypted-at-rest rollout path.
  */
 export async function createStory(
   db: Queryable,
@@ -519,15 +524,16 @@ export async function createStory(
     forkedFrom?: StoryId;
     forkedAtScene?: number;
     ownerUserId?: string;
+    encryptionVersion?: number;
   } = {},
 ): Promise<Story> {
   const id = `story:${randomUUID()}`;
   await db.query(
     `INSERT INTO stories
        (id, title, scene, turn, player_character_id, current_location_id, style, knobs,
-        forked_from, forked_at_scene, owner_user_id)
-     VALUES ($1,$2,1,0,'',NULL,'{}'::jsonb,'{}'::jsonb,$3,$4,$5)`,
-    [id, opts.title ?? '', opts.forkedFrom ?? null, opts.forkedAtScene ?? null, opts.ownerUserId ?? null],
+        forked_from, forked_at_scene, owner_user_id, encryption_version)
+     VALUES ($1,$2,1,0,'',NULL,'{}'::jsonb,'{}'::jsonb,$3,$4,$5,$6)`,
+    [id, opts.title ?? '', opts.forkedFrom ?? null, opts.forkedAtScene ?? null, opts.ownerUserId ?? null, opts.encryptionVersion ?? 0],
   );
 
   for (const [i, worldId] of (opts.worldIds ?? []).entries()) {
@@ -595,6 +601,8 @@ export async function resolveOrCreateStoryForUser(
   db: Queryable,
   ownerUserId: string,
   worldIds: number[] = [],
+  /** Storage format for a newly auto-created story when this user owns none yet. */
+  encryptionVersion = 0,
 ): Promise<StoryId> {
   const existing = await listStoriesForUser(db, ownerUserId);
   if (existing.length > 0) {
@@ -626,7 +634,7 @@ export async function resolveOrCreateStoryForUser(
   // primary world rather than whatever was ingested most recently. A caller that knows
   // which worlds it wants still passes them explicitly.
   const seed = worldIds.length ? worldIds : await defaultWorldIds(db);
-  return (await createStory(db, { title: '', ownerUserId, worldIds: seed })).id;
+  return (await createStory(db, { title: '', ownerUserId, worldIds: seed, encryptionVersion })).id;
 }
 
 /**
