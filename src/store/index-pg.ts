@@ -98,7 +98,7 @@ export class World {
     this.crypto = opts.crypto;
     const worldId = sources[0]?.worldId;
 
-    this.graph = new GraphStore({ db, storyId, sources });
+    this.graph = new GraphStore({ db, storyId, sources, crypto: opts.crypto });
     this.cast = new CastStore({ db, storyId, sources, crypto: opts.crypto });
     this.chronicle = new ChronicleStore({ db, storyId, worldId, crypto: opts.crypto });
     this.threads = new ThreadStore(db, storyId, opts.crypto);
