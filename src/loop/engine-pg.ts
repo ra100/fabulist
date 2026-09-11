@@ -29,7 +29,7 @@ import type { Provider, Registry } from '../providers/provider.ts';
 import type { World } from '../store/index-pg.ts';
 import type { Db } from '../db/pg.ts';
 import { loadFrameData, type FrameData } from '../frame/builders-pg.ts';
-import { commitDelta, type CommitResult } from './commit-pg.ts';
+import { commitTurn, type CommitResult } from './commit-pg.ts';
 import { Compactor } from './compact-pg.ts';
 import {
   buildNarratorPrompt,
@@ -449,15 +449,6 @@ export class Engine {
       }
     }
 
-    // 9. COMMIT
-    const commit = await commitDelta(this.db, world, delta);
-
-    // Compaction runs after the commit, on the scene that just closed: only the
-    // current scene stays verbatim, everything above it becomes a summary.
-    if (this.autoCompact && delta.sceneAdvance) {
-      await this.compactor.onSceneClosed(session.scene);
-    }
-
     const meta: TurnMeta = {
       integrity: integrityVerdict,
       referee: refereeVerdict,
@@ -467,20 +458,22 @@ export class Engine {
       providerCalls: args.calls,
     };
 
-    const turnNo = session.turn + 1;
-    const turn = await world.chronicle.addTurn({
-      scene: session.scene,
-      turn: turnNo,
+    // 9. COMMIT. Delta, prose record, turn number, session advance, and thread
+    // tension are one story-serialised transaction.
+    const { commit, turn } = await commitTurn(this.db, world, {
       rawInput,
       intent,
       delta,
       bookProse: prose,
-      pinned: false,
       meta,
+      threadId: plan.threadId,
     });
-    await world.session.set({ turn: turnNo });
 
-    if (plan.threadId) await world.threads.adjustTension(plan.threadId, 0.05);
+    // Compaction is derived data and runs only after the authoritative turn
+    // transaction succeeds.
+    if (this.autoCompact && delta.sceneAdvance) {
+      await this.compactor.onSceneClosed(session.scene);
+    }
 
     return { kind: 'narrated', turn, prose, delta, commit, validation };
   }

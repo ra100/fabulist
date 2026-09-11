@@ -511,6 +511,7 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_order ON turns (story_id, scene, turn);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_story_position ON turns (story_id, scene, turn);
 
 -- Hierarchical compaction: only the current scene stays verbatim, everything
 -- above becomes a summary that keeps entity references intact.

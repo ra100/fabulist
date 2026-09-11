@@ -27,7 +27,7 @@
  * decay must precede the bump, and `sceneAdvance` must be last.
  */
 import { randomUUID } from 'node:crypto';
-import type { Delta, EntityId, StoryEvent, Visibility } from '../domain/types.ts';
+import type { Delta, EntityId, StoryEvent, Turn, Visibility } from '../domain/types.ts';
 import type { Db } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
 
@@ -37,6 +37,135 @@ export interface CommitResult {
   brokenVows: Array<{ entityId: EntityId; vowId: string; text: string }>;
   newThreadIds: string[];
   factIds: string[];
+}
+
+export interface CommitTurnInput {
+  rawInput: string;
+  intent: Turn['intent'];
+  delta: Delta;
+  bookProse: string;
+  meta: Turn['meta'];
+  threadId?: string | null;
+}
+
+export interface CommitTurnResult {
+  commit: CommitResult;
+  turn: Turn;
+}
+
+async function applyDelta(
+  world: World,
+  delta: Delta,
+  scene: number,
+  turn: number,
+  visibility: Visibility,
+): Promise<CommitResult> {
+  const result: CommitResult = { events: [], touchedIds: [], brokenVows: [], newThreadIds: [], factIds: [] };
+  const touched = new Set<EntityId>();
+
+  for (const u of delta.entityUpserts) {
+    await world.graph.upsert({ ...u, provenance: `emergent:${scene}`, createdScene: scene, salience: 0.6 }, 'chronicle');
+    touched.add(u.id);
+  }
+
+  for (const ev of delta.events) {
+    const stored = await world.chronicle.addEvent({
+      scene,
+      turn,
+      text: ev.text,
+      participants: ev.participants,
+      locationId: ev.locationId,
+      significance: ev.significance,
+      visibility,
+      fromConsequenceId: null,
+    });
+    result.events.push(stored);
+    for (const p of ev.participants) touched.add(p);
+    if (ev.locationId) touched.add(ev.locationId);
+  }
+
+  for (const a of delta.edgeAsserts) {
+    await world.graph.assertEdge(a, scene, 'chronicle', `scene:${scene}`);
+    touched.add(a.subject);
+    touched.add(a.object);
+  }
+
+  for (const r of delta.edgeRetires) {
+    await world.graph.retireEdge(r.subject, r.predicate, r.object, scene);
+    touched.add(r.subject);
+    touched.add(r.object);
+  }
+
+  for (const c of delta.conditionUpdates) {
+    await world.cast.updateCondition(c.entityId, c.patch);
+    touched.add(c.entityId);
+  }
+
+  for (const r of delta.relationshipUpdates) {
+    await world.cast.adjustRelationship(r.fromId, r.toId, {
+      trust: r.trustDelta,
+      affection: r.affectionDelta,
+      respect: r.respectDelta,
+      note: r.note,
+    });
+    touched.add(r.fromId);
+    touched.add(r.toId);
+  }
+
+  for (const f of delta.factsLearned) {
+    const fact = await world.chronicle.addFact(f.text, scene);
+    result.factIds.push(fact.id);
+    for (const id of f.knownBy) await world.chronicle.setKnowledge(fact.id, id, 'knows', scene);
+    for (const id of f.suspectedBy) await world.chronicle.setKnowledge(fact.id, id, 'suspects', scene);
+  }
+
+  for (const t of delta.threadUpdates) {
+    const cur = t.id ? await world.threads.get(t.id) : undefined;
+    if (t.id && cur) {
+      await world.threads.update(t.id, {
+        title: t.title ?? cur.title,
+        stakes: t.stakes ?? cur.stakes,
+        tension: cur.tension + (t.tensionDelta ?? 0),
+        parties: t.parties ?? cur.parties,
+        resolutions: t.resolutions ?? cur.resolutions,
+        status: t.status ?? cur.status,
+      });
+    } else if (t.title) {
+      const created = await world.threads.create({
+        title: t.title,
+        stakes: t.stakes ?? '',
+        tension: Math.max(0, Math.min(1, 0.4 + (t.tensionDelta ?? 0))),
+        parties: t.parties ?? [],
+        resolutions: t.resolutions?.length ? t.resolutions : ['unresolved', 'escalates', 'fades'],
+        status: t.status ?? 'open',
+        createdScene: scene,
+      });
+      result.newThreadIds.push(created.id);
+    }
+  }
+
+  for (const v of delta.vowBreaks) {
+    const vow = await world.cast.breakVow(v.entityId, v.vowId, scene);
+    if (!vow) continue;
+    result.brokenVows.push({ entityId: v.entityId, vowId: v.vowId, text: vow.text });
+    const name = (await world.graph.get(v.entityId))?.name ?? v.entityId;
+    const thread = await world.threads.create({
+      title: `${name} broke a vow: ${vow.text}`,
+      stakes: 'who they are now, and who learns of it',
+      tension: 0.9,
+      parties: [v.entityId],
+      resolutions: ['penance', 'concealment', 'a second break', 'exposure'],
+      status: 'open',
+      createdScene: scene,
+    });
+    result.newThreadIds.push(thread.id);
+    await world.chronicle.addDivergence(scene, 'vow-break', `${name} broke "${vow.text}"`);
+  }
+
+  await world.graph.decaySalience(0.04);
+  await world.graph.bumpSalience([...touched], 0.4);
+  result.touchedIds = [...touched];
+  return result;
 }
 
 /**
@@ -53,11 +182,8 @@ export async function commitDelta(
   delta: Delta,
   visibility: Visibility = 'onscreen',
 ): Promise<CommitResult> {
-  const session = await world.session.get();
-  const scene = session.scene;
-  const turn = session.turn;
-
   return db.tx(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [world.storyId]);
     // Same story, same canon sources, but every statement now rides the
     // transaction. See the header for why this is not optional.
     const w = new World({
@@ -66,129 +192,50 @@ export async function commitDelta(
       sources: world.sources,
       imagesDir: world.illustrations.imagesDir,
     });
-
-    const result: CommitResult = { events: [], touchedIds: [], brokenVows: [], newThreadIds: [], factIds: [] };
-    const touched = new Set<EntityId>();
-
-    for (const u of delta.entityUpserts) {
-      await w.graph.upsert({ ...u, provenance: `emergent:${scene}`, createdScene: scene, salience: 0.6 }, 'chronicle');
-      touched.add(u.id);
-    }
-
-    for (const ev of delta.events) {
-      const stored = await w.chronicle.addEvent({
-        scene,
-        turn,
-        text: ev.text,
-        participants: ev.participants,
-        locationId: ev.locationId,
-        significance: ev.significance,
-        visibility,
-        fromConsequenceId: null,
-      });
-      result.events.push(stored);
-      for (const p of ev.participants) touched.add(p);
-      if (ev.locationId) touched.add(ev.locationId);
-    }
-
-    for (const a of delta.edgeAsserts) {
-      await w.graph.assertEdge(a, scene, 'chronicle', `scene:${scene}`);
-      touched.add(a.subject);
-      touched.add(a.object);
-    }
-
-    for (const r of delta.edgeRetires) {
-      await w.graph.retireEdge(r.subject, r.predicate, r.object, scene);
-      touched.add(r.subject);
-      touched.add(r.object);
-    }
-
-    for (const c of delta.conditionUpdates) {
-      await w.cast.updateCondition(c.entityId, c.patch);
-      touched.add(c.entityId);
-    }
-
-    for (const r of delta.relationshipUpdates) {
-      await w.cast.adjustRelationship(r.fromId, r.toId, {
-        trust: r.trustDelta,
-        affection: r.affectionDelta,
-        respect: r.respectDelta,
-        note: r.note,
-      });
-      touched.add(r.fromId);
-      touched.add(r.toId);
-    }
-
-    // Facts default to being known only by the characters the prose showed
-    // learning them. Anyone else has to find out through transmission.
-    for (const f of delta.factsLearned) {
-      const fact = await w.chronicle.addFact(f.text, scene);
-      result.factIds.push(fact.id);
-      for (const id of f.knownBy) await w.chronicle.setKnowledge(fact.id, id, 'knows', scene);
-      for (const id of f.suspectedBy) await w.chronicle.setKnowledge(fact.id, id, 'suspects', scene);
-    }
-
-    for (const t of delta.threadUpdates) {
-      // One read instead of the SQLite version's two `get(t.id)` calls: it called
-      // the same query twice to test existence and then to read the row, which
-      // was free in-process and is a wasted round trip here.
-      const cur = t.id ? await w.threads.get(t.id) : undefined;
-      if (t.id && cur) {
-        await w.threads.update(t.id, {
-          title: t.title ?? cur.title,
-          stakes: t.stakes ?? cur.stakes,
-          tension: cur.tension + (t.tensionDelta ?? 0),
-          parties: t.parties ?? cur.parties,
-          resolutions: t.resolutions ?? cur.resolutions,
-          status: t.status ?? cur.status,
-        });
-      } else if (t.title) {
-        const created = await w.threads.create({
-          title: t.title,
-          stakes: t.stakes ?? '',
-          tension: Math.max(0, Math.min(1, 0.4 + (t.tensionDelta ?? 0))),
-          parties: t.parties ?? [],
-          // Never one resolution: a single path is a plot, which breaks on deviation.
-          resolutions: t.resolutions?.length ? t.resolutions : ['unresolved', 'escalates', 'fades'],
-          status: t.status ?? 'open',
-          createdScene: scene,
-        });
-        result.newThreadIds.push(created.id);
-      }
-    }
-
-    // A broken vow is the most consequential thing that can happen to a sheet:
-    // it spawns a thread and becomes a divergence, because the fallout is the story.
-    for (const v of delta.vowBreaks) {
-      const vow = await w.cast.breakVow(v.entityId, v.vowId, scene);
-      if (!vow) continue;
-      result.brokenVows.push({ entityId: v.entityId, vowId: v.vowId, text: vow.text });
-      const name = (await w.graph.get(v.entityId))?.name ?? v.entityId;
-      const thread = await w.threads.create({
-        title: `${name} broke a vow: ${vow.text}`,
-        stakes: 'who they are now, and who learns of it',
-        tension: 0.9,
-        parties: [v.entityId],
-        resolutions: ['penance', 'concealment', 'a second break', 'exposure'],
-        status: 'open',
-        createdScene: scene,
-      });
-      result.newThreadIds.push(thread.id);
-      await w.chronicle.addDivergence(scene, 'vow-break', `${name} broke "${vow.text}"`);
-    }
-
-    // Salience: everything cools, then what this turn touched gets hot again.
-    // Order matters — bumping before decaying would cool what just happened.
-    await w.graph.decaySalience(0.04);
-    await w.graph.bumpSalience([...touched], 0.4);
-    result.touchedIds = [...touched];
-
+    const session = await w.session.get();
+    const result = await applyDelta(w, delta, session.scene, session.turn, visibility);
     if (delta.sceneAdvance) {
-      await w.session.set({ scene: scene + 1, turn: 0 });
-      await w.chronicle.upsertScene(scene + 1, {});
+      await w.session.set({ scene: session.scene + 1, turn: 0 });
+      await w.chronicle.upsertScene(session.scene + 1, {});
     }
-
     return result;
+  });
+}
+
+/**
+ * Commits the authoritative prose record and every state change from it as one
+ * story-serialised transaction.
+ */
+export async function commitTurn(db: Db, world: World, input: CommitTurnInput): Promise<CommitTurnResult> {
+  return db.tx(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [world.storyId]);
+    const w = new World({
+      db: client,
+      storyId: world.storyId,
+      sources: world.sources,
+      imagesDir: world.illustrations.imagesDir,
+    });
+    const session = await w.session.get();
+    const turnNo = session.turn + 1;
+    const commit = await applyDelta(w, input.delta, session.scene, turnNo, 'onscreen');
+    const turn = await w.chronicle.addTurn({
+      scene: session.scene,
+      turn: turnNo,
+      rawInput: input.rawInput,
+      intent: input.intent,
+      delta: input.delta,
+      bookProse: input.bookProse,
+      pinned: false,
+      meta: input.meta,
+    });
+    if (input.threadId) await w.threads.adjustTension(input.threadId, 0.05);
+    if (input.delta.sceneAdvance) {
+      await w.session.set({ scene: session.scene + 1, turn: 0 });
+      await w.chronicle.upsertScene(session.scene + 1, {});
+    } else {
+      await w.session.set({ turn: turnNo });
+    }
+    return { commit, turn };
   });
 }
 
