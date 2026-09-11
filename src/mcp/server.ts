@@ -587,6 +587,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     {
       description: 'Record a style-anchor passage \u2014 prose the player liked, to steer future generation toward.',
       inputSchema: { text: z.string(), note: z.string().optional() },
+      outputSchema: { ok: z.literal(true) },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ text, note }) => toolResult(addAnchorTool(ctx, { text, note })),
