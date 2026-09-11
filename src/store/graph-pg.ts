@@ -348,6 +348,13 @@ export class GraphStore {
    * the same constraint and type checking as any other write, so a malformed
    * extraction is rejected here instead of corrupting canon. Same tradeoff the
    * SQLite importer makes, and for the same reason.
+   *
+   * Same subtlety as `assertEdgesMany`: a batch can name the same entity id twice —
+   * two wiki pages that normalise to one id (a redirect, a disambiguation variant,
+   * a retitled article) are the common case — and Postgres refuses to
+   * `ON CONFLICT DO UPDATE` the same row twice in one statement ("cannot affect row
+   * a second time"). Duplicates are collapsed here, keeping the last occurrence,
+   * which is what sequential `upsert` calls would have left behind.
    */
   async upsertMany(
     entities: Array<Partial<Entity> & { id: EntityId; type: EntityType; name: string }>,
@@ -359,9 +366,15 @@ export class GraphStore {
     const scope: string | number = layer === 'canon' ? this.requireCanonWorld() : this.storyId;
     const cols = `${scopeCol}, id, type, name, summary, provenance, confidence, salience, depth_level, props, created_scene`;
 
+    // Collapse to one row per id, last write winning. `scope` is constant for the
+    // whole call, so the id alone is the conflict identity.
+    const unique = new Map<EntityId, (typeof entities)[number]>();
+    for (const e of entities) unique.set(e.id, e);
+    const rows = [...unique.values()];
+
     let written = 0;
-    for (let i = 0; i < entities.length; i += BULK_ROWS) {
-      const chunk = entities.slice(i, i + BULK_ROWS);
+    for (let i = 0; i < rows.length; i += BULK_ROWS) {
+      const chunk = rows.slice(i, i + BULK_ROWS);
       const params: unknown[] = [];
       const tuples = chunk.map((e) => {
         const base = params.length;
