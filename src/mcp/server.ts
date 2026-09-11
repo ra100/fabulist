@@ -18,6 +18,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { z } from 'zod';
 import type { McpAuth, VerifiedUser } from './auth.ts';
+import { addDefaultOutputSchema } from './output-schema.ts';
 import {
   addAnchorTool,
   addDirectiveTool,
@@ -178,6 +179,7 @@ function serverInfo(resourceUrl: string) {
 
 function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   const server = new McpServer(serverInfo(resourceUrl), { instructions: INSTRUCTIONS });
+  addDefaultOutputSchema(server);
 
   server.registerTool(
     'list_worlds',
