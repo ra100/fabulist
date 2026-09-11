@@ -266,14 +266,14 @@ export async function overlayEdges<R extends QueryResultRow = QueryResultRow>(
   // `pri` rides along so the caller can tell a chronicle edge from a canon one —
   // that is the `layer` field on the Edge domain type, not internal bookkeeping.
   const arms = [
-    `SELECT ${EDGE_COLUMNS}, 0 AS pri FROM chron_edges c
+    `SELECT c.eid, ${EDGE_COLUMNS}, 0 AS pri FROM chron_edges c
        WHERE c.story_id = ${p(storyId)} AND c.${col} = ${p(value)} AND ${live('c')}`,
   ];
   for (const s of sources) {
     // The mask: skip a canon edge whose identity this story has already
     // asserted or retired. Indexed by idx_chron_edges_identity.
     arms.push(
-      `SELECT ${EDGE_COLUMNS}, ${p(s.ordinal)} AS pri FROM canon_edges e
+      `SELECT NULL::bigint AS eid, ${EDGE_COLUMNS}, ${p(s.ordinal)} AS pri FROM canon_edges e
          WHERE e.world_id = ${p(s.worldId)} AND e.${col} = ${p(value)} AND ${live('e')}
            AND NOT EXISTS (
              SELECT 1 FROM chron_edges m
