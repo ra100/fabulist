@@ -5,9 +5,10 @@ import type { World } from '../store/index.ts';
 const DEFAULT_CHAPTER_SIZE = 8;
 
 export function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SIZE): StoryLayout {
-  const turns = world.chronicle.turns({ limit: 5000 });
+  const turns = world.chronicle.turns({});
   const eligible = new Map(world.history.eligibleTurns().map((turn) => [turn.turnId, turn]));
-  const segmentStarts = new Set(world.history.sceneStartPositions());
+  const segments = world.history.sceneSegments();
+  const segmentStarts = new Map(segments.map((segment) => [segment.startPosition, segment.id]));
   turns.sort((left, right) => {
     const leftPosition = eligible.get(left.id)?.position;
     const rightPosition = eligible.get(right.id)?.position;
@@ -16,15 +17,19 @@ export function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SIZE): S
       : left.scene - right.scene || left.turn - right.turn;
   });
   let previousRawScene: number | undefined;
+  let segmentId: string | undefined;
   let scene = 0;
   const layoutTurns: StoryLayoutTurn[] = [];
   for (const source of turns) {
     const history = eligible.get(source.id);
+    if (previousRawScene !== source.scene) segmentId = undefined;
     const boundary = history ? segmentStarts.has(history.position) : false;
+    if (history && segmentStarts.has(history.position) && layoutTurns.length > 0) segmentId = segmentStarts.get(history.position);
     const startsScene = layoutTurns.length === 0 || previousRawScene !== source.scene || (boundary && layoutTurns.length > 0);
     if (startsScene) scene += 1;
     layoutTurns.push({
-      turnId: source.id, scene, chapter: Math.floor((scene - 1) / chapterSize) + 1, turn: source.turn,
+      turnId: source.id, scene, metadataKey: segmentId ? `segment:${segmentId}` : `raw:${source.scene}`,
+      chapter: Math.floor((scene - 1) / chapterSize) + 1, turn: source.turn,
       startsScene, eligible: Boolean(history), position: history?.position ?? null, source,
     });
     previousRawScene = source.scene;
@@ -39,6 +44,10 @@ export function splitSceneAtTurn(world: World, turnId: string) {
     const target = layout.turns.find((turn) => turn.turnId === turnId)!;
     const affectedScene = Math.max(1, target.scene - 1);
     world.chronicle.invalidateSummariesFrom(affectedScene, Math.floor((affectedScene - 1) / DEFAULT_CHAPTER_SIZE) + 1);
+    // A raw-scene summary can span the newly split child. It has no safe
+    // range identity, so discard it rather than projecting it onto either side.
+    world.db.prepare(`DELETE FROM scene_metadata WHERE story_id = ?`).run(world.storyId);
+    world.db.prepare(`UPDATE scenes SET title = '', summary = '' WHERE story_id = ?`).run(world.storyId);
     const last = layout.turns.at(-1);
     world.session.set({ scene: layout.currentScene, turn: last?.turn ?? 0 });
     return split;

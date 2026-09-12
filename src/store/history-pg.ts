@@ -15,6 +15,7 @@ const TABLES = [
   'events',
   'consequences',
   'scenes',
+  'scene_metadata',
   'chapters',
   'directives',
   'divergences',
@@ -139,6 +140,14 @@ export class HistoryStore {
     return rows.map(({ start_position }) => start_position);
   }
 
+  async sceneSegments(): Promise<Array<{ id: string; startPosition: number }>> {
+    const { rows } = await this.db.query<{ id: string; start_position: number }>(
+      `SELECT id, start_position FROM scene_segments WHERE story_id = $1 ORDER BY start_position`,
+      [this.storyId],
+    );
+    return rows.map((segment) => ({ id: segment.id, startPosition: segment.start_position }));
+  }
+
   async activeSegmentAt(position: number): Promise<string | null> {
     const { rows } = await this.db.query<{ id: string }>(
       `SELECT id FROM scene_segments WHERE story_id = $1 AND start_position <= $2 ORDER BY start_position DESC LIMIT 1`,
@@ -218,11 +227,19 @@ export class HistoryStore {
       if (stored.history_position == null) throw new Error(`split_scene: turn ${turnId} is legacy and has no exact history`);
       const eligible = await this.eligibleTurnFrom(queryable, turnId);
       if (!eligible) throw new Error(`split_scene: turn ${turnId} has no exact history checkpoint`);
-      const exists = await queryable.query(`SELECT 1 FROM scene_segments WHERE story_id = $1 AND start_position = $2`, [
+      const [prior, exists] = await Promise.all([
+        queryable.query<{ scene: number }>(
+          `SELECT scene FROM turns WHERE story_id = $1 AND history_position IS NOT NULL AND history_position < $2
+           ORDER BY history_position DESC LIMIT 1`,
+          [this.storyId, eligible.position],
+        ),
+        queryable.query(`SELECT 1 FROM scene_segments WHERE story_id = $1 AND start_position = $2`, [
         this.storyId,
         eligible.position,
+        ]),
       ]);
-      if (exists.rowCount) throw new Error(`turn ${turnId} already starts a scene`);
+      if (!prior.rows[0] || prior.rows[0].scene !== eligible.scene || exists.rowCount)
+        throw new Error(`turn ${turnId} already starts a scene`);
       const id = `segment:${randomUUID()}`;
       await queryable.query(`INSERT INTO scene_segments (id, story_id, start_position) VALUES ($1,$2,$3)`, [
         id,

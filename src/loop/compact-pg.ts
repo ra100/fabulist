@@ -9,6 +9,7 @@
  * anything that happened more than a scene ago.
  */
 import type { EntityId } from '../domain/types.ts';
+import type { StoryLayout } from '../domain/types.ts';
 import type { World } from '../store/index-pg.ts';
 import { adaptRequest, extractJson, type JsonSchema, type Provider } from '../providers/provider.ts';
 import { storyLayout } from './history-pg.ts';
@@ -78,11 +79,14 @@ export class Compactor {
    * has a summary is left alone unless `force` is set, so this is safe to call
    * on every scene advance.
    */
-  async summariseScene(world: World, scene: number, force = false): Promise<string | null> {
-    const existing = (await world.chronicle.scenes()).find((s) => s.scene === scene);
+  async summariseScene(world: World, scene: number, force = false, suppliedLayout?: StoryLayout): Promise<string | null> {
+    const layout = suppliedLayout ?? await storyLayout(world, this.chapterSize);
+    const entries = layout.turns.filter((entry) => entry.scene === scene);
+    const identity = entries[0]?.metadataKey ?? `raw:${scene}`;
+    const existing = (await world.chronicle.scenes()).find((s) => s.identity === identity);
     if (existing?.summary && !force) return existing.summary;
 
-    const turns = (await storyLayout(world, this.chapterSize)).turns.filter((entry) => entry.scene === scene).map((entry) => entry.source);
+    const turns = entries.map((entry) => entry.source);
     if (turns.length < this.minTurns) return null;
 
     const prose = turns.map((t) => t.bookProse).filter(Boolean).join('\n\n');
@@ -103,8 +107,9 @@ export class Compactor {
     const names = await world.graph.getMany([...ids]);
     const roster = [...ids].map((id) => `${id} = ${names.get(id)?.name ?? id}`).join('\n');
 
-    const events = (await world.chronicle.events({ sinceScene: scene }))
-      .filter((e) => e.scene === scene)
+    const eventScene = new Map(layout.turns.map((entry) => [`${entry.source.scene}:${entry.source.turn}`, entry.metadataKey]));
+    const events = (await world.chronicle.events({ limit: Number.MAX_SAFE_INTEGER }))
+      .filter((e) => eventScene.get(`${e.scene}:${e.turn}`) === identity)
       .map((e) => `- ${e.text}`)
       .join('\n');
 
@@ -126,7 +131,7 @@ export class Compactor {
       summary,
       title: typeof parsed.title === 'string' ? parsed.title.slice(0, 90) : '',
       chapter: this.chapterOf(scene),
-    });
+    }, identity);
     return summary;
   }
 
@@ -186,7 +191,7 @@ export class Compactor {
     for (const scene of [...scenesWithTurns].sort((a, b) => a - b)) {
       if (scene >= activeScene) continue; // the current scene stays verbatim
       if (have.get(scene)) continue;
-      const summary = await this.summariseScene(world, scene);
+      const summary = await this.summariseScene(world, scene, false, layout);
       if (summary) result.scenesSummarised.push(scene);
     }
     return result;

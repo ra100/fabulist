@@ -361,7 +361,7 @@ test('the regenerate endpoint 404s on an unknown turn id', async () => {
   });
 });
 
-test('the book endpoint returns both registers per turn', async () => {
+test('the book endpoint returns both registers per turn', async (t) => {
   await withServer(async (base) => {
     await send(base, 'POST', '/api/play', { input: 'i tell tem to fetch water' });
     const { body } = await get(base, '/api/book');
@@ -371,7 +371,7 @@ test('the book endpoint returns both registers per turn', async () => {
     assert.ok(turns[0]!.bookProse.length > 0, 'and the prose exists alongside it');
   });
 
-  test('book and timeline expose split turns in their derived scenes', async () => {
+  await t.test('book and timeline expose split turns in their derived scenes', async () => {
     await withServer(async (base, world) => {
       for (let turn = 0; turn < 4; turn++) await send(base, 'POST', '/api/play', { input: `i act ${turn}` });
       const turns = world.chronicle.turns();
@@ -391,6 +391,26 @@ test('the book endpoint returns both registers per turn', async () => {
       assert.deepEqual(timeline.scenes.filter((scene) => scene.turnCount).map((scene) => [scene.scene, scene.turnCount]), [[1, 2], [2, 2]]);
       assert.deepEqual(timeline.scenes.filter((scene) => scene.turnCount).map((scene) => scene.eligibleTurnCount), [2, 2]);
     });
+  });
+});
+
+test('book and timeline keep split-range metadata separate from later raw scenes', async () => {
+  await withServer(async (base, world) => {
+    for (let turn = 0; turn < 5; turn++) await send(base, 'POST', '/api/play', { input: `i act ${turn}` });
+    const turns = world.chronicle.turns();
+    splitSceneAtTurn(world, turns[3]!.id);
+    world.session.set({ scene: 3, turn: 0 });
+    await send(base, 'POST', '/api/play', { input: 'i begin the next raw scene' });
+    await send(base, 'POST', '/api/play', { input: 'i continue the next raw scene' });
+
+    await send(base, 'POST', '/api/compact', { scene: 2, force: true });
+    await send(base, 'POST', '/api/compact', { scene: 3, force: true });
+    const book = (await get(base, '/api/book')).body as { scenes: Array<{ scene: number; summary: string }> };
+    const timeline = (await get(base, '/api/timeline')).body as { scenes: Array<{ scene: number; summary: string; turnCount: number }> };
+    assert.ok(book.scenes.find((scene) => scene.scene === 2)?.summary, 'child range owns its summary');
+    assert.ok(book.scenes.find((scene) => scene.scene === 3)?.summary, 'later raw scene owns its summary');
+    assert.equal(timeline.scenes.find((scene) => scene.scene === 2)?.turnCount, 2);
+    assert.equal(timeline.scenes.find((scene) => scene.scene === 3)?.turnCount, 2);
   });
 });
 

@@ -202,11 +202,8 @@ export class ChronicleStore {
           .all(this.storyId, opts.scene),
       ).map(toTurn);
     }
-    return rows<TurnRow>(
-      this.db
-        .prepare(`SELECT * FROM turns WHERE story_id = ? ORDER BY scene, turn LIMIT ?`)
-        .all(this.storyId, opts.limit ?? 500),
-    ).map(toTurn);
+    const sql = `SELECT * FROM turns WHERE story_id = ? ORDER BY scene, turn${opts.limit === undefined ? '' : ' LIMIT ?'}`;
+    return rows<TurnRow>(this.db.prepare(sql).all(...([this.storyId, ...(opts.limit === undefined ? [] : [opts.limit])] as never[]))).map(toTurn);
   }
 
   recentTurns(n: number): Turn[] {
@@ -298,32 +295,43 @@ export class ChronicleStore {
 
   // --------------------------------------------------------------- scenes
 
-  upsertScene(
-    scene: number,
-    patch: { title?: string; summary?: string; locationId?: string | null; chapter?: number },
-  ): void {
+  upsertScene(scene: number, patch: { title?: string; summary?: string; locationId?: string | null; chapter?: number }, identity = `raw:${scene}`): void {
+    // Retain the legacy projection for unsplit consumers and old snapshots.
+    // Split ranges exclusively use scene_metadata and therefore cannot collide.
+    if (identity === `raw:${scene}`) this.db.prepare(
+      `INSERT INTO scenes (story_id, scene, title, summary, location_id, chapter) VALUES (?,?,?,?,?,?)
+       ON CONFLICT(story_id, scene) DO UPDATE SET title=COALESCE(NULLIF(excluded.title,''),scenes.title),
+       summary=COALESCE(NULLIF(excluded.summary,''),scenes.summary), location_id=COALESCE(excluded.location_id,scenes.location_id),
+       chapter=excluded.chapter`,
+    ).run(this.storyId, scene, patch.title ?? '', patch.summary ?? '', patch.locationId ?? null, patch.chapter ?? 1);
     this.db
       .prepare(
-        `INSERT INTO scenes (story_id, scene, title, summary, location_id, chapter) VALUES (?,?,?,?,?,?)
-         ON CONFLICT(story_id, scene) DO UPDATE SET
-           title = COALESCE(NULLIF(excluded.title,''), scenes.title),
-           summary = COALESCE(NULLIF(excluded.summary,''), scenes.summary),
-           location_id = COALESCE(excluded.location_id, scenes.location_id),
+        `INSERT INTO scene_metadata (story_id, identity, scene, title, summary, location_id, chapter) VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(story_id, identity) DO UPDATE SET
+           scene = excluded.scene,
+           title = COALESCE(NULLIF(excluded.title,''), scene_metadata.title),
+           summary = COALESCE(NULLIF(excluded.summary,''), scene_metadata.summary),
+           location_id = COALESCE(excluded.location_id, scene_metadata.location_id),
            chapter = excluded.chapter`,
       )
-      .run(this.storyId, scene, patch.title ?? '', patch.summary ?? '', patch.locationId ?? null, patch.chapter ?? 1);
+      .run(this.storyId, identity, scene, patch.title ?? '', patch.summary ?? '', patch.locationId ?? null, patch.chapter ?? 1);
   }
 
-  scenes(): Array<{ scene: number; title: string; summary: string; locationId: string | null; chapter: number }> {
-    return rows<{ scene: number; title: string; summary: string; location_id: string | null; chapter: number }>(
+  scenes(): Array<{ identity: string; scene: number; title: string; summary: string; locationId: string | null; chapter: number }> {
+    const legacy = rows<{ scene: number; title: string; summary: string; location_id: string | null; chapter: number }>(
       this.db.prepare(`SELECT * FROM scenes WHERE story_id = ? ORDER BY scene`).all(this.storyId),
     ).map((r) => ({
+      identity: `raw:${r.scene}`,
       scene: r.scene,
       title: r.title,
       summary: r.summary,
       locationId: r.location_id,
       chapter: r.chapter,
     }));
+    const metadata = rows<{ identity: string; scene: number; title: string; summary: string; location_id: string | null; chapter: number }>(
+      this.db.prepare(`SELECT * FROM scene_metadata WHERE story_id = ? ORDER BY scene`).all(this.storyId),
+    ).map((r) => ({ ...r, locationId: r.location_id }));
+    return [...new Map([...legacy, ...metadata].map((scene) => [scene.identity, scene])).values()];
   }
 
   upsertChapter(chapter: number, patch: { title?: string; summary?: string }): void {
@@ -355,6 +363,7 @@ export class ChronicleStore {
 
   invalidateSummariesFrom(scene: number, chapter: number): void {
     this.db.prepare(`UPDATE scenes SET title = '', summary = '' WHERE story_id = ? AND scene >= ?`).run(this.storyId, scene);
+    this.db.prepare(`UPDATE scene_metadata SET title = '', summary = '' WHERE story_id = ? AND scene >= ?`).run(this.storyId, scene);
     this.db.prepare(`UPDATE chapters SET title = '', summary = '' WHERE story_id = ? AND chapter >= ?`).run(this.storyId, chapter);
   }
 
@@ -487,17 +496,15 @@ export class ChronicleStore {
 
   // ----------------------------------------------------------- divergences
 
-  addDivergence(scene: number, kind: string, detail: string, canon = ''): void {
+  addDivergence(scene: number, kind: string, detail: string, canon = '', turn?: number): void {
     this.db
-      .prepare(`INSERT INTO divergences (story_id, scene, kind, detail, canon) VALUES (?,?,?,?,?)`)
-      .run(this.storyId, scene, kind, detail, canon);
+      .prepare(`INSERT INTO divergences (story_id, scene, turn, kind, detail, canon) VALUES (?,?,?,?,?,?)`)
+      .run(this.storyId, scene, turn ?? null, kind, detail, canon);
   }
 
-  divergences(): Array<{ id: number; scene: number; kind: string; detail: string; canon: string }> {
+  divergences(): Array<{ id: number; scene: number; turn: number | null; kind: string; detail: string; canon: string }> {
     return rows(
-      this.db
-        .prepare(`SELECT id, scene, kind, detail, canon FROM divergences WHERE story_id = ? ORDER BY scene`)
-        .all(this.storyId),
+      this.db.prepare(`SELECT id, scene, turn, kind, detail, canon FROM divergences WHERE story_id = ? ORDER BY scene`).all(this.storyId),
     );
   }
 

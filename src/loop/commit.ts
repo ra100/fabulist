@@ -147,7 +147,7 @@ function applyDelta(
         createdScene: scene,
       });
       result.newThreadIds.push(thread.id);
-      world.chronicle.addDivergence(scene, 'vow-break', `${name} broke "${vow.text}"`);
+      world.chronicle.addDivergence(scene, 'vow-break', `${name} broke "${vow.text}"`, '', turn);
     }
 
     // Salience: everything cools, then what this turn touched gets hot again.
@@ -164,7 +164,7 @@ export function commitDelta(world: World, delta: Delta, visibility: Visibility =
     const result = applyDelta(world, delta, session.scene, session.turn, visibility);
     if (delta.sceneAdvance) {
       world.session.set({ scene: session.scene + 1, turn: 0 });
-      world.chronicle.upsertScene(session.scene + 1, {});
+      world.chronicle.upsertScene(session.scene + 1, {}, `raw:${session.scene + 1}`);
     }
     return result;
   });
@@ -194,7 +194,7 @@ export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResu
     if (input.threadId) world.threads.adjustTension(input.threadId, 0.05);
     if (input.delta.sceneAdvance) {
       world.session.set({ scene: activeScene + 1, turn: 0 });
-      world.chronicle.upsertScene(scene + 1, {});
+      world.chronicle.upsertScene(activeScene + 1, {}, `raw:${scene + 1}`);
     } else {
       world.session.set({ turn: turnNo });
     }
