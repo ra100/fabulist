@@ -13,7 +13,7 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '../db/pg.ts';
 import type { Engine } from '../loop/engine-pg.ts';
-import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint } from '../loop/history-pg.ts';
+import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint, storyLayout } from '../loop/history-pg.ts';
 import { World, worldFor } from '../store/index-pg.ts';
 import { forkStory, rollback } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
@@ -549,19 +549,18 @@ route('POST', '/api/sheet/:id/lock', async (_req, res, { db, world, params, body
 });
 
 route('GET', '/api/book', async (_req, res, { world }) => {
-  const turns = await world.chronicle.turns({ limit: 1000 });
+  const layout = await storyLayout(world);
+  const derivedSceneForRaw = new Map<number, number>();
+  for (const turn of layout.turns) derivedSceneForRaw.set(turn.source.scene, derivedSceneForRaw.get(turn.source.scene) ?? turn.scene);
   send(res, 200, {
-    scenes: await world.chronicle.scenes(),
-    turns: turns.map((t) => ({
-      id: t.id,
-      scene: t.scene,
-      turn: t.turn,
-      rawInput: t.rawInput,
-      bookProse: t.bookProse,
-      pinned: t.pinned,
-      move: t.meta.move,
-      integrity: t.meta.integrity?.distance ?? null,
-      lintScore: t.meta.lint?.score ?? null,
+    scenes: (await world.chronicle.scenes()).map((scene) => ({
+      ...scene,
+      scene: derivedSceneForRaw.get(scene.scene) ?? scene.scene,
+    })),
+    turns: layout.turns.slice(0, 1000).map(({ source: t, scene, chapter, eligible, position, startsScene }) => ({
+      id: t.id, scene, chapter, turn: t.turn, historyPosition: position, eligible, startsScene,
+      rawInput: t.rawInput, bookProse: t.bookProse, pinned: t.pinned, move: t.meta.move,
+      integrity: t.meta.integrity?.distance ?? null, lintScore: t.meta.lint?.score ?? null,
     })),
   });
 });
@@ -1074,16 +1073,23 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
   const scenes = await world.chronicle.scenes();
   const chapters = await world.chronicle.chapters();
   const divergences = await world.chronicle.divergences();
-  const turns = await world.chronicle.turns({ limit: 5000 });
+  const layout = await storyLayout(world);
+  const derivedSceneForRaw = new Map<number, number>();
+  for (const turn of layout.turns) derivedSceneForRaw.set(turn.source.scene, derivedSceneForRaw.get(turn.source.scene) ?? turn.scene);
 
   const turnCounts = new Map<number, number>();
-  for (const t of turns) turnCounts.set(t.scene, (turnCounts.get(t.scene) ?? 0) + 1);
+  const eligibleTurnCounts = new Map<number, number>();
+  for (const turn of layout.turns) {
+    turnCounts.set(turn.scene, (turnCounts.get(turn.scene) ?? 0) + 1);
+    if (turn.eligible) eligibleTurnCounts.set(turn.scene, (eligibleTurnCounts.get(turn.scene) ?? 0) + 1);
+  }
 
   const divergencesByScene = new Map<number, typeof divergences>();
   for (const d of divergences) {
-    const list = divergencesByScene.get(d.scene) ?? [];
+    const scene = derivedSceneForRaw.get(d.scene) ?? d.scene;
+    const list = divergencesByScene.get(scene) ?? [];
     list.push(d);
-    divergencesByScene.set(d.scene, list);
+    divergencesByScene.set(scene, list);
   }
 
   // Every scene that has a `scenes` row, at least one turn, a recorded
@@ -1095,12 +1101,12 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
   // in it has committed yet (a directive/override can fire before the turn
   // that reports it finishes). Unioned and ordered.
   const sceneNumbers = new Set<number>([
-    ...scenes.map((s) => s.scene),
+    ...scenes.map((s) => derivedSceneForRaw.get(s.scene) ?? s.scene),
     ...turnCounts.keys(),
     ...divergencesByScene.keys(),
     (await world.session.get()).scene,
   ]);
-  const sceneMeta = new Map(scenes.map((s) => [s.scene, s]));
+  const sceneMeta = new Map(scenes.map((s) => [derivedSceneForRaw.get(s.scene) ?? s.scene, s]));
 
   const sceneEntries = [...sceneNumbers]
     .sort((a, b) => a - b)
@@ -1110,14 +1116,15 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
         scene,
         title: meta?.title ?? '',
         summary: meta?.summary ?? '',
-        chapter: meta?.chapter ?? 1,
+        chapter: layout.turns.find((turn) => turn.scene === scene)?.chapter ?? meta?.chapter ?? 1,
         turnCount: turnCounts.get(scene) ?? 0,
+        eligibleTurnCount: eligibleTurnCounts.get(scene) ?? 0,
         divergences: divergencesByScene.get(scene) ?? [],
       };
     });
 
   send(res, 200, {
-    currentScene: (await world.session.get()).scene,
+    currentScene: layout.currentScene,
     chapters,
     scenes: sceneEntries,
     divergenceCount: divergences.length,

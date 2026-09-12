@@ -117,11 +117,34 @@ export class HistoryStore {
   async startsScene(turnId: string): Promise<boolean> {
     const eligible = await this.eligibleTurn(turnId);
     if (!eligible) return false;
-    const { rowCount } = await this.db.query(
-      `SELECT 1 FROM scene_segments WHERE story_id = $1 AND start_position = $2`,
-      [this.storyId, eligible.position],
+    const [{ rows: prior }, { rowCount }] = await Promise.all([
+      this.db.query<{ scene: number }>(
+        `SELECT scene FROM turns WHERE story_id = $1 AND history_position IS NOT NULL AND history_position < $2
+         ORDER BY history_position DESC LIMIT 1`,
+        [this.storyId, eligible.position],
+      ),
+      this.db.query(
+        `SELECT 1 FROM scene_segments WHERE story_id = $1 AND start_position = $2`,
+        [this.storyId, eligible.position],
+      ),
+    ]);
+    return !prior[0] || prior[0].scene !== eligible.scene || Boolean(rowCount);
+  }
+
+  async sceneStartPositions(): Promise<number[]> {
+    const { rows } = await this.db.query<{ start_position: number }>(
+      `SELECT start_position FROM scene_segments WHERE story_id = $1`,
+      [this.storyId],
     );
-    return Boolean(rowCount);
+    return rows.map(({ start_position }) => start_position);
+  }
+
+  async activeSegmentAt(position: number): Promise<string | null> {
+    const { rows } = await this.db.query<{ id: string }>(
+      `SELECT id FROM scene_segments WHERE story_id = $1 AND start_position <= $2 ORDER BY start_position DESC LIMIT 1`,
+      [this.storyId, position],
+    );
+    return rows[0]?.id ?? null;
   }
 
   async restore(checkpoint: HistoryCheckpoint): Promise<void> {
@@ -178,6 +201,7 @@ export class HistoryStore {
         this.storyId,
         retained.position,
       ]);
+      await this.reconcileContinuation(queryable, retained.position);
       return retained;
     });
   }
@@ -437,6 +461,30 @@ export class HistoryStore {
     if (!key) throw new Error(`private story ${this.storyId} is locked`);
     if (key.length !== 32) throw new Error('invalid private-story key');
     return Buffer.from(key);
+  }
+
+  private async reconcileContinuation(queryable: Queryable, position: number): Promise<void> {
+    const [{ rows: turns }, { rows: segments }] = await Promise.all([
+      queryable.query<{ scene: number; turn: number; history_position: number }>(
+        `SELECT scene, turn, history_position FROM turns WHERE story_id = $1 AND history_position <= $2 ORDER BY history_position`,
+        [this.storyId, position],
+      ),
+      queryable.query<{ id: string; start_position: number }>(
+        `SELECT id, start_position FROM scene_segments WHERE story_id = $1 AND start_position <= $2 ORDER BY start_position`,
+        [this.storyId, position],
+      ),
+    ]);
+    const starts = new Set(segments.map((segment) => segment.start_position));
+    let previousScene: number | undefined;
+    let scene = 0;
+    for (const turn of turns) {
+      if (previousScene !== turn.scene || starts.has(turn.history_position)) scene += 1;
+      previousScene = turn.scene;
+    }
+    const last = turns.at(-1);
+    await queryable.query(`UPDATE stories SET scene = $1, turn = $2, active_scene_segment_id = $3 WHERE id = $4`, [
+      scene || 1, last?.turn ?? 0, segments.at(-1)?.id ?? null, this.storyId,
+    ]);
   }
 
   private transaction<T>(fn: (queryable: Queryable) => Promise<T>): Promise<T> {
