@@ -29,3 +29,27 @@ CREATE TABLE IF NOT EXISTS scene_segments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_scene_segments_start ON scene_segments (story_id, start_position);
+
+-- Existing deployments ran schema-pg-roles.sql before these tables existed.
+-- Grant both read and story-write access here instead of relying on a fresh
+-- install or the migration runner being able to create roles.
+DO $$
+DECLARE
+  sch TEXT := current_schema();
+  history_table TEXT;
+  role_name TEXT;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY['fabulist_play', 'fabulist_ingest'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      FOREACH history_table IN ARRAY ARRAY['history_checkpoints', 'scene_segments'] LOOP
+        EXECUTE format(
+          'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO %I',
+          sch,
+          history_table,
+          role_name
+        );
+      END LOOP;
+    END IF;
+  END LOOP;
+END
+$$;

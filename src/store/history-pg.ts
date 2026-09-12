@@ -23,6 +23,7 @@ const TABLES = [
 ] as const;
 
 const DELETE_ORDER = [...TABLES].reverse();
+const ENCRYPTED_LAYOUT_TABLES = [...TABLES, 'stories'] as const;
 
 interface CheckpointRow {
   id: string;
@@ -153,6 +154,7 @@ export class HistoryStore {
   }
 
   private async captureIn(queryable: Queryable, turnId?: string): Promise<HistoryCheckpoint> {
+    await queryable.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [this.storyId]);
     const key = await this.privateKey(queryable);
     if (turnId) {
       const { rows } = await queryable.query<CheckpointRow>(
@@ -266,8 +268,8 @@ export class HistoryStore {
         ciphertext: Buffer;
       }>(
         `SELECT table_name, record_id, field_name, version, nonce, ciphertext
-           FROM encrypted_story_values WHERE story_id = $1 AND table_name <> 'history_checkpoints'`,
-        [this.storyId],
+           FROM encrypted_story_values WHERE story_id = $1 AND table_name = ANY($2::text[])`,
+        [this.storyId, ENCRYPTED_LAYOUT_TABLES],
       );
       layout.encryptedValues = encrypted.map((value) => ({
         tableName: value.table_name,
@@ -298,10 +300,10 @@ export class HistoryStore {
 
   private async restoreLayout(queryable: Queryable, layout: HistoryLayout): Promise<void> {
     if (layout.encryptedValues) {
-      await queryable.query(
-        `DELETE FROM encrypted_story_values WHERE story_id = $1 AND table_name <> 'history_checkpoints'`,
-        [this.storyId],
-      );
+      await queryable.query(`DELETE FROM encrypted_story_values WHERE story_id = $1 AND table_name = ANY($2::text[])`, [
+        this.storyId,
+        ENCRYPTED_LAYOUT_TABLES,
+      ]);
     }
     for (const table of DELETE_ORDER) {
       const query =

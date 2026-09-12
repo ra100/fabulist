@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import type { Turn } from '../src/domain/types.ts';
 import { World } from '../src/store/index-pg.ts';
@@ -70,6 +71,45 @@ test('private history checkpoints never fall back to plaintext', async (t) => {
       storyId,
     ]);
     assert.equal(Number(count?.n), 1);
+
+    await unlocked.history.restore(checkpoint);
+    assert.deepEqual(await unlocked.chronicle.getTurn(second.id), second);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('history checkpoint migration grants history tables to deployed play role', () => {
+  const migration = readFileSync(new URL('../src/db/migrations-pg/006-turn-history.sql', import.meta.url), 'utf8');
+  assert.match(migration, /ARRAY\['history_checkpoints', 'scene_segments'\]/);
+  assert.match(migration, /ARRAY\['fabulist_play', 'fabulist_ingest'\]/);
+  assert.match(migration, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I\.%I TO %I/);
+});
+
+test('history checkpoint captures allocate unique positions per story inside transactions', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'history-concurrency');
+    const storyId = await makeStory(db, 'history-concurrency-story', [worldId]);
+    const world = await World.forStory(db, storyId);
+    const first = await world.chronicle.addTurn(turnInput(1));
+    const second = await world.chronicle.addTurn(turnInput(2));
+
+    const checkpoints = await Promise.all(
+      [first, second].map((turn) =>
+        db.tx(async (client) => {
+          const transactionalWorld = await World.forStory(client, storyId);
+          return transactionalWorld.history.capture(turn.id);
+        }),
+      ),
+    );
+
+    assert.deepEqual(
+      checkpoints.map(({ position }) => position).sort((a, b) => a - b),
+      [1, 2],
+    );
+    assert.deepEqual(
+      (await world.history.eligibleTurns()).map(({ position }) => position),
+      [1, 2],
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });
