@@ -20,6 +20,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { makeWorld, withPg } from './pg-harness.ts';
 import { World, createWorld, worldFor } from '../src/store/index-pg.ts';
 import { claimUnownedStories, createStory, listStories } from '../src/store/world-pg.ts';
@@ -31,8 +33,11 @@ import { SetupService, type SetupServiceOptions } from '../src/setup/service-pg.
 import { fixtureFetcher } from '../src/ingest/client.ts';
 import { WIKI } from './fixtures/wiki.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
+import { buildMcpAuth } from '../src/mcp/auth.ts';
 import type { Db } from '../src/db/pg.ts';
 import type { SessionUser } from '../src/auth/config.ts';
+
+const MCP_DEV_TOKEN = 'pg-api-mcp-secret';
 
 /**
  * A server over the test schema, with a fixed boot world.
@@ -45,7 +50,7 @@ import type { SessionUser } from '../src/auth/config.ts';
 async function withServer(
   db: Db,
   fn: (base: string, world: World, setup: SetupService) => Promise<void>,
-  opts: { seed?: boolean; wikiFetcher?: SetupServiceOptions['wikiFetcher'] } = {},
+  opts: { seed?: boolean; wikiFetcher?: SetupServiceOptions['wikiFetcher']; mcp?: boolean } = {},
 ): Promise<void> {
   const worldId = await makeWorld(db, 'verrow', 'Saint Verrow');
   const story = await createStory(db, { title: 'A story', worldIds: [worldId] });
@@ -60,7 +65,14 @@ async function withServer(
     providers,
     ...(opts.wikiFetcher ? { wikiFetcher: opts.wikiFetcher } : {}),
   });
-  const server = createApiServer({ world: () => world, db, engine, setup });
+  const mcpAuth = opts.mcp ? buildMcpAuth({ MCP_DEV_TOKEN: MCP_DEV_TOKEN }) : undefined;
+  const server = createApiServer({
+    world: () => world,
+    db,
+    engine,
+    setup,
+    ...(mcpAuth ? { mcpAuth, mcpResourceUrl: 'http://127.0.0.1/mcp' } : {}),
+  });
   await listen(server);
   const { port } = server.address() as AddressInfo;
   try {
@@ -68,6 +80,18 @@ async function withServer(
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
   }
+}
+
+function connectMcp(base: string) {
+  const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+    requestInit: { headers: { authorization: ['Bearer', MCP_DEV_TOKEN].join(' ') } },
+  });
+  return { client: new Client({ name: 'fabulist-pg-api-test', version: '1.0.0' }), transport };
+}
+
+function mcpPayload(res: unknown): Record<string, unknown> {
+  const content = (res as { content: Array<{ type: string; text?: string }> }).content;
+  return JSON.parse(content.find((item) => item.type === 'text')!.text!) as Record<string, unknown>;
 }
 
 function listen(server: Server): Promise<void> {
@@ -131,6 +155,39 @@ test('state, cast, threads and the book all serve from Postgres', async (t) => {
       assert.equal((await get(base, '/api/consequences')).status, 200);
       assert.equal((await get(base, '/api/causality')).status, 200);
     });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('a locked private story is an actionable MCP state and leaves the transport usable', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(
+      db,
+      async (base, world) => {
+        await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [world.storyId]);
+
+        const { client, transport } = connectMcp(base);
+        await client.connect(transport);
+        try {
+          const before = await client.listTools();
+          assert.ok(before.tools.some((tool) => tool.name === 'get_state'));
+
+          const locked = await client.callTool({ name: 'get_state', arguments: {} });
+          assert.equal(locked.isError, undefined);
+          assert.deepEqual(mcpPayload(locked), {
+            status: 'locked',
+            error: 'Private stories are locked.',
+            nextStep: 'Open Fabulist in your browser, unlock Private Storage, then retry this tool.',
+          });
+
+          const worlds = mcpPayload(await client.callTool({ name: 'list_worlds', arguments: {} }));
+          assert.ok(Array.isArray(worlds.worlds), 'a second tool call should still succeed after the locked response');
+        } finally {
+          await client.close();
+        }
+      },
+      { mcp: true },
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });
