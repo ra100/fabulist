@@ -74,6 +74,10 @@ function formatTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(2)}m`;
 }
 
+function ErrorNotice({ error }: { error: string | null }) {
+  return error ? <div className="card warn" style={{ margin: 12 }} role="alert">{error}</div> : null;
+}
+
 export function App() {
   const [tab, setTab] = useState<Tab>('book');
   const [state, setState] = useState<State | null>(null);
@@ -103,6 +107,23 @@ export function App() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [privateStorage, setPrivateStorage] = useState<PrivateStorageSnapshot | null>(null);
   const [privateStorageError, setPrivateStorageError] = useState<string | null>(null);
+
+  // Most actions have their own local recovery. This is the last line of
+  // defence for one that does not: React does not render rejected async event
+  // handlers, so without it an API failure only reaches the browser console.
+  useEffect(() => {
+    const report = (reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason));
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => report(event.reason);
+    const onError = (event: ErrorEvent) => {
+      if (event.error) report(event.error);
+    };
+    window.addEventListener('unhandledrejection', onUnhandledRejection);
+    window.addEventListener('error', onError);
+    return () => {
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
+      window.removeEventListener('error', onError);
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -225,18 +246,21 @@ export function App() {
     }
   }, []);
 
-  if (fresh === null) return <div className="wizard"><div className="wizard-card dim">loading…</div></div>;
+  if (fresh === null) return <><ErrorNotice error={error} /><div className="wizard"><div className="wizard-card dim">loading…</div></div></>;
 
   if (fresh) {
     return (
-      <SetupWizard
-        onDone={async () => {
-          // Load the new world *before* leaving the wizard, or the app renders
-          // one frame of stale state - the previous world's name in the header.
-          await refresh();
-          setFresh(false);
-        }}
-      />
+      <>
+        <ErrorNotice error={error} />
+        <SetupWizard
+          onDone={async () => {
+            // Load the new world *before* leaving the wizard, or the app renders
+            // one frame of stale state - the previous world's name in the header.
+            await refresh();
+            setFresh(false);
+          }}
+        />
+      </>
     );
   }
 
@@ -325,7 +349,7 @@ export function App() {
         </div>
       ) : null}
 
-      {error ? <div className="card warn" style={{ margin: 12 }}>{error}</div> : null}
+      <ErrorNotice error={error} />
 
       {currentUser?.encryptionPilot ? (
         <PrivateStorageBanner
