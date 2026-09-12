@@ -560,6 +560,12 @@ export interface StoryKeyGrant {
   expiresAt: string;
 }
 
+export interface PrivateStoryMigrationStatus {
+  status: string;
+  error: string | null;
+  blocklist_done: boolean;
+}
+
 /**
  * Routes this bundle needs that a server predating them will not have.
  *
@@ -650,8 +656,8 @@ export const api = {
       post<{ enrolled: true }>('/encryption/enroll', enrollment),
     unlock: (storyKeys: StoryKeyHandoff[]) => post<{ grants: StoryKeyGrant[] }>('/encryption/unlock', { storyKeys }),
     lock: (storyId?: string) => post<{ lockedStoryIds: string[] }>('/encryption/lock', storyId ? { storyId } : {}),
-    migration: () => req<{ migration: { status: string; error: string | null; blocklist_done: boolean } | null }>('/encryption/migration'),
-    migrate: () => post<{ migration: { status: string; error: string | null; blocklist_done: boolean } }>('/encryption/migration', {}),
+    migration: () => req<{ migration: PrivateStoryMigrationStatus | null }>('/encryption/migration'),
+    migrate: () => post<{ migration: PrivateStoryMigrationStatus }>('/encryption/migration', {}),
   },
   state: () => parsedReq<State>('/state', stateResponseSchema),
   /**

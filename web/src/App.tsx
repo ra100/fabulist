@@ -7,7 +7,6 @@ import {
   type CurrentUser,
   type DepthMode,
   type Edge,
-  type EncryptionKeyBundle,
   type Entity,
   type EntityDetail,
   type ImageProvidersReport,
@@ -35,6 +34,10 @@ import { FactsView } from './views/FactsView.tsx';
 import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
+import {
+  privateStoragePresentation,
+  type PrivateStorageSnapshot,
+} from './private-storage.ts';
 import {
   createEncryptionEnrollment,
   eraseUnlockedStoryKeys,
@@ -98,6 +101,8 @@ export function App() {
   // is server-side: `requireAdmin` in `src/server/api.ts` 403s those routes
   // regardless of what this renders).
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [privateStorage, setPrivateStorage] = useState<PrivateStorageSnapshot | null>(null);
+  const [privateStorageError, setPrivateStorageError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -157,6 +162,51 @@ export function App() {
   useEffect(() => {
     void api.auth.me().then((r) => setCurrentUser(r.user)).catch(() => setCurrentUser(null));
   }, []);
+
+  const refreshPrivateStorage = useCallback(async () => {
+    if (!currentUser?.encryptionPilot) {
+      setPrivateStorage(null);
+      setPrivateStorageError(null);
+      return;
+    }
+    try {
+      const [keys, { migration }] = await Promise.all([
+        api.encryption.keys(),
+        api.encryption.migration(),
+      ]);
+      setPrivateStorage({ keys, migration });
+      setPrivateStorageError(null);
+    } catch (err) {
+      setPrivateStorageError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    void refreshPrivateStorage().catch(() => {});
+  }, [refreshPrivateStorage]);
+
+  useEffect(() => {
+    const expiries = privateStorage?.keys.grants
+      .map(({ expiresAt }) => Date.parse(expiresAt))
+      .filter(Number.isFinite) ?? [];
+    if (!expiries.length) return;
+    const delay = Math.max(1_000, Math.min(...expiries) - Date.now() + 250);
+    const timer = window.setTimeout(() => void refreshPrivateStorage().catch(() => {}), delay);
+    return () => window.clearTimeout(timer);
+  }, [privateStorage, refreshPrivateStorage]);
+
+  const openPrivateStorage = useCallback(() => {
+    setTab('settings');
+    window.requestAnimationFrame(() => {
+      document.getElementById('private-storage')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, []);
+
+  const refreshAfterPrivateStorageChange = useCallback(async () => {
+    await refreshPrivateStorage();
+    await refresh();
+  }, [refresh, refreshPrivateStorage]);
 
   /**
    * Clears the server-side session cookie, then hard-navigates to `/` —
@@ -236,6 +286,13 @@ export function App() {
             </button>
           ))}
         </nav>
+        {currentUser?.encryptionPilot ? (
+          <PrivateStorageIndicator
+            snapshot={privateStorage}
+            error={privateStorageError}
+            onOpen={openPrivateStorage}
+          />
+        ) : null}
         {/*
           Absent entirely when login is off or nobody is signed in yet — the
           same "no `currentUser` means nothing to show" shape `SettingsTab`
@@ -270,6 +327,14 @@ export function App() {
 
       {error ? <div className="card warn" style={{ margin: 12 }}>{error}</div> : null}
 
+      {currentUser?.encryptionPilot ? (
+        <PrivateStorageBanner
+          snapshot={privateStorage}
+          error={privateStorageError}
+          onOpen={openPrivateStorage}
+        />
+      ) : null}
+
       {tab === 'book' ? <BookTab state={state} hasPlayer={hasPlayer} onChanged={refresh} /> : null}
       {tab === 'timeline' ? <TimelineView /> : null}
       {tab === 'graph' ? <GraphTab /> : null}
@@ -287,14 +352,86 @@ export function App() {
           onResetToWizard={() => setFresh(true)}
         />
       ) : null}
-      {tab === 'settings' ? <SettingsTab state={state} onChanged={refresh} currentUser={currentUser} /> : null}
+      {tab === 'settings' ? (
+        <SettingsTab
+          state={state}
+          onChanged={refresh}
+          currentUser={currentUser}
+          privateStorage={privateStorage}
+          privateStorageError={privateStorageError}
+          onPrivateStorageChanged={refreshAfterPrivateStorageChange}
+        />
+      ) : null}
     </div>
   );
 }
 
-function PrivateStoragePanel({ user }: { user: CurrentUser }) {
-  const [enrolled, setEnrolled] = useState<boolean | null>(null);
-  const [keyBundle, setKeyBundle] = useState<EncryptionKeyBundle | null>(null);
+function PrivateStorageIndicator({
+  snapshot,
+  error,
+  onOpen,
+}: {
+  snapshot: PrivateStorageSnapshot | null;
+  error: string | null;
+  onOpen: () => void;
+}) {
+  const presentation = privateStoragePresentation(snapshot, error);
+  return (
+    <button
+      className={`private-storage-indicator ${presentation.state}`}
+      onClick={onOpen}
+      title={presentation.detail}
+      aria-label={`Private storage: ${presentation.label}. ${presentation.detail}`}
+    >
+      <span className="private-storage-indicator-dot" aria-hidden="true" />
+      <span className="private-storage-indicator-name">private storage</span>
+      <b>{presentation.label}</b>
+    </button>
+  );
+}
+
+function PrivateStorageBanner({
+  snapshot,
+  error,
+  onOpen,
+}: {
+  snapshot: PrivateStorageSnapshot | null;
+  error: string | null;
+  onOpen: () => void;
+}) {
+  const presentation = privateStoragePresentation(snapshot, error);
+  if (presentation.state === 'loading' || presentation.state === 'unlocked') return null;
+  return (
+    <div className={`private-storage-banner ${presentation.state}`} role="status">
+      <span className="private-storage-indicator-dot" aria-hidden="true" />
+      <p>
+        <b>Private storage: {presentation.label}.</b>{' '}
+        {presentation.detail}
+      </p>
+      <button onClick={onOpen}>
+        {presentation.state === 'setup'
+          ? 'set up'
+          : presentation.state === 'action'
+            ? 'migrate now'
+            : presentation.state === 'locked'
+              ? 'unlock'
+              : 'review'}
+      </button>
+    </div>
+  );
+}
+
+function PrivateStoragePanel({
+  user,
+  snapshot,
+  statusError,
+  onChanged,
+}: {
+  user: CurrentUser;
+  snapshot: PrivateStorageSnapshot | null;
+  statusError: string | null;
+  onChanged: () => Promise<void>;
+}) {
   const [passphrase, setPassphrase] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [draft, setDraft] = useState<EncryptionEnrollment | null>(null);
@@ -302,21 +439,12 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
   const [copied, setCopied] = useState(false);
   const [unlockWithRecovery, setUnlockWithRecovery] = useState(false);
   const [unlockSecret, setUnlockSecret] = useState('');
-  const [grants, setGrants] = useState<EncryptionKeyBundle['grants']>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [migration, setMigration] = useState<{ status: string; error: string | null } | null>(null);
-
-  useEffect(() => {
-    void api.encryption.keys()
-      .then((keys) => {
-        setEnrolled(keys.enrolled);
-        setKeyBundle(keys);
-        setGrants(keys.grants);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-    void api.encryption.migration().then(({ migration }) => setMigration(migration)).catch(() => {});
-  }, []);
+  const keyBundle = snapshot?.keys ?? null;
+  const enrolled = keyBundle?.enrolled ?? null;
+  const grants = keyBundle?.grants ?? [];
+  const migration = snapshot?.migration ?? null;
 
   const prepare = async () => {
     if (passphrase !== confirmation) {
@@ -344,9 +472,8 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
     setError(null);
     try {
       await api.encryption.enroll(draft);
-      setKeyBundle({ enrolled: true, userKey: draft.userKey, storyKeys: draft.storyKeys, grants: [] });
-      setEnrolled(true);
       setDraft(null);
+      await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -364,8 +491,9 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
         ? await unlockWithRecoveryCode(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret)
         : await unlockWithPassphrase(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret);
       const result = await api.encryption.unlock(storyKeyHandoff(unlocked.storyKeys));
-      setGrants(result.grants);
+      if (!result.grants.length) throw new Error('no private stories were unlocked');
       setUnlockSecret('');
+      await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -379,8 +507,8 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
     setError(null);
     try {
       await api.encryption.lock();
-      setGrants([]);
       setUnlockSecret('');
+      window.location.reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -392,7 +520,8 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
     setBusy(true);
     setError(null);
     try {
-      setMigration((await api.encryption.migrate()).migration);
+      await api.encryption.migrate();
+      await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -410,15 +539,24 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
     }
   };
 
-  if (enrolled === null && !error) return null;
+  if (!snapshot) {
+    return (
+      <section id="private-storage" className="card private-storage">
+        <h3>private storage</h3>
+        <p className={statusError ? 'private-storage-error' : 'dim'} role={statusError ? 'alert' : undefined}>
+          {statusError ?? 'checking private storage…'}
+        </p>
+      </section>
+    );
+  }
   if (enrolled) {
     const expiry = grants[0]?.expiresAt ? new Date(grants[0].expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
     const migrationComplete = migration?.status === 'complete';
     return (
-      <section className="card private-storage">
+      <section id="private-storage" className="card private-storage">
         <div className="private-storage-heading">
           <h3>private storage</h3>
-          <span className={`tag${grants.length ? ' locked' : ''}`}>{grants.length ? 'unlocked' : 'recovery configured'}</span>
+          <span className={`tag${grants.length ? ' locked' : ''}`}>{grants.length ? 'unlocked' : 'locked'}</span>
         </div>
         <div className="private-storage-status">
           <span className="private-storage-mark" aria-hidden="true">◆</span>
@@ -459,7 +597,7 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
             </label>
             <div className="private-storage-actions">
               <button className="primary" onClick={() => void unlock()} disabled={busy || !unlockSecret}>
-                {busy ? 'unlocking…' : 'unlock for MCP'}
+                {busy ? 'unlocking…' : 'unlock private stories'}
               </button>
               <span className="small dimmer">The passphrase and recovery code never leave this browser.</span>
             </div>
@@ -470,12 +608,13 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
           {migration ? ` Status: ${migration.status}${migration.error ? ` — ${migration.error}` : ''}.` : ''}
           {' '}Creating, claiming, forking, and resetting stories is temporarily disabled while private storage is enrolled, until browser-side key provisioning is added.
         </p>
+        {error || statusError ? <p className="private-storage-error" role="alert">{error ?? statusError}</p> : null}
       </section>
     );
   }
 
   return (
-    <section className="card private-storage">
+    <section id="private-storage" className="card private-storage">
       <div className="private-storage-heading">
         <h3>private storage</h3>
         <span className="tag">pilot</span>
@@ -537,7 +676,7 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
           </div>
         </div>
       )}
-      {error ? <p className="private-storage-error" role="alert">{error}</p> : null}
+      {error || statusError ? <p className="private-storage-error" role="alert">{error ?? statusError}</p> : null}
     </section>
   );
 }
@@ -1651,7 +1790,21 @@ function PalettePicker() {
 
 // ------------------------------------------------------------------ settings
 
-function SettingsTab({ state, onChanged, currentUser }: { state: State | null; onChanged: () => void; currentUser: CurrentUser | null }) {
+function SettingsTab({
+  state,
+  onChanged,
+  currentUser,
+  privateStorage,
+  privateStorageError,
+  onPrivateStorageChanged,
+}: {
+  state: State | null;
+  onChanged: () => void;
+  currentUser: CurrentUser | null;
+  privateStorage: PrivateStorageSnapshot | null;
+  privateStorageError: string | null;
+  onPrivateStorageChanged: () => Promise<void>;
+}) {
   const [style, setStyle] = useState<State['session']['style'] | null>(null);
   const [knobs, setKnobs] = useState<State['session']['knobs'] | null>(null);
   const [anchors, setAnchors] = useState<Array<{ id: number; text: string; note: string }>>([]);
@@ -1681,8 +1834,15 @@ function SettingsTab({ state, onChanged, currentUser }: { state: State | null; o
     <div className="main">
       <div className="pane">
         <div className="measure-tool">
+        {currentUser?.encryptionPilot ? (
+          <PrivateStoragePanel
+            user={currentUser}
+            snapshot={privateStorage}
+            statusError={privateStorageError}
+            onChanged={onPrivateStorageChanged}
+          />
+        ) : null}
         <PalettePicker />
-        {currentUser?.encryptionPilot ? <PrivateStoragePanel user={currentUser} /> : null}
         {style ? (
           <div className="card">
             <h3>style contract</h3>
