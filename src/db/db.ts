@@ -181,14 +181,28 @@ export function jsonGet<T>(raw: unknown, fallback: T): T {
   }
 }
 
+const transactionDepth = new WeakMap<Db, number>();
+
 export function tx<T>(db: Db, fn: () => T): T {
-  db.exec('BEGIN');
+  const depth = transactionDepth.get(db) ?? 0;
+  const savepoint = `fabulist_tx_${depth}`;
+  if (depth === 0) db.exec('BEGIN');
+  else db.exec(`SAVEPOINT ${savepoint}`);
+  transactionDepth.set(db, depth + 1);
   try {
     const out = fn();
-    db.exec('COMMIT');
+    if (depth === 0) db.exec('COMMIT');
+    else db.exec(`RELEASE SAVEPOINT ${savepoint}`);
     return out;
   } catch (err) {
-    db.exec('ROLLBACK');
+    if (depth === 0) db.exec('ROLLBACK');
+    else {
+      db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+    }
     throw err;
+  } finally {
+    if (depth === 0) transactionDepth.delete(db);
+    else transactionDepth.set(db, depth);
   }
 }

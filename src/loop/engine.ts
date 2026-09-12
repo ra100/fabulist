@@ -28,7 +28,7 @@ import type { FrameContext } from '../frame/builders.ts';
 import { tokenizerFor } from '../frame/tokenizer.ts';
 import type { Provider, Registry } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
-import { commitDelta, type CommitResult } from './commit.ts';
+import { commitTurn, type CommitResult } from './commit.ts';
 import { Compactor } from './compact.ts';
 import {
   buildNarratorPrompt,
@@ -415,15 +415,6 @@ export class Engine {
       }
     }
 
-    // 9. COMMIT
-    const commit = commitDelta(world, delta);
-
-    // Compaction runs after the commit, on the scene that just closed: only the
-    // current scene stays verbatim, everything above it becomes a summary.
-    if (this.autoCompact && delta.sceneAdvance) {
-      await this.compactor.onSceneClosed(session.scene);
-    }
-
     const meta: TurnMeta = {
       integrity: integrityVerdict,
       referee: refereeVerdict,
@@ -433,20 +424,20 @@ export class Engine {
       providerCalls: args.calls,
     };
 
-    const turnNo = session.turn + 1;
-    const turn = world.chronicle.addTurn({
-      scene: session.scene,
-      turn: turnNo,
+    const { commit, turn } = commitTurn(world, {
       rawInput,
       intent,
       delta,
       bookProse: prose,
-      pinned: false,
       meta,
+      threadId: plan.threadId,
     });
-    world.session.set({ turn: turnNo });
 
-    if (plan.threadId) world.threads.adjustTension(plan.threadId, 0.05);
+    // Compaction runs after the commit, on the scene that just closed: only the
+    // current scene stays verbatim, everything above it becomes a summary.
+    if (this.autoCompact && delta.sceneAdvance) {
+      await this.compactor.onSceneClosed(session.scene);
+    }
 
     return { kind: 'narrated', turn, prose, delta, commit, validation };
   }

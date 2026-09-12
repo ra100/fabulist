@@ -132,6 +132,13 @@ test('playing a turn through the api commits and reports what it set in motion',
     assert.equal(world.chronicle.turns().length, 1);
     assert.ok(typeof b.seeded === 'number', 'reports how many consequences were seeded');
     assert.ok(b.tick !== null, 'and what the queue did');
+    const turn = world.chronicle.turns()[0]!;
+    const checkpoint = world.history.checkpointForTurn(turn.id);
+    assert.ok(checkpoint, 'a committed turn receives an exact history checkpoint');
+
+    const style = await send(base, 'PUT', '/api/style', { register: 'plain' });
+    assert.equal(style.status, 200);
+    assert.deepEqual(world.history.checkpointForTurn(turn.id), checkpoint, 'authoring checkpoints do not replace turn checkpoints');
   });
 });
 
