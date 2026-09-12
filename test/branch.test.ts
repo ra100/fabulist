@@ -10,6 +10,8 @@ import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine.ts';
 import { branchSave, firstSceneOfChapter, forkStory, rollback, truncateToScene } from '../src/loop/branch.ts';
 import { seedConsequences } from '../src/consequence/propagate.ts';
+import { commitTurn } from '../src/loop/commit.ts';
+import { emptyDelta, type Turn } from '../src/domain/types.ts';
 
 function tmp() {
   const dir = mkdtempSync(join(tmpdir(), 'story-branch-'));
@@ -33,6 +35,16 @@ async function playHistory(world: World) {
   await engine.takeTurn('i stab the captain', { overrideIntegrity: true });
   const fact = world.chronicle.addFact('Anselm drew a knife in the yard', 3);
   world.chronicle.setKnowledge(fact.id, 'char:novice-tem', 'knows', 3);
+}
+
+function exactTurn(world: World, turn: number): Turn {
+  return commitTurn(world, {
+    rawInput: `exact action ${turn}`,
+    intent: null,
+    delta: emptyDelta(),
+    bookProse: `Exact turn ${turn}.`,
+    meta: { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] },
+  }).turn;
 }
 
 test('truncating to a scene discards that scene and everything after it', async () => {
@@ -481,5 +493,81 @@ test('rollback by chapter refuses a chapter with no recorded scenes', async () =
   seedWorld(world);
   await playHistory(world);
   assert.throws(() => rollback(world, { chapter: 9 }), /no recorded scenes/);
+  world.close();
+});
+
+test('turn rollback preserves the selected turn and its exact checkpoint state', () => {
+  const world = World.open(':memory:');
+  world.graph.upsert({ id: 'char:pc', type: 'Character', name: 'Player' }, 'canon');
+  const first = exactTurn(world, 1);
+  world.cast.updateCondition('char:pc', { mood: 'afraid' });
+  world.chronicle.addFact('The bell tower is unsafe', 1);
+  const second = exactTurn(world, 2);
+  world.cast.updateCondition('char:pc', { mood: 'furious' });
+  world.chronicle.addFact('The bell tower collapsed', 1);
+  const third = exactTurn(world, 3);
+
+  const result = rollback(world, { turnId: second.id, mode: 'destructive' });
+
+  assert.equal(result.toTurnId, second.id);
+  assert.deepEqual(world.chronicle.turns().map(({ id }) => id), [first.id, second.id]);
+  assert.equal(world.cast.get('char:pc')?.condition.mood, 'afraid');
+  assert.ok(world.chronicle.facts().some((fact) => fact.text === 'The bell tower is unsafe'));
+  assert.ok(!world.chronicle.facts().some((fact) => fact.text === 'The bell tower collapsed'));
+  assert.equal(world.history.checkpointForTurn(third.id), undefined);
+  world.close();
+});
+
+test('turn rollback forks only retained history and leaves the source untouched', () => {
+  const world = World.open(':memory:');
+  const first = exactTurn(world, 1);
+  const second = exactTurn(world, 2);
+  const third = exactTurn(world, 3);
+  const sourceCheckpointCount = Number(
+    (world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as { count: number })
+      .count,
+  );
+
+  const result = rollback(world, { turnId: second.id });
+
+  assert.equal(result.mode, 'fork');
+  assert.equal(result.toTurnId, second.id);
+  assert.equal(world.chronicle.turns().length, 3, 'source prose is unchanged');
+  assert.equal(
+    Number(
+      (world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
+        count: number;
+      }).count,
+    ),
+    sourceCheckpointCount,
+    'source checkpoint history is unchanged',
+  );
+  const forked = world.withStory(result.forkedStory!.id);
+  assert.deepEqual(forked.chronicle.turns().map((turn) => turn.bookProse), [first.bookProse, second.bookProse]);
+  assert.equal(forked.history.eligibleTurns().length, 2, 'only checkpoints through the retained turn were copied');
+  assert.equal(forked.history.checkpointForTurn(third.id), undefined);
+  world.close();
+});
+
+test('legacy turn rollback is rejected without modifying the story', () => {
+  const world = World.open(':memory:');
+  const legacy = world.chronicle.addTurn({
+    scene: 1,
+    turn: 1,
+    rawInput: 'legacy action',
+    intent: null,
+    delta: null,
+    bookProse: 'Legacy turn.',
+    pinned: false,
+    meta: { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] },
+  });
+  const committed = exactTurn(world, 2);
+
+  assert.throws(() => rollback(world, { turnId: legacy.id, mode: 'destructive' }), /legacy/);
+  assert.throws(() => rollback(world, { turnId: 'turn:unknown', mode: 'destructive' }), /unknown/);
+  assert.throws(() => rollback(world, { scene: 1, turnId: committed.id }), /exactly one/);
+  world.db.prepare(`DELETE FROM history_checkpoints WHERE story_id = ? AND turn_id = ?`).run(world.storyId, committed.id);
+  assert.throws(() => rollback(world, { turnId: committed.id, mode: 'destructive' }), /checkpoint/);
+  assert.deepEqual(world.chronicle.turns().map(({ id }) => id), [legacy.id, committed.id]);
   world.close();
 });

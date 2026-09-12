@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import type { Turn } from '../src/domain/types.ts';
 import { World } from '../src/store/index-pg.ts';
 import { makeStory, makeWorld, withPg } from './pg-harness.ts';
+import { rollback } from '../src/loop/branch-pg.ts';
 
 function turnInput(turn: number): Omit<Turn, 'id' | 'createdAt'> {
   return {
@@ -109,6 +110,72 @@ test('history checkpoint captures allocate unique positions per story inside tra
     assert.deepEqual(
       (await world.history.eligibleTurns()).map(({ position }) => position),
       [1, 2],
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('turn rollback preserves the selected checkpoint and forks only retained history', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'turn-rollback');
+    const storyId = await makeStory(db, 'turn-rollback-story', [worldId]);
+    const world = await World.forStory(db, storyId);
+    await world.graph.upsert({ id: 'char:pc', type: 'Character', name: 'Player' }, 'chronicle');
+    const sheet = await world.cast.getOrBlank('char:pc');
+    sheet.condition.mood = 'steady';
+    await world.cast.put(sheet);
+
+    const first = await world.chronicle.addTurn(turnInput(1));
+    await world.history.capture(first.id);
+    await world.cast.updateCondition('char:pc', { mood: 'afraid' });
+    await world.chronicle.addFact('The archive is sealed', 1);
+    const second = await world.chronicle.addTurn(turnInput(2));
+    await world.history.capture(second.id);
+    await world.cast.updateCondition('char:pc', { mood: 'furious' });
+    await world.chronicle.addFact('The archive burned', 1);
+    const third = await world.chronicle.addTurn(turnInput(3));
+    await world.history.capture(third.id);
+
+    const forkResult = await rollback(db, world, { turnId: second.id });
+    assert.equal(forkResult.toTurnId, second.id);
+    assert.equal((await world.chronicle.turns()).length, 3, 'forking leaves the source untouched');
+    const forked = await World.forStory(db, forkResult.story!.id);
+    assert.deepEqual(
+      (await forked.chronicle.turns()).map((turn) => turn.bookProse),
+      [first.bookProse, second.bookProse],
+    );
+    assert.equal((await forked.history.eligibleTurns()).length, 2);
+
+    const destructive = await rollback(db, world, { turnId: second.id, mode: 'destructive' });
+    assert.equal(destructive.toTurnId, second.id);
+    assert.deepEqual(
+      (await world.chronicle.turns()).map(({ id }) => id),
+      [first.id, second.id],
+    );
+    assert.equal((await world.cast.get('char:pc'))?.condition.mood, 'afraid');
+    assert.ok((await world.chronicle.facts()).some((fact) => fact.text === 'The archive is sealed'));
+    assert.ok(!(await world.chronicle.facts()).some((fact) => fact.text === 'The archive burned'));
+    assert.equal(await world.history.checkpointForTurn(third.id), undefined);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('legacy turn rollback rejects the target without changing PostgreSQL history', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'legacy-turn-rollback');
+    const storyId = await makeStory(db, 'legacy-turn-rollback-story', [worldId]);
+    const world = await World.forStory(db, storyId);
+    const legacy = await world.chronicle.addTurn(turnInput(1));
+    const committed = await world.chronicle.addTurn(turnInput(2));
+    await world.history.capture(committed.id);
+
+    await assert.rejects(() => rollback(db, world, { turnId: legacy.id, mode: 'destructive' }), /legacy/);
+    await assert.rejects(() => rollback(db, world, { turnId: 'turn:unknown', mode: 'destructive' }), /unknown/);
+    await db.query(`DELETE FROM history_checkpoints WHERE story_id = $1 AND turn_id = $2`, [storyId, committed.id]);
+    await assert.rejects(() => rollback(db, world, { turnId: committed.id, mode: 'destructive' }), /checkpoint/);
+    assert.deepEqual(
+      (await world.chronicle.turns()).map(({ id }) => id),
+      [legacy.id, committed.id],
     );
   });
   if (!ran) t.skip('no Postgres configured');

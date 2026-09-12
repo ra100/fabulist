@@ -139,6 +139,14 @@ export class HistoryStore {
     return found ? toCheckpoint(found) : undefined;
   }
 
+  checkpointsThrough(position: number): HistoryCheckpoint[] {
+    return rows<CheckpointRow>(
+      this.db
+        .prepare(`SELECT * FROM history_checkpoints WHERE story_id = ? AND position <= ? ORDER BY position`)
+        .all(this.storyId, position),
+    ).map(toCheckpoint);
+  }
+
   eligibleTurn(turnId: string): EligibleTurn | undefined {
     return row<EligibleTurn>(
       this.db
@@ -177,6 +185,36 @@ export class HistoryStore {
   restore(checkpoint: HistoryCheckpoint): void {
     if (checkpoint.storyId !== this.storyId) throw new Error(`checkpoint ${checkpoint.id} belongs to another story`);
     tx(this.db, () => this.restoreLayout(checkpoint.state));
+  }
+
+  /** Restores one retained turn and atomically removes only its later history. */
+  restoreTurn(turnId: string): HistoryCheckpoint {
+    return tx(this.db, () => {
+      const turn = row<{ history_position: number | null }>(
+        this.db.prepare(`SELECT history_position FROM turns WHERE id = ? AND story_id = ?`).get(turnId, this.storyId),
+      );
+      if (!turn) throw new Error(`rollback: unknown turn ${turnId}`);
+      if (turn.history_position == null) throw new Error(`rollback: turn ${turnId} is legacy and has no exact history`);
+      const checkpoint = row<CheckpointRow>(
+        this.db
+          .prepare(`SELECT * FROM history_checkpoints WHERE story_id = ? AND turn_id = ?`)
+          .get(this.storyId, turnId),
+      );
+      if (!checkpoint) throw new Error(`rollback: turn ${turnId} has no exact history checkpoint`);
+
+      const retained = toCheckpoint(checkpoint);
+      this.restoreLayout(retained.state);
+      this.db
+        .prepare(`DELETE FROM turns WHERE story_id = ? AND history_position > ?`)
+        .run(this.storyId, retained.position);
+      this.db
+        .prepare(`DELETE FROM scene_segments WHERE story_id = ? AND start_position > ?`)
+        .run(this.storyId, retained.position);
+      this.db
+        .prepare(`DELETE FROM history_checkpoints WHERE story_id = ? AND position > ?`)
+        .run(this.storyId, retained.position);
+      return retained;
+    });
   }
 
   splitBefore(turnId: string): SceneSplit {
