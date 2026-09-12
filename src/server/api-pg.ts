@@ -1993,7 +1993,7 @@ route('GET', '/api/setup/ingest-health', async (_req, res, { setup, user, authCo
  * fields exist only to widen the scope for "read more". Admin-only, same
  * reasoning as `GET /api/setup/ingest-health` above.
  */
-route('POST', '/api/setup/continue', (_req, res, { setup, body, user, authConfig }) => {
+route('POST', '/api/setup/continue', async (_req, res, { setup, body, user, authConfig }) => {
   if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireSetup(res, setup);
   if (!svc) return;
@@ -2005,7 +2005,11 @@ route('POST', '/api/setup/continue', (_req, res, { setup, body, user, authConfig
     // finished, so widening a 600-page world to 20,000 pays only for the new
     // ones.
     const limits = limitsFromWire(parsed);
-    const job = svc.continueIngest({ seeds, mode, excludeCategories, limits });
+    // Awaited: unlike the SQLite sibling this one is async (it loads the
+    // persisted ingest context from the database before it can start a job),
+    // so serialising the promise sent `{}` — a job with no `id` and no
+    // `progress` — and the panel polling it died on the first render.
+    const job = await svc.continueIngest({ seeds, mode, excludeCategories, limits });
     send(res, 200, job);
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });

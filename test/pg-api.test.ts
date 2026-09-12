@@ -27,7 +27,9 @@ import { seedWorld } from '../src/seed/verrow-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
-import { SetupService } from '../src/setup/service-pg.ts';
+import { SetupService, type SetupServiceOptions } from '../src/setup/service-pg.ts';
+import { fixtureFetcher } from '../src/ingest/client.ts';
+import { WIKI } from './fixtures/wiki.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
 import type { Db } from '../src/db/pg.ts';
 import type { SessionUser } from '../src/auth/config.ts';
@@ -43,7 +45,7 @@ import type { SessionUser } from '../src/auth/config.ts';
 async function withServer(
   db: Db,
   fn: (base: string, world: World, setup: SetupService) => Promise<void>,
-  opts: { seed?: boolean } = {},
+  opts: { seed?: boolean; wikiFetcher?: SetupServiceOptions['wikiFetcher'] } = {},
 ): Promise<void> {
   const worldId = await makeWorld(db, 'verrow', 'Saint Verrow');
   const story = await createStory(db, { title: 'A story', worldIds: [worldId] });
@@ -52,7 +54,12 @@ async function withServer(
 
   const providers = new ProviderRegistry(new MockProvider());
   const engine = new Engine({ world: () => world, db, providers });
-  const setup = new SetupService({ world: () => world, db, providers });
+  const setup = new SetupService({
+    world: () => world,
+    db,
+    providers,
+    ...(opts.wikiFetcher ? { wikiFetcher: opts.wikiFetcher } : {}),
+  });
   const server = createApiServer({ world: () => world, db, engine, setup });
   await listen(server);
   const { port } = server.address() as AddressInfo;
@@ -530,6 +537,66 @@ test('claiming only ever takes stories nobody owns', async (t) => {
 
     // And a second claim finds nothing left to do.
     assert.equal(await claimUnownedStories(db, 'user-me'), 0);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * Settings' reading panel gets a real job back, not a serialised promise.
+ *
+ * `SetupService.continueIngest` is async on Postgres (it loads the persisted
+ * ingest context from the database first) where its SQLite sibling is not, and
+ * the route sent it straight to `JSON.stringify` unawaited. A `Promise` has no
+ * own enumerable keys, so both "continue reading" and "read more" answered
+ * `{}` with a 200 — and the panel, which renders `job.progress.stage` the
+ * moment the call resolves, threw and took the whole app down with it: a black
+ * screen. The assertions below are exactly the fields that panel reads.
+ */
+test('continuing a wiki ingest returns a started job, not an empty body', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(
+      db,
+      async (base, world) => {
+        await world.chronicle.setMeta(
+          'ingestContext',
+          JSON.stringify({
+            baseUrl: 'https://vale.fandom.com',
+            wikiName: 'vale.fandom.com',
+            mode: 'skim',
+            seeds: ['Duskhollow'],
+            excludeCategories: [],
+            title: 'The Ashen Vale',
+          }),
+        );
+
+        const started = await send(base, 'POST', '/api/setup/continue', { maxPages: 2, hops: 1 });
+        assert.equal(started.status, 200, JSON.stringify(started.body));
+        assert.equal(typeof started.body.id, 'string', `no job id in ${JSON.stringify(started.body)}`);
+        assert.ok(started.body.id.length > 0);
+        assert.ok(
+          ['running', 'done', 'failed'].includes(started.body.status),
+          `expected a job status, got ${JSON.stringify(started.body.status)}`,
+        );
+        // The panel reads `job.progress.stage` unconditionally on the very
+        // first render, so an absent `progress` is the crash itself.
+        assert.equal(typeof started.body.progress?.stage, 'string', 'a job must carry its progress');
+
+        // And the id it handed back is one the poll route can actually resolve
+        // — the other half of what the panel does with this response.
+        const polled = await get(base, `/api/setup/job/${encodeURIComponent(started.body.id)}`);
+        assert.equal(polled.status, 200);
+        assert.equal(polled.body.id, started.body.id);
+
+        // Let the job finish before the server and schema go away, so its
+        // writes do not land on a torn-down database.
+        for (let i = 0; i < 400; i++) {
+          const now = await get(base, `/api/setup/job/${encodeURIComponent(started.body.id)}`);
+          if (now.body?.status !== 'running') break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      },
+      { wikiFetcher: fixtureFetcher(WIKI) },
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });
