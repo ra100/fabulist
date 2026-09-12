@@ -89,7 +89,7 @@ DECLARE
     'stories', 'story_sources', 'story_id_aliases', 'chron_entities', 'chron_edges',
     'chron_sheets', 'relationships', 'facts', 'fact_knowledge', 'threads', 'events',
     'consequences', 'turns', 'scenes', 'chapters', 'directives', 'divergences',
-    'style_anchors', 'prose_blocklist', 'illustrations',
+    'style_anchors', 'prose_blocklist', 'illustrations', 'history_checkpoints', 'scene_segments',
     -- User-scoped encryption rollout and key-wrap state. The key tables contain
     -- browser-produced ciphertext only; no role, including the operator's app
     -- process, can derive the plaintext key from them.
