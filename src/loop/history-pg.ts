@@ -1,4 +1,5 @@
 import type { Db } from '../db/pg.ts';
+import type { Engine } from './engine-pg.ts';
 import { World } from '../store/index-pg.ts';
 
 /**
@@ -24,4 +25,19 @@ export async function recordAuthoringCheckpoint<T>(
     await transactionWorld.history.capture();
     return result;
   });
+}
+
+/**
+ * Renders without a checked-out transaction client, then serialises the
+ * verify/write/checkpoint sequence under the story lock.
+ */
+export async function regenerateProseWithCheckpoint(
+  db: Db,
+  world: World,
+  engine: Engine,
+  turnId: string,
+  opts: { note?: string; onToken?: (chunk: string) => void } = {},
+) {
+  const rendered = await engine.renderProseRegeneration(turnId, { ...opts, world });
+  return recordAuthoringCheckpoint(db, world, (transactionWorld) => engine.persistProseRegeneration(rendered, transactionWorld));
 }

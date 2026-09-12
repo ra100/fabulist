@@ -27,7 +27,7 @@ import { World, createWorld, worldFor } from '../src/store/index-pg.ts';
 import { claimUnownedStories, createStory, listStories, listStoriesForUser } from '../src/store/world-pg.ts';
 import { seedWorld } from '../src/seed/verrow-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
-import { ProviderRegistry } from '../src/providers/provider.ts';
+import { ProviderRegistry, type CompletionRequest, type CompletionResult, type Provider } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
 import { SetupService, type SetupServiceOptions } from '../src/setup/service-pg.ts';
 import { fixtureFetcher } from '../src/ingest/client.ts';
@@ -37,6 +37,7 @@ import { buildMcpAuth } from '../src/mcp/auth.ts';
 import type { Db } from '../src/db/pg.ts';
 import { SESSION_COOKIE, type SessionUser } from '../src/auth/config.ts';
 import { HistoryStore } from '../src/store/history-pg.ts';
+import { recordAuthoringCheckpoint } from '../src/loop/history-pg.ts';
 
 const MCP_DEV_TOKEN = 'pg-api-mcp-secret';
 
@@ -51,14 +52,14 @@ const MCP_DEV_TOKEN = 'pg-api-mcp-secret';
 async function withServer(
   db: Db,
   fn: (base: string, world: World, setup: SetupService, engine: Engine) => Promise<void>,
-  opts: { seed?: boolean; wikiFetcher?: SetupServiceOptions['wikiFetcher']; mcp?: boolean } = {},
+  opts: { seed?: boolean; wikiFetcher?: SetupServiceOptions['wikiFetcher']; mcp?: boolean; provider?: Provider } = {},
 ): Promise<void> {
   const worldId = await makeWorld(db, 'verrow', 'Saint Verrow');
   const story = await createStory(db, { title: 'A story', worldIds: [worldId] });
   const world = await World.forStory(db, story.id);
   if (opts.seed !== false) await seedWorld(world);
 
-  const providers = new ProviderRegistry(new MockProvider());
+  const providers = new ProviderRegistry(opts.provider ?? new MockProvider());
   const engine = new Engine({ world: () => world, db, providers });
   const setup = new SetupService({
     world: () => world,
@@ -93,6 +94,38 @@ function connectMcp(base: string) {
 function mcpPayload(res: unknown): Record<string, unknown> {
   const content = (res as { content: Array<{ type: string; text?: string }> }).content;
   return JSON.parse(content.find((item) => item.type === 'text')!.text!) as Record<string, unknown>;
+}
+
+class BlockingNarratorProvider extends MockProvider {
+  private narrationStarted: Promise<void> | null = null;
+  private markNarrationStarted: (() => void) | null = null;
+  private releaseNarration: (() => void) | null = null;
+
+  blockNextNarration(): void {
+    this.narrationStarted = new Promise((resolve) => {
+      this.markNarrationStarted = resolve;
+    });
+  }
+
+  async waitForNarration(): Promise<void> {
+    await this.narrationStarted;
+  }
+
+  release(): void {
+    this.releaseNarration?.();
+    this.releaseNarration = null;
+  }
+
+  override async complete(req: CompletionRequest): Promise<CompletionResult> {
+    if (req.role === 'narrate' && this.markNarrationStarted) {
+      this.markNarrationStarted();
+      this.markNarrationStarted = null;
+      await new Promise<void>((resolve) => {
+        this.releaseNarration = resolve;
+      });
+    }
+    return super.complete(req);
+  }
 }
 
 function listen(server: Server): Promise<void> {
@@ -257,7 +290,7 @@ test('REST authoring writes and regenerate roll back when checkpoint capture fai
       assert.equal(unknown.status, 404);
       const styleBefore = (await world.session.get()).style;
       const originalCapture = HistoryStore.prototype.capture;
-      HistoryStore.prototype.capture = async function () {
+      HistoryStore.prototype.capture = async () => {
         throw new Error('checkpoint persistence failed');
       };
       try {
@@ -277,13 +310,7 @@ test('REST authoring writes and regenerate roll back when checkpoint capture fai
       const refusedPinned = await send(base, 'POST', `/api/turn/${turn.id}/regenerate`, {});
       assert.equal(refusedPinned.status, 409);
       await send(base, 'POST', `/api/turn/${turn.id}/pin`, { pinned: false });
-      const originalRegenerate = engine.regenerateProse.bind(engine);
-      engine.regenerateProse = async (turnId, options = {}) => {
-        const transactionWorld = options.world!;
-        await transactionWorld.chronicle.setProse(turnId, 'this prose must be rolled back');
-        return (await transactionWorld.chronicle.getTurn(turnId))!;
-      };
-      HistoryStore.prototype.capture = async function () {
+      HistoryStore.prototype.capture = async () => {
         throw new Error('checkpoint persistence failed');
       };
       try {
@@ -291,10 +318,51 @@ test('REST authoring writes and regenerate roll back when checkpoint capture fai
         assert.equal(failedRegenerate.status, 500, 'checkpoint persistence failures are not reported as missing turns');
       } finally {
         HistoryStore.prototype.capture = originalCapture;
-        engine.regenerateProse = originalRegenerate;
       }
       assert.equal((await world.chronicle.getTurn(turn.id))?.bookProse, originalProse, 'the prose mutation rolls back with capture');
     });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL regeneration renders outside the lock and rejects concurrent turn changes', async (t) => {
+  const provider = new BlockingNarratorProvider();
+  const ran = await withPg(async (db) => {
+    await withServer(
+      db,
+      async (base, world) => {
+        const played = await send(base, 'POST', '/api/play', { input: 'i warm the ink and keep copying' });
+        assert.equal(played.status, 200);
+        const turn = (await world.chronicle.turns())[0]!;
+        const originalProse = turn.bookProse;
+
+        provider.blockNextNarration();
+        const reroll = send(base, 'POST', `/api/turn/${turn.id}/regenerate`, {});
+        await provider.waitForNarration();
+        const pin = send(base, 'POST', `/api/turn/${turn.id}/pin`, { pinned: true });
+        const pinnedBeforeRenderCompletes = await Promise.race([
+          pin,
+          new Promise<Res | null>((resolve) => setTimeout(() => resolve(null), 750)),
+        ]);
+        provider.release();
+        assert.ok(pinnedBeforeRenderCompletes, 'the pin write must not wait for remote narration');
+        assert.equal(pinnedBeforeRenderCompletes.status, 200);
+        assert.equal((await reroll).status, 409, 'a pin applied during rendering wins');
+        assert.equal((await world.chronicle.getTurn(turn.id))?.bookProse, originalProse);
+
+        await send(base, 'POST', `/api/turn/${turn.id}/pin`, { pinned: false });
+        provider.blockNextNarration();
+        const rerollAfterEdit = send(base, 'POST', `/api/turn/${turn.id}/regenerate`, {});
+        await provider.waitForNarration();
+        await recordAuthoringCheckpoint(db, world, (transactionWorld) =>
+          transactionWorld.chronicle.setProse(turn.id, 'the author’s intervening revision'),
+        );
+        provider.release();
+        assert.equal((await rerollAfterEdit).status, 409, 'an intervening prose revision wins');
+        assert.equal((await world.chronicle.getTurn(turn.id))?.bookProse, 'the author’s intervening revision');
+      },
+      { provider },
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });

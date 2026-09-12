@@ -13,7 +13,7 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '../db/pg.ts';
 import type { Engine } from '../loop/engine-pg.ts';
-import { recordAuthoringCheckpoint } from '../loop/history-pg.ts';
+import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint } from '../loop/history-pg.ts';
 import { World, worldFor } from '../store/index-pg.ts';
 import { forkStory, rollback } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
@@ -624,15 +624,13 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { db, engine, world,
   const id = decodeURIComponent(params.id ?? '');
   const { note } = parseBody(regenerateBodySchema, body);
   try {
-    // `world` explicit: the per-request (per-user, when login is on) world
-    // — see `TakeTurnOptions.world`'s own doc comment for why.
-    const turn = await recordAuthoringCheckpoint(db, world, (transactionWorld) =>
-      engine.regenerateProse(id, { ...(note?.trim() ? { note: note.trim() } : {}), world: transactionWorld }),
-    );
+    const turn = await regenerateProseWithCheckpoint(db, world, engine, id, {
+      ...(note?.trim() ? { note: note.trim() } : {}),
+    });
     send(res, 200, turn);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (message.includes('pinned')) return send(res, 409, { error: message });
+    if (message.includes('pinned') || message.includes('changed while prose was being rendered')) return send(res, 409, { error: message });
     if (message.startsWith('no turn ')) return send(res, 404, { error: message });
     throw err;
   }
