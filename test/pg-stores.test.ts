@@ -589,6 +589,7 @@ test('encrypted private graph entities retain stable ids with keyed blind lookup
     assert.ok(indexes.rows.every((row) => !row.token.includes('Mara')));
 
     const locked = (await World.forStory(db, storyId)).graph;
+    assert.equal(await locked.isEmpty(), false, 'structural startup checks do not require an unlocked story key');
     await assert.rejects(() => locked.get('char:secret'), /locked/);
     await assert.rejects(() => locked.search('Mara'), /locked/);
     await assert.rejects(() => locked.assertEdge({ subject: 'char:secret', predicate: 'KNOWS', object: 'char:other' }, 3), /locked/);

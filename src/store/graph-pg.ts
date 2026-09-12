@@ -1237,9 +1237,8 @@ export class GraphStore {
    * on every UI refresh. Here both arms are indexed primary-key lookups, but
    * `EXISTS` is still the right question to ask.
    */
-  async isEmpty(): Promise<boolean> {
-    await this.privateValues.key();
-    // Each arm is its own EXISTS, OR-ed together, rather than
+   async isEmpty(): Promise<boolean> {
+     // Each arm is its own EXISTS, OR-ed together, rather than
     // `SELECT 1 ... LIMIT 1 UNION ALL SELECT 1 ... LIMIT 1`: a bare LIMIT inside
     // a UNION arm is a syntax error in Postgres (`syntax error at or near
     // "UNION"`), which is how this was caught. EXISTS also short-circuits per
