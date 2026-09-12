@@ -1190,6 +1190,54 @@ interface ActiveMcpSession {
 
 const MCP_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 const activeMcpSessions = new Map<string, ActiveMcpSession>();
+const MCP_DIAGNOSTIC_LIMIT = 30;
+
+export interface McpDiagnosticEvent {
+  sequence: number;
+  at: string;
+  method: string;
+  tool?: string;
+  session: 'new' | 'present' | 'missing';
+  outcome: string;
+  detail?: string;
+}
+
+let mcpDiagnosticSequence = 0;
+const mcpDiagnosticEvents: McpDiagnosticEvent[] = [];
+
+function toolName(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object' || !('params' in body)) return undefined;
+  const params = (body as { params?: unknown }).params;
+  if (!params || typeof params !== 'object' || !('name' in params)) return undefined;
+  const name = (params as { name?: unknown }).name;
+  return typeof name === 'string' ? name : undefined;
+}
+
+function recordMcpDiagnostic(
+  body: unknown,
+  session: McpDiagnosticEvent['session'],
+  outcome: string,
+  detail?: string,
+): void {
+  mcpDiagnosticEvents.push({
+    sequence: ++mcpDiagnosticSequence,
+    at: new Date().toISOString(),
+    method: requestMethod(body) ?? 'unknown',
+    ...(toolName(body) ? { tool: toolName(body) } : {}),
+    session,
+    outcome,
+    ...(detail ? { detail } : {}),
+  });
+  if (mcpDiagnosticEvents.length > MCP_DIAGNOSTIC_LIMIT) mcpDiagnosticEvents.shift();
+}
+
+export function getMcpDiagnostics(): { events: McpDiagnosticEvent[] } {
+  return { events: mcpDiagnosticEvents.map((event) => ({ ...event })) };
+}
+
+export function recordMcpRequestFailure(body: unknown, error: unknown, hasSession: boolean): void {
+  recordMcpDiagnostic(body, hasSession ? 'present' : 'missing', 'server_error', error instanceof Error ? error.name : typeof error);
+}
 
 async function pruneExpiredMcpSessions(now: number): Promise<void> {
   for (const [sessionId, session] of activeMcpSessions) {
@@ -1241,6 +1289,7 @@ export async function handleMcpRequest(
   try {
     verified = await opts.auth.verify(req.headers.authorization);
   } catch {
+    recordMcpDiagnostic(body, requestSessionId(req) ? 'present' : 'missing', 'unauthorized');
     // Every failure mode (missing header, malformed token, expired,
     // wrong audience) reports the same 401 + WWW-Authenticate: MCP clients
     // branch on the *header*, not on distinguishing failure reasons, and
@@ -1267,11 +1316,13 @@ export async function handleMcpRequest(
   if (sessionId) {
     const session = activeMcpSessions.get(sessionId);
     if (!session || session.userId !== verified.userId) {
+      recordMcpDiagnostic(body, 'present', 'session_not_found');
       sendMcpProtocolError(res, 404, -32001, 'MCP session not found; initialize a new session');
       return;
     }
     session.lastUsedAt = now;
     await session.transport.handleRequest(reqWithAuth, res, body);
+    recordMcpDiagnostic(body, 'present', `completed_http_${res.statusCode}`);
     if (req.method === 'DELETE') {
       activeMcpSessions.delete(sessionId);
     }
@@ -1279,6 +1330,7 @@ export async function handleMcpRequest(
   }
 
   if (req.method !== 'POST' || requestMethod(body) !== 'initialize') {
+    recordMcpDiagnostic(body, 'missing', 'session_required');
     sendMcpProtocolError(res, 400, -32000, 'Mcp-Session-Id header required');
     return;
   }
@@ -1295,6 +1347,7 @@ export async function handleMcpRequest(
     await transport.handleRequest(reqWithAuth, res, body);
     if (!transport.sessionId) throw new Error('MCP initialization completed without a session id');
     activeMcpSessions.set(transport.sessionId, { server, transport, userId: verified.userId, lastUsedAt: now });
+    recordMcpDiagnostic(body, 'new', `completed_http_${res.statusCode}`);
   } catch (error) {
     await server.close();
     throw error;

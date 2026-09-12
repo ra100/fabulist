@@ -190,6 +190,19 @@ test('a locked private story is an actionable MCP state and leaves the transport
 
           const worlds = mcpPayload(await client.callTool({ name: 'list_worlds', arguments: {} }));
           assert.ok(Array.isArray(worlds.worlds), 'a second tool call should still succeed after the locked response');
+
+          const diagnostics = await get(base, '/api/mcp-diagnostics');
+          assert.equal(diagnostics.status, 200);
+          assert.ok(
+            diagnostics.body.events.some(
+              (event: { method: string; tool?: string; session: string; outcome: string }) =>
+                event.method === 'tools/call' &&
+                event.tool === 'list_worlds' &&
+                event.session === 'present' &&
+                event.outcome === 'completed_http_200',
+            ),
+          );
+          assert.equal(JSON.stringify(diagnostics.body).includes(MCP_DEV_TOKEN), false);
         } finally {
           await client.close();
         }
