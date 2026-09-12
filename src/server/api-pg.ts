@@ -2293,7 +2293,11 @@ export function createApiServer(opts: ServerOptions) {
 
     res.setHeader('access-control-allow-origin', '*');
     res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('access-control-allow-headers', 'content-type,authorization');
+    res.setHeader(
+      'access-control-allow-headers',
+      'content-type,authorization,mcp-protocol-version,mcp-session-id,last-event-id',
+    );
+    res.setHeader('access-control-expose-headers', 'mcp-session-id');
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       return res.end();
@@ -2311,15 +2315,37 @@ export function createApiServer(opts: ServerOptions) {
     // since the caller is Claude/ChatGPT, not a browser with a cookie jar.
     // It is deliberately reached *before* the session gate, not gated by it.
     if (mcpAuth && mcpResourceUrl && url.pathname === '/mcp') {
+      let body: unknown;
       try {
-        const body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readJsonBody(req);
+        body = req.method === 'GET' || req.method === 'DELETE' ? undefined : await readJsonBody(req);
         await handleMcpRequest(req, res, body, {
           toolContext: mcpToolContextFor,
           auth: mcpAuth,
           resourceUrl: mcpResourceUrl,
         });
       } catch (err) {
-        if (!res.headersSent) send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
+        const method =
+          body && typeof body === 'object' && 'method' in body && typeof body.method === 'string'
+            ? body.method
+            : req.method;
+        console.error(`MCP request failed (${method}):`, err);
+        if (!res.headersSent) {
+          const id =
+            body &&
+            typeof body === 'object' &&
+            'id' in body &&
+            (typeof body.id === 'string' || typeof body.id === 'number' || body.id === null)
+              ? body.id
+              : null;
+          res.writeHead(statusForError(err), { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32603, message: 'MCP request failed; reconnect and retry' },
+              id,
+            }),
+          );
+        }
       }
       return;
     }

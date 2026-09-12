@@ -5,13 +5,12 @@
  * `@modelcontextprotocol/sdk`'s wire protocol, and `src/mcp/auth.ts`'s
  * bearer-token check to every request before the SDK ever sees it.
  *
- * Stateless mode (`sessionIdGenerator: undefined`) deliberately: this
- * server's actual state lives in the world/story SQLite files and in
- * `Engine`'s own `pending` map (see `commitExternalNarration`), not in an
- * MCP session — a fresh `McpServer`/transport pair per HTTP request costs
- * nothing that matters here and sidesteps every session-affinity question a
- * stateful transport would raise behind a load balancer later.
+ * Streamable HTTP sessions retain the initialized server and transport across
+ * requests. ChatGPT performs initialization/schema discovery separately from
+ * tool invocation, so destroying that pair after each request can make the
+ * first tools/call look like a dead connector even though tools/list worked.
  */
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -1181,7 +1180,42 @@ export interface McpRouteOptions {
   resourceUrl: string;
 }
 
-/** `WWW-Authenticate` on every 401 this route returns \u2014 not optional: it is how a compliant MCP client discovers where to authenticate at all (see `auth.ts`'s header comment and the MCP spec's own sequence diagram). */
+/** One retained SDK server/transport pair per initialized Streamable HTTP session. */
+interface ActiveMcpSession {
+  server: McpServer;
+  transport: StreamableHTTPServerTransport;
+  userId: string;
+  lastUsedAt: number;
+}
+
+const MCP_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
+const activeMcpSessions = new Map<string, ActiveMcpSession>();
+
+async function pruneExpiredMcpSessions(now: number): Promise<void> {
+  for (const [sessionId, session] of activeMcpSessions) {
+    if (now - session.lastUsedAt < MCP_SESSION_TTL_MS) continue;
+    activeMcpSessions.delete(sessionId);
+    await session.server.close();
+  }
+}
+
+function requestSessionId(req: IncomingMessage): string | undefined {
+  const value = req.headers['mcp-session-id'];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function requestMethod(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object' || !('method' in body)) return undefined;
+  const method = (body as { method?: unknown }).method;
+  return typeof method === 'string' ? method : undefined;
+}
+
+function sendMcpProtocolError(res: ServerResponse, status: number, code: number, message: string): void {
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
+}
+
+/** `WWW-Authenticate` on every 401 this route returns; it is required for OAuth discovery. */
 function wwwAuthenticateHeader(resourceUrl: string): string {
   return [
     'Bearer error="unauthorized"',
@@ -1227,16 +1261,43 @@ export async function handleMcpRequest(
   };
   const reqWithAuth = Object.assign(req, { auth: authInfo });
 
+  const now = Date.now();
+  await pruneExpiredMcpSessions(now);
+  const sessionId = requestSessionId(req);
+  if (sessionId) {
+    const session = activeMcpSessions.get(sessionId);
+    if (!session || session.userId !== verified.userId) {
+      sendMcpProtocolError(res, 404, -32001, 'MCP session not found; initialize a new session');
+      return;
+    }
+    session.lastUsedAt = now;
+    await session.transport.handleRequest(reqWithAuth, res, body);
+    if (req.method === 'DELETE') {
+      activeMcpSessions.delete(sessionId);
+    }
+    return;
+  }
+
+  if (req.method !== 'POST' || requestMethod(body) !== 'initialize') {
+    sendMcpProtocolError(res, 400, -32000, 'Mcp-Session-Id header required');
+    return;
+  }
+
   const server = buildServer(await opts.toolContext(verified), opts.resourceUrl);
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: randomUUID,
+    onsessionclosed: (closedSessionId) => {
+      activeMcpSessions.delete(closedSessionId);
+    },
+  });
+  await server.connect(transport);
   try {
-    await server.connect(transport);
     await transport.handleRequest(reqWithAuth, res, body);
-  } finally {
-    res.on('close', () => {
-      transport.close();
-      server.close();
-    });
+    if (!transport.sessionId) throw new Error('MCP initialization completed without a session id');
+    activeMcpSessions.set(transport.sessionId, { server, transport, userId: verified.userId, lastUsedAt: now });
+  } catch (error) {
+    await server.close();
+    throw error;
   }
 }
 
