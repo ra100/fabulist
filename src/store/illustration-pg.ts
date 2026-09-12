@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import type { Queryable } from '../db/pg.ts';
 import { decryptStoryBytes, decryptStoryValue, encryptStoryBytes, encryptStoryValue } from '../crypto/story-envelope.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
+import { PrivateStoryLockedError } from './private-story-access.ts';
 import type {
   EntityId,
   Illustration,
@@ -63,7 +64,7 @@ class IllustrationPrivateValues {
     }
     if (this.encryptionVersion === 0) return null;
     const key = this.crypto?.keyForStory(this.storyId) ?? null;
-    if (!key) throw new Error(`private story ${this.storyId} is locked`);
+    if (!key) throw new PrivateStoryLockedError(this.storyId);
     if (key.length !== 32) throw new Error('invalid private-story key');
     return Buffer.from(key);
   }

@@ -44,6 +44,7 @@ import { decryptStoryValue, encryptStoryValue, storyBlindIndex } from '../crypto
 import { jsonGet, type Queryable } from '../db/pg.ts';
 import { overlayEdges, overlayEntities, overlayEntity, type OverlaySource } from '../db/overlay.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
+import { PrivateStoryLockedError } from './private-story-access.ts';
 import type {
   DepthLevelValue,
   Edge,
@@ -84,7 +85,7 @@ class GraphPrivateValues {
     }
     if (this.encryptionVersion === 0) return null;
     const key = this.crypto?.keyForStory(this.storyId) ?? null;
-    if (!key) throw new Error(`private story ${this.storyId} is locked`);
+    if (!key) throw new PrivateStoryLockedError(this.storyId);
     if (key.length !== 32) throw new Error('invalid private-story key');
     return Buffer.from(key);
   }
@@ -908,7 +909,7 @@ export class GraphStore {
         out.push(...rows.map((row) => toEntity(row, 'canon')));
       }
       return out;
-  }
+    }
 
   /**
    * Salience is play-time and per-story: bumping it copy-on-writes a chronicle
