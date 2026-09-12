@@ -12,6 +12,7 @@ import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine.ts';
 import { splitSceneAtTurn } from '../src/loop/history.ts';
+import { HistoryStore } from '../src/store/history.ts';
 import { createApiServer } from '../src/server/api.ts';
 import type { AuthConfig } from '../src/auth/config.ts';
 import { SESSION_COOKIE } from '../src/auth/config.ts';
@@ -828,6 +829,113 @@ test('POST /api/rollback in destructive mode needs no CurrentStory at all', asyn
   });
 });
 
+test('POST /api/rollback retains an exact turn and defaults to an isolated fork', async () => {
+  await withMultiStoryServer(async (base, world, currentStory) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    await send(base, 'POST', '/api/play', { input: 'i check the door' });
+    await send(base, 'POST', '/api/play', { input: 'i hide the psalter' });
+    const sourceId = world.storyId;
+    const target = world.chronicle.turns()[1]!;
+
+    const { status, body } = await send(base, 'POST', '/api/rollback', { turnId: target.id });
+    assert.equal(status, 200);
+    const result = body as { mode: string; toTurnId: string; forkedStory: { id: string } };
+    assert.equal(result.mode, 'fork');
+    assert.equal(result.toTurnId, target.id);
+    assert.equal(world.withStory(sourceId).chronicle.turns().length, 3, 'the source remains intact');
+    assert.equal(world.withStory(result.forkedStory.id).chronicle.turns().length, 2, 'the selected turn is retained');
+    assert.equal(currentStory.id(), result.forkedStory.id, 'the default fork becomes current');
+  });
+});
+
+test('POST /api/scene/split validates exact targets and returns derived layout metadata', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    await send(base, 'POST', '/api/play', { input: 'i check the door' });
+    await send(base, 'POST', '/api/play', { input: 'i hide the psalter' });
+    const target = world.chronicle.turns()[1]!;
+
+    const split = await send(base, 'POST', '/api/scene/split', { turnId: target.id });
+    assert.equal(split.status, 200);
+    const splitBody = split.body as {
+      turnId: string; startsAtTurnId: string; scene: number; chapter: number; startsScene: boolean; target?: never;
+    };
+    assert.equal(splitBody.turnId, target.id);
+    assert.equal(splitBody.startsAtTurnId, target.id);
+    assert.equal(splitBody.scene, 2);
+    assert.equal(splitBody.chapter, 1);
+    assert.equal(splitBody.startsScene, true);
+    assert.equal(splitBody.target, undefined, 'the public response contract does not expose internal transaction metadata');
+
+    const duplicate = await send(base, 'POST', '/api/scene/split', { turnId: target.id });
+    assert.equal(duplicate.status, 400);
+    assert.match((duplicate.body as { error: string }).error, /already starts a scene/);
+    const unknown = await send(base, 'POST', '/api/scene/split', { turnId: 'turn:unknown' });
+    assert.equal(unknown.status, 400);
+    assert.equal((await send(base, 'POST', '/api/scene/split', { turnId: '' })).status, 400, 'malformed targets remain validation errors');
+    const missing = world.chronicle.turns()[2]!;
+    world.db.prepare(`DELETE FROM history_checkpoints WHERE story_id = ? AND turn_id = ?`).run(world.storyId, missing.id);
+    const ineligible = await send(base, 'POST', '/api/scene/split', { turnId: missing.id });
+    assert.equal(ineligible.status, 400);
+    assert.match((ineligible.body as { error: string }).error, /checkpoint/);
+    const legacy = world.chronicle.addTurn({
+      scene: 2,
+      turn: 99,
+      rawInput: 'legacy turn',
+      intent: null,
+      delta: null,
+      bookProse: 'Legacy prose.',
+      pinned: false,
+      meta: { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] },
+    });
+    const legacyTarget = await send(base, 'POST', '/api/scene/split', { turnId: legacy.id });
+    assert.equal(legacyTarget.status, 400);
+    assert.match((legacyTarget.body as { error: string }).error, /legacy/);
+    const legacyRollback = await send(base, 'POST', '/api/rollback', { turnId: legacy.id, mode: 'destructive' });
+    assert.equal(legacyRollback.status, 400);
+    assert.match((legacyRollback.body as { error: string }).error, /legacy/);
+    const unknownRollback = await send(base, 'POST', '/api/rollback', { turnId: 'turn:unknown', mode: 'destructive' });
+    assert.equal(unknownRollback.status, 400);
+    const ineligibleRollback = await send(base, 'POST', '/api/rollback', { turnId: missing.id, mode: 'destructive' });
+    assert.equal(ineligibleRollback.status, 400);
+    assert.match((ineligibleRollback.body as { error: string }).error, /checkpoint/);
+  });
+});
+
+test('POST /api/rollback surfaces unexpected checkpoint restore errors as 500', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+    const target = world.chronicle.turns()[0]!;
+    const originalRestoreTurn = HistoryStore.prototype.restoreTurn;
+    HistoryStore.prototype.restoreTurn = () => {
+      throw new Error('rollback persistence failed');
+    };
+    try {
+      const failed = await send(base, 'POST', '/api/rollback', { turnId: target.id, mode: 'destructive' });
+      assert.equal(failed.status, 500);
+      assert.match((failed.body as { error: string }).error, /rollback persistence failed/);
+    } finally {
+      HistoryStore.prototype.restoreTurn = originalRestoreTurn;
+    }
+  });
+});
+
+test('POST /api/scene/split surfaces unexpected persistence errors as 500', async () => {
+  await withServer(async (base) => {
+    const originalSplitBefore = HistoryStore.prototype.splitBefore;
+    HistoryStore.prototype.splitBefore = () => {
+      throw new Error('split persistence failed');
+    };
+    try {
+      const failed = await send(base, 'POST', '/api/scene/split', { turnId: 'turn:any' });
+      assert.equal(failed.status, 500);
+      assert.match((failed.body as { error: string }).error, /split persistence failed/);
+    } finally {
+      HistoryStore.prototype.splitBefore = originalSplitBefore;
+    }
+  });
+});
+
 test('POST /api/rollback in fork mode 503s without a CurrentStory to switch through', async () => {
   await withServer(async (base) => {
     await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
@@ -843,6 +951,13 @@ test('POST /api/rollback refuses ambiguous or out-of-range input with a clear 40
     const neither = await send(base, 'POST', '/api/rollback', { mode: 'destructive' });
     assert.equal(neither.status, 400);
     assert.match((neither.body as { error: string }).error, /exactly one/);
+    const multiple = await send(base, 'POST', '/api/rollback', { scene: 1, turnId: 'turn:2', mode: 'destructive' });
+    assert.equal(multiple.status, 400);
+    assert.equal(
+      (await send(base, 'POST', '/api/rollback', { turnId: '', mode: 'destructive' })).status,
+      400,
+      'malformed targets remain validation errors',
+    );
 
     const tooFar = await send(base, 'POST', '/api/rollback', { scene: 99, mode: 'destructive' });
     assert.equal(tooFar.status, 400);

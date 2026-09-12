@@ -59,12 +59,14 @@ import {
   removeEdgeTool,
   replaceTurnProseTool,
   resetWorldTool,
+  rollbackTool,
   resolveInterruptTool,
   resolveWikiTool,
   searchEntitiesTool,
   setCurrentLocationTool,
   searchTool,
   fetchTool,
+  splitSceneTool,
   startStoryTool,
   switchStoryTool,
   switchWorldTool,
@@ -233,6 +235,43 @@ test('getBookTool returns turns in order, most recent last', async () => {
   assert.ok(checkpoint, 'a committed turn receives an exact history checkpoint');
   updateStyleTool(ctx, { register: 'plain' });
   assert.deepEqual(world.history.checkpointForTurn(out.turns[0]!.id), checkpoint, 'authoring checkpoints retain turn checkpoints');
+  world.close();
+});
+
+test('rollback and scene split tools use exact turn targets without changing the source fork', async () => {
+  const { world, ctx, engine } = setup();
+  await engine.takeTurn('i warm the ink');
+  await engine.takeTurn('i check the door');
+  await engine.takeTurn('i hide the psalter');
+  const turns = world.chronicle.turns();
+
+  const rollback = rollbackTool(ctx, { turnId: turns[1]!.id });
+  assert.equal(rollback.mode, 'fork');
+  assert.equal(rollback.toTurnId, turns[1]!.id);
+  assert.equal(world.chronicle.turns().length, 3, 'the source is unchanged by the default fork');
+  assert.equal(world.withStory(rollback.forkedStory!.id).chronicle.turns().length, 2, 'the selected turn is retained');
+  assert.throws(() => rollbackTool(ctx, {}), /exactly one/);
+  assert.throws(() => rollbackTool(ctx, { scene: 1, turnId: turns[1]!.id }), /exactly one/);
+
+  const split = splitSceneTool(ctx, { turnId: turns[1]!.id });
+  assert.equal(split.startsAtTurnId, turns[1]!.id);
+  assert.equal(split.scene, 2);
+  assert.equal(split.startsScene, true);
+  assert.throws(() => splitSceneTool(ctx, { turnId: turns[1]!.id }), /already starts a scene/);
+  assert.throws(() => splitSceneTool(ctx, { turnId: 'turn:unknown' }), /unknown/);
+
+  const legacy = world.chronicle.addTurn({
+    scene: 2,
+    turn: 99,
+    rawInput: 'legacy turn',
+    intent: null,
+    delta: null,
+    bookProse: 'Legacy prose.',
+    pinned: false,
+    meta: { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] },
+  });
+  assert.throws(() => splitSceneTool(ctx, { turnId: legacy.id }), /legacy/);
+  assert.throws(() => rollbackTool(ctx, { turnId: legacy.id }), /legacy/);
   world.close();
 });
 

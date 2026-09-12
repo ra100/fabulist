@@ -13,7 +13,7 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '../db/pg.ts';
 import type { Engine } from '../loop/engine-pg.ts';
-import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint, storyLayout } from '../loop/history-pg.ts';
+import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint, splitSceneAtTurn, storyLayout } from '../loop/history-pg.ts';
 import { World, worldFor } from '../store/index-pg.ts';
 import { forkStory, rollback } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
@@ -109,6 +109,7 @@ import {
   setupResolveBodySchema,
   sheetBodySchema,
   sheetLockBodySchema,
+  splitSceneBodySchema,
   styleBodySchema,
   storySourcesBodySchema,
   turnPinBodySchema,
@@ -1388,7 +1389,7 @@ route('POST', '/api/stories/fork', async (_req, res, { world, db, body, user }) 
  * pulled along too.
  */
 route('POST', '/api/rollback', async (_req, res, { world, db, body, user }) => {
-  const { scene, chapter, mode } = parseBody(rollbackBodySchema, body);
+  const { scene, chapter, turnId, mode } = parseBody(rollbackBodySchema, body);
   if (!(await ownsStoryOrRespond(res, db, world.storyId, user))) return;
   const effectiveMode = mode ?? 'fork';
   // No shared pointer to switch. `forkStory` stamps the new story's
@@ -1402,12 +1403,31 @@ route('POST', '/api/rollback', async (_req, res, { world, db, body, user }) => {
     const result = await rollback(db, world, {
       ...(scene === undefined ? {} : { toScene: scene }),
       ...(chapter === undefined ? {} : { toChapter: chapter }),
+      ...(turnId === undefined ? {} : { turnId }),
       mode: effectiveMode,
       ...(user ? { ownerUserId: user.id } : {}),
     });
     send(res, 200, { ...result, storyId: result.story?.id ?? world.storyId });
   } catch (err) {
-    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+route('POST', '/api/scene/split', async (_req, res, { world, db, body, user }) => {
+  const { turnId } = parseBody(splitSceneBodySchema, body);
+  if (!(await ownsStoryOrRespond(res, db, world.storyId, user))) return;
+  try {
+    const split = await splitSceneAtTurn(world, turnId);
+    const { target, ...boundary } = split;
+    send(res, 200, {
+      ...boundary,
+      startsAtTurnId: target.turnId,
+      scene: target.scene,
+      chapter: target.chapter,
+      startsScene: target.startsScene,
+    });
+  } catch (err) {
+    send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
   }
 });
 
