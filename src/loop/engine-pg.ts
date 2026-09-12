@@ -32,6 +32,7 @@ import type { Db } from '../db/pg.ts';
 import { loadFrameData, type FrameData } from '../frame/builders-pg.ts';
 import { commitTurn, type CommitResult } from './commit-pg.ts';
 import { Compactor } from './compact-pg.ts';
+import { fingerprintFrameInput } from './frame-fingerprint.ts';
 import {
   buildNarratorPrompt,
   classify,
@@ -134,9 +135,17 @@ export interface TakeTurnOptions {
 export interface RenderedProseRegeneration {
   turn: Turn;
   session: SessionState;
+  frameFingerprint: string;
   prose: string;
   calls: TurnMeta['providerCalls'];
   lint: LintReport | null;
+}
+
+interface ProseRegenerationFrame {
+  turn: Turn;
+  session: SessionState;
+  data: FrameData;
+  fingerprint: string;
 }
 
 /**
@@ -593,16 +602,12 @@ export class Engine {
     opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
   ): Promise<RenderedProseRegeneration> {
     const world = opts.world ?? await this.getWorld();
-    const turn = await world.chronicle.getTurn(turnId);
-    if (!turn) throw new Error(`no turn ${turnId}`);
-    if (turn.pinned) throw new Error('this passage is pinned and will not be re-rendered');
+    const { turn, session, data, fingerprint } = await this.proseRegenerationFrame(world, turnId);
 
     const calls: TurnMeta['providerCalls'] = [];
     // A reroll re-renders one turn, so it needs the same snapshot machinery as a
     // fresh turn: the narrator frame is built from present cast, location and
     // recent prose exactly as before.
-    const session = await world.session.get();
-    const data = await loadFrameData(world, session);
     const frames: Record<string, Frame> = {};
     const deps = this.deps(world, session, data, calls, frames);
 
@@ -637,19 +642,17 @@ export class Engine {
       }
     }
 
-    return { turn, session, prose: finalProse, calls, lint };
+    return { turn, session, frameFingerprint: fingerprint, prose: finalProse, calls, lint };
   }
 
   async persistProseRegeneration(rendered: RenderedProseRegeneration, world: World): Promise<Turn> {
-    const turn = await world.chronicle.getTurn(rendered.turn.id);
-    if (!turn) throw new Error(`no turn ${rendered.turn.id}`);
-    if (turn.pinned) throw new Error('this passage is pinned and will not be re-rendered');
-    if (JSON.stringify(turn) !== JSON.stringify(rendered.turn) || JSON.stringify(await world.session.get()) !== JSON.stringify(rendered.session)) {
+    const current = await this.proseRegenerationFrame(world, rendered.turn.id);
+    if (current.fingerprint !== rendered.frameFingerprint) {
       throw new Error('the turn or story state changed while prose was being rendered; retry');
     }
-    await world.chronicle.setProse(turn.id, rendered.prose);
-    await world.chronicle.appendRerollMeta(turn.id, { providerCalls: rendered.calls, lint: rendered.lint });
-    return (await world.chronicle.getTurn(turn.id))!;
+    await world.chronicle.setProse(current.turn.id, rendered.prose);
+    await world.chronicle.appendRerollMeta(current.turn.id, { providerCalls: rendered.calls, lint: rendered.lint });
+    return (await world.chronicle.getTurn(current.turn.id))!;
   }
 
   async regenerateProse(
@@ -659,6 +662,15 @@ export class Engine {
     const world = opts.world ?? await this.getWorld();
     const rendered = await this.renderProseRegeneration(turnId, { ...opts, world });
     return this.persistProseRegeneration(rendered, world);
+  }
+
+  private async proseRegenerationFrame(world: World, turnId: string): Promise<ProseRegenerationFrame> {
+    const turn = await world.chronicle.getTurn(turnId);
+    if (!turn) throw new Error(`no turn ${turnId}`);
+    if (turn.pinned) throw new Error('this passage is pinned and will not be re-rendered');
+    const session = await world.session.get();
+    const data = await loadFrameData(world, session);
+    return { turn, session, data, fingerprint: narratorFrameFingerprint(turn, session, data) };
   }
 
   /** Answers a world question from state without advancing the story. */
@@ -714,6 +726,10 @@ function typePrefix(type: string): string {
     default:
       return 'concept';
   }
+}
+
+function narratorFrameFingerprint(turn: Turn, session: SessionState, data: FrameData): string {
+  return fingerprintFrameInput({ turn, session, data });
 }
 
 export function slug(s: string): string {

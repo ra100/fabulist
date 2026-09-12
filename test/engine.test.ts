@@ -4,8 +4,9 @@ import { World } from '../src/store/index.ts';
 import { createStory } from '../src/store/world.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
-import { ProviderRegistry } from '../src/providers/provider.ts';
+import { ProviderRegistry, type CompletionRequest, type CompletionResult } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine.ts';
+import { fingerprintFrameInput } from '../src/loop/frame-fingerprint.ts';
 import { coerceDelta, validateDelta } from '../src/loop/validate.ts';
 import { extractJson } from '../src/providers/provider.ts';
 
@@ -17,7 +18,48 @@ function setup(providerOpts = {}) {
   return { world, mock, engine };
 }
 
+class BlockingNarratorProvider extends MockProvider {
+  private narrationStarted: Promise<void> | null = null;
+  private markNarrationStarted: (() => void) | null = null;
+  private releaseNarration: (() => void) | null = null;
+
+  blockNextNarration(): void {
+    this.narrationStarted = new Promise((resolve) => {
+      this.markNarrationStarted = resolve;
+    });
+  }
+
+  async waitForNarration(): Promise<void> {
+    await this.narrationStarted;
+  }
+
+  release(): void {
+    this.releaseNarration?.();
+    this.releaseNarration = null;
+  }
+
+  override async complete(req: CompletionRequest): Promise<CompletionResult> {
+    if (req.role === 'narrate' && this.markNarrationStarted) {
+      this.markNarrationStarted();
+      this.markNarrationStarted = null;
+      await new Promise<void>((resolve) => {
+        this.releaseNarration = resolve;
+      });
+    }
+    return super.complete(req);
+  }
+}
+
 // ------------------------------------------------------------------ plumbing
+
+test('frame fingerprints ignore Map insertion order and retain value changes', () => {
+  const first = fingerprintFrameInput({ state: new Map([['b', { value: 2 }], ['a', { value: 1 }]]) });
+  const reordered = fingerprintFrameInput({ state: new Map([['a', { value: 1 }], ['b', { value: 2 }]]) });
+  const changed = fingerprintFrameInput({ state: new Map([['a', { value: 1 }], ['b', { value: 3 }]]) });
+
+  assert.equal(first, reordered);
+  assert.notEqual(first, changed);
+});
 
 test('extractJson tolerates fences, preamble and trailing commentary', () => {
   assert.deepEqual(extractJson('{"a":1}'), { a: 1 });
@@ -341,6 +383,36 @@ test('regenerateProse appends a provider call each time, so usage totals still a
   await engine.regenerateProse(out.turn.id);
   const after = world.chronicle.getTurn(out.turn.id)!;
   assert.ok(after.meta.providerCalls.length > callsBefore, 'the reroll call was logged, not dropped');
+  world.close();
+});
+
+test('regenerateProse rejects a stale narrator frame after a cast edit', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const provider = new BlockingNarratorProvider();
+  const engine = new Engine({ world, providers: new ProviderRegistry(provider) });
+  const out = await engine.takeTurn('i keep copying');
+  if (out.kind !== 'narrated') throw new Error('expected narration');
+  const originalProse = out.turn.bookProse;
+
+  provider.blockNextNarration();
+  const reroll = engine.regenerateProse(out.turn.id);
+  await provider.waitForNarration();
+  const playerId = world.session.get().playerCharacterId!;
+  const sheet = world.cast.get(playerId)!;
+  world.cast.put({ ...sheet, condition: { ...sheet.condition, mood: 'watchful' } });
+  const checkpointCount = (
+    world.db.prepare('SELECT count(*) AS count FROM history_checkpoints WHERE story_id = ?').get(world.storyId) as { count: number }
+  ).count;
+
+  provider.release();
+  await assert.rejects(() => reroll, /changed while prose was being rendered/);
+  assert.equal(world.chronicle.getTurn(out.turn.id)?.bookProse, originalProse);
+  assert.equal(
+    (world.db.prepare('SELECT count(*) AS count FROM history_checkpoints WHERE story_id = ?').get(world.storyId) as { count: number }).count,
+    checkpointCount,
+    'the stale reroll records no checkpoint',
+  );
   world.close();
 });
 
