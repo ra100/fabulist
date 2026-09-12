@@ -13,6 +13,7 @@
  * raw player input and mechanical meta stay in the app, not the export.
  */
 import type { World } from '../store/index-pg.ts';
+import { storyLayout } from './history-pg.ts';
 
 export interface ExportOptions {
   /** Book title, defaulting to the world's own title (`meta.worldTitle`) or "Untitled". */
@@ -34,19 +35,19 @@ export async function exportMarkdown(world: World, opts: ExportOptions = {}): Pr
   // `getMeta` still answers for anything else a world remembers. See
   // `chronicle-pg.ts` for why that key could not stay global once a story can read
   // two worlds.
-  const [metaTitle, scenes, chapters, turns] = await Promise.all([
+  const [metaTitle, scenes, chapters, layout] = await Promise.all([
     world.chronicle.getMeta('worldTitle', ''),
     world.chronicle.scenes(),
     world.chronicle.chapters(),
-    world.chronicle.turns({ limit: 5000 }),
+    storyLayout(world),
   ]);
   const title = opts.title ?? (metaTitle || 'Untitled');
 
-  const turnsByScene = new Map<number, typeof turns>();
-  for (const t of turns) {
-    const list = turnsByScene.get(t.scene) ?? [];
-    list.push(t);
-    turnsByScene.set(t.scene, list);
+  const turnsByScene = new Map<number, typeof layout.turns>();
+  for (const turn of layout.turns) {
+    const list = turnsByScene.get(turn.scene) ?? [];
+    list.push(turn);
+    turnsByScene.set(turn.scene, list);
   }
 
   const sceneMeta = new Map(scenes.map((s) => [s.scene, s]));
@@ -79,7 +80,7 @@ export async function exportMarkdown(world: World, opts: ExportOptions = {}): Pr
     }
 
     for (const t of turnsByScene.get(scene) ?? []) {
-      if (t.bookProse.trim()) lines.push(t.bookProse.trim(), '');
+      if (t.source.bookProse.trim()) lines.push(t.source.bookProse.trim(), '');
     }
   }
 

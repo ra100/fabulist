@@ -12,6 +12,7 @@ import type { EntityId } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
 import { checkpoint } from '../db/db.ts';
 import { adaptRequest, extractJson, type JsonSchema, type Provider } from '../providers/provider.ts';
+import { storyLayout } from './history.ts';
 
 export const summarySchema: JsonSchema = {
   name: 'summary',
@@ -95,7 +96,7 @@ export class Compactor {
     const existing = world.chronicle.scenes().find((s) => s.scene === scene);
     if (existing?.summary && !force) return existing.summary;
 
-    const turns = world.chronicle.turns({ scene });
+    const turns = storyLayout(world, this.chapterSize).turns.filter((entry) => entry.scene === scene).map((entry) => entry.source);
     if (turns.length < this.minTurns) return null;
 
     const prose = turns.map((t) => t.bookProse).filter(Boolean).join('\n\n');
@@ -194,9 +195,11 @@ export class Compactor {
     const result: CompactionResult = { scenesSummarised: [], chaptersSummarised: [] };
     const have = new Map(world.chronicle.scenes().map((s) => [s.scene, s.summary]));
 
-    const scenesWithTurns = new Set(world.chronicle.turns({ limit: 5000 }).map((t) => t.scene));
+    const layout = storyLayout(world, this.chapterSize);
+    const scenesWithTurns = new Set(layout.turns.map((turn) => turn.scene));
+    const activeScene = layout.currentScene || currentScene;
     for (const scene of [...scenesWithTurns].sort((a, b) => a - b)) {
-      if (scene >= currentScene) continue; // the current scene stays verbatim
+      if (scene >= activeScene) continue; // the current scene stays verbatim
       if (have.get(scene)) continue;
       const summary = await this.summariseScene(scene);
       if (summary) result.scenesSummarised.push(scene);

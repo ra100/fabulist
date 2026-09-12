@@ -17,6 +17,7 @@ import type {
   Thread,
 } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
+import { storyLayout } from '../loop/history.ts';
 import { assembleFrame, Priority, type SlotSpec } from './budget.ts';
 import type { Tokenizer } from './tokenizer.ts';
 
@@ -271,9 +272,10 @@ function recentProse(ctx: FrameContext, maxTurns = 8): string {
 }
 
 function sceneSummaries(ctx: FrameContext): string {
+  const completedScenes = new Set(storyLayout(ctx.world).turns.filter((turn) => turn.scene < ctx.session.scene).map((turn) => turn.scene));
   return ctx.world.chronicle
     .scenes()
-    .filter((s) => s.scene < ctx.session.scene && s.summary)
+    .filter((s) => completedScenes.has(s.scene) && s.summary)
     .map((s) => `scene ${s.scene}: ${s.summary}`)
     .join('\n');
 }

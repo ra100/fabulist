@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import type { Delta, EntityId, StoryEvent, Turn, Visibility } from '../domain/types.ts';
 import { tx } from '../db/db.ts';
 import type { World } from '../store/index.ts';
+import { storyLayout } from './history.ts';
 
 export interface CommitResult {
   events: StoryEvent[];
@@ -173,10 +174,15 @@ export function commitDelta(world: World, delta: Delta, visibility: Visibility =
 export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResult {
   return tx(world.db, () => {
     const session = world.session.get();
-    const turnNo = session.turn + 1;
-    const commit = applyDelta(world, input.delta, session.scene, turnNo, 'onscreen');
+    const layout = storyLayout(world);
+    const previous = layout.turns.at(-1)?.source;
+    const activeScene = layout.turns.at(-1)?.scene ?? layout.currentScene;
+    const advancingFromEmptyScene = previous && session.scene > activeScene;
+    const scene = advancingFromEmptyScene ? previous.scene + 1 : (previous?.scene ?? session.scene);
+    const turnNo = advancingFromEmptyScene ? 1 : (previous?.turn ?? session.turn) + 1;
+    const commit = applyDelta(world, input.delta, scene, turnNo, 'onscreen');
     const turn = world.chronicle.addTurn({
-      scene: session.scene,
+      scene,
       turn: turnNo,
       rawInput: input.rawInput,
       intent: input.intent,
@@ -187,8 +193,8 @@ export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResu
     });
     if (input.threadId) world.threads.adjustTension(input.threadId, 0.05);
     if (input.delta.sceneAdvance) {
-      world.session.set({ scene: session.scene + 1, turn: 0 });
-      world.chronicle.upsertScene(session.scene + 1, {});
+      world.session.set({ scene: activeScene + 1, turn: 0 });
+      world.chronicle.upsertScene(scene + 1, {});
     } else {
       world.session.set({ turn: turnNo });
     }
