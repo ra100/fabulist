@@ -131,6 +131,14 @@ export interface TakeTurnOptions {
   world?: World;
 }
 
+export interface RenderedProseRegeneration {
+  turn: Turn;
+  session: SessionState;
+  prose: string;
+  calls: TurnMeta['providerCalls'];
+  lint: LintReport | null;
+}
+
 /**
  * State a turn needs to resume from once external prose comes back —
  * everything computed before Narrate that `commitExternalNarration` would
@@ -580,10 +588,10 @@ export class Engine {
    * into the beat the narrator sees, for the common case of "reroll, but fix
    * this one thing" rather than a blind retry hoping for a better roll.
    */
-  async regenerateProse(
+  async renderProseRegeneration(
     turnId: string,
     opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
-  ): Promise<Turn> {
+  ): Promise<RenderedProseRegeneration> {
     const world = opts.world ?? await this.getWorld();
     const turn = await world.chronicle.getTurn(turnId);
     if (!turn) throw new Error(`no turn ${turnId}`);
@@ -629,10 +637,28 @@ export class Engine {
       }
     }
 
-    await world.chronicle.setProse(turnId, finalProse);
-    await world.chronicle.appendRerollMeta(turnId, { providerCalls: calls, lint });
+    return { turn, session, prose: finalProse, calls, lint };
+  }
 
-    return (await world.chronicle.getTurn(turnId))!;
+  async persistProseRegeneration(rendered: RenderedProseRegeneration, world: World): Promise<Turn> {
+    const turn = await world.chronicle.getTurn(rendered.turn.id);
+    if (!turn) throw new Error(`no turn ${rendered.turn.id}`);
+    if (turn.pinned) throw new Error('this passage is pinned and will not be re-rendered');
+    if (JSON.stringify(turn) !== JSON.stringify(rendered.turn) || JSON.stringify(await world.session.get()) !== JSON.stringify(rendered.session)) {
+      throw new Error('the turn or story state changed while prose was being rendered; retry');
+    }
+    await world.chronicle.setProse(turn.id, rendered.prose);
+    await world.chronicle.appendRerollMeta(turn.id, { providerCalls: rendered.calls, lint: rendered.lint });
+    return (await world.chronicle.getTurn(turn.id))!;
+  }
+
+  async regenerateProse(
+    turnId: string,
+    opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
+  ): Promise<Turn> {
+    const world = opts.world ?? await this.getWorld();
+    const rendered = await this.renderProseRegeneration(turnId, { ...opts, world });
+    return this.persistProseRegeneration(rendered, world);
   }
 
   /** Answers a world question from state without advancing the story. */
