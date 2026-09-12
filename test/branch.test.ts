@@ -549,6 +549,18 @@ test('turn rollback forks only retained history and leaves the source untouched'
   world.close();
 });
 
+test('exact-turn forks reject a source story other than the active story', () => {
+  const world = World.open(':memory:');
+  const turn = exactTurn(world, 1);
+  const other = forkStory(world, { fromStoryId: world.storyId, title: 'Other story' }).story;
+
+  assert.throws(
+    () => forkStory(world, { fromStoryId: other.id, atTurnId: turn.id }),
+    /exact turn target must belong to the current story/,
+  );
+  world.close();
+});
+
 test('legacy turn rollback is rejected without modifying the story', () => {
   const world = World.open(':memory:');
   const legacy = world.chronicle.addTurn({
