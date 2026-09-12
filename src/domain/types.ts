@@ -379,6 +379,8 @@ export interface StorySnapshot {
 export interface StoryLayoutTurn {
   turnId: string;
   scene: number;
+  /** Durable metadata identity for this raw-scene range. */
+  metadataKey: string;
   chapter: number;
   turn: number;
   startsScene: boolean;

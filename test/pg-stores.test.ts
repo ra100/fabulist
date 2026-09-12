@@ -429,17 +429,18 @@ test('encrypted chronicle sheets and relationship notes round-trip without base-
       trust: 0.5, affection: 0.2, respect: 0.4, note: 'The guide hid the map.',
     });
 
-    test('invalidating private summaries replaces encrypted scene and chapter prose', async (t) => {
+    await t.test('invalidating private summaries replaces encrypted scene and chapter prose', async (t) => {
       const ran = await withPg(async (db) => {
         const { storyId } = await setup(db, 'private-summary-invalidation');
         await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [storyId]);
-        const chronicle = new ChronicleStore({ db, storyId, crypto: { keyForStory: () => randomBytes(32) } });
+        const key = randomBytes(32);
+        const chronicle = new ChronicleStore({ db, storyId, crypto: { keyForStory: () => key } });
         await chronicle.upsertScene(2, { chapter: 1, title: 'Stale scene', summary: 'Stale scene summary' });
         await chronicle.upsertChapter(1, { title: 'Stale chapter', summary: 'Stale chapter summary' });
 
         await chronicle.invalidateSummariesFrom(2, 1);
 
-        assert.deepEqual(await chronicle.scenes(), [{ scene: 2, chapter: 1, title: '', summary: '' }]);
+        assert.deepEqual(await chronicle.scenes(), [{ identity: 'raw:2', scene: 2, chapter: 1, title: '', summary: '' }]);
         assert.deepEqual(await chronicle.chapters(), [{ chapter: 1, title: '', summary: '' }]);
         const values = await db.query<{ title: string; summary: string }>(
           `SELECT title, summary FROM scenes WHERE story_id = $1 UNION ALL SELECT title, summary FROM chapters WHERE story_id = $1`,
@@ -742,7 +743,7 @@ test('encrypted chronicles keep personal prose and turn JSON out of base tables'
     assert.deepEqual(restoredTurn?.delta, turn.delta);
     assert.deepEqual(restoredTurn?.meta, meta);
     assert.equal((await chron.facts())[0]?.text, 'The bell is a key.');
-    assert.deepEqual(await chron.scenes(), [{ scene: 1, title: 'Hidden Hall', summary: 'The bell reveals a door.', locationId: null, chapter: 1 }]);
+    assert.deepEqual(await chron.scenes(), [{ identity: 'raw:1', scene: 1, title: 'Hidden Hall', summary: 'The bell reveals a door.', locationId: null, chapter: 1 }]);
     assert.deepEqual(await chron.chapter(1), { chapter: 1, title: 'Secrets', summary: 'Nothing stays buried.' });
     assert.deepEqual((await chron.divergences()).map(({ kind, detail, canon }) => ({ kind, detail, canon })), [
       { kind: 'choice', detail: 'The player opened the hidden door.', canon: 'The door stays closed.' },

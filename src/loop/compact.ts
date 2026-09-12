@@ -13,6 +13,7 @@ import type { World } from '../store/index.ts';
 import { checkpoint } from '../db/db.ts';
 import { adaptRequest, extractJson, type JsonSchema, type Provider } from '../providers/provider.ts';
 import { storyLayout } from './history.ts';
+import type { StoryLayout } from '../domain/types.ts';
 
 export const summarySchema: JsonSchema = {
   name: 'summary',
@@ -91,12 +92,15 @@ export class Compactor {
    * has a summary is left alone unless `force` is set, so this is safe to call
    * on every scene advance.
    */
-  async summariseScene(scene: number, force = false): Promise<string | null> {
+  async summariseScene(scene: number, force = false, suppliedLayout?: StoryLayout): Promise<string | null> {
     const world = this.getWorld();
-    const existing = world.chronicle.scenes().find((s) => s.scene === scene);
+    const layout = suppliedLayout ?? storyLayout(world, this.chapterSize);
+    const entries = layout.turns.filter((entry) => entry.scene === scene);
+    const identity = entries[0]?.metadataKey ?? `raw:${scene}`;
+    const existing = world.chronicle.scenes().find((s) => s.identity === identity);
     if (existing?.summary && !force) return existing.summary;
 
-    const turns = storyLayout(world, this.chapterSize).turns.filter((entry) => entry.scene === scene).map((entry) => entry.source);
+    const turns = entries.map((entry) => entry.source);
     if (turns.length < this.minTurns) return null;
 
     const prose = turns.map((t) => t.bookProse).filter(Boolean).join('\n\n');
@@ -116,9 +120,10 @@ export class Compactor {
       .map((id) => `${id} = ${world.graph.get(id)?.name ?? id}`)
       .join('\n');
 
+    const eventScene = new Map(layout.turns.map((entry) => [`${entry.source.scene}:${entry.source.turn}`, entry.metadataKey]));
     const events = world.chronicle
-      .events({ sinceScene: scene })
-      .filter((e) => e.scene === scene)
+      .events({ limit: Number.MAX_SAFE_INTEGER })
+      .filter((e) => eventScene.get(`${e.scene}:${e.turn}`) === identity)
       .map((e) => `- ${e.text}`)
       .join('\n');
 
@@ -140,7 +145,7 @@ export class Compactor {
       summary,
       title: typeof parsed.title === 'string' ? parsed.title.slice(0, 90) : '',
       chapter: this.chapterOf(scene),
-    });
+    }, identity);
     return summary;
   }
 
@@ -201,7 +206,7 @@ export class Compactor {
     for (const scene of [...scenesWithTurns].sort((a, b) => a - b)) {
       if (scene >= activeScene) continue; // the current scene stays verbatim
       if (have.get(scene)) continue;
-      const summary = await this.summariseScene(scene);
+      const summary = await this.summariseScene(scene, false, layout);
       if (summary) result.scenesSummarised.push(scene);
     }
     return result;

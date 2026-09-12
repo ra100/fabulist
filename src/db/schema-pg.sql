@@ -672,6 +672,17 @@ CREATE TABLE IF NOT EXISTS scenes (
   PRIMARY KEY (story_id, scene)
 );
 
+CREATE TABLE IF NOT EXISTS scene_metadata (
+  story_id    TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  identity    TEXT NOT NULL,
+  scene       INTEGER NOT NULL,
+  title       TEXT NOT NULL DEFAULT '',
+  summary     TEXT NOT NULL DEFAULT '',
+  location_id TEXT,
+  chapter     INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (story_id, identity)
+);
+
 CREATE TABLE IF NOT EXISTS chapters (
   story_id TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
   chapter  INTEGER NOT NULL,
@@ -699,6 +710,7 @@ CREATE TABLE IF NOT EXISTS divergences (
   id       BIGSERIAL PRIMARY KEY,
   story_id TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
   scene    INTEGER NOT NULL,
+  turn      INTEGER,
   kind     TEXT NOT NULL,
   detail   TEXT NOT NULL,
   canon    TEXT NOT NULL DEFAULT ''

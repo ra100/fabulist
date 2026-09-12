@@ -311,6 +311,20 @@ CREATE TABLE IF NOT EXISTS scenes (
   FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
 );
 
+-- Scene numbers are a display projection. Metadata is keyed by the raw scene
+-- or explicit split segment that owns it, so a later split cannot alias it.
+CREATE TABLE IF NOT EXISTS scene_metadata (
+  story_id    TEXT NOT NULL,
+  identity    TEXT NOT NULL,
+  scene       INTEGER NOT NULL,
+  title       TEXT NOT NULL DEFAULT '',
+  summary     TEXT NOT NULL DEFAULT '',
+  location_id TEXT,
+  chapter     INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (story_id, identity),
+  FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS chapters (
   story_id TEXT NOT NULL,
   chapter  INTEGER NOT NULL,
@@ -345,6 +359,7 @@ CREATE TABLE IF NOT EXISTS divergences (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   story_id TEXT NOT NULL,
   scene    INTEGER NOT NULL,
+  turn       INTEGER,
   kind     TEXT NOT NULL,
   detail   TEXT NOT NULL,
   canon    TEXT NOT NULL DEFAULT '',

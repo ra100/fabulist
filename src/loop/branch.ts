@@ -309,6 +309,7 @@ const CHRONICLE_TABLES = [
   { table: 'consequences', sceneCol: 'created_scene', extra: '', idColumn: 'text' as const, refs: ['cause_event_id'] },
   { table: 'turns', sceneCol: 'scene', extra: '', idColumn: 'text' as const, refs: [] },
   { table: 'scenes', sceneCol: 'scene', extra: '', idColumn: null, refs: [] },
+  { table: 'scene_metadata', sceneCol: 'scene', extra: '', idColumn: null, refs: [] },
   { table: 'chapters', sceneCol: null, extra: '', idColumn: null, refs: [] },
   { table: 'directives', sceneCol: 'created_scene', extra: '', idColumn: 'text' as const, refs: [] },
   { table: 'divergences', sceneCol: 'scene', extra: '', idColumn: 'integer' as const, refs: [] },

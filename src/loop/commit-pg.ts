@@ -160,7 +160,7 @@ async function applyDelta(
       createdScene: scene,
     });
     result.newThreadIds.push(thread.id);
-    await world.chronicle.addDivergence(scene, 'vow-break', `${name} broke "${vow.text}"`);
+    await world.chronicle.addDivergence(scene, 'vow-break', `${name} broke "${vow.text}"`, '', turn);
   }
 
   await world.graph.decaySalience(0.04);
@@ -198,7 +198,7 @@ export async function commitDelta(
     const result = await applyDelta(w, delta, session.scene, session.turn, visibility);
     if (delta.sceneAdvance) {
       await w.session.set({ scene: session.scene + 1, turn: 0 });
-      await w.chronicle.upsertScene(session.scene + 1, {});
+      await w.chronicle.upsertScene(session.scene + 1, {}, `raw:${session.scene + 1}`);
     }
     return result;
   });
@@ -239,7 +239,7 @@ export async function commitTurn(db: Db, world: World, input: CommitTurnInput): 
     if (input.threadId) await w.threads.adjustTension(input.threadId, 0.05);
     if (input.delta.sceneAdvance) {
       await w.session.set({ scene: activeScene + 1, turn: 0 });
-      await w.chronicle.upsertScene(scene + 1, {});
+      await w.chronicle.upsertScene(activeScene + 1, {}, `raw:${scene + 1}`);
     } else {
       await w.session.set({ turn: turnNo });
     }
