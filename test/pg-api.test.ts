@@ -360,6 +360,31 @@ test('PostgreSQL regeneration renders outside the lock and rejects concurrent tu
         provider.release();
         assert.equal((await rerollAfterEdit).status, 409, 'an intervening prose revision wins');
         assert.equal((await world.chronicle.getTurn(turn.id))?.bookProse, 'the author’s intervening revision');
+
+        provider.blockNextNarration();
+        const rerollAfterCastEdit = send(base, 'POST', `/api/turn/${turn.id}/regenerate`, {});
+        await provider.waitForNarration();
+        const playerId = (await world.session.get()).playerCharacterId!;
+        await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+          const sheet = await transactionWorld.cast.get(playerId);
+          assert.ok(sheet);
+          await transactionWorld.cast.put({
+            ...sheet,
+            condition: { ...sheet.condition, mood: 'watchful' },
+          });
+        });
+        const checkpointCount = await db.query<{ count: string }>(
+          'SELECT count(*)::text AS count FROM history_checkpoints WHERE story_id = $1',
+          [world.storyId],
+        );
+        provider.release();
+        assert.equal((await rerollAfterCastEdit).status, 409, 'an intervening cast change invalidates the narrator frame');
+        assert.equal((await world.chronicle.getTurn(turn.id))?.bookProse, 'the author’s intervening revision');
+        const afterConflict = await db.query<{ count: string }>(
+          'SELECT count(*)::text AS count FROM history_checkpoints WHERE story_id = $1',
+          [world.storyId],
+        );
+        assert.equal(afterConflict.rows[0]?.count, checkpointCount.rows[0]?.count, 'the stale reroll records no checkpoint');
       },
       { provider },
     );
