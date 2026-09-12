@@ -13,6 +13,8 @@ export interface PlayWorkflowAdapter<World, Outcome extends NarratedOutcome, Tic
   seedConsequences(world: World, delta: unknown, events: unknown[]): number | Promise<number>;
   tickConsequences(world: World): Tick | Promise<Tick>;
   worldTick(world: World): unknown | Promise<unknown>;
+  /** Wraps post-turn authored state and its checkpoint in one persistence transaction. */
+  recordAuthoringCheckpoint?<T>(world: World, mutate: (world: World) => Promise<T>): Promise<T>;
 }
 
 export interface PlayWorkflowOptions {
@@ -42,9 +44,15 @@ export async function runPlayTurn<World, Outcome extends NarratedOutcome, Tick>(
   let seeded = 0;
   let tick: Tick | null = null;
   if (outcome.kind === 'narrated' && outcome.delta !== undefined && outcome.commit) {
-    seeded = await adapter.seedConsequences(world, outcome.delta, outcome.commit.events);
-    tick = await adapter.tickConsequences(world);
-    await adapter.worldTick(world);
+    const mutate = async (transactionWorld: World): Promise<[number, Tick]> => {
+      const seeded = await adapter.seedConsequences(transactionWorld, outcome.delta!, outcome.commit!.events);
+      const tick = await adapter.tickConsequences(transactionWorld);
+      await adapter.worldTick(transactionWorld);
+      return [seeded, tick];
+    };
+    [seeded, tick] = adapter.recordAuthoringCheckpoint
+      ? await adapter.recordAuthoringCheckpoint(world, mutate)
+      : await mutate(world);
   }
   return { outcome, seeded, tick };
 }
