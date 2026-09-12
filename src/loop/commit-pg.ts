@@ -237,6 +237,7 @@ export async function commitTurn(db: Db, world: World, input: CommitTurnInput): 
     } else {
       await w.session.set({ turn: turnNo });
     }
+    await w.history.capture(turn.id);
     return { commit, turn };
   });
 }
