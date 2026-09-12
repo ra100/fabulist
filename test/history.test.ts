@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { World } from '../src/store/index.ts';
 import { emptyDelta, type Turn } from '../src/domain/types.ts';
 import { commitDelta, commitTurn } from '../src/loop/commit.ts';
+import { rollback } from '../src/loop/branch.ts';
 import { recordAuthoringCheckpoint, splitSceneAtTurn, storyLayout } from '../src/loop/history.ts';
 import { Compactor } from '../src/loop/compact.ts';
 import { exportMarkdown } from '../src/loop/export.ts';
@@ -184,5 +185,45 @@ test('restoring retained split history reconciles the continuation cursor', () =
   const session = world.session.get();
   assert.deepEqual({ scene: session.scene, turn: session.turn }, { scene: 2, turn: 4 });
   assert.ok(world.history.activeSegmentAt(4));
+  world.close();
+});
+
+test('exact rollback and fork invalidate a restored parent summary while preserving earlier scene metadata', () => {
+  const world = World.open(':memory:');
+  const firstScene = [1, 2].map((turn) => {
+    const value = world.chronicle.addTurn(turnInput(turn));
+    world.history.capture(value.id);
+    return value;
+  });
+  world.session.set({ scene: 2, turn: 0 });
+  const secondScene = [1, 2, 3, 4].map((turn) => {
+    const value = world.chronicle.addTurn({ ...turnInput(turn), scene: 2 });
+    if (turn === 4) {
+      world.chronicle.upsertScene(1, { title: 'Safe', summary: 'The first scene remains whole.', chapter: 1 });
+      world.chronicle.upsertScene(2, { title: 'Parent', summary: 'This spans the later split.', chapter: 1 });
+      world.chronicle.upsertChapter(1, { title: 'Old chapter', summary: 'Contains the parent scene.' });
+    }
+    world.history.capture(value.id);
+    return value;
+  });
+  splitSceneAtTurn(world, secondScene[2]!.id);
+
+  const forked = rollback(world, { turnId: secondScene[3]!.id, mode: 'fork' }).forkedStory!;
+  const fork = world.withStory(forked.id);
+  assert.equal(fork.chronicle.scenes().find((scene) => scene.identity === 'raw:1')?.summary, 'The first scene remains whole.');
+  assert.equal(fork.chronicle.scenes().find((scene) => scene.identity === 'raw:2')?.summary, '');
+  assert.equal(fork.chronicle.chapter(1)?.summary, '');
+  assert.equal(fork.history.sceneSegments().length, 2);
+  assert.deepEqual({ scene: fork.session.get().scene, turn: fork.session.get().turn }, { scene: 3, turn: 4 });
+  assert.ok(fork.history.activeSegmentAt(6));
+
+  rollback(world, { turnId: secondScene[3]!.id, mode: 'destructive' });
+  assert.equal(world.chronicle.scenes().find((scene) => scene.identity === 'raw:1')?.summary, 'The first scene remains whole.');
+  assert.equal(world.chronicle.scenes().find((scene) => scene.identity === 'raw:2')?.summary, '');
+  assert.equal(world.chronicle.chapter(1)?.summary, '');
+  assert.equal(world.history.sceneSegments().length, 2);
+  assert.deepEqual({ scene: world.session.get().scene, turn: world.session.get().turn }, { scene: 3, turn: 4 });
+  assert.ok(world.history.activeSegmentAt(6));
+  assert.equal(firstScene.length, 2);
   world.close();
 });
