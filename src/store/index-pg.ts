@@ -353,6 +353,62 @@ export async function renameWorld(db: Queryable, slug: string, title: string): P
   return (await getWorldBySlug(db, nextSlug))!;
 }
 
+/**
+ * The canon world a story writes into, binding it to one when it has none.
+ *
+ * A brand-new story has no `story_sources` row at all — `createStory` allows an
+ * empty list because the wizard is the thing that decides what canon a story
+ * reads, and until it has run there is nothing to point at. Every canon write
+ * therefore refused: `GraphStore.requireCanonWorld`, `CastStore` and
+ * `ChronicleStore.setMeta` all throw rather than guess a target, which is the
+ * right behaviour for a *store* and the wrong answer for the one caller that
+ * legitimately creates canon. Setting up a fresh instance failed on it — an
+ * ingest at its first `setMeta('worldTitle')`, an authored world at its last.
+ *
+ * So the resolution lives here, above the stores, where picking a world is a
+ * decision rather than a guess:
+ *
+ * - already bound: the primary source, untouched. A second ingest continues
+ *   into the world the first one filled.
+ * - unbound: an empty, unread world if the instance has one — `serve-pg`
+ *   creates exactly that at boot so the wizard has somewhere to land — else a
+ *   new one.
+ *
+ * A world that already holds canon is never adopted. Authoring a described
+ * world into somebody's ingested Star Trek is precisely the mistake the stores'
+ * refusal exists to prevent, and this must not reintroduce it by picking the
+ * first row it finds.
+ *
+ * Needs the ingest role: creating a world is a system write (see
+ * `schema-pg-roles.sql`).
+ */
+export async function ensureCanonWorldFor(db: Db, storyId: StoryId, title = ''): Promise<number> {
+  return db.tx(async (tx) => {
+    // The story row is locked for the duration, so two setup steps started
+    // against one fresh story cannot each decide it is unbound, create a world
+    // apiece and leave the story reading both. `ON CONFLICT DO NOTHING` would
+    // stop the duplicate row, not the duplicate world.
+    await tx.query(`SELECT id FROM stories WHERE id = $1 FOR UPDATE`, [storyId]);
+
+    const bound = await sourcesFor(tx, storyId);
+    if (bound[0]) return bound[0].worldId;
+
+    const { rows } = await tx.query<{ id: string }>(
+      `SELECT w.id FROM worlds w
+         WHERE NOT EXISTS (SELECT 1 FROM canon_entities c WHERE c.world_id = w.id)
+           AND NOT EXISTS (SELECT 1 FROM story_sources ss WHERE ss.world_id = w.id)
+         ORDER BY w.id LIMIT 1`,
+    );
+    const worldId = rows[0] ? Number(rows[0].id) : (await createWorld(tx, title)).id;
+
+    await tx.query(`INSERT INTO story_sources (story_id, world_id, ordinal) VALUES ($1,$2,1)`, [
+      storyId,
+      worldId,
+    ]);
+    return worldId;
+  });
+}
+
 /** Points a story at a set of canon worlds, in precedence order. The crossover write. */
 export async function setStorySources(db: Db, storyId: StoryId, worldIds: number[]): Promise<void> {
   await db.tx(async (tx) => {

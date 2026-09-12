@@ -407,32 +407,59 @@ export class ChronicleStore {
   // worlds.
 
   /**
-   * Thrown rather than defaulted: writing world identity to a guessed world is
-   * how `worldTitle` ended up describing the wrong world in the SQLite data
-   * (`star-trek-alpha-beta` carries the title "Saint Verrow" to this day).
+   * The world these keys belong to: the one passed in, else this story's
+   * primary source read from `story_sources`.
+   *
+   * The fallback is the same one `GraphStore`/`CastStore` apply to
+   * `canonWorldId`, just resolved later. It is needed because `World` reads
+   * `story_sources` *once*, when it builds the stores, so a store built before
+   * the story was bound to a world held `undefined` while the answer sat in the
+   * table — and this was the only store that turned that into a throw. Setting
+   * up a fresh story died on it: an ingest at its very first
+   * `setMeta('worldTitle')`, an authored world at its very last, after the whole
+   * world had been invented and written.
+   *
+   * Still never a *guess*. Resolving means reading the binding the story
+   * already has; with no binding this throws exactly as before, because writing
+   * world identity to an arbitrary world is how `worldTitle` ended up
+   * describing the wrong one in the SQLite data (`star-trek-alpha-beta` carries
+   * the title "Saint Verrow" to this day). Choosing a world when there is none
+   * is `ensureCanonWorldFor`'s job, one layer up.
    */
-  private requireWorld(): number {
-    if (this.worldId === undefined) {
+  private async resolveWorld(): Promise<number | undefined> {
+    if (this.worldId !== undefined) return this.worldId;
+    const { rows } = await this.db.query<{ world_id: string }>(
+      `SELECT world_id FROM story_sources WHERE story_id = $1 ORDER BY ordinal LIMIT 1`,
+      [this.storyId],
+    );
+    if (rows[0]) this.worldId = Number(rows[0].world_id);
+    return this.worldId;
+  }
+
+  private async requireWorld(): Promise<number> {
+    const worldId = await this.resolveWorld();
+    if (worldId === undefined) {
       throw new Error(
-        `no world for story ${this.storyId}: world-level meta needs a target world (pass worldId, or use worlds.title for identity)`,
+        `no world for story ${this.storyId}: world-level meta needs a target world (story_sources is empty, or pass worldId)`,
       );
     }
-    return this.worldId;
+    return worldId;
   }
 
   async setMeta(key: string, value: string): Promise<void> {
     await this.db.query(
       `INSERT INTO world_meta (world_id, key, value) VALUES ($1,$2,$3)
        ON CONFLICT (world_id, key) DO UPDATE SET value = EXCLUDED.value`,
-      [this.requireWorld(), key, value],
+      [await this.requireWorld(), key, value],
     );
   }
 
   async getMeta(key: string, fallback = ''): Promise<string> {
-    if (this.worldId === undefined) return fallback;
+    const worldId = await this.resolveWorld();
+    if (worldId === undefined) return fallback;
     const { rows } = await this.db.query<{ value: string }>(
       `SELECT value FROM world_meta WHERE world_id = $1 AND key = $2`,
-      [this.worldId, key],
+      [worldId, key],
     );
     return rows[0]?.value ?? fallback;
   }
