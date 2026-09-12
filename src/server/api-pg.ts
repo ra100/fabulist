@@ -1539,18 +1539,24 @@ route('DELETE', '/api/blocklist/:pattern', async (_req, res, { db, params, user 
 
 route('GET', '/api/providers', async (_req, res, ctx) => {
   if (!requireAdmin(res, ctx.authConfig, ctx.user)) return;
-  const [{ probeAll, usableProfiles }, { PROFILES }, { loadConfig }] = await Promise.all([
+  const [{ probeAll, usableProfiles }, { profilesFor }, { loadConfig }] = await Promise.all([
     import('../providers/probe.ts'),
     import('../providers/http.ts'),
     import('../config/config.ts'),
   ]);
-  const cfg = loadConfig();
+  // The live service first: it knows the file this server was actually started
+  // with, and holds providers kept during this session. `loadConfig` is the
+  // fallback for a server wired without one.
+  const cfg = ctx.config?.get() ?? loadConfig();
   const results = await probeAll(cfg.providers, {});
+  // Derived from the same config as the probe, so a provider the operator added
+  // and tested is offered as a profile rather than silently unusable.
+  const profiles = profilesFor(cfg.providers);
   send(res, 200, {
     profile: ctx.registry?.profile() ?? cfg.profile,
     results,
-    usableProfiles: usableProfiles(results, PROFILES),
-    profiles: Object.keys(PROFILES),
+    usableProfiles: usableProfiles(results, profiles),
+    profiles: Object.keys(profiles),
   });
 });
 

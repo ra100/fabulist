@@ -21,7 +21,7 @@ import {
   saveConfig,
   type Config,
 } from './config.ts';
-import { defaultAuth, PRESETS, PROFILES, type ProviderKind, type ProviderSpec } from '../providers/http.ts';
+import { defaultAuth, PRESETS, profilesFor, type ProviderKind, type ProviderSpec } from '../providers/http.ts';
 import { IMAGE_PRESETS, type ImageProviderKind, type ImageProviderSpec } from '../providers/imageConfig.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
@@ -135,8 +135,9 @@ export class ConfigService {
     return this.cfg.imageProviders?.[key] ?? IMAGE_PRESETS[key];
   }
 
+  /** Built-in profiles plus the one each configured provider is worth on its own. */
   profileNames(): string[] {
-    return Object.keys(PROFILES);
+    return Object.keys(profilesFor(this.cfg.providers));
   }
 
   // ------------------------------------------------------------------ patch
