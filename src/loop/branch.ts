@@ -363,6 +363,8 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
   if (!source) throw new Error(`no story ${opts.fromStoryId} in this world`);
   if (opts.atScene !== undefined && opts.atScene < 1) throw new Error('scene must be 1 or greater');
   if (opts.atScene !== undefined && opts.atTurnId !== undefined) throw new Error('fork: pass atScene or atTurnId, not both');
+  if (opts.atTurnId !== undefined && opts.fromStoryId !== world.storyId)
+    throw new Error('fork: exact turn target must belong to the current story');
   const checkpoint = opts.atTurnId === undefined ? undefined : exactTurnCheckpoint(world, opts.atTurnId, 'fork');
   const retainedPosition = checkpoint?.position;
   const retainedCheckpoints = checkpoint ? world.history.checkpointsThrough(checkpoint.position) : [];
