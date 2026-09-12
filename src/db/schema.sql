@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS stories (
   current_location_id  TEXT,
   style                TEXT NOT NULL DEFAULT '{}',
   knobs                TEXT NOT NULL DEFAULT '{}',
+  active_scene_segment_id TEXT,
   forked_from          TEXT,
   forked_at_scene      INTEGER,
   created_at           TEXT NOT NULL DEFAULT '',
@@ -257,10 +258,43 @@ CREATE TABLE IF NOT EXISTS turns (
   pinned     INTEGER NOT NULL DEFAULT 0,
   meta       TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
+  history_position INTEGER,
+  scene_segment_id TEXT,
   FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_order ON turns(story_id, scene, turn);
+CREATE INDEX IF NOT EXISTS idx_turns_history_position ON turns(story_id, history_position);
+
+-- ----------------------------------------------------------- turn history
+-- Checkpoints are immutable story-only projections. A turn checkpoint is
+-- unique, while null `turn_id` records authoring-mutation checkpoints.
+CREATE TABLE IF NOT EXISTS history_checkpoints (
+  id         TEXT PRIMARY KEY,
+  story_id   TEXT NOT NULL,
+  turn_id    TEXT,
+  position   INTEGER NOT NULL,
+  state      TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (story_id, turn_id),
+  UNIQUE (story_id, position),
+  FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_checkpoints_turn ON history_checkpoints(story_id, turn_id);
+
+-- A segment starts at a history position. It is independent from display scene
+-- numbers, which can be regrouped without changing causal history.
+CREATE TABLE IF NOT EXISTS scene_segments (
+  id             TEXT PRIMARY KEY,
+  story_id       TEXT NOT NULL,
+  start_position INTEGER NOT NULL,
+  created_at     TEXT NOT NULL,
+  UNIQUE (story_id, start_position),
+  FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_scene_segments_start ON scene_segments(story_id, start_position);
 
 -- ------------------------------------------------------------------- scenes
 -- Hierarchical compaction: only the current scene stays verbatim, everything

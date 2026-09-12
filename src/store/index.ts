@@ -17,6 +17,7 @@ import { GraphStore } from './graph.ts';
 import { CastStore } from './cast.ts';
 import { ChronicleStore } from './chronicle.ts';
 import { IllustrationStore } from './illustration.ts';
+import { HistoryStore } from './history.ts';
 import {
   ConsequenceStore,
   DirectiveStore,
@@ -39,6 +40,7 @@ export class World {
   readonly directives: DirectiveStore;
   readonly session: StoryStore;
   readonly illustrations: IllustrationStore;
+  readonly history: HistoryStore;
 
   readonly db: Db;
   readonly storyId: StoryId;
@@ -60,6 +62,7 @@ export class World {
     // this. Explicit default instead; real callers (`cli/serve.ts`) pass the
     // directory next to their actual `dbPath`.
     this.illustrations = new IllustrationStore(db, storyId, imagesDir ?? 'data/images');
+    this.history = new HistoryStore(db, storyId);
   }
 
   /**
@@ -285,4 +288,3 @@ export class CurrentWorld {
     this.db.close();
   }
 }
-

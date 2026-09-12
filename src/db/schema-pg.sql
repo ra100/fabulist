@@ -284,6 +284,7 @@ CREATE TABLE IF NOT EXISTS stories (
   current_location_id TEXT,
   style               JSONB NOT NULL DEFAULT '{}'::jsonb,
   knobs               JSONB NOT NULL DEFAULT '{}'::jsonb,
+  active_scene_segment_id TEXT,
   forked_from         TEXT REFERENCES stories(id) ON DELETE SET NULL,
   forked_at_scene     INTEGER,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -626,10 +627,38 @@ CREATE TABLE IF NOT EXISTS turns (
   book_prose TEXT NOT NULL DEFAULT '',
   pinned     BOOLEAN NOT NULL DEFAULT false,
   meta       JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  history_position INTEGER,
+  scene_segment_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_order ON turns (story_id, scene, turn);
+CREATE INDEX IF NOT EXISTS idx_turns_history_position ON turns (story_id, history_position);
+
+-- Immutable story-only state after a committed turn or authoring mutation.
+-- Private checkpoint payloads live exclusively in encrypted_story_values.
+CREATE TABLE IF NOT EXISTS history_checkpoints (
+  id         TEXT PRIMARY KEY,
+  story_id   TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  turn_id    TEXT,
+  position   INTEGER NOT NULL,
+  state      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (story_id, turn_id),
+  UNIQUE (story_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_checkpoints_turn ON history_checkpoints (story_id, turn_id);
+
+CREATE TABLE IF NOT EXISTS scene_segments (
+  id             TEXT PRIMARY KEY,
+  story_id       TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  start_position INTEGER NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (story_id, start_position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scene_segments_start ON scene_segments (story_id, start_position);
 
 -- Hierarchical compaction: only the current scene stays verbatim, everything
 -- above becomes a summary that keeps entity references intact.
