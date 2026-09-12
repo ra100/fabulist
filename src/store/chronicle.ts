@@ -131,7 +131,9 @@ export class ChronicleStore {
     }
     args.push(opts.limit ?? 100);
     return rows<EventRow>(
-      this.db.prepare(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY scene, turn LIMIT ?`).all(...(args as never[])),
+      this.db
+        .prepare(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY scene, turn LIMIT ?`)
+        .all(...(args as never[])),
     ).map(toEvent);
   }
 
@@ -195,17 +197,23 @@ export class ChronicleStore {
   turns(opts: { scene?: number; limit?: number } = {}): Turn[] {
     if (opts.scene !== undefined) {
       return rows<TurnRow>(
-        this.db.prepare(`SELECT * FROM turns WHERE story_id = ? AND scene = ? ORDER BY turn`).all(this.storyId, opts.scene),
+        this.db
+          .prepare(`SELECT * FROM turns WHERE story_id = ? AND scene = ? ORDER BY turn`)
+          .all(this.storyId, opts.scene),
       ).map(toTurn);
     }
     return rows<TurnRow>(
-      this.db.prepare(`SELECT * FROM turns WHERE story_id = ? ORDER BY scene, turn LIMIT ?`).all(this.storyId, opts.limit ?? 500),
+      this.db
+        .prepare(`SELECT * FROM turns WHERE story_id = ? ORDER BY scene, turn LIMIT ?`)
+        .all(this.storyId, opts.limit ?? 500),
     ).map(toTurn);
   }
 
   recentTurns(n: number): Turn[] {
     return rows<TurnRow>(
-      this.db.prepare(`SELECT * FROM turns WHERE story_id = ? ORDER BY scene DESC, turn DESC LIMIT ?`).all(this.storyId, n),
+      this.db
+        .prepare(`SELECT * FROM turns WHERE story_id = ? ORDER BY scene DESC, turn DESC LIMIT ?`)
+        .all(this.storyId, n),
     )
       .map(toTurn)
       .reverse();
@@ -230,7 +238,9 @@ export class ChronicleStore {
   } {
     const total = { tokensIn: 0, tokensOut: 0, calls: 0 };
     const byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }> = {};
-    const metas = rows<{ meta: string }>(this.db.prepare(`SELECT meta FROM turns WHERE story_id = ?`).all(this.storyId));
+    const metas = rows<{ meta: string }>(
+      this.db.prepare(`SELECT meta FROM turns WHERE story_id = ?`).all(this.storyId),
+    );
     for (const row_ of metas) {
       const meta = jsonGet<TurnMeta | null>(row_.meta, null);
       for (const c of meta?.providerCalls ?? []) {
@@ -248,7 +258,17 @@ export class ChronicleStore {
 
   /** Re-render changes how it is told, never what happened (DESIGN §7.2). */
   setProse(id: string, prose: string): void {
-    this.db.prepare(`UPDATE turns SET book_prose = ? WHERE id = ? AND story_id = ? AND pinned = 0`).run(prose, id, this.storyId);
+    this.db
+      .prepare(`UPDATE turns SET book_prose = ? WHERE id = ? AND story_id = ? AND pinned = 0`)
+      .run(prose, id, this.storyId);
+  }
+
+  /** An explicit author edit replaces even pinned prose while preserving its delta. */
+  replaceProse(id: string, prose: string): boolean {
+    const result = this.db
+      .prepare(`UPDATE turns SET book_prose = ? WHERE id = ? AND story_id = ?`)
+      .run(prose, id, this.storyId);
+    return Number(result.changes) > 0;
   }
 
   /**
@@ -267,7 +287,9 @@ export class ChronicleStore {
       providerCalls: [...turn.meta.providerCalls, ...patch.providerCalls],
       lint: patch.lint,
     };
-    this.db.prepare(`UPDATE turns SET meta = ? WHERE id = ? AND story_id = ? AND pinned = 0`).run(JSON.stringify(meta), id, this.storyId);
+    this.db
+      .prepare(`UPDATE turns SET meta = ? WHERE id = ? AND story_id = ? AND pinned = 0`)
+      .run(JSON.stringify(meta), id, this.storyId);
   }
 
   setPinned(id: string, pinned: boolean): void {
@@ -276,7 +298,10 @@ export class ChronicleStore {
 
   // --------------------------------------------------------------- scenes
 
-  upsertScene(scene: number, patch: { title?: string; summary?: string; locationId?: string | null; chapter?: number }): void {
+  upsertScene(
+    scene: number,
+    patch: { title?: string; summary?: string; locationId?: string | null; chapter?: number },
+  ): void {
     this.db
       .prepare(
         `INSERT INTO scenes (story_id, scene, title, summary, location_id, chapter) VALUES (?,?,?,?,?,?)
@@ -313,11 +338,19 @@ export class ChronicleStore {
   }
 
   chapter(chapter: number): { chapter: number; title: string; summary: string } | undefined {
-    return row(this.db.prepare(`SELECT chapter, title, summary FROM chapters WHERE story_id = ? AND chapter = ?`).get(this.storyId, chapter));
+    return row(
+      this.db
+        .prepare(`SELECT chapter, title, summary FROM chapters WHERE story_id = ? AND chapter = ?`)
+        .get(this.storyId, chapter),
+    );
   }
 
   chapters(): Array<{ chapter: number; title: string; summary: string }> {
-    return rows(this.db.prepare(`SELECT chapter, title, summary FROM chapters WHERE story_id = ? ORDER BY chapter`).all(this.storyId));
+    return rows(
+      this.db
+        .prepare(`SELECT chapter, title, summary FROM chapters WHERE story_id = ? ORDER BY chapter`)
+        .all(this.storyId),
+    );
   }
 
   // ----------------------------------------------------------------- meta
@@ -338,13 +371,17 @@ export class ChronicleStore {
 
   addFact(text: string, scene: number): Fact {
     const id = `fact:${randomUUID()}`;
-    this.db.prepare(`INSERT INTO facts (id, story_id, text, scene) VALUES (?,?,?,?)`).run(id, this.storyId, text, scene);
+    this.db
+      .prepare(`INSERT INTO facts (id, story_id, text, scene) VALUES (?,?,?,?)`)
+      .run(id, this.storyId, text, scene);
     return { id, text, scene, layer: 'chronicle' };
   }
 
   facts(limit = 200): Fact[] {
     return rows<{ id: string; text: string; scene: number }>(
-      this.db.prepare(`SELECT id, text, scene FROM facts WHERE story_id = ? ORDER BY scene DESC LIMIT ?`).all(this.storyId, limit),
+      this.db
+        .prepare(`SELECT id, text, scene FROM facts WHERE story_id = ? ORDER BY scene DESC LIMIT ?`)
+        .all(this.storyId, limit),
     ).map((r) => ({ ...r, layer: 'chronicle' as const }));
   }
 
@@ -355,13 +392,7 @@ export class ChronicleStore {
    * already story-scoped via `facts`, and every call site resolves the fact
    * through this store first.
    */
-  setKnowledge(
-    factId: FactId,
-    entityId: EntityId,
-    level: KnowledgeLevel,
-    scene: number,
-    distortion = 0,
-  ): void {
+  setKnowledge(factId: FactId, entityId: EntityId, level: KnowledgeLevel, scene: number, distortion = 0): void {
     this.db
       .prepare(
         `INSERT INTO fact_knowledge (fact_id, entity_id, level, since_scene, distortion)
@@ -459,19 +490,25 @@ export class ChronicleStore {
 
   divergences(): Array<{ id: number; scene: number; kind: string; detail: string; canon: string }> {
     return rows(
-      this.db.prepare(`SELECT id, scene, kind, detail, canon FROM divergences WHERE story_id = ? ORDER BY scene`).all(this.storyId),
+      this.db
+        .prepare(`SELECT id, scene, kind, detail, canon FROM divergences WHERE story_id = ? ORDER BY scene`)
+        .all(this.storyId),
     );
   }
 
   // --------------------------------------------------------- style anchors
 
   addAnchor(text: string, note = '', scene = 0): void {
-    this.db.prepare(`INSERT INTO style_anchors (story_id, text, note, scene) VALUES (?,?,?,?)`).run(this.storyId, text, note, scene);
+    this.db
+      .prepare(`INSERT INTO style_anchors (story_id, text, note, scene) VALUES (?,?,?,?)`)
+      .run(this.storyId, text, note, scene);
   }
 
   anchors(limit = 5): Array<{ id: number; text: string; note: string; scene: number }> {
     return rows(
-      this.db.prepare(`SELECT id, text, note, scene FROM style_anchors WHERE story_id = ? ORDER BY id DESC LIMIT ?`).all(this.storyId, limit),
+      this.db
+        .prepare(`SELECT id, text, note, scene FROM style_anchors WHERE story_id = ? ORDER BY id DESC LIMIT ?`)
+        .all(this.storyId, limit),
     );
   }
 }

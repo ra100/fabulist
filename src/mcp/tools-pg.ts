@@ -24,19 +24,15 @@ import { limitsFromWire, type SetupService, type IngestJobResult, type PreviewRe
 import type { CharacterSketch, IngestPlan } from '../setup/planner.ts';
 import type { WikiCandidate } from '../setup/directory.ts';
 import type { DepthMode } from '../ingest/depth-pg.ts';
+import { slugId } from '../ingest/parse.ts';
 import type { Job } from '../setup/jobs.ts';
 import { World, getWorldBySlug, listWorlds, setStorySources } from '../store/index-pg.ts';
 import { assertWorldAccess, worldsVisibleTo } from '../store/access-pg.ts';
 import type { Db } from '../db/pg.ts';
-import {
-  createStory,
-  getStory,
-  listStories,
-  listStoriesForUserWithPrivateValues,
-} from '../store/world-pg.ts';
+import { createStory, getStory, listStories, listStoriesForUserWithPrivateValues } from '../store/world-pg.ts';
 import { assertPrivateStoryCreationReady } from '../store/private-story-migration-pg.ts';
 import type { SessionUser } from '../auth/config.ts';
-import type { Directive, StyleContract, Knobs, VisualStyle, EntityId } from '../domain/types.ts';
+import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType } from '../domain/types.ts';
 import { playTurn } from '../application/play-pg.ts';
 
 export interface McpToolContext {
@@ -88,7 +84,6 @@ function parseVisualStyle(v: unknown): VisualStyle | undefined {
 }
 
 // -------------------------------------------------------------- read tools
-
 
 export async function listWorldsTool(ctx: McpToolContext) {
   const world = await ctx.world();
@@ -202,7 +197,10 @@ export async function createStoryTool(ctx: McpToolContext, args: { title?: strin
  * here" / "continue from an earlier point"). `fromStoryId` defaults to
  * whichever story is current in the open world.
  */
-export async function forkStoryTool(ctx: McpToolContext, args: { fromStoryId?: string; title?: string; atScene?: number }) {
+export async function forkStoryTool(
+  ctx: McpToolContext,
+  args: { fromStoryId?: string; title?: string; atScene?: number },
+) {
   const world = await ctx.world();
   if (ctx.user) await assertPrivateStoryCreationReady(ctx.db, ctx.user.id);
   const sourceId = args.fromStoryId || world.storyId;
@@ -279,7 +277,7 @@ export async function switchStoryTool(ctx: McpToolContext, args: { id: string })
 export async function getStateTool(ctx: McpToolContext) {
   const world = await ctx.world();
   const session = await world.session.get();
-  const hasPlayer = !!await world.cast.player();
+  const hasPlayer = !!(await world.cast.player());
   return {
     session,
     // The distinction a caller cannot otherwise draw: a world can be full of
@@ -300,7 +298,7 @@ export async function getCastTool(ctx: McpToolContext, args: { name?: string }) 
   if (args.name) {
     const entity = await world.graph.resolveName(args.name);
     if (!entity) return { sheet: null, entity: null };
-    return { entity, sheet: await world.cast.get(entity.id) ?? null };
+    return { entity, sheet: (await world.cast.get(entity.id)) ?? null };
   }
   // Entities for the whole cast in one batch, not one query per sheet.
   const sheets = await world.cast.list();
@@ -312,14 +310,15 @@ export async function getCastTool(ctx: McpToolContext, args: { name?: string }) 
 
 export async function getEntityTool(ctx: McpToolContext, args: { id?: string; name?: string }) {
   const world = await ctx.world();
-  const entity = args.id ? await world.graph.get(args.id) : args.name ? await world.graph.resolveName(args.name) : undefined;
+  const entity = args.id
+    ? await world.graph.get(args.id)
+    : args.name
+      ? await world.graph.resolveName(args.name)
+      : undefined;
   if (!entity) return { entity: null };
   // The sheet and the neighbourhood overlap through the pool; the neighbours'
   // own entities then come back in one batch rather than one query each.
-  const [sheet, neighbours] = await Promise.all([
-    world.cast.get(entity.id),
-    world.graph.neighbours(entity.id),
-  ]);
+  const [sheet, neighbours] = await Promise.all([world.cast.get(entity.id), world.graph.neighbours(entity.id)]);
   const others = await world.graph.getMany(neighbours.map((n) => n.otherId));
   return {
     entity,
@@ -331,6 +330,114 @@ export async function getEntityTool(ctx: McpToolContext, args: { id?: string; na
 export async function searchEntitiesTool(ctx: McpToolContext, args: { query: string; limit?: number }) {
   const world = await ctx.world();
   return { entities: await world.graph.search(args.query, args.limit ?? 20) };
+}
+
+// ---------------------------------------------------------- manual state edits
+
+const ENTITY_TYPES: Record<string, EntityType> = {
+  character: 'Character',
+  location: 'Location',
+  faction: 'Faction',
+  item: 'Item',
+  concept: 'Concept',
+  event: 'Event',
+};
+
+function manualEntityType(type: string): EntityType {
+  const parsed = ENTITY_TYPES[type.toLowerCase()];
+  if (!parsed) throw new Error(`upsert_entity: unsupported type ${type}`);
+  return parsed;
+}
+
+async function entityReference(world: World, value: string, tool: string): Promise<EntityId> {
+  const exact = await world.graph.get(value);
+  if (exact) return exact.id;
+  const matches = (await world.graph.search(value, 100)).filter(
+    (entity) => entity.name.toLowerCase() === value.trim().toLowerCase(),
+  );
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length > 1) throw new Error(`${tool}: ${JSON.stringify(value)} is ambiguous; use an entity id`);
+  throw new Error(`${tool}: no entity ${JSON.stringify(value)}`);
+}
+
+/** Create or copy-on-write update an entity in the active story with manual provenance. */
+export async function upsertEntityTool(
+  ctx: McpToolContext,
+  args: { id?: string; type: string; name: string; attributes?: Record<string, unknown>; summary?: string },
+) {
+  const world = await ctx.world();
+  const type = manualEntityType(args.type);
+  const name = args.name.trim();
+  if (!name) throw new Error('upsert_entity: name is required');
+  const id = args.id?.trim() || slugId(type, name);
+  const previous = await world.graph.get(id);
+  const session = await world.session.get();
+  await world.graph.upsert(
+    {
+      id,
+      type,
+      name,
+      summary: args.summary?.trim() ?? previous?.summary ?? '',
+      props: { ...(previous?.props ?? {}), ...(args.attributes ?? {}) },
+      provenance: 'manual',
+      confidence: 1,
+      salience: previous?.salience ?? 0.5,
+      depthLevel: previous?.depthLevel ?? 0,
+      createdScene: previous?.createdScene ?? session.scene,
+    },
+    'chronicle',
+  );
+  return { id, created: !previous, entity: (await world.graph.get(id))! };
+}
+
+/** Assert a live story-scoped edge; IDs or unambiguous exact names are accepted. */
+export async function upsertEdgeTool(
+  ctx: McpToolContext,
+  args: { from: string; relation: string; to: string; attributes?: Record<string, unknown> },
+) {
+  const world = await ctx.world();
+  const relation = args.relation.trim();
+  if (!relation) throw new Error('upsert_edge: relation is required');
+  const subject = await entityReference(world, args.from, 'upsert_edge.from');
+  const object = await entityReference(world, args.to, 'upsert_edge.to');
+  const before = (await world.graph.edgesFrom(subject)).find(
+    (edge) => edge.predicate === relation && edge.object === object,
+  );
+  const weight = typeof args.attributes?.weight === 'number' ? args.attributes.weight : undefined;
+  const evidence = typeof args.attributes?.note === 'string' ? args.attributes.note : undefined;
+  const session = await world.session.get();
+  await world.graph.assertEdge(
+    { subject, predicate: relation, object, weight, evidence },
+    session.scene,
+    'chronicle',
+    'manual',
+  );
+  const edge = (await world.graph.edgesFrom(subject)).find(
+    (candidate) => candidate.predicate === relation && candidate.object === object,
+  );
+  return { from: subject, relation, to: object, created: !before, edge };
+}
+
+/** Retire an edge rather than deleting it, preserving its history. */
+export async function removeEdgeTool(ctx: McpToolContext, args: { from: string; relation: string; to: string }) {
+  const world = await ctx.world();
+  const subject = await entityReference(world, args.from, 'remove_edge.from');
+  const object = await entityReference(world, args.to, 'remove_edge.to');
+  const session = await world.session.get();
+  return { removed: await world.graph.retireEdge(subject, args.relation.trim(), object, session.scene) };
+}
+
+/** Set the current scene location to an existing Location entity. */
+export async function setCurrentLocationTool(ctx: McpToolContext, args: { entityId?: string; name?: string }) {
+  const world = await ctx.world();
+  const ref = args.entityId ?? args.name;
+  if (!ref) throw new Error('set_current_location: entityId or name is required');
+  const id = await entityReference(world, ref, 'set_current_location');
+  const entity = (await world.graph.get(id))!;
+  if (entity.type !== 'Location') throw new Error(`set_current_location: ${id} is a ${entity.type}, not a Location`);
+  const session = await world.session.set({ currentLocationId: id });
+  await world.chronicle.upsertScene(session.scene, { locationId: id });
+  return { currentLocationId: id, scene: session.scene };
 }
 
 export async function getThreadsTool(ctx: McpToolContext) {
@@ -365,10 +472,7 @@ export async function listCharactersTool(ctx: McpToolContext) {
   // route this mirrors.
   const listed = await world.graph.list({ type: 'Character', limit: 60 });
   const ids = listed.map((e) => e.id);
-  const [sheets, degrees] = await Promise.all([
-    world.cast.getManyOrBlank(ids),
-    world.graph.neighboursMany(ids),
-  ]);
+  const [sheets, degrees] = await Promise.all([world.cast.getManyOrBlank(ids), world.graph.neighboursMany(ids)]);
   const characters = listed
     .map((e) => ({
       id: e.id,
@@ -397,10 +501,18 @@ export async function listCharactersTool(ctx: McpToolContext) {
  */
 export async function startStoryTool(
   ctx: McpToolContext,
-  args: { existing?: string; name?: string; role?: string; goals?: string[]; vows?: Array<{ text: string; rank: number }> },
+  args: {
+    existing?: string;
+    name?: string;
+    role?: string;
+    goals?: string[];
+    vows?: Array<{ text: string; rank: number }>;
+  },
 ) {
   if (!ctx.setup) {
-    throw new Error('start_story: this server has no setup service enabled (a single fixed world was configured at startup)');
+    throw new Error(
+      'start_story: this server has no setup service enabled (a single fixed world was configured at startup)',
+    );
   }
   const world = await ctx.world();
   const assigned = await assignPlayerCharacter(world, {
@@ -454,7 +566,8 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
       // Stated in the payload, not only in the tool description and the server
       // instructions: a client that ignored both still gets told, at the exact
       // moment it matters, that stopping here throws the turn away.
-      nextStep: 'Write the prose from narratorSystemPrompt + sceneFrame, then call commit_narration with it and this resumeToken. Nothing is saved until you do.',
+      nextStep:
+        'Write the prose from narratorSystemPrompt + sceneFrame, then call commit_narration with it and this resumeToken. Nothing is saved until you do.',
       resumeToken: outcome.resumeToken,
       narratorSystemPrompt: outcome.system,
       sceneFrame: outcome.user,
@@ -464,7 +577,8 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'interrupted') {
     return {
       status: 'interrupted' as const,
-      nextStep: 'Show the player these options and call resolve_interrupt with the one they pick and this originalText. Do not call commit_narration — no turn is pending.',
+      nextStep:
+        'Show the player these options and call resolve_interrupt with the one they pick and this originalText. Do not call commit_narration — no turn is pending.',
       message: outcome.interrupt.message,
       distance: outcome.distance,
       reasoning: outcome.reasoning,
@@ -478,7 +592,8 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'answered') {
     return {
       status: 'answered' as const,
-      nextStep: 'This was a question about the world, not an action. Relay the answer; there is nothing to narrate or commit.',
+      nextStep:
+        'This was a question about the world, not an action. Relay the answer; there is nothing to narrate or commit.',
       text: outcome.text,
     };
   }
@@ -504,7 +619,8 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
   if (outcome.kind === 'narrated') {
     return {
       status: 'narrated' as const,
-      nextStep: 'Committed. Show the prose to the player and take the next turn with propose_turn, or close_scene at a scene break.',
+      nextStep:
+        'Committed. Show the prose to the player and take the next turn with propose_turn, or close_scene at a scene break.',
       turnId: outcome.turn.id,
       prose: outcome.prose,
       eventsRecorded: outcome.commit.events.length,
@@ -516,7 +632,8 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
     // extract/validate rejected the delta the prose implied.
     return {
       status: 'blocked' as const,
-      nextStep: 'Nothing was committed. Rewrite the prose so it does not imply the rejected change, then call propose_turn again for a fresh token.',
+      nextStep:
+        'Nothing was committed. Rewrite the prose so it does not imply the rejected change, then call propose_turn again for a fresh token.',
       reason: outcome.reason,
       issues: outcome.validation.issues.filter((i) => !i.repaired),
     };
@@ -528,7 +645,9 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
   // 'narrated' or 'blocked'. Kept explicit rather than cast away, so a
   // future change to `TurnOutcome` fails this file's typecheck instead of
   // silently mismatching at runtime.
-  throw new Error(`commit_narration: unexpected outcome kind ${outcome.kind} — this should be unreachable post-narrate`);
+  throw new Error(
+    `commit_narration: unexpected outcome kind ${outcome.kind} — this should be unreachable post-narrate`,
+  );
 }
 
 /**
@@ -546,7 +665,11 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
  */
 export async function resolveInterruptTool(
   ctx: McpToolContext,
-  args: { originalText: string; effect: 'override' | 'establish-break' | 'revise' | 'switch-character'; actorId?: string },
+  args: {
+    originalText: string;
+    effect: 'override' | 'establish-break' | 'revise' | 'switch-character';
+    actorId?: string;
+  },
 ) {
   if (args.effect === 'revise' || args.effect === 'switch-character') {
     return { status: 'nothing-written' as const, hint: 'try a different action, or a different character' };
@@ -611,6 +734,20 @@ export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string
   return ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
 }
 
+/** Author-controlled exact prose replacement; it never re-extracts state. */
+export async function replaceTurnProseTool(
+  ctx: McpToolContext,
+  args: { id: string; prose: string; stateMode?: 'preserve' },
+) {
+  const world = await ctx.world();
+  if (!args.prose.trim()) throw new Error('replace_turn_prose: prose is required');
+  if (args.stateMode && args.stateMode !== 'preserve')
+    throw new Error('replace_turn_prose: only stateMode "preserve" is supported');
+  if (!(await world.chronicle.replaceProse(args.id, args.prose)))
+    throw new Error(`replace_turn_prose: no turn ${args.id}`);
+  return { stateMode: 'preserve' as const, turn: (await world.chronicle.getTurn(args.id))! };
+}
+
 /**
  * `update_sheet`. The MCP-side counterpart of `PUT /api/sheet/:id` \u2014 edits a
  * character's identity/contract/voice/condition/locks. `appearance` never
@@ -641,7 +778,12 @@ export async function updateSheetTool(
     voice: (args.voice as unknown as typeof existing.voice) ?? existing.voice,
     condition: (args.condition as unknown as typeof existing.condition) ?? existing.condition,
     appearance: args.appearance
-      ? { ...existing.appearance, ...args.appearance, referenceImagePath: existing.appearance.referenceImagePath, seed: existing.appearance.seed }
+      ? {
+          ...existing.appearance,
+          ...args.appearance,
+          referenceImagePath: existing.appearance.referenceImagePath,
+          seed: existing.appearance.seed,
+        }
       : existing.appearance,
     locks: args.locks ?? existing.locks,
   });
@@ -756,7 +898,10 @@ export async function generatePortraitTool(ctx: McpToolContext, args: { entityId
  * \u2014 illustrates an already-committed turn, from the cast/location its own delta recorded
  * (never a player-supplied list, so the image depicts what actually happened).
  */
-export async function generateSceneIllustrationTool(ctx: McpToolContext, args: { turnId: string; visualStyle?: string }) {
+export async function generateSceneIllustrationTool(
+  ctx: McpToolContext,
+  args: { turnId: string; visualStyle?: string },
+) {
   if (!ctx.illustrations) {
     throw new Error('generate_scene_illustration: this server has no image provider configured');
   }
@@ -765,12 +910,22 @@ export async function generateSceneIllustrationTool(ctx: McpToolContext, args: {
   if (!turn) throw new Error(`generate_scene_illustration: no turn ${args.turnId}`);
   const style = parseVisualStyle(args.visualStyle);
   const firstEvent = turn.delta?.events[0];
-  const locationId = (firstEvent?.locationId ?? (await world.session.get()).currentLocationId ?? null) as EntityId | null;
+  const locationId = (firstEvent?.locationId ??
+    (await world.session.get()).currentLocationId ??
+    null) as EntityId | null;
   const presentIds = (firstEvent?.participants ?? []) as EntityId[];
   try {
-    return await ctx.illustrations.illustrateScene(args.turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style, world);
+    return await ctx.illustrations.illustrateScene(
+      args.turnId,
+      locationId,
+      presentIds,
+      turn.bookProse.slice(0, 400),
+      style,
+      world,
+    );
   } catch (err) {
-    if (err instanceof NoImageProviderError) throw new Error('generate_scene_illustration: no image provider configured');
+    if (err instanceof NoImageProviderError)
+      throw new Error('generate_scene_illustration: no image provider configured');
     throw err;
   }
 }
@@ -791,13 +946,16 @@ export async function generateSceneIllustrationTool(ctx: McpToolContext, args: {
  */
 export async function composeIllustrationPromptTool(
   ctx: McpToolContext,
-  args: { subject: 'portrait'; entityId: string; visualStyle?: string } | { subject: 'scene'; turnId: string; visualStyle?: string },
+  args:
+    | { subject: 'portrait'; entityId: string; visualStyle?: string }
+    | { subject: 'scene'; turnId: string; visualStyle?: string },
 ) {
   if (!ctx.illustrations) {
     throw new Error('compose_illustration_prompt: illustration is not enabled on this server');
   }
   const style = parseVisualStyle(args.visualStyle);
-  const note = 'Copy-pasteable fallback — no provider was called and nothing was generated or stored. Paste prompt/negativePrompt into whatever image tool is available.';
+  const note =
+    'Copy-pasteable fallback — no provider was called and nothing was generated or stored. Paste prompt/negativePrompt into whatever image tool is available.';
   if (args.subject === 'portrait') {
     const composed = await ctx.illustrations.composePortrait(args.entityId, style);
     return { ...composed, note };
@@ -806,9 +964,17 @@ export async function composeIllustrationPromptTool(
   const turn = await world.chronicle.getTurn(args.turnId);
   if (!turn) throw new Error(`compose_illustration_prompt: no turn ${args.turnId}`);
   const firstEvent = turn.delta?.events[0];
-  const locationId = (firstEvent?.locationId ?? (await world.session.get()).currentLocationId ?? null) as EntityId | null;
+  const locationId = (firstEvent?.locationId ??
+    (await world.session.get()).currentLocationId ??
+    null) as EntityId | null;
   const presentIds = (firstEvent?.participants ?? []) as EntityId[];
-  const composed = await ctx.illustrations.composeScene(args.turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style);
+  const composed = await ctx.illustrations.composeScene(
+    args.turnId,
+    locationId,
+    presentIds,
+    turn.bookProse.slice(0, 400),
+    style,
+  );
   return { ...composed, note };
 }
 
@@ -1161,7 +1327,13 @@ export async function fetchTool(ctx: McpToolContext, args: { id: string }) {
   if (id.startsWith('fact:')) {
     const fact = (await world.chronicle.facts(1000)).find((f) => f.id === id);
     if (!fact) throw new Error(`fetch: no fact ${id}`);
-    return { id, title: 'Fact', text: fact.text, url: searchUri(id), metadata: { scene: fact.scene, layer: fact.layer } };
+    return {
+      id,
+      title: 'Fact',
+      text: fact.text,
+      url: searchUri(id),
+      metadata: { scene: fact.scene, layer: fact.layer },
+    };
   }
 
   if (id.startsWith('thread:')) {
@@ -1177,7 +1349,12 @@ export async function fetchTool(ctx: McpToolContext, args: { id: string }) {
       title: thread.title,
       text,
       url: searchUri(id),
-      metadata: { tension: thread.tension, status: thread.status, parties: thread.parties, createdScene: thread.createdScene },
+      metadata: {
+        tension: thread.tension,
+        status: thread.status,
+        parties: thread.parties,
+        createdScene: thread.createdScene,
+      },
     };
   }
 
@@ -1195,20 +1372,15 @@ export async function fetchTool(ctx: McpToolContext, args: { id: string }) {
 
   // Anything else is an entity id (`char:`, `place:`, ...) or a plain name a
   // model passed through from get_cast.
-  const entity = await world.graph.get(id) ?? await world.graph.resolveName(id);
+  const entity = (await world.graph.get(id)) ?? (await world.graph.resolveName(id));
   if (!entity) {
     throw new Error(`fetch: unrecognized id '${id}' (expected an id from search, or an entity name)`);
   }
   // Sheet and neighbourhood overlap; the neighbours' names then come back in one
   // batch rather than one query each.
-  const [sheet, adjacency] = await Promise.all([
-    world.cast.get(entity.id),
-    world.graph.neighbours(entity.id),
-  ]);
+  const [sheet, adjacency] = await Promise.all([world.cast.get(entity.id), world.graph.neighbours(entity.id)]);
   const otherNames = await world.graph.getMany(adjacency.map((n) => n.otherId));
-  const neighbours = adjacency.map(
-    (n) => `${n.edge.predicate} \u2192 ${otherNames.get(n.otherId)?.name ?? n.otherId}`,
-  );
+  const neighbours = adjacency.map((n) => `${n.edge.predicate} \u2192 ${otherNames.get(n.otherId)?.name ?? n.otherId}`);
   const text = [
     `${entity.name} (${entity.type})`,
     entity.summary,

@@ -23,12 +23,13 @@ import { limitsFromWire, type SetupService, type IngestJobResult, type PreviewRe
 import type { CharacterSketch, IngestPlan } from '../setup/planner.ts';
 import type { WikiCandidate } from '../setup/directory.ts';
 import type { DepthMode } from '../ingest/depth.ts';
+import { slugId } from '../ingest/parse.ts';
 import type { Job } from '../setup/jobs.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { createStory, getStory, listStories, listStoriesForUser } from '../store/world.ts';
 import type { SessionUser } from '../auth/config.ts';
 import { listWorlds } from '../store/worlds.ts';
-import type { Directive, StyleContract, Knobs, VisualStyle, EntityId } from '../domain/types.ts';
+import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType } from '../domain/types.ts';
 
 export interface McpToolContext {
   /** Resolves fresh per call, exactly like every route in `api.ts` does — a story/world switch must take effect on the next call, not after a restart. */
@@ -75,7 +76,6 @@ function parseVisualStyle(v: unknown): VisualStyle | undefined {
 
 // -------------------------------------------------------------- read tools
 
-
 export function listWorldsTool(ctx: McpToolContext) {
   const worlds = listWorlds(ctx.dataRoot);
   const current = ctx.currentWorld?.slug();
@@ -100,7 +100,9 @@ export function listWorldsTool(ctx: McpToolContext) {
  */
 export function switchWorldTool(ctx: McpToolContext, args: { slug: string }) {
   if (!ctx.currentWorld) {
-    throw new Error('switch_world: this server has no switchable world (a single fixed world was configured at startup)');
+    throw new Error(
+      'switch_world: this server has no switchable world (a single fixed world was configured at startup)',
+    );
   }
   ctx.currentWorld.switchTo(args.slug);
   return { current: ctx.currentWorld.slug() };
@@ -229,7 +231,9 @@ export function rollbackTool(
  */
 export function switchStoryTool(ctx: McpToolContext, args: { id: string }) {
   if (!ctx.currentStory) {
-    throw new Error('switch_story: this server has no story management enabled (a single fixed world was configured at startup)');
+    throw new Error(
+      'switch_story: this server has no story management enabled (a single fixed world was configured at startup)',
+    );
   }
   const world = ctx.world();
   assertOwned(world, args.id, ctx.user, 'switch_story');
@@ -296,6 +300,109 @@ export function searchEntitiesTool(ctx: McpToolContext, args: { query: string; l
   return { entities: world.graph.search(args.query, args.limit ?? 20) };
 }
 
+// ---------------------------------------------------------- manual state edits
+
+const ENTITY_TYPES: Record<string, EntityType> = {
+  character: 'Character',
+  location: 'Location',
+  faction: 'Faction',
+  item: 'Item',
+  concept: 'Concept',
+  event: 'Event',
+};
+
+function manualEntityType(type: string): EntityType {
+  const parsed = ENTITY_TYPES[type.toLowerCase()];
+  if (!parsed) throw new Error(`upsert_entity: unsupported type ${type}`);
+  return parsed;
+}
+
+function entityReference(world: World, value: string, tool: string): EntityId {
+  const exact = world.graph.get(value);
+  if (exact) return exact.id;
+  const matches = world.graph
+    .search(value, 100)
+    .filter((entity) => entity.name.toLowerCase() === value.trim().toLowerCase());
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length > 1) throw new Error(`${tool}: ${JSON.stringify(value)} is ambiguous; use an entity id`);
+  throw new Error(`${tool}: no entity ${JSON.stringify(value)}`);
+}
+
+/** Create or copy-on-write update an entity in the active story with manual provenance. */
+export function upsertEntityTool(
+  ctx: McpToolContext,
+  args: { id?: string; type: string; name: string; attributes?: Record<string, unknown>; summary?: string },
+) {
+  const world = ctx.world();
+  const type = manualEntityType(args.type);
+  const name = args.name.trim();
+  if (!name) throw new Error('upsert_entity: name is required');
+  const id = args.id?.trim() || slugId(type, name);
+  const previous = world.graph.get(id);
+  world.graph.upsert(
+    {
+      id,
+      type,
+      name,
+      summary: args.summary?.trim() ?? previous?.summary ?? '',
+      props: { ...(previous?.props ?? {}), ...(args.attributes ?? {}) },
+      provenance: 'manual',
+      confidence: 1,
+      salience: previous?.salience ?? 0.5,
+      depthLevel: previous?.depthLevel ?? 0,
+      createdScene: previous?.createdScene ?? world.session.get().scene,
+    },
+    'chronicle',
+  );
+  return { id, created: !previous, entity: world.graph.get(id)! };
+}
+
+/** Assert a live story-scoped edge; IDs or unambiguous exact names are accepted. */
+export function upsertEdgeTool(
+  ctx: McpToolContext,
+  args: { from: string; relation: string; to: string; attributes?: Record<string, unknown> },
+) {
+  const world = ctx.world();
+  const relation = args.relation.trim();
+  if (!relation) throw new Error('upsert_edge: relation is required');
+  const subject = entityReference(world, args.from, 'upsert_edge.from');
+  const object = entityReference(world, args.to, 'upsert_edge.to');
+  const before = world.graph.edgesFrom(subject).find((edge) => edge.predicate === relation && edge.object === object);
+  const weight = typeof args.attributes?.weight === 'number' ? args.attributes.weight : undefined;
+  const evidence = typeof args.attributes?.note === 'string' ? args.attributes.note : undefined;
+  world.graph.assertEdge(
+    { subject, predicate: relation, object, weight, evidence },
+    world.session.get().scene,
+    'chronicle',
+    'manual',
+  );
+  const edge = world.graph
+    .edgesFrom(subject)
+    .find((candidate) => candidate.predicate === relation && candidate.object === object);
+  return { from: subject, relation, to: object, created: !before, edge };
+}
+
+/** Retire an edge rather than deleting it, preserving its history. */
+export function removeEdgeTool(ctx: McpToolContext, args: { from: string; relation: string; to: string }) {
+  const world = ctx.world();
+  const subject = entityReference(world, args.from, 'remove_edge.from');
+  const object = entityReference(world, args.to, 'remove_edge.to');
+  return { removed: world.graph.retireEdge(subject, args.relation.trim(), object, world.session.get().scene) };
+}
+
+/** Set the current scene location to an existing Location entity. */
+export function setCurrentLocationTool(ctx: McpToolContext, args: { entityId?: string; name?: string }) {
+  const world = ctx.world();
+  const ref = args.entityId ?? args.name;
+  if (!ref) throw new Error('set_current_location: entityId or name is required');
+  const id = entityReference(world, ref, 'set_current_location');
+  const entity = world.graph.get(id)!;
+  if (entity.type !== 'Location') throw new Error(`set_current_location: ${id} is a ${entity.type}, not a Location`);
+  const session = world.session.set({ currentLocationId: id });
+  world.chronicle.upsertScene(session.scene, { locationId: id });
+  return { currentLocationId: id, scene: session.scene };
+}
+
 export function getThreadsTool(ctx: McpToolContext) {
   const world = ctx.world();
   return { threads: world.threads.all() };
@@ -356,10 +463,18 @@ export function listCharactersTool(ctx: McpToolContext) {
  */
 export function startStoryTool(
   ctx: McpToolContext,
-  args: { existing?: string; name?: string; role?: string; goals?: string[]; vows?: Array<{ text: string; rank: number }> },
+  args: {
+    existing?: string;
+    name?: string;
+    role?: string;
+    goals?: string[];
+    vows?: Array<{ text: string; rank: number }>;
+  },
 ) {
   if (!ctx.setup) {
-    throw new Error('start_story: this server has no setup service enabled (a single fixed world was configured at startup)');
+    throw new Error(
+      'start_story: this server has no setup service enabled (a single fixed world was configured at startup)',
+    );
   }
   const world = ctx.world();
   const assigned = assignPlayerCharacter(world, {
@@ -413,7 +528,8 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
       // Stated in the payload, not only in the tool description and the server
       // instructions: a client that ignored both still gets told, at the exact
       // moment it matters, that stopping here throws the turn away.
-      nextStep: 'Write the prose from narratorSystemPrompt + sceneFrame, then call commit_narration with it and this resumeToken. Nothing is saved until you do.',
+      nextStep:
+        'Write the prose from narratorSystemPrompt + sceneFrame, then call commit_narration with it and this resumeToken. Nothing is saved until you do.',
       resumeToken: outcome.resumeToken,
       narratorSystemPrompt: outcome.system,
       sceneFrame: outcome.user,
@@ -423,7 +539,8 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'interrupted') {
     return {
       status: 'interrupted' as const,
-      nextStep: 'Show the player these options and call resolve_interrupt with the one they pick and this originalText. Do not call commit_narration — no turn is pending.',
+      nextStep:
+        'Show the player these options and call resolve_interrupt with the one they pick and this originalText. Do not call commit_narration — no turn is pending.',
       message: outcome.interrupt.message,
       distance: outcome.distance,
       reasoning: outcome.reasoning,
@@ -437,7 +554,8 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'answered') {
     return {
       status: 'answered' as const,
-      nextStep: 'This was a question about the world, not an action. Relay the answer; there is nothing to narrate or commit.',
+      nextStep:
+        'This was a question about the world, not an action. Relay the answer; there is nothing to narrate or commit.',
       text: outcome.text,
     };
   }
@@ -463,7 +581,8 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
   if (outcome.kind === 'narrated') {
     return {
       status: 'narrated' as const,
-      nextStep: 'Committed. Show the prose to the player and take the next turn with propose_turn, or close_scene at a scene break.',
+      nextStep:
+        'Committed. Show the prose to the player and take the next turn with propose_turn, or close_scene at a scene break.',
       turnId: outcome.turn.id,
       prose: outcome.prose,
       eventsRecorded: outcome.commit.events.length,
@@ -475,7 +594,8 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
     // extract/validate rejected the delta the prose implied.
     return {
       status: 'blocked' as const,
-      nextStep: 'Nothing was committed. Rewrite the prose so it does not imply the rejected change, then call propose_turn again for a fresh token.',
+      nextStep:
+        'Nothing was committed. Rewrite the prose so it does not imply the rejected change, then call propose_turn again for a fresh token.',
       reason: outcome.reason,
       issues: outcome.validation.issues.filter((i) => !i.repaired),
     };
@@ -487,7 +607,9 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
   // 'narrated' or 'blocked'. Kept explicit rather than cast away, so a
   // future change to `TurnOutcome` fails this file's typecheck instead of
   // silently mismatching at runtime.
-  throw new Error(`commit_narration: unexpected outcome kind ${outcome.kind} — this should be unreachable post-narrate`);
+  throw new Error(
+    `commit_narration: unexpected outcome kind ${outcome.kind} — this should be unreachable post-narrate`,
+  );
 }
 
 /**
@@ -505,7 +627,11 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
  */
 export async function resolveInterruptTool(
   ctx: McpToolContext,
-  args: { originalText: string; effect: 'override' | 'establish-break' | 'revise' | 'switch-character'; actorId?: string },
+  args: {
+    originalText: string;
+    effect: 'override' | 'establish-break' | 'revise' | 'switch-character';
+    actorId?: string;
+  },
 ) {
   if (args.effect === 'revise' || args.effect === 'switch-character') {
     return { status: 'nothing-written' as const, hint: 'try a different action, or a different character' };
@@ -579,6 +705,16 @@ export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string
   return ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
 }
 
+/** Author-controlled exact prose replacement; it never re-extracts state. */
+export function replaceTurnProseTool(ctx: McpToolContext, args: { id: string; prose: string; stateMode?: 'preserve' }) {
+  const world = ctx.world();
+  if (!args.prose.trim()) throw new Error('replace_turn_prose: prose is required');
+  if (args.stateMode && args.stateMode !== 'preserve')
+    throw new Error('replace_turn_prose: only stateMode "preserve" is supported');
+  if (!world.chronicle.replaceProse(args.id, args.prose)) throw new Error(`replace_turn_prose: no turn ${args.id}`);
+  return { stateMode: 'preserve' as const, turn: world.chronicle.getTurn(args.id)! };
+}
+
 /**
  * `update_sheet`. The MCP-side counterpart of `PUT /api/sheet/:id` \u2014 edits a
  * character's identity/contract/voice/condition/locks. `appearance` never
@@ -609,7 +745,12 @@ export function updateSheetTool(
     voice: (args.voice as unknown as typeof existing.voice) ?? existing.voice,
     condition: (args.condition as unknown as typeof existing.condition) ?? existing.condition,
     appearance: args.appearance
-      ? { ...existing.appearance, ...args.appearance, referenceImagePath: existing.appearance.referenceImagePath, seed: existing.appearance.seed }
+      ? {
+          ...existing.appearance,
+          ...args.appearance,
+          referenceImagePath: existing.appearance.referenceImagePath,
+          seed: existing.appearance.seed,
+        }
       : existing.appearance,
     locks: args.locks ?? existing.locks,
   });
@@ -721,7 +862,10 @@ export async function generatePortraitTool(ctx: McpToolContext, args: { entityId
  * \u2014 illustrates an already-committed turn, from the cast/location its own delta recorded
  * (never a player-supplied list, so the image depicts what actually happened).
  */
-export async function generateSceneIllustrationTool(ctx: McpToolContext, args: { turnId: string; visualStyle?: string }) {
+export async function generateSceneIllustrationTool(
+  ctx: McpToolContext,
+  args: { turnId: string; visualStyle?: string },
+) {
   if (!ctx.illustrations) {
     throw new Error('generate_scene_illustration: this server has no image provider configured');
   }
@@ -733,9 +877,17 @@ export async function generateSceneIllustrationTool(ctx: McpToolContext, args: {
   const locationId = (firstEvent?.locationId ?? world.session.get().currentLocationId ?? null) as EntityId | null;
   const presentIds = (firstEvent?.participants ?? []) as EntityId[];
   try {
-    return await ctx.illustrations.illustrateScene(args.turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style, world);
+    return await ctx.illustrations.illustrateScene(
+      args.turnId,
+      locationId,
+      presentIds,
+      turn.bookProse.slice(0, 400),
+      style,
+      world,
+    );
   } catch (err) {
-    if (err instanceof NoImageProviderError) throw new Error('generate_scene_illustration: no image provider configured');
+    if (err instanceof NoImageProviderError)
+      throw new Error('generate_scene_illustration: no image provider configured');
     throw err;
   }
 }
@@ -756,13 +908,16 @@ export async function generateSceneIllustrationTool(ctx: McpToolContext, args: {
  */
 export async function composeIllustrationPromptTool(
   ctx: McpToolContext,
-  args: { subject: 'portrait'; entityId: string; visualStyle?: string } | { subject: 'scene'; turnId: string; visualStyle?: string },
+  args:
+    | { subject: 'portrait'; entityId: string; visualStyle?: string }
+    | { subject: 'scene'; turnId: string; visualStyle?: string },
 ) {
   if (!ctx.illustrations) {
     throw new Error('compose_illustration_prompt: illustration is not enabled on this server');
   }
   const style = parseVisualStyle(args.visualStyle);
-  const note = 'Copy-pasteable fallback — no provider was called and nothing was generated or stored. Paste prompt/negativePrompt into whatever image tool is available.';
+  const note =
+    'Copy-pasteable fallback — no provider was called and nothing was generated or stored. Paste prompt/negativePrompt into whatever image tool is available.';
   if (args.subject === 'portrait') {
     const composed = ctx.illustrations.composePortrait(args.entityId, style);
     return { ...composed, note };
@@ -773,7 +928,13 @@ export async function composeIllustrationPromptTool(
   const firstEvent = turn.delta?.events[0];
   const locationId = (firstEvent?.locationId ?? world.session.get().currentLocationId ?? null) as EntityId | null;
   const presentIds = (firstEvent?.participants ?? []) as EntityId[];
-  const composed = ctx.illustrations.composeScene(args.turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style);
+  const composed = ctx.illustrations.composeScene(
+    args.turnId,
+    locationId,
+    presentIds,
+    turn.bookProse.slice(0, 400),
+    style,
+  );
   return { ...composed, note };
 }
 
@@ -835,11 +996,19 @@ export async function closeSceneTool(ctx: McpToolContext) {
  * `fork_story` (which branches within the same world file): a genuinely
  * separate save the caller can hand off or archive independently.
  */
-export function branchStoryToFileTool(ctx: McpToolContext, args: { atScene: number; toPath: string; overwrite?: boolean }) {
+export function branchStoryToFileTool(
+  ctx: McpToolContext,
+  args: { atScene: number; toPath: string; overwrite?: boolean },
+) {
   const world = ctx.world();
   const fromPath = world.db.prepare(`PRAGMA database_list`).get() as { file?: string } | undefined;
   if (!fromPath?.file) throw new Error('branch_story_to_file: cannot branch an in-memory save');
-  const opts: BranchOptions = { fromPath: fromPath.file, toPath: args.toPath, atScene: args.atScene, overwrite: args.overwrite === true };
+  const opts: BranchOptions = {
+    fromPath: fromPath.file,
+    toPath: args.toPath,
+    atScene: args.atScene,
+    overwrite: args.overwrite === true,
+  };
   return branchSave(opts);
 }
 
@@ -1099,7 +1268,13 @@ export function fetchTool(ctx: McpToolContext, args: { id: string }) {
   if (id.startsWith('fact:')) {
     const fact = world.chronicle.facts(1000).find((f) => f.id === id);
     if (!fact) throw new Error(`fetch: no fact ${id}`);
-    return { id, title: 'Fact', text: fact.text, url: searchUri(id), metadata: { scene: fact.scene, layer: fact.layer } };
+    return {
+      id,
+      title: 'Fact',
+      text: fact.text,
+      url: searchUri(id),
+      metadata: { scene: fact.scene, layer: fact.layer },
+    };
   }
 
   if (id.startsWith('thread:')) {
@@ -1115,7 +1290,12 @@ export function fetchTool(ctx: McpToolContext, args: { id: string }) {
       title: thread.title,
       text,
       url: searchUri(id),
-      metadata: { tension: thread.tension, status: thread.status, parties: thread.parties, createdScene: thread.createdScene },
+      metadata: {
+        tension: thread.tension,
+        status: thread.status,
+        parties: thread.parties,
+        createdScene: thread.createdScene,
+      },
     };
   }
 

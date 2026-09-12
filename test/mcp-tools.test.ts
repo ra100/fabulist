@@ -56,10 +56,13 @@ import {
   previewIngestTool,
   proposeTurnTool,
   regenerateTurnTool,
+  removeEdgeTool,
+  replaceTurnProseTool,
   resetWorldTool,
   resolveInterruptTool,
   resolveWikiTool,
   searchEntitiesTool,
+  setCurrentLocationTool,
   searchTool,
   fetchTool,
   startStoryTool,
@@ -67,6 +70,8 @@ import {
   switchWorldTool,
   tickTool,
   updateKnobsTool,
+  upsertEdgeTool,
+  upsertEntityTool,
   updateSheetTool,
   updateStyleTool,
   updateThreadTool,
@@ -153,6 +158,46 @@ test('searchEntitiesTool finds the seed cast by a partial query', () => {
   const { world, ctx } = setup();
   const out = searchEntitiesTool(ctx, { query: 'anselm' });
   assert.ok(out.entities.some((e) => e.id === 'char:brother-anselm'));
+  world.close();
+});
+
+test('manual graph tools create story-scoped entities, edges, and a scene location', () => {
+  const { world, ctx } = setup();
+  const residence = upsertEntityTool(ctx, {
+    id: 'place:mira-residence',
+    type: 'location',
+    name: "Mira's residence",
+    attributes: { district: 'New Canaan' },
+  });
+  assert.equal(residence.created, true);
+  assert.equal(residence.entity.provenance, 'manual');
+
+  const updated = upsertEntityTool(ctx, {
+    id: residence.id,
+    type: 'location',
+    name: "Mira's residence",
+    attributes: { guarded: true },
+    summary: 'A quiet residence.',
+  });
+  assert.equal(updated.created, false);
+  assert.deepEqual(updated.entity.props, { district: 'New Canaan', guarded: true });
+
+  const edge = upsertEdgeTool(ctx, { from: 'Brother Anselm', relation: 'located_at', to: residence.id });
+  assert.equal(edge.created, true);
+  assert.equal(edge.edge?.provenance, 'manual');
+  assert.equal(setCurrentLocationTool(ctx, { entityId: residence.id }).currentLocationId, residence.id);
+  assert.equal(world.session.get().currentLocationId, residence.id);
+  assert.equal(world.chronicle.scenes()[0]?.locationId, residence.id);
+
+  assert.equal(
+    removeEdgeTool(ctx, { from: 'char:brother-anselm', relation: 'located_at', to: residence.id }).removed,
+    true,
+  );
+  assert.ok(
+    !world.graph
+      .edgesFrom('char:brother-anselm')
+      .some((e) => e.predicate === 'located_at' && e.object === residence.id),
+  );
   world.close();
 });
 
@@ -258,7 +303,13 @@ test('switchWorldTool reports a clear error for an unknown slug, without disturb
     const cw = CurrentWorld.open('only-world', root);
     const mock = new MockProvider();
     const engine = new Engine({ world: () => cw.world(), providers: new ProviderRegistry(mock) });
-    const ctx: McpToolContext = { world: () => cw.world(), engine, currentStory: cw.stories(), currentWorld: cw, dataRoot: root };
+    const ctx: McpToolContext = {
+      world: () => cw.world(),
+      engine,
+      currentStory: cw.stories(),
+      currentWorld: cw,
+      dataRoot: root,
+    };
 
     assert.throws(() => switchWorldTool(ctx, { slug: 'nope' }), /no world "nope"/);
     assert.equal(cw.slug(), 'only-world', 'a failed switch leaves the original world open');
@@ -288,7 +339,11 @@ test('createStoryTool starts a fresh story without switching to it', () => {
 
   const after = listStoriesTool(ctx).stories;
   assert.equal(after.length, 2);
-  assert.equal(after.find((s) => s.id === world.storyId)?.current, true, 'still on the original story \u2014 create does not switch');
+  assert.equal(
+    after.find((s) => s.id === world.storyId)?.current,
+    true,
+    'still on the original story \u2014 create does not switch',
+  );
   assert.equal(after.find((s) => s.id === story.id)?.current, false);
   world.close();
 });
@@ -320,7 +375,13 @@ test('switchStoryTool actually switches, so the next call\u2019s tools follow', 
     const cw = CurrentWorld.open('story-world', root);
     const mock = new MockProvider();
     const engine = new Engine({ world: () => cw.world(), providers: new ProviderRegistry(mock) });
-    const ctx: McpToolContext = { world: () => cw.world(), engine, currentStory: cw.stories(), currentWorld: cw, dataRoot: root };
+    const ctx: McpToolContext = {
+      world: () => cw.world(),
+      engine,
+      currentStory: cw.stories(),
+      currentWorld: cw,
+      dataRoot: root,
+    };
 
     const originalId = cw.world().storyId;
     const { story } = createStoryTool(ctx, { title: 'Second story' });
@@ -381,7 +442,11 @@ test('startStoryTool places an original character when existing is omitted', () 
 
   const out = startStoryTool(ctx, { name: 'A Newcomer', role: 'A traveler passing through' });
   assert.equal(out.created, true);
-  assert.equal(world.graph.get(out.playerCharacterId)?.provenance, 'emergent:0', 'an invented protagonist, not source material');
+  assert.equal(
+    world.graph.get(out.playerCharacterId)?.provenance,
+    'emergent:0',
+    'an invented protagonist, not source material',
+  );
   world.close();
 });
 
@@ -419,7 +484,10 @@ test('commitNarrationTool finishes the turn end to end', async () => {
   const proposal = await proposeTurnTool(ctx, { text: 'i warm the ink and keep copying' });
   if (proposal.status !== 'awaiting-narration') throw new Error('expected awaiting-narration');
 
-  const out = await commitNarrationTool(ctx, { resumeToken: proposal.resumeToken, prose: 'Anselm keeps to his letters.' });
+  const out = await commitNarrationTool(ctx, {
+    resumeToken: proposal.resumeToken,
+    prose: 'Anselm keeps to his letters.',
+  });
   assert.equal(out.status, 'narrated');
   if (out.status !== 'narrated') return;
   assert.equal(out.prose, 'Anselm keeps to his letters.');
@@ -431,7 +499,10 @@ test('resolveInterruptTool with revise or switch-character writes nothing and ne
   const { world, ctx } = setup();
   const revise = await resolveInterruptTool(ctx, { originalText: 'i stab the captain', effect: 'revise' });
   assert.equal(revise.status, 'nothing-written');
-  const switchChar = await resolveInterruptTool(ctx, { originalText: 'i stab the captain', effect: 'switch-character' });
+  const switchChar = await resolveInterruptTool(ctx, {
+    originalText: 'i stab the captain',
+    effect: 'switch-character',
+  });
   assert.equal(switchChar.status, 'nothing-written');
   assert.equal(world.chronicle.turns().length, 0);
   world.close();
@@ -504,6 +575,25 @@ test('regenerateTurnTool re-renders a turn\u2019s prose, and refuses a pinned on
   world.close();
 });
 
+test('replaceTurnProseTool commits exact prose, including for a pinned turn, without changing its delta', async () => {
+  const { world, ctx } = setup();
+  const played = await proposeTurnTool(ctx, { text: 'i warm the ink and keep copying' });
+  assert.equal(played.status, 'awaiting-narration');
+  if (played.status !== 'awaiting-narration') return;
+  const committed = await commitNarrationTool(ctx, { resumeToken: played.resumeToken, prose: 'He warms the ink.' });
+  assert.equal(committed.status, 'narrated');
+  if (committed.status !== 'narrated') return;
+  const before = world.chronicle.getTurn(committed.turnId)!;
+  pinTurnTool(ctx, { id: before.id });
+
+  const out = replaceTurnProseTool(ctx, { id: before.id, prose: 'Exact author correction.' });
+  assert.equal(out.stateMode, 'preserve');
+  assert.equal(out.turn.bookProse, 'Exact author correction.');
+  assert.deepEqual(out.turn.delta, before.delta);
+  assert.equal(out.turn.pinned, true);
+  world.close();
+});
+
 test('updateSheetTool edits identity/voice/condition without touching appearance\u2019s reference image fields', () => {
   const { world, ctx } = setup();
   const before = world.cast.get('char:brother-anselm')!;
@@ -514,7 +604,11 @@ test('updateSheetTool edits identity/voice/condition without touching appearance
   });
   assert.equal(out?.voice.diction, 'terse, clipped');
   assert.equal(out?.appearance.description, 'A new description');
-  assert.equal(out?.appearance.referenceImagePath, before.appearance.referenceImagePath, 'never touched through this editor');
+  assert.equal(
+    out?.appearance.referenceImagePath,
+    before.appearance.referenceImagePath,
+    'never touched through this editor',
+  );
   world.close();
 });
 
@@ -596,7 +690,10 @@ test('generatePortraitTool generates a portrait and sets the reference image pat
 
 test('generatePortraitTool throws a clear, actionable message when no image provider is configured', async () => {
   const { world, ctx } = setup(); // setup() never sets ctx.illustrations
-  await assert.rejects(() => generatePortraitTool(ctx, { entityId: 'char:brother-anselm' }), /no image provider configured/);
+  await assert.rejects(
+    () => generatePortraitTool(ctx, { entityId: 'char:brother-anselm' }),
+    /no image provider configured/,
+  );
   world.close();
 });
 
@@ -638,7 +735,11 @@ test('composeIllustrationPromptTool returns a portrait prompt with no provider c
   assert.match(out.prompt, /Brother Anselm/);
   assert.ok(out.negativePrompt.length > 0);
   assert.match(out.note, /Copy-pasteable fallback/);
-  assert.equal(world.illustrations.forEntity('char:brother-anselm').length, 0, 'composing writes nothing to the illustrations table');
+  assert.equal(
+    world.illustrations.forEntity('char:brother-anselm').length,
+    0,
+    'composing writes nothing to the illustrations table',
+  );
   world.close();
 });
 
@@ -791,7 +892,11 @@ test('discoverWorldTool runs the same crawl as a pollable job', async () => {
 
 test('commitIngestTool commits a previewed scope and actually writes canon', async () => {
   const { world, svc, ctx } = setupWizardCtx();
-  const preview = await previewIngestTool(ctx, { baseUrl: 'https://vale.fandom.com', seeds: ['Duskhollow'], mode: 'mid' });
+  const preview = await previewIngestTool(ctx, {
+    baseUrl: 'https://vale.fandom.com',
+    seeds: ['Duskhollow'],
+    mode: 'mid',
+  });
   const job = commitIngestTool(ctx, { previewKey: preview.previewKey });
   await settleJob(svc, job.id);
   const settled = getSetupJobTool(ctx, { id: job.id });
@@ -808,7 +913,9 @@ test('commitIngestTool throws for a previewKey that was never previewed', () => 
 
 test('createCustomWorldTool builds an authored world from a description', async () => {
   const { world, svc, ctx } = setupWizardCtx();
-  const job = createCustomWorldTool(ctx, { description: 'A lighthouse keeper and the smugglers who need her looking away.' });
+  const job = createCustomWorldTool(ctx, {
+    description: 'A lighthouse keeper and the smugglers who need her looking away.',
+  });
   await settleJob(svc, job.id);
   const settled = getSetupJobTool(ctx, { id: job.id });
   assert.equal(settled.status, 'done');
@@ -894,7 +1001,13 @@ test('resetWorldTool wipes the world and rebinds currentStory to the new blank s
     const mock = new MockProvider();
     const engine = new Engine({ world: () => cw.world(), providers: new ProviderRegistry(mock) });
     const svc = new SetupService({ world: () => cw.world(), providers: new ProviderRegistry(mock) });
-    const ctx: McpToolContext = { world: () => cw.world(), engine, currentStory: cw.stories(), setup: svc, dataRoot: root };
+    const ctx: McpToolContext = {
+      world: () => cw.world(),
+      engine,
+      currentStory: cw.stories(),
+      setup: svc,
+      dataRoot: root,
+    };
 
     assert.ok(cw.world().graph.counts().entities > 0, 'sanity: something was there before reset');
     const out = resetWorldTool(ctx);
@@ -1093,7 +1206,13 @@ test('a caller with no identity keeps the legacy shared-story behaviour', () => 
     const engine = new Engine({ world: () => cw.world(), providers: new ProviderRegistry(new MockProvider()) });
     // No `user`/`selectStory`: what a dev-token server with no login configured
     // builds. Ownership must stay unset and switching must stay server-wide.
-    const ctx: McpToolContext = { world: () => cw.world(), engine, currentStory: cw.stories(), currentWorld: cw, dataRoot: root };
+    const ctx: McpToolContext = {
+      world: () => cw.world(),
+      engine,
+      currentStory: cw.stories(),
+      currentWorld: cw,
+      dataRoot: root,
+    };
 
     const { story } = createStoryTool(ctx, { title: 'Shared' });
     assert.equal(story.ownerUserId, null, 'nothing is attributed to a user that does not exist');

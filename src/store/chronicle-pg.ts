@@ -313,9 +313,7 @@ export class ChronicleStore {
     return { ...e, id };
   }
 
-  async events(
-    opts: { limit?: number; sinceScene?: number; visibility?: Visibility[] } = {},
-  ): Promise<StoryEvent[]> {
+  async events(opts: { limit?: number; sinceScene?: number; visibility?: Visibility[] } = {}): Promise<StoryEvent[]> {
     const key = await this.privateKey();
     const where: string[] = ['story_id = $1'];
     const args: unknown[] = [this.storyId];
@@ -336,7 +334,12 @@ export class ChronicleStore {
       args,
     );
     if (!key) return rows.map(toEvent);
-    const values = await this.encryptedValues('events', rows.map((row) => row.id), ['text'], key);
+    const values = await this.encryptedValues(
+      'events',
+      rows.map((row) => row.id),
+      ['text'],
+      key,
+    );
     return rows.map((row) =>
       toEvent({ ...row, text: ChronicleStore.stringValue(values.get(row.id)!.get('text'), 'events.text') }),
     );
@@ -358,7 +361,12 @@ export class ChronicleStore {
       [this.storyId, JSON.stringify([playerId]), limit],
     );
     if (!key) return rows.map(toEvent).reverse();
-    const values = await this.encryptedValues('events', rows.map((row) => row.id), ['text'], key);
+    const values = await this.encryptedValues(
+      'events',
+      rows.map((row) => row.id),
+      ['text'],
+      key,
+    );
     return rows
       .map((row) =>
         toEvent({ ...row, text: ChronicleStore.stringValue(values.get(row.id)!.get('text'), 'events.text') }),
@@ -437,10 +445,10 @@ export class ChronicleStore {
 
   async getTurn(id: string): Promise<Turn | undefined> {
     const key = await this.privateKey();
-    const { rows } = await this.db.query<TurnRow>(
-      `SELECT ${TURN_COLS} FROM turns WHERE id = $1 AND story_id = $2`,
-      [id, this.storyId],
-    );
+    const { rows } = await this.db.query<TurnRow>(`SELECT ${TURN_COLS} FROM turns WHERE id = $1 AND story_id = $2`, [
+      id,
+      this.storyId,
+    ]);
     return rows[0] ? (await this.toTurns(rows, key))[0] : undefined;
   }
 
@@ -486,11 +494,17 @@ export class ChronicleStore {
     const key = await this.privateKey();
     const total = { tokensIn: 0, tokensOut: 0, calls: 0 };
     const byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }> = {};
-    const { rows } = await this.db.query<{ id: string; meta: unknown }>(`SELECT id, meta FROM turns WHERE story_id = $1`, [
-      this.storyId,
-    ]);
+    const { rows } = await this.db.query<{ id: string; meta: unknown }>(
+      `SELECT id, meta FROM turns WHERE story_id = $1`,
+      [this.storyId],
+    );
     const values = key
-      ? await this.encryptedValues('turns', rows.map((row) => row.id), ['meta'], key)
+      ? await this.encryptedValues(
+          'turns',
+          rows.map((row) => row.id),
+          ['meta'],
+          key,
+        )
       : null;
     for (const r of rows) {
       const meta = jsonGet<TurnMeta | null>(values?.get(r.id)?.get('meta') ?? r.meta, null);
@@ -526,6 +540,30 @@ export class ChronicleStore {
       id,
       this.storyId,
     ]);
+  }
+
+  /** An explicit author edit replaces even pinned prose while preserving its delta. */
+  async replaceProse(id: string, prose: string): Promise<boolean> {
+    const key = await this.privateKey();
+    if (key) {
+      const turn = await this.getTurn(id);
+      if (!turn) return false;
+      await this.writePrivateValues(
+        `UPDATE turns SET book_prose = '' WHERE id = $1 AND story_id = $2 RETURNING true AS inserted`,
+        [id, this.storyId],
+        'turns',
+        id,
+        key,
+        [{ field: 'book_prose', value: prose }],
+      );
+      return true;
+    }
+    const result = await this.db.query(`UPDATE turns SET book_prose = $1 WHERE id = $2 AND story_id = $3`, [
+      prose,
+      id,
+      this.storyId,
+    ]);
+    return (result.rowCount ?? 0) > 0;
   }
 
   /**
@@ -566,11 +604,7 @@ export class ChronicleStore {
   }
 
   async setPinned(id: string, pinned: boolean): Promise<void> {
-    await this.db.query(`UPDATE turns SET pinned = $1 WHERE id = $2 AND story_id = $3`, [
-      pinned,
-      id,
-      this.storyId,
-    ]);
+    await this.db.query(`UPDATE turns SET pinned = $1 WHERE id = $2 AND story_id = $3`, [pinned, id, this.storyId]);
   }
 
   // --------------------------------------------------------------- scenes
@@ -627,14 +661,20 @@ export class ChronicleStore {
     }>(`SELECT scene, title, summary, location_id, chapter FROM scenes WHERE story_id = $1 ORDER BY scene`, [
       this.storyId,
     ]);
-    if (!key) return rows.map((r) => ({
-      scene: r.scene,
-      title: r.title,
-      summary: r.summary,
-      locationId: r.location_id,
-      chapter: r.chapter,
-    }));
-    const values = await this.encryptedValues('scenes', rows.map((row) => String(row.scene)), ['title', 'summary'], key);
+    if (!key)
+      return rows.map((r) => ({
+        scene: r.scene,
+        title: r.title,
+        summary: r.summary,
+        locationId: r.location_id,
+        chapter: r.chapter,
+      }));
+    const values = await this.encryptedValues(
+      'scenes',
+      rows.map((row) => String(row.scene)),
+      ['title', 'summary'],
+      key,
+    );
     return rows.map((row) => {
       const privateValues = values.get(String(row.scene))!;
       return {
@@ -698,7 +738,12 @@ export class ChronicleStore {
       [this.storyId],
     );
     if (!key) return rows;
-    const values = await this.encryptedValues('chapters', rows.map((row) => String(row.chapter)), ['title', 'summary'], key);
+    const values = await this.encryptedValues(
+      'chapters',
+      rows.map((row) => String(row.chapter)),
+      ['title', 'summary'],
+      key,
+    );
     return rows.map((row) => {
       const privateValues = values.get(String(row.chapter))!;
       return {
@@ -777,7 +822,12 @@ export class ChronicleStore {
       [this.storyId, limit],
     );
     if (!key) return rows.map((r) => ({ ...r, layer: 'chronicle' as const }));
-    const values = await this.encryptedValues('facts', rows.map((row) => row.id), ['text'], key);
+    const values = await this.encryptedValues(
+      'facts',
+      rows.map((row) => row.id),
+      ['text'],
+      key,
+    );
     return rows.map((row) => ({
       ...row,
       text: ChronicleStore.stringValue(values.get(row.id)!.get('text'), 'facts.text'),
@@ -830,15 +880,21 @@ export class ChronicleStore {
          ORDER BY k.since_scene DESC`,
       [this.storyId, entityId],
     );
-    if (!key) return rows.map((r) => ({
-      factId: r.fact_id,
-      entityId: r.entity_id,
-      level: r.level,
-      sinceScene: r.since_scene,
-      distortion: r.distortion,
-      text: r.text,
-    }));
-    const values = await this.encryptedValues('facts', rows.map((row) => row.fact_id), ['text'], key);
+    if (!key)
+      return rows.map((r) => ({
+        factId: r.fact_id,
+        entityId: r.entity_id,
+        level: r.level,
+        sinceScene: r.since_scene,
+        distortion: r.distortion,
+        text: r.text,
+      }));
+    const values = await this.encryptedValues(
+      'facts',
+      rows.map((row) => row.fact_id),
+      ['text'],
+      key,
+    );
     return rows.map((row) => ({
       factId: row.fact_id,
       entityId: row.entity_id,
@@ -856,10 +912,7 @@ export class ChronicleStore {
       level: KnowledgeLevel;
       since_scene: number;
       distortion: number;
-    }>(
-      `SELECT fact_id, entity_id, level, since_scene, distortion FROM fact_knowledge WHERE fact_id = $1`,
-      [factId],
-    );
+    }>(`SELECT fact_id, entity_id, level, since_scene, distortion FROM fact_knowledge WHERE fact_id = $1`, [factId]);
     return rows.map((r) => ({
       factId: r.fact_id,
       entityId: r.entity_id,
@@ -902,7 +955,12 @@ export class ChronicleStore {
       [this.storyId, entityId, limit],
     );
     if (!key) return rows.map((r) => ({ ...r, layer: 'chronicle' as const }));
-    const values = await this.encryptedValues('facts', rows.map((row) => row.id), ['text'], key);
+    const values = await this.encryptedValues(
+      'facts',
+      rows.map((row) => row.id),
+      ['text'],
+      key,
+    );
     return rows.map((row) => ({
       ...row,
       text: ChronicleStore.stringValue(values.get(row.id)!.get('text'), 'facts.text'),
@@ -929,10 +987,13 @@ export class ChronicleStore {
       );
       return;
     }
-    await this.db.query(
-      `INSERT INTO divergences (story_id, scene, kind, detail, canon) VALUES ($1,$2,$3,$4,$5)`,
-      [this.storyId, scene, kind, detail, canon],
-    );
+    await this.db.query(`INSERT INTO divergences (story_id, scene, kind, detail, canon) VALUES ($1,$2,$3,$4,$5)`, [
+      this.storyId,
+      scene,
+      kind,
+      detail,
+      canon,
+    ]);
   }
 
   async divergences(): Promise<Array<{ id: number; scene: number; kind: string; detail: string; canon: string }>> {
@@ -943,12 +1004,15 @@ export class ChronicleStore {
       kind: string;
       detail: string;
       canon: string;
-    }>(`SELECT id, scene, kind, detail, canon FROM divergences WHERE story_id = $1 ORDER BY scene`, [
-      this.storyId,
-    ]);
+    }>(`SELECT id, scene, kind, detail, canon FROM divergences WHERE story_id = $1 ORDER BY scene`, [this.storyId]);
     // BIGSERIAL arrives as a string; callers treat divergence ids as numbers.
     if (!key) return rows.map((r) => ({ ...r, id: Number(r.id) }));
-    const values = await this.encryptedValues('divergences', rows.map((row) => row.id), ['detail', 'canon'], key);
+    const values = await this.encryptedValues(
+      'divergences',
+      rows.map((row) => row.id),
+      ['detail', 'canon'],
+      key,
+    );
     return rows.map((row) => ({
       ...row,
       id: Number(row.id),
@@ -991,7 +1055,12 @@ export class ChronicleStore {
       [this.storyId, limit],
     );
     if (!key) return rows.map((r) => ({ ...r, id: Number(r.id) }));
-    const values = await this.encryptedValues('style_anchors', rows.map((row) => row.id), ['text', 'note'], key);
+    const values = await this.encryptedValues(
+      'style_anchors',
+      rows.map((row) => row.id),
+      ['text', 'note'],
+      key,
+    );
     return rows.map((row) => ({
       ...row,
       id: Number(row.id),
