@@ -9,6 +9,8 @@ import { rollback } from '../src/loop/branch-pg.ts';
 import { splitSceneAtTurn, storyLayout } from '../src/loop/history-pg.ts';
 import { commitTurn } from '../src/loop/commit-pg.ts';
 import { emptyDelta } from '../src/domain/types.ts';
+import { Compactor } from '../src/loop/compact-pg.ts';
+import { MockProvider } from '../src/providers/mock.ts';
 
 function turnInput(turn: number): Omit<Turn, 'id' | 'createdAt'> {
   return {
@@ -290,6 +292,45 @@ test('PostgreSQL exact rollback and fork discard revived parent summaries after 
       { scene: 3, turn: 4 },
     );
     assert.ok(await world.history.activeSegmentAt(6));
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL exact fork preserves a child segment summary under its fresh identity', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'split-child-summary-fork');
+    const storyId = await makeStory(db, 'split-child-summary-fork-story', [worldId]);
+    const world = await World.forStory(db, storyId);
+    const turns: Turn[] = [];
+    for (const turn of [1, 2, 3, 4]) {
+      turns.push((await commitTurn(db, world, { ...turnInput(turn), delta: emptyDelta(), bookProse: `Prose ${turn}.` })).turn);
+    }
+    const split = await splitSceneAtTurn(world, turns[2]!.id);
+    const sourceIdentity = `segment:${split.id}`;
+    const sourceSummary = await new Compactor({ provider: new MockProvider(), minTurns: 1 }).summariseScene(world, 2);
+    assert.ok(sourceSummary);
+    assert.equal((await world.chronicle.scenes()).find((scene) => scene.identity === sourceIdentity)?.summary, sourceSummary);
+
+    const retained = (await commitTurn(db, world, {
+      ...turnInput(5), delta: emptyDelta(), bookProse: 'Prose 5.',
+    })).turn;
+    assert.ok(await world.history.eligibleTurn(retained.id));
+    const forkResult = await rollback(db, world, { turnId: retained.id, mode: 'fork' });
+    const fork = await World.forStory(db, forkResult.story!.id);
+    const forkSegment = (await fork.history.sceneSegments()).find((segment) => segment.startPosition === split.position)!;
+    const forkIdentity = `segment:${forkSegment.id}`;
+
+    assert.notEqual(forkIdentity, sourceIdentity);
+    assert.equal((await fork.chronicle.scenes()).find((scene) => scene.identity === forkIdentity)?.summary, sourceSummary);
+    const forkRetained = (await fork.history.eligibleTurns()).at(-1)!;
+    const forkCheckpoint = (await fork.history.checkpointForTurn(forkRetained.turnId))!;
+    assert.ok(
+      forkCheckpoint.state.tables.scene_metadata?.some(
+        (metadata) => metadata.identity === forkIdentity && metadata.summary === sourceSummary,
+      ),
+      'copied checkpoint state uses the fork segment identity',
+    );
+    assert.equal((await world.chronicle.scenes()).find((scene) => scene.identity === sourceIdentity)?.summary, sourceSummary);
   });
   if (!ran) t.skip('no Postgres configured');
 });

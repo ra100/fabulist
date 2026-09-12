@@ -227,3 +227,35 @@ test('exact rollback and fork invalidate a restored parent summary while preserv
   assert.equal(firstScene.length, 2);
   world.close();
 });
+
+test('exact fork preserves a child segment summary under its fresh identity', async () => {
+  const world = World.open(':memory:');
+  const turns = [1, 2, 3, 4].map((turn) =>
+    commitTurn(world, { ...turnInput(turn), delta: emptyDelta(), bookProse: `Prose ${turn}.` }).turn,
+  );
+  const split = splitSceneAtTurn(world, turns[2]!.id);
+  const sourceIdentity = `segment:${split.id}`;
+  const sourceSummary = await new Compactor({ world, provider: new MockProvider(), minTurns: 1 }).summariseScene(2);
+  assert.ok(sourceSummary);
+  assert.equal(world.chronicle.scenes().find((scene) => scene.identity === sourceIdentity)?.summary, sourceSummary);
+
+  const retained = commitTurn(world, { ...turnInput(5), delta: emptyDelta(), bookProse: 'Prose 5.' }).turn;
+  assert.ok(world.history.eligibleTurn(retained.id));
+  const forked = rollback(world, { turnId: retained.id, mode: 'fork' }).forkedStory!;
+  const fork = world.withStory(forked.id);
+  const forkSegment = fork.history.sceneSegments().find((segment) => segment.startPosition === split.position)!;
+  const forkIdentity = `segment:${forkSegment.id}`;
+
+  assert.notEqual(forkIdentity, sourceIdentity);
+  assert.equal(fork.chronicle.scenes().find((scene) => scene.identity === forkIdentity)?.summary, sourceSummary);
+  const forkRetained = fork.history.eligibleTurns().at(-1)!;
+  const forkCheckpoint = fork.history.checkpointForTurn(forkRetained.turnId)!;
+  assert.ok(
+    forkCheckpoint.state.tables.scene_metadata?.some(
+      (metadata) => metadata.identity === forkIdentity && metadata.summary === sourceSummary,
+    ),
+    'copied checkpoint state uses the fork segment identity',
+  );
+  assert.equal(world.chronicle.scenes().find((scene) => scene.identity === sourceIdentity)?.summary, sourceSummary);
+  world.close();
+});
