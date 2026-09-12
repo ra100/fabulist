@@ -35,6 +35,7 @@ import { CastStore } from './cast-pg.ts';
 import { ChronicleStore, type ChronicleCrypto } from './chronicle-pg.ts';
 import { GraphStore } from './graph-pg.ts';
 import { IllustrationStore } from './illustration-pg.ts';
+import { HistoryStore } from './history-pg.ts';
 import {
   ConsequenceStore,
   DirectiveStore,
@@ -84,6 +85,7 @@ export class World {
    */
   readonly session: StoryStore;
   readonly illustrations: IllustrationStore;
+  readonly history: HistoryStore;
 
   readonly db: Queryable;
   readonly storyId: StoryId;
@@ -109,6 +111,7 @@ export class World {
     // repository just because they touched illustrations, so the default is a
     // fixed path a caller overrides on purpose.
     this.illustrations = new IllustrationStore(db, storyId, opts.imagesDir ?? 'data/images', opts.crypto);
+    this.history = new HistoryStore(db, storyId, opts.crypto);
   }
 
   /**

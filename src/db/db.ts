@@ -99,6 +99,25 @@ function migrate(db: Db): void {
   // privacy bug, not a convenience.
   addColumnIfMissing(db, 'stories', 'owner_user_id', 'TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_stories_owner ON stories(owner_user_id)');
+  addColumnIfMissing(db, 'stories', 'active_scene_segment_id', 'TEXT');
+  addColumnIfMissing(db, 'turns', 'history_position', 'INTEGER');
+  addColumnIfMissing(db, 'turns', 'scene_segment_id', 'TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_turns_history_position ON turns(story_id, history_position)');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS history_checkpoints (
+      id TEXT PRIMARY KEY, story_id TEXT NOT NULL, turn_id TEXT, position INTEGER NOT NULL,
+      state TEXT NOT NULL, created_at TEXT NOT NULL,
+      UNIQUE (story_id, turn_id), UNIQUE (story_id, position),
+      FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_history_checkpoints_turn ON history_checkpoints(story_id, turn_id);
+    CREATE TABLE IF NOT EXISTS scene_segments (
+      id TEXT PRIMARY KEY, story_id TEXT NOT NULL, start_position INTEGER NOT NULL, created_at TEXT NOT NULL,
+      UNIQUE (story_id, start_position),
+      FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_scene_segments_start ON scene_segments(story_id, start_position);
+  `);
 }
 
 function addColumnIfMissing(db: Db, table: string, column: string, ddl: string): void {
