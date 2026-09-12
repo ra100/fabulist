@@ -166,9 +166,17 @@ test('a locked private story is an actionable MCP state and leaves the transport
       async (base, world) => {
         await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [world.storyId]);
 
+        const preflight = await fetch(`${base}/mcp`, {
+          method: 'OPTIONS',
+          headers: { 'access-control-request-headers': 'mcp-session-id,mcp-protocol-version' },
+        });
+        assert.match(preflight.headers.get('access-control-allow-headers') ?? '', /mcp-session-id/);
+        assert.match(preflight.headers.get('access-control-expose-headers') ?? '', /mcp-session-id/);
+
         const { client, transport } = connectMcp(base);
         await client.connect(transport);
         try {
+          assert.ok(transport.sessionId, 'the initialized client should retain an MCP session id');
           const before = await client.listTools();
           assert.ok(before.tools.some((tool) => tool.name === 'get_state'));
 
