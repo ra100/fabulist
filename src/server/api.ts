@@ -13,6 +13,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Engine } from '../loop/engine.ts';
+import { recordAuthoringCheckpoint } from '../loop/history.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { forkStory, rollback } from '../loop/branch.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export.ts';
@@ -351,6 +352,7 @@ route('PUT', '/api/sheet/:id', (_req, res, { world, params, body }) => {
       : existing.appearance,
     locks: (patch.locks as string[]) ?? existing.locks,
   });
+  recordAuthoringCheckpoint(world);
   send(res, 200, world.cast.get(id));
 });
 
@@ -359,6 +361,7 @@ route('POST', '/api/sheet/:id/lock', (_req, res, { world, params, body }) => {
   const { path, locked } = parseBody(sheetLockBodySchema, body);
   if (locked === false) world.cast.unlock(id, path);
   else world.cast.lock(id, path);
+  recordAuthoringCheckpoint(world);
   send(res, 200, world.cast.get(id));
 });
 
@@ -412,6 +415,7 @@ route('POST', '/api/turn/:id/pin', (_req, res, { world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
   const { pinned } = parseBody(turnPinBodySchema, body);
   world.chronicle.setPinned(id, pinned !== false);
+  recordAuthoringCheckpoint(world);
   send(res, 200, world.chronicle.getTurn(id));
 });
 
@@ -429,6 +433,7 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, world, par
     // `world` explicit: the per-request (per-user, when login is on) world
     // — see `TakeTurnOptions.world`'s own doc comment for why.
     const turn = await engine.regenerateProse(id, { ...(note?.trim() ? { note: note.trim() } : {}), world });
+    recordAuthoringCheckpoint(world);
     send(res, 200, turn);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -443,7 +448,9 @@ route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
   // see `TakeTurnOptions.world`'s own doc comment for why this must not be
   // left to the engine's own captured getter once two users can each be
   // mid-turn on their own story at the same time.
-  send(res, 200, await playTurn(engine, world, input, { overrideIntegrity }));
+  const result = await playTurn(engine, world, input, { overrideIntegrity });
+  if (result.outcome.kind === 'narrated') recordAuthoringCheckpoint(world);
+  send(res, 200, result);
 });
 
 route('GET', '/api/threads', (_req, res, { world }) => {
@@ -470,6 +477,7 @@ route('POST', '/api/threads', (_req, res, { world, body }) => {
     status: 'open',
     createdScene: world.session.get().scene,
   });
+  recordAuthoringCheckpoint(world);
   send(res, 200, created);
 });
 
@@ -478,6 +486,7 @@ route('PUT', '/api/thread/:id', (_req, res, { world, params, body }) => {
   if (!world.threads.get(id)) return send(res, 404, { error: 'no thread' });
   const patch = parseBody(updateThreadBodySchema, body);
   world.threads.update(id, patch);
+  recordAuthoringCheckpoint(world);
   send(res, 200, world.threads.get(id));
 });
 
@@ -558,6 +567,7 @@ route('POST', '/api/fact/:id/knowledge', (_req, res, { world, params, body }) =>
   const b = parseBody(knowledgeBodySchema, body);
   try {
     world.chronicle.setKnowledge(factId, b.entityId, b.level, b.sinceScene ?? world.session.get().scene, b.distortion ?? 0);
+    recordAuthoringCheckpoint(world);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return send(res, message.includes('FOREIGN KEY') ? 404 : 500, { error: message.includes('FOREIGN KEY') ? 'no fact' : message });
@@ -570,6 +580,7 @@ route('DELETE', '/api/fact/:id/knowledge/:entityId', (_req, res, { world, params
   const factId = decodeURIComponent(params.id ?? '');
   const entityId = decodeURIComponent(params.entityId ?? '');
   world.chronicle.revokeKnowledge(factId, entityId);
+  recordAuthoringCheckpoint(world);
   send(res, 200, { factId, knowers: world.chronicle.knowersOf(factId) });
 });
 
@@ -583,11 +594,14 @@ route('GET', '/api/directives', (_req, res, { world }) => {
  */
 route('POST', '/api/directive', async (_req, res, { world, body }) => {
   const b = parseBody(directiveBodySchema, body);
-  send(res, 200, await createDirective(sqliteDirectiveRepository(world), b));
+  const directive = await createDirective(sqliteDirectiveRepository(world), b);
+  recordAuthoringCheckpoint(world);
+  send(res, 200, directive);
 });
 
 route('DELETE', '/api/directive/:id', (_req, res, { world, params }) => {
   world.directives.setStatus(decodeURIComponent(params.id ?? ''), 'retired');
+  recordAuthoringCheckpoint(world);
   send(res, 200, { ok: true });
 });
 
@@ -599,6 +613,7 @@ route('PUT', '/api/style', (_req, res, { world, body }) => {
   const cur = world.session.get();
   const next = { ...cur.style, ...parseBody(styleBodySchema, body) };
   world.session.set({ style: next });
+  recordAuthoringCheckpoint(world);
   send(res, 200, next);
 });
 
@@ -610,6 +625,7 @@ route('PUT', '/api/knobs', (_req, res, { world, body }) => {
   const cur = world.session.get();
   const next = { ...cur.knobs, ...parseBody(knobsBodySchema, body) };
   world.session.set({ knobs: next });
+  recordAuthoringCheckpoint(world);
   send(res, 200, next);
 });
 
@@ -781,12 +797,14 @@ route('POST', '/api/anchor', (_req, res, { world, body }) => {
   const { text, note } = (body ?? {}) as { text?: string; note?: string };
   if (!text) return send(res, 400, { error: 'text required' });
   world.chronicle.addAnchor(text, note ?? '', world.session.get().scene);
+  recordAuthoringCheckpoint(world);
   send(res, 200, { ok: true });
 });
 
 route('POST', '/api/tick', (_req, res, { world }) => {
   const tick = tickConsequences(world);
   const notes = worldTick(world);
+  recordAuthoringCheckpoint(world);
   send(res, 200, { tick, notes });
 });
 
@@ -882,6 +900,7 @@ route('POST', '/api/scene/close', async (_req, res, { world, engine }) => {
   const result = await engine.compaction().onSceneClosed(before.scene);
   world.session.set({ scene: before.scene + 1, turn: 0 });
   world.chronicle.upsertScene(before.scene + 1, { chapter: engine.compaction().chapterOf(before.scene + 1) });
+  recordAuthoringCheckpoint(world);
   const summary = world.chronicle.scenes().find((s) => s.scene === before.scene)?.summary ?? null;
   send(res, 200, {
     closedScene: before.scene,
@@ -1298,6 +1317,7 @@ route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => 
       seeded = seedCons(world, outcome.delta, outcome.commit.events).length;
       tick = tickCons(world);
       wTick(world);
+      recordAuthoringCheckpoint(world);
     }
     emit('done', { outcome, seeded, tick });
   } catch (err) {

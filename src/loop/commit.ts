@@ -6,7 +6,7 @@
  * not tell.
  */
 import { randomUUID } from 'node:crypto';
-import type { Delta, EntityId, StoryEvent, Visibility } from '../domain/types.ts';
+import type { Delta, EntityId, StoryEvent, Turn, Visibility } from '../domain/types.ts';
 import { tx } from '../db/db.ts';
 import type { World } from '../store/index.ts';
 
@@ -18,22 +18,37 @@ export interface CommitResult {
   factIds: string[];
 }
 
-export function commitDelta(world: World, delta: Delta, visibility: Visibility = 'onscreen'): CommitResult {
-  const session = world.session.get();
-  const scene = session.scene;
-  const turn = session.turn;
+export interface CommitTurnInput {
+  rawInput: string;
+  intent: Turn['intent'];
+  delta: Delta;
+  bookProse: string;
+  meta: Turn['meta'];
+  threadId?: string | null;
+}
 
-  return tx(world.db, () => {
-    const result: CommitResult = { events: [], touchedIds: [], brokenVows: [], newThreadIds: [], factIds: [] };
-    const touched = new Set<EntityId>();
+export interface CommitTurnResult {
+  commit: CommitResult;
+  turn: Turn;
+}
 
-    for (const u of delta.entityUpserts) {
-      world.graph.upsert(
-        { ...u, provenance: `emergent:${scene}`, createdScene: scene, salience: 0.6 },
-        'chronicle',
-      );
-      touched.add(u.id);
-    }
+function applyDelta(
+  world: World,
+  delta: Delta,
+  scene: number,
+  turn: number,
+  visibility: Visibility,
+): CommitResult {
+  const result: CommitResult = { events: [], touchedIds: [], brokenVows: [], newThreadIds: [], factIds: [] };
+  const touched = new Set<EntityId>();
+
+  for (const u of delta.entityUpserts) {
+    world.graph.upsert(
+      { ...u, provenance: `emergent:${scene}`, createdScene: scene, salience: 0.6 },
+      'chronicle',
+    );
+    touched.add(u.id);
+  }
 
     for (const ev of delta.events) {
       const stored = world.chronicle.addEvent({
@@ -139,12 +154,46 @@ export function commitDelta(world: World, delta: Delta, visibility: Visibility =
     world.graph.bumpSalience([...touched], 0.4);
     result.touchedIds = [...touched];
 
-    if (delta.sceneAdvance) {
-      world.session.set({ scene: scene + 1, turn: 0 });
-      world.chronicle.upsertScene(scene + 1, {});
-    }
+  return result;
+}
 
+export function commitDelta(world: World, delta: Delta, visibility: Visibility = 'onscreen'): CommitResult {
+  return tx(world.db, () => {
+    const session = world.session.get();
+    const result = applyDelta(world, delta, session.scene, session.turn, visibility);
+    if (delta.sceneAdvance) {
+      world.session.set({ scene: session.scene + 1, turn: 0 });
+      world.chronicle.upsertScene(session.scene + 1, {});
+    }
     return result;
+  });
+}
+
+/** Commits prose, its delta, session state, and its exact rollback checkpoint atomically. */
+export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResult {
+  return tx(world.db, () => {
+    const session = world.session.get();
+    const turnNo = session.turn + 1;
+    const commit = applyDelta(world, input.delta, session.scene, turnNo, 'onscreen');
+    const turn = world.chronicle.addTurn({
+      scene: session.scene,
+      turn: turnNo,
+      rawInput: input.rawInput,
+      intent: input.intent,
+      delta: input.delta,
+      bookProse: input.bookProse,
+      pinned: false,
+      meta: input.meta,
+    });
+    if (input.threadId) world.threads.adjustTension(input.threadId, 0.05);
+    if (input.delta.sceneAdvance) {
+      world.session.set({ scene: session.scene + 1, turn: 0 });
+      world.chronicle.upsertScene(session.scene + 1, {});
+    } else {
+      world.session.set({ turn: turnNo });
+    }
+    world.history.capture(turn.id);
+    return { commit, turn };
   });
 }
 
