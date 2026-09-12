@@ -577,7 +577,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     'update_sheet',
     {
       description:
-        'Edit a character\u2019s sheet: identity, contract (vows/drives), voice, condition, appearance, or field locks. ' +
+        'Edit or create a sheet for an existing character entity: identity, contract (vows/drives), voice, condition, appearance, or field locks. ' +
         'Each field replaces the sheet\u2019s current value for that section when provided; omit a field to leave it untouched. ' +
         'appearance never touches referenceImagePath/seed through this tool \u2014 those are set only by generate_portrait.',
       inputSchema: {
