@@ -56,7 +56,12 @@ import { ROUTABLE_ROLES, validateImageSpec, validateSpec, type ConfigService } f
 import { type IllustrationService, NoImageProviderError } from '../illustration/service-pg.ts';
 import { composePortraitPrompt, composeScenePrompt } from '../illustration/composer.ts';
 import { mcpSessionUser, type McpAuth } from '../mcp/auth.ts';
-import { handleMcpRequest, protectedResourceMetadata } from '../mcp/server-pg.ts';
+import {
+  getMcpDiagnostics,
+  handleMcpRequest,
+  protectedResourceMetadata,
+  recordMcpRequestFailure,
+} from '../mcp/server-pg.ts';
 import type { McpToolContext } from '../mcp/tools-pg.ts';
 import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
@@ -2324,6 +2329,7 @@ export function createApiServer(opts: ServerOptions) {
           resourceUrl: mcpResourceUrl,
         });
       } catch (err) {
+        recordMcpRequestFailure(body, err, !!req.headers['mcp-session-id']);
         const method =
           body && typeof body === 'object' && 'method' in body && typeof body.method === 'string'
             ? body.method
@@ -2419,6 +2425,14 @@ export function createApiServer(opts: ServerOptions) {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+
+    // Public like /api/health so an operator can diagnose a connector that
+    // cannot authenticate. The ring buffer contains protocol method/tool names
+    // and outcomes only: never tokens, identities, arguments, or results.
+    if (url.pathname === '/api/mcp-diagnostics' && req.method === 'GET') {
+      res.setHeader('cache-control', 'no-store');
+      return send(res, 200, getMcpDiagnostics());
     }
 
     if (authConfig) {
