@@ -14,7 +14,7 @@
  * than reimplementing any part of the turn loop here.
  */
 import type { Engine } from '../loop/engine-pg.ts';
-import { recordAuthoringCheckpoint } from '../loop/history-pg.ts';
+import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint } from '../loop/history-pg.ts';
 import { forkStory, rollback, type ForkOptions } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
@@ -734,12 +734,9 @@ export async function pinTurnTool(ctx: McpToolContext, args: { id: string; pinne
  */
 export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string; note?: string }) {
   const world = await ctx.world();
-  return recordAuthoringCheckpoint(ctx.db, world, (transactionWorld) =>
-    ctx.engine.regenerateProse(args.id, {
-      ...(args.note?.trim() ? { note: args.note.trim() } : {}),
-      world: transactionWorld,
-    }),
-  );
+  return regenerateProseWithCheckpoint(ctx.db, world, ctx.engine, args.id, {
+    ...(args.note?.trim() ? { note: args.note.trim() } : {}),
+  });
 }
 
 /** Author-controlled exact prose replacement; it never re-extracts state. */
