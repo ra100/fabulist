@@ -84,6 +84,15 @@ export class HistoryStore {
     return rows[0] ? checkpointOf(rows[0], await this.readState(this.db, rows[0], key)) : undefined;
   }
 
+  async checkpointsThrough(position: number): Promise<HistoryCheckpoint[]> {
+    const key = await this.privateKey(this.db);
+    const { rows } = await this.db.query<CheckpointRow>(
+      `SELECT * FROM history_checkpoints WHERE story_id = $1 AND position <= $2 ORDER BY position`,
+      [this.storyId, position],
+    );
+    return Promise.all(rows.map(async (checkpoint) => checkpointOf(checkpoint, await this.readState(this.db, checkpoint, key))));
+  }
+
   async eligibleTurn(turnId: string): Promise<EligibleTurn | undefined> {
     const { rows } = await this.db.query<EligibleTurn>(
       `SELECT t.id AS "turnId", t.scene, t.turn, t.history_position AS position
@@ -125,6 +134,51 @@ export class HistoryStore {
       );
       if (!rows[0]) throw new Error(`no checkpoint ${checkpoint.id}`);
       await this.restoreLayout(queryable, await this.readState(queryable, rows[0], key));
+    });
+  }
+
+  /** Restores one retained turn and atomically removes only its later history. */
+  async restoreTurn(turnId: string): Promise<HistoryCheckpoint> {
+    return this.transaction(async (queryable) => {
+      await queryable.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [this.storyId]);
+      const { rows: turns } = await queryable.query<{ history_position: number | null }>(
+        `SELECT history_position FROM turns WHERE id = $1 AND story_id = $2`,
+        [turnId, this.storyId],
+      );
+      const turn = turns[0];
+      if (!turn) throw new Error(`rollback: unknown turn ${turnId}`);
+      if (turn.history_position == null) throw new Error(`rollback: turn ${turnId} is legacy and has no exact history`);
+      const { rows: checkpoints } = await queryable.query<CheckpointRow>(
+        `SELECT * FROM history_checkpoints WHERE story_id = $1 AND turn_id = $2`,
+        [this.storyId, turnId],
+      );
+      const checkpoint = checkpoints[0];
+      if (!checkpoint) throw new Error(`rollback: turn ${turnId} has no exact history checkpoint`);
+
+      const key = await this.privateKey(queryable);
+      const retained = checkpointOf(checkpoint, await this.readState(queryable, checkpoint, key));
+      await this.restoreLayout(queryable, retained.state);
+      await queryable.query(`DELETE FROM turns WHERE story_id = $1 AND history_position > $2`, [
+        this.storyId,
+        retained.position,
+      ]);
+      await queryable.query(`DELETE FROM scene_segments WHERE story_id = $1 AND start_position > $2`, [
+        this.storyId,
+        retained.position,
+      ]);
+      await queryable.query(
+        `DELETE FROM encrypted_story_values
+          WHERE story_id = $1 AND table_name = 'history_checkpoints'
+            AND record_id IN (
+              SELECT id FROM history_checkpoints WHERE story_id = $1 AND position > $2
+            )`,
+        [this.storyId, retained.position],
+      );
+      await queryable.query(`DELETE FROM history_checkpoints WHERE story_id = $1 AND position > $2`, [
+        this.storyId,
+        retained.position,
+      ]);
+      return retained;
     });
   }
 
