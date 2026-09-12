@@ -433,11 +433,12 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, world, par
     // `world` explicit: the per-request (per-user, when login is on) world
     // — see `TakeTurnOptions.world`'s own doc comment for why.
     const turn = await engine.regenerateProse(id, { ...(note?.trim() ? { note: note.trim() } : {}), world });
-    recordAuthoringCheckpoint(world);
     send(res, 200, turn);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    send(res, message.includes('pinned') ? 409 : 404, { error: message });
+    if (message.includes('pinned')) return send(res, 409, { error: message });
+    if (message.startsWith('no turn ')) return send(res, 404, { error: message });
+    throw err;
   }
 });
 
