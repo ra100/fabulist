@@ -736,8 +736,10 @@ export function updateSheetTool(
   },
 ) {
   const world = ctx.world();
-  const existing = world.cast.get(args.id);
-  if (!existing) throw new Error(`update_sheet: no sheet ${args.id}`);
+  const entity = world.graph.get(args.id);
+  if (!entity) throw new Error(`update_sheet: no entity ${args.id}`);
+  if (entity.type !== 'Character') throw new Error(`update_sheet: ${args.id} is not a character`);
+  const existing = world.cast.getOrBlank(args.id);
   world.cast.put({
     ...existing,
     identity: (args.identity as unknown as typeof existing.identity) ?? existing.identity,
