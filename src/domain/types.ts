@@ -367,6 +367,41 @@ export interface Turn {
   createdAt: string;
 }
 
+/**
+ * A serializable, story-only projection. It intentionally contains neither
+ * canon nor world metadata, so restoring it cannot affect another story.
+ */
+export interface StoryLayout {
+  session: SessionState;
+  tables: Record<string, Array<Record<string, unknown>>>;
+}
+
+/** An immutable story projection recorded after a turn or authoring mutation. */
+export interface HistoryCheckpoint {
+  id: string;
+  storyId: StoryId;
+  turnId: string | null;
+  position: number;
+  state: StoryLayout;
+  createdAt: string;
+}
+
+/** A committed turn with the exact checkpoint needed for turn-level operations. */
+export interface EligibleTurn {
+  turnId: string;
+  scene: number;
+  turn: number;
+  position: number;
+}
+
+/** The durable boundary created immediately before an eligible turn. */
+export interface SceneSplit {
+  id: string;
+  storyId: StoryId;
+  turnId: string;
+  position: number;
+}
+
 export type InputClass = 'action' | 'dialogue' | 'ooc-directive' | 'meta-query';
 
 export interface Intent {
