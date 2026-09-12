@@ -156,6 +156,7 @@ export interface Timeline {
     summary: string;
     chapter: number;
     turnCount: number;
+    eligibleTurnCount?: number;
     divergences: Array<{ id: number; scene: number; kind: string; detail: string; canon: string }>;
   }>;
   divergenceCount: number;
@@ -165,6 +166,7 @@ export interface Timeline {
 export interface BookTurn {
   id: string; scene: number; turn: number; rawInput: string; bookProse: string;
   pinned: boolean; move: string | null; integrity: string | null; lintScore: number | null;
+  eligible?: boolean; historyPosition?: number | null; startsScene?: boolean;
 }
 
 export interface Interrupt {

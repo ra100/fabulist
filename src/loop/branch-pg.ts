@@ -298,6 +298,7 @@ const FORK_TABLES = [
   { table: 'consequences', scene: 'created_scene', freshId: true },
   { table: 'turns', scene: 'scene', freshId: true },
   { table: 'scenes', scene: 'scene', freshId: false },
+  { table: 'scene_metadata', scene: 'scene', freshId: false },
   { table: 'chapters', scene: null, freshId: false },
   { table: 'directives', scene: 'created_scene', freshId: true },
   { table: 'divergences', scene: 'scene', freshId: false },

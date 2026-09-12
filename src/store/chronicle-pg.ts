@@ -429,8 +429,8 @@ export class ChronicleStore {
       return this.toTurns(rows, key);
     }
     const { rows } = await this.db.query<TurnRow>(
-      `SELECT ${TURN_COLS} FROM turns WHERE story_id = $1 ORDER BY scene, turn LIMIT $2`,
-      [this.storyId, opts.limit ?? 500],
+      `SELECT ${TURN_COLS} FROM turns WHERE story_id = $1 ORDER BY scene, turn${opts.limit === undefined ? '' : ' LIMIT $2'}`,
+      opts.limit === undefined ? [this.storyId] : [this.storyId, opts.limit],
     );
     return this.toTurns(rows, key);
   }
@@ -613,23 +613,34 @@ export class ChronicleStore {
   async upsertScene(
     scene: number,
     patch: { title?: string; summary?: string; locationId?: string | null; chapter?: number },
+    identity = `raw:${scene}`,
   ): Promise<void> {
     const key = await this.privateKey();
+    if (identity === `raw:${scene}` && !key) {
+      await this.db.query(
+        `INSERT INTO scenes (story_id, scene, title, summary, location_id, chapter) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (story_id, scene) DO UPDATE SET title=COALESCE(NULLIF(EXCLUDED.title,''),scenes.title),
+         summary=COALESCE(NULLIF(EXCLUDED.summary,''),scenes.summary), location_id=COALESCE(EXCLUDED.location_id,scenes.location_id),
+         chapter=EXCLUDED.chapter`,
+        [this.storyId, scene, patch.title ?? '', patch.summary ?? '', patch.locationId ?? null, patch.chapter ?? 1],
+      );
+    }
     // `NULLIF(..., '')` keeps a blank patch from erasing an existing title or
     // summary: the compactor writes summaries and the wizard writes titles, and
     // either may upsert the same scene without knowing the other's field.
     if (key) {
       await this.writePrivateValues(
-        `INSERT INTO scenes (story_id, scene, title, summary, location_id, chapter) VALUES ($1,$2,'','',$3,$4)
-         ON CONFLICT (story_id, scene) DO UPDATE SET
-           title = scenes.title,
-           summary = scenes.summary,
-           location_id = COALESCE(EXCLUDED.location_id, scenes.location_id),
+        `INSERT INTO scene_metadata (story_id, identity, scene, title, summary, location_id, chapter) VALUES ($1,$2,$3,'','',$4,$5)
+         ON CONFLICT (story_id, identity) DO UPDATE SET
+           scene = EXCLUDED.scene,
+           title = scene_metadata.title,
+           summary = scene_metadata.summary,
+           location_id = COALESCE(EXCLUDED.location_id, scene_metadata.location_id),
            chapter = EXCLUDED.chapter
          RETURNING (xmax = 0) AS inserted`,
-        [this.storyId, scene, patch.locationId ?? null, patch.chapter ?? 1],
-        'scenes',
-        String(scene),
+        [this.storyId, identity, scene, patch.locationId ?? null, patch.chapter ?? 1],
+        'scene_metadata',
+        identity,
         key,
         [
           { field: 'title', value: patch.title ?? '', writeOnUpdate: !!patch.title },
@@ -639,18 +650,19 @@ export class ChronicleStore {
       return;
     }
     await this.db.query(
-      `INSERT INTO scenes (story_id, scene, title, summary, location_id, chapter) VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (story_id, scene) DO UPDATE SET
-         title = COALESCE(NULLIF(EXCLUDED.title,''), scenes.title),
-         summary = COALESCE(NULLIF(EXCLUDED.summary,''), scenes.summary),
-         location_id = COALESCE(EXCLUDED.location_id, scenes.location_id),
+      `INSERT INTO scene_metadata (story_id, identity, scene, title, summary, location_id, chapter) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (story_id, identity) DO UPDATE SET
+         scene = EXCLUDED.scene,
+         title = COALESCE(NULLIF(EXCLUDED.title,''), scene_metadata.title),
+         summary = COALESCE(NULLIF(EXCLUDED.summary,''), scene_metadata.summary),
+         location_id = COALESCE(EXCLUDED.location_id, scene_metadata.location_id),
          chapter = EXCLUDED.chapter`,
-      [this.storyId, scene, patch.title ?? '', patch.summary ?? '', patch.locationId ?? null, patch.chapter ?? 1],
+      [this.storyId, identity, scene, patch.title ?? '', patch.summary ?? '', patch.locationId ?? null, patch.chapter ?? 1],
     );
   }
 
   async scenes(): Promise<
-    Array<{ scene: number; title: string; summary: string; locationId: string | null; chapter: number }>
+    Array<{ identity: string; scene: number; title: string; summary: string; locationId: string | null; chapter: number }>
   > {
     const key = await this.privateKey();
     const { rows } = await this.db.query<{
@@ -662,23 +674,22 @@ export class ChronicleStore {
     }>(`SELECT scene, title, summary, location_id, chapter FROM scenes WHERE story_id = $1 ORDER BY scene`, [
       this.storyId,
     ]);
-    if (!key)
-      return rows.map((r) => ({
-        scene: r.scene,
-        title: r.title,
-        summary: r.summary,
-        locationId: r.location_id,
-        chapter: r.chapter,
-      }));
-    const values = await this.encryptedValues(
-      'scenes',
-      rows.map((row) => String(row.scene)),
-      ['title', 'summary'],
-      key,
+    const legacy = rows.map((r) => ({
+      identity: `raw:${r.scene}`, scene: r.scene,
+      title: r.title,
+      summary: r.summary,
+      locationId: r.location_id,
+      chapter: r.chapter,
+    }));
+    const { rows: metadata } = await this.db.query<{ identity: string; scene: number; title: string; summary: string; location_id: string | null; chapter: number }>(
+      `SELECT identity, scene, title, summary, location_id, chapter FROM scene_metadata WHERE story_id = $1 ORDER BY scene`, [this.storyId],
     );
-    return rows.map((row) => {
-      const privateValues = values.get(String(row.scene))!;
+    if (!key) return [...new Map([...legacy, ...metadata.map((r) => ({ ...r, locationId: r.location_id }))].map((s) => [s.identity, s])).values()];
+    const values = await this.encryptedValues('scene_metadata', metadata.map((row) => row.identity), ['title', 'summary'], key);
+    const secured = metadata.map((row) => {
+      const privateValues = values.get(row.identity)!;
       return {
+        identity: row.identity,
         scene: row.scene,
         title: ChronicleStore.stringValue(privateValues.get('title'), 'scenes.title'),
         summary: ChronicleStore.stringValue(privateValues.get('summary'), 'scenes.summary'),
@@ -686,6 +697,7 @@ export class ChronicleStore {
         chapter: row.chapter,
       };
     });
+    return [...new Map([...legacy, ...secured].map((scene) => [scene.identity, scene])).values()];
   }
 
   async upsertChapter(chapter: number, patch: { title?: string; summary?: string }): Promise<void> {
@@ -759,15 +771,15 @@ export class ChronicleStore {
     const key = await this.privateKey();
     if (key) {
       const [{ rows: scenes }, { rows: chapters }] = await Promise.all([
-        this.db.query<{ scene: number }>(`SELECT scene FROM scenes WHERE story_id = $1 AND scene >= $2`, [this.storyId, scene]),
+        this.db.query<{ identity: string; scene: number }>(`SELECT identity, scene FROM scene_metadata WHERE story_id = $1 AND scene >= $2`, [this.storyId, scene]),
         this.db.query<{ chapter: number }>(`SELECT chapter FROM chapters WHERE story_id = $1 AND chapter >= $2`, [this.storyId, chapter]),
       ]);
       for (const row of scenes) {
         await this.writePrivateValues(
-          `UPDATE scenes SET title = '', summary = '' WHERE story_id = $1 AND scene = $2 RETURNING true AS inserted`,
-          [this.storyId, row.scene],
-          'scenes',
-          String(row.scene),
+          `UPDATE scene_metadata SET title = '', summary = '' WHERE story_id = $1 AND identity = $2 RETURNING true AS inserted`,
+          [this.storyId, row.identity],
+          'scene_metadata',
+          row.identity,
           key,
           [{ field: 'title', value: '' }, { field: 'summary', value: '' }],
         );
@@ -785,6 +797,7 @@ export class ChronicleStore {
       return;
     }
     await this.db.query(`UPDATE scenes SET title = '', summary = '' WHERE story_id = $1 AND scene >= $2`, [this.storyId, scene]);
+    await this.db.query(`UPDATE scene_metadata SET title = '', summary = '' WHERE story_id = $1 AND scene >= $2`, [this.storyId, scene]);
     await this.db.query(`UPDATE chapters SET title = '', summary = '' WHERE story_id = $1 AND chapter >= $2`, [this.storyId, chapter]);
   }
 
@@ -1031,13 +1044,13 @@ export class ChronicleStore {
 
   // ----------------------------------------------------------- divergences
 
-  async addDivergence(scene: number, kind: string, detail: string, canon = ''): Promise<void> {
+  async addDivergence(scene: number, kind: string, detail: string, canon = '', turn?: number): Promise<void> {
     const key = await this.privateKey();
     if (key) {
       const id = await this.nextSerialId('divergences');
       await this.writePrivateValues(
-        `INSERT INTO divergences (id, story_id, scene, kind, detail, canon) VALUES ($1,$2,$3,$4,'','') RETURNING true AS inserted`,
-        [id, this.storyId, scene, kind],
+        `INSERT INTO divergences (id, story_id, scene, turn, kind, detail, canon) VALUES ($1,$2,$3,$4,$5,'','') RETURNING true AS inserted`,
+        [id, this.storyId, scene, turn ?? null, kind],
         'divergences',
         id,
         key,
@@ -1048,24 +1061,24 @@ export class ChronicleStore {
       );
       return;
     }
-    await this.db.query(`INSERT INTO divergences (story_id, scene, kind, detail, canon) VALUES ($1,$2,$3,$4,$5)`, [
-      this.storyId,
-      scene,
-      kind,
-      detail,
-      canon,
-    ]);
+    await this.db.query(
+      `INSERT INTO divergences (story_id, scene, turn, kind, detail, canon) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [this.storyId, scene, turn ?? null, kind, detail, canon],
+    );
   }
 
-  async divergences(): Promise<Array<{ id: number; scene: number; kind: string; detail: string; canon: string }>> {
+  async divergences(): Promise<Array<{ id: number; scene: number; turn: number | null; kind: string; detail: string; canon: string }>> {
     const key = await this.privateKey();
     const { rows } = await this.db.query<{
       id: string;
       scene: number;
+      turn: number | null;
       kind: string;
       detail: string;
       canon: string;
-    }>(`SELECT id, scene, kind, detail, canon FROM divergences WHERE story_id = $1 ORDER BY scene`, [this.storyId]);
+    }>(`SELECT id, scene, turn, kind, detail, canon FROM divergences WHERE story_id = $1 ORDER BY scene`, [
+      this.storyId,
+    ]);
     // BIGSERIAL arrives as a string; callers treat divergence ids as numbers.
     if (!key) return rows.map((r) => ({ ...r, id: Number(r.id) }));
     const values = await this.encryptedValues(

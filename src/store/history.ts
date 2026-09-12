@@ -13,6 +13,7 @@ const TABLES = [
   'events',
   'consequences',
   'scenes',
+  'scene_metadata',
   'chapters',
   'directives',
   'divergences',
@@ -194,6 +195,12 @@ export class HistoryStore {
     return rows<{ start_position: number }>(
       this.db.prepare(`SELECT start_position FROM scene_segments WHERE story_id = ?`).all(this.storyId),
     ).map(({ start_position }) => start_position);
+  }
+
+  sceneSegments(): Array<{ id: string; startPosition: number }> {
+    return rows<{ id: string; start_position: number }>(
+      this.db.prepare(`SELECT id, start_position FROM scene_segments WHERE story_id = ? ORDER BY start_position`).all(this.storyId),
+    ).map((segment) => ({ id: segment.id, startPosition: segment.start_position }));
   }
 
   activeSegmentAt(position: number): string | null {

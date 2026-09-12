@@ -102,6 +102,7 @@ function migrate(db: Db): void {
   addColumnIfMissing(db, 'stories', 'active_scene_segment_id', 'TEXT');
   addColumnIfMissing(db, 'turns', 'history_position', 'INTEGER');
   addColumnIfMissing(db, 'turns', 'scene_segment_id', 'TEXT');
+  addColumnIfMissing(db, 'divergences', 'turn', 'INTEGER');
   db.exec('CREATE INDEX IF NOT EXISTS idx_turns_history_position ON turns(story_id, history_position)');
   db.exec(`
     CREATE TABLE IF NOT EXISTS history_checkpoints (
@@ -117,6 +118,12 @@ function migrate(db: Db): void {
       FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_scene_segments_start ON scene_segments(story_id, start_position);
+    CREATE TABLE IF NOT EXISTS scene_metadata (
+      story_id TEXT NOT NULL, identity TEXT NOT NULL, scene INTEGER NOT NULL,
+      title TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', location_id TEXT,
+      chapter INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (story_id, identity),
+      FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
+    );
   `);
 }
 
