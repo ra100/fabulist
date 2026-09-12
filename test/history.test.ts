@@ -157,3 +157,32 @@ test('invalid split targets leave history unchanged', () => {
   assert.deepEqual(world.session.get(), before.session);
   world.close();
 });
+
+test('initial and normal raw-scene boundaries cannot be split', () => {
+  const world = World.open(':memory:');
+  const first = commitTurn(world, { ...turnInput(1), delta: emptyDelta() }).turn;
+  world.session.set({ scene: 2, turn: 0 });
+  const second = commitTurn(world, { ...turnInput(1), delta: emptyDelta() }).turn;
+  const before = Number((world.db.prepare(`SELECT COUNT(*) AS n FROM scene_segments`).get() as { n: number }).n);
+
+  assert.equal(world.history.startsScene(first.id), true);
+  assert.equal(world.history.startsScene(second.id), true);
+  assert.throws(() => splitSceneAtTurn(world, first.id), /already starts a scene/);
+  assert.throws(() => splitSceneAtTurn(world, second.id), /already starts a scene/);
+  assert.equal(Number((world.db.prepare(`SELECT COUNT(*) AS n FROM scene_segments`).get() as { n: number }).n), before);
+  world.close();
+});
+
+test('restoring retained split history reconciles the continuation cursor', () => {
+  const world = World.open(':memory:');
+  const turns = Array.from({ length: 4 }, (_, index) =>
+    commitTurn(world, { ...turnInput(index + 1), delta: emptyDelta() }).turn,
+  );
+  splitSceneAtTurn(world, turns[2]!.id);
+  world.history.restoreTurn(turns[3]!.id);
+
+  const session = world.session.get();
+  assert.deepEqual({ scene: session.scene, turn: session.turn }, { scene: 2, turn: 4 });
+  assert.ok(world.history.activeSegmentAt(4));
+  world.close();
+});

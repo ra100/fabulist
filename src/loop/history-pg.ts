@@ -6,10 +6,11 @@ import { World } from '../store/index-pg.ts';
 const DEFAULT_CHAPTER_SIZE = 8;
 
 export async function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SIZE): Promise<StoryLayout> {
-  const [turns, eligibleTurns, session] = await Promise.all([
-    world.chronicle.turns({ limit: 5000 }), world.history.eligibleTurns(), world.session.get(),
+  const [turns, eligibleTurns, segmentStarts, session] = await Promise.all([
+    world.chronicle.turns({ limit: 5000 }), world.history.eligibleTurns(), world.history.sceneStartPositions(), world.session.get(),
   ]);
   const eligible = new Map(eligibleTurns.map((turn) => [turn.turnId, turn]));
+  const boundaries = new Set(segmentStarts);
   turns.sort((left, right) => {
     const leftPosition = eligible.get(left.id)?.position;
     const rightPosition = eligible.get(right.id)?.position;
@@ -22,7 +23,7 @@ export async function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SI
   const layoutTurns: StoryLayoutTurn[] = [];
   for (const source of turns) {
     const history = eligible.get(source.id);
-    const boundary = history ? await world.history.startsScene(source.id) : false;
+    const boundary = history ? boundaries.has(history.position) : false;
     const startsScene = layoutTurns.length === 0 || previousRawScene !== source.scene || (boundary && layoutTurns.length > 0);
     if (startsScene) scene += 1;
     layoutTurns.push({
@@ -55,6 +56,16 @@ export async function splitSceneAtTurn(world: World, turnId: string) {
       db: client, storyId: world.storyId, sources: world.sources, imagesDir: world.illustrations.imagesDir, crypto: world.crypto,
     }));
   });
+}
+
+export async function reconcileContinuation(world: World): Promise<void> {
+  const layout = await storyLayout(world);
+  const last = layout.turns.at(-1);
+  await world.session.set({ scene: layout.currentScene, turn: last?.turn ?? 0 });
+  await world.db.query(`UPDATE stories SET active_scene_segment_id = $1 WHERE id = $2`, [
+    last?.position == null ? null : await world.history.activeSegmentAt(last.position),
+    world.storyId,
+  ]);
 }
 
 /**

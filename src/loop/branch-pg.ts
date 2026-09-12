@@ -37,6 +37,7 @@ import type { Db, Queryable } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
 import { createStory, getStory } from '../store/world-pg.ts';
 import type { HistoryCheckpoint, Story, StoryId, StorySnapshot } from '../domain/types.ts';
+import { reconcileContinuation } from './history-pg.ts';
 
 export interface TruncateResult {
   turns: number;
@@ -229,7 +230,8 @@ export async function rollbackToTurn(
   const checkpoint = await exactTurnCheckpoint(world, turnId, 'rollback');
   if (mode === 'destructive') {
     await world.history.restoreTurn(turnId);
-    return { mode, atScene: checkpoint.state.session.scene, toTurnId: turnId, story: null, removed: null };
+    await reconcileContinuation(world);
+    return { mode, atScene: (await world.session.get()).scene, toTurnId: turnId, story: null, removed: null };
   }
   const forked = await forkStory(db, world, {
     fromStoryId: world.storyId,
@@ -526,6 +528,7 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
         session.active_scene_segment_id ? segmentIds.get(session.active_scene_segment_id) ?? null : null,
         story.id,
       ]);
+      await reconcileContinuation(forkedWorld);
     } else {
       // The new story resumes exactly where the copy ends, same as truncateToScene.
       await forkedWorld.session.set({ scene, turn: 0 });
