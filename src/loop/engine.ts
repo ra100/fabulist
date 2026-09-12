@@ -31,6 +31,7 @@ import type { Provider, Registry } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
 import { commitTurn, type CommitResult } from './commit.ts';
 import { Compactor } from './compact.ts';
+import { fingerprintFrameInput } from './frame-fingerprint.ts';
 import {
   buildNarratorPrompt,
   classify,
@@ -538,21 +539,8 @@ export class Engine {
     const calls: TurnMeta['providerCalls'] = [];
     const deps = this.deps(world, calls);
 
-    const agreedBeat = [
-      turn.meta.referee ? `ruling: ${turn.meta.referee.ruling}${turn.meta.referee.cost ? ` (cost: ${turn.meta.referee.cost})` : ''}` : '',
-      turn.meta.referee?.reasoning ? `referee: ${turn.meta.referee.reasoning}` : '',
-      turn.meta.move ? `gm move: ${turn.meta.move}` : '',
-      turn.delta?.events.length ? `beat: ${turn.delta.events.map((e) => e.text).join(' ')}` : 'beat: continue',
-      turn.meta.integrity?.distance === 'stretch'
-        ? `The act is a stretch for this character. Show them feeling the weight of it in the prose; do not stop them.`
-        : '',
-      turn.meta.integrity?.distance === 'off-key'
-        ? `This sits badly with who they are. Give the world or their own body some resistance, in fiction.`
-        : '',
-      opts.note ? `The author asked for this on the reroll: ${opts.note}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+    const agreedBeat = this.proseRegenerationBeat(turn, opts.note);
+    const frameFingerprint = fingerprintFrameInput(buildNarratorPrompt(deps, turn.rawInput, agreedBeat, false));
 
     // The original turn's own verbatim decision doesn't apply to a reroll:
     // the player isn't retyping their input, so there is nothing of theirs to
@@ -570,11 +558,41 @@ export class Engine {
     }
 
     return tx(world.db, () => {
+      const current = world.chronicle.getTurn(turnId);
+      if (!current) throw new Error(`no turn ${turnId}`);
+      if (current.pinned) throw new Error('this passage is pinned and will not be re-rendered');
+      const currentPrompt = buildNarratorPrompt(
+        this.deps(world, []),
+        current.rawInput,
+        this.proseRegenerationBeat(current, opts.note),
+        false,
+      );
+      if (frameFingerprint !== fingerprintFrameInput(currentPrompt)) {
+        throw new Error('the turn or story state changed while prose was being rendered; retry');
+      }
       world.chronicle.setProse(turnId, finalProse);
       world.chronicle.appendRerollMeta(turnId, { providerCalls: calls, lint });
       world.history.capture();
       return world.chronicle.getTurn(turnId)!;
     });
+  }
+
+  private proseRegenerationBeat(turn: Turn, note?: string): string {
+    return [
+      turn.meta.referee ? `ruling: ${turn.meta.referee.ruling}${turn.meta.referee.cost ? ` (cost: ${turn.meta.referee.cost})` : ''}` : '',
+      turn.meta.referee?.reasoning ? `referee: ${turn.meta.referee.reasoning}` : '',
+      turn.meta.move ? `gm move: ${turn.meta.move}` : '',
+      turn.delta?.events.length ? `beat: ${turn.delta.events.map((e) => e.text).join(' ')}` : 'beat: continue',
+      turn.meta.integrity?.distance === 'stretch'
+        ? `The act is a stretch for this character. Show them feeling the weight of it in the prose; do not stop them.`
+        : '',
+      turn.meta.integrity?.distance === 'off-key'
+        ? `This sits badly with who they are. Give the world or their own body some resistance, in fiction.`
+        : '',
+      note ? `The author asked for this on the reroll: ${note}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
   }
 
   /** Answers a world question from state without advancing the story. */
