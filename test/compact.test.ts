@@ -158,6 +158,38 @@ test('backfill catches up scenes that closed unsummarised, never the current one
   assert.ok(!world.chronicle.scenes().find((s) => s.scene === 3)?.summary);
 });
 
+test('backfill reads events once and keeps each split-layout scene scoped to its own events', async () => {
+  const { world, mock } = setup();
+  for (const scene of [1, 2, 3]) addTurns(world, scene, 2);
+  for (const scene of [1, 2, 3]) {
+    world.chronicle.addEvent({
+      scene, turn: 1, text: `event for scene ${scene}`, participants: [], locationId: null,
+      significance: 0.5, visibility: 'onscreen', fromConsequenceId: null,
+    });
+  }
+  const originalEvents = world.chronicle.events.bind(world.chronicle);
+  let eventReads = 0;
+  const requests: string[] = [];
+  world.chronicle.events = ((opts) => {
+    eventReads += 1;
+    return originalEvents(opts);
+  }) as typeof world.chronicle.events;
+  const originalComplete = mock.complete.bind(mock);
+  mock.complete = async (request) => {
+    requests.push(String(request.messages[1]?.content));
+    return originalComplete(request);
+  };
+
+  const result = await new Compactor({ world, provider: mock }).backfill(3);
+
+  assert.deepEqual(result.scenesSummarised, [1, 2]);
+  assert.equal(eventReads, 1);
+  assert.match(requests[0]!, /event for scene 1/);
+  assert.doesNotMatch(requests[0]!, /event for scene 2/);
+  assert.match(requests[1]!, /event for scene 2/);
+  assert.doesNotMatch(requests[1]!, /event for scene 1/);
+});
+
 test('a provider failure leaves the scene unsummarised rather than corrupt', async () => {
   const world = World.open(':memory:');
   seedWorld(world);

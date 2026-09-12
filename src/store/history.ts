@@ -243,8 +243,76 @@ export class HistoryStore {
         .prepare(`DELETE FROM history_checkpoints WHERE story_id = ? AND position > ?`)
         .run(this.storyId, retained.position);
       this.reconcileContinuation(retained.position);
+      this.invalidateStaleSummaries();
       return retained;
     });
+  }
+
+  /**
+   * A checkpoint predating a split contains a raw-scene summary which may
+   * span the new child scene. Segments intentionally survive restoration, so
+   * clear only metadata whose identity or chapter membership no longer fits
+   * the retained layout.
+   */
+  invalidateStaleSummaries(): void {
+    const turns = rows<{ scene: number; history_position: number }>(
+      this.db.prepare(
+        `SELECT scene, history_position FROM turns
+          WHERE story_id = ? AND history_position IS NOT NULL
+          ORDER BY history_position`,
+      ).all(this.storyId),
+    );
+    const segments = new Map(
+      rows<{ id: string; start_position: number }>(
+        this.db.prepare(`SELECT id, start_position FROM scene_segments WHERE story_id = ?`).all(this.storyId),
+      ).map((segment) => [segment.start_position, segment.id]),
+    );
+    const expected = new Map<string, { scene: number; chapter: number }>();
+    const identitiesByRawScene = new Map<number, Set<string>>();
+    let previousRawScene: number | undefined;
+    let segmentId: string | undefined;
+    let scene = 0;
+    for (const turn of turns) {
+      if (previousRawScene !== turn.scene) segmentId = undefined;
+      if (segments.has(turn.history_position) && scene > 0) segmentId = segments.get(turn.history_position);
+      if (previousRawScene !== turn.scene || (segments.has(turn.history_position) && scene > 0)) scene += 1;
+      const identity = segmentId ? `segment:${segmentId}` : `raw:${turn.scene}`;
+      expected.set(identity, { scene, chapter: Math.floor((scene - 1) / 8) + 1 });
+      const identities = identitiesByRawScene.get(turn.scene) ?? new Set<string>();
+      identities.add(identity);
+      identitiesByRawScene.set(turn.scene, identities);
+      previousRawScene = turn.scene;
+    }
+    const metadata = rows<{ identity: string; scene: number; chapter: number }>(
+      this.db.prepare(`SELECT identity, scene, chapter FROM scene_metadata WHERE story_id = ?`).all(this.storyId),
+    );
+    const stale = metadata.filter((entry) => {
+      const layout = expected.get(entry.identity);
+      const rawScene = /^raw:(\d+)$/.exec(entry.identity);
+      return !layout ||
+        layout.scene !== entry.scene ||
+        layout.chapter !== entry.chapter ||
+        (rawScene !== null && (identitiesByRawScene.get(Number(rawScene[1]))?.size ?? 0) > 1);
+    });
+    for (const entry of stale) {
+      this.db.prepare(`UPDATE scene_metadata SET title = '', summary = '' WHERE story_id = ? AND identity = ?`)
+        .run(this.storyId, entry.identity);
+    }
+
+    const expectedByChapter = new Map<number, Set<string>>();
+    for (const [identity, layout] of expected) {
+      const group = expectedByChapter.get(layout.chapter) ?? new Set<string>();
+      group.add(identity);
+      expectedByChapter.set(layout.chapter, group);
+    }
+    for (const chapter of this.chapters()) {
+      const stored = new Set(metadata.filter((entry) => entry.chapter === chapter.chapter).map((entry) => entry.identity));
+      const expectedGroup = expectedByChapter.get(chapter.chapter) ?? new Set<string>();
+      if (stored.size !== expectedGroup.size || [...stored].some((identity) => !expectedGroup.has(identity))) {
+        this.db.prepare(`UPDATE chapters SET title = '', summary = '' WHERE story_id = ? AND chapter = ?`)
+          .run(this.storyId, chapter.chapter);
+      }
+    }
   }
 
   splitBefore(turnId: string): SceneSplit {
@@ -338,6 +406,12 @@ export class HistoryStore {
   private activeSegment(layout: StorySnapshot): string | null {
     const session = layout.session as StorySnapshot['session'] & { active_scene_segment_id?: string | null };
     return session.active_scene_segment_id ?? null;
+  }
+
+  private chapters(): Array<{ chapter: number }> {
+    return rows<{ chapter: number }>(
+      this.db.prepare(`SELECT chapter FROM chapters WHERE story_id = ?`).all(this.storyId),
+    );
   }
 
   private reconcileContinuation(position: number): void {

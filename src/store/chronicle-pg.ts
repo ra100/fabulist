@@ -685,7 +685,19 @@ export class ChronicleStore {
       `SELECT identity, scene, title, summary, location_id, chapter FROM scene_metadata WHERE story_id = $1 ORDER BY scene`, [this.storyId],
     );
     if (!key) return [...new Map([...legacy, ...metadata.map((r) => ({ ...r, locationId: r.location_id }))].map((s) => [s.identity, s])).values()];
-    const values = await this.encryptedValues('scene_metadata', metadata.map((row) => row.identity), ['title', 'summary'], key);
+    const values = await this.encryptedValuesOptional('scene_metadata', metadata.map((row) => row.identity), ['title', 'summary'], key);
+    const legacyRows = metadata.filter(
+      (row) => !values.get(row.identity)?.size && row.identity === `raw:${row.scene}`,
+    );
+    if (legacyRows.length) {
+      const legacy = await this.encryptedValues('scenes', legacyRows.map((row) => String(row.scene)), ['title', 'summary'], key);
+      for (const row of legacyRows) values.set(row.identity, legacy.get(String(row.scene))!);
+    }
+    for (const row of metadata) {
+      if (!values.get(row.identity)?.has('title') || !values.get(row.identity)?.has('summary')) {
+        throw new Error('missing encrypted private story value scene_metadata.title');
+      }
+    }
     const secured = metadata.map((row) => {
       const privateValues = values.get(row.identity)!;
       return {
@@ -698,6 +710,42 @@ export class ChronicleStore {
       };
     });
     return [...new Map([...legacy, ...secured].map((scene) => [scene.identity, scene])).values()];
+  }
+
+  private async encryptedValuesOptional(
+    table: string,
+    recordIds: string[],
+    fields: string[],
+    key: Buffer,
+  ): Promise<DecryptedValues> {
+    const values: DecryptedValues = new Map();
+    if (!recordIds.length) return values;
+    const { rows } = await this.db.query<{
+      record_id: string;
+      field_name: string;
+      version: number;
+      nonce: Buffer;
+      ciphertext: Buffer;
+    }>(
+      `SELECT record_id, field_name, version, nonce, ciphertext
+         FROM encrypted_story_values
+        WHERE story_id = $1 AND table_name = $2
+          AND record_id = ANY($3::text[]) AND field_name = ANY($4::text[])`,
+      [this.storyId, table, recordIds, fields],
+    );
+    for (const row of rows) {
+      const fieldsForRecord = values.get(row.record_id) ?? new Map<string, unknown>();
+      fieldsForRecord.set(
+        row.field_name,
+        decryptStoryValue(
+          key,
+          { storyId: this.storyId, table, recordId: row.record_id, field: row.field_name },
+          { version: row.version, nonce: row.nonce, ciphertext: row.ciphertext },
+        ),
+      );
+      values.set(row.record_id, fieldsForRecord);
+    }
+    return values;
   }
 
   async upsertChapter(chapter: number, patch: { title?: string; summary?: string }): Promise<void> {
