@@ -94,7 +94,8 @@ DECLARE
     -- browser-produced ciphertext only; no role, including the operator's app
     -- process, can derive the plaintext key from them.
     'encryption_rollout', 'user_encryption_keys', 'story_encryption_keys',
-    'encrypted_story_values'];
+    'encrypted_story_values', 'chron_entity_blind_indexes',
+    'user_private_story_migrations', 'story_private_story_migrations'];
   system_tables TEXT[] := ARRAY[
     -- `world_access` is system data: who may see a world is not something a play
     -- connection may edit, or a user could grant themselves access to a private

@@ -305,6 +305,7 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
   const [grants, setGrants] = useState<EncryptionKeyBundle['grants']>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [migration, setMigration] = useState<{ status: string; error: string | null } | null>(null);
 
   useEffect(() => {
     void api.encryption.keys()
@@ -314,6 +315,7 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
         setGrants(keys.grants);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    void api.encryption.migration().then(({ migration }) => setMigration(migration)).catch(() => {});
   }, []);
 
   const prepare = async () => {
@@ -386,6 +388,18 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
     }
   };
 
+  const migrate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setMigration((await api.encryption.migrate()).migration);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const copyRecoveryCode = async () => {
     if (!draft) return;
     try {
@@ -399,6 +413,7 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
   if (enrolled === null && !error) return null;
   if (enrolled) {
     const expiry = grants[0]?.expiresAt ? new Date(grants[0].expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
+    const migrationComplete = migration?.status === 'complete';
     return (
       <section className="card private-storage">
         <div className="private-storage-heading">
@@ -411,12 +426,17 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
             <b>{grants.length ? 'Private-story access is active.' : 'Your recovery path is ready.'}</b>{' '}
             {grants.length
               ? `The temporary processing grant expires at ${expiry}. Lock it when you finish using MCP.`
-              : 'This prepares the short-lived server-memory grant private MCP use will need after content migration ships.'}
+              : migrationComplete
+                ? 'Unlock when you want Fabulist or an MCP client to process your encrypted stories.'
+                : 'Unlock to migrate your existing stories and grant temporary private-story processing access.'}
           </p>
         </div>
         {grants.length ? (
           <div className="private-storage-actions">
             <button onClick={() => void lock()} disabled={busy}>{busy ? 'locking…' : 'lock private stories'}</button>
+            <button className="primary" onClick={() => void migrate()} disabled={busy || migrationComplete}>
+              {busy ? 'migrating…' : migrationComplete ? 'private stories migrated' : 'migrate all private stories'}
+            </button>
           </div>
         ) : (
           <div className="private-unlock">
@@ -446,7 +466,9 @@ function PrivateStoragePanel({ user }: { user: CurrentUser }) {
           </div>
         )}
         <p className="private-storage-footnote">
-          Content migration is not available yet, so existing stories are still plaintext despite the configured recovery path.
+          Migration requires an active grant for every story you own. It copies your shared blocklist into every story before removing legacy plaintext; no passphrase or recovery code is sent.
+          {migration ? ` Status: ${migration.status}${migration.error ? ` — ${migration.error}` : ''}.` : ''}
+          {' '}Creating, claiming, forking, and resetting stories is temporarily disabled while private storage is enrolled, until browser-side key provisioning is added.
         </p>
       </section>
     );

@@ -735,6 +735,24 @@ export async function listStoriesForUser(db: Queryable, ownerUserId: string): Pr
 }
 
 /**
+ * Story-library projection with private titles restored under the caller's
+ * process-local key grants. The ordinary list remains available to routing
+ * code that only needs stable IDs and ordering.
+ */
+export async function listStoriesForUserWithPrivateValues(
+  db: Queryable,
+  ownerUserId: string,
+  crypto: ChronicleCrypto,
+): Promise<Story[]> {
+  const stories = await listStoriesForUser(db, ownerUserId);
+  return Promise.all(
+    stories.map((story) =>
+      story.encryptionVersion === 1 ? new StoryStore(db, story.id, crypto).info() : Promise.resolve(story),
+    ),
+  );
+}
+
+/**
  * Stories with no owner, for the "claim your imported books" flow.
  *
  * Imported SQLite saves arrive with `owner_user_id` NULL, because they predate login

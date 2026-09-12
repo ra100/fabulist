@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeWorld, withPg } from './pg-harness.ts';
@@ -21,8 +21,25 @@ import { encryptStoryValue } from '../src/crypto/story-envelope.ts';
 import { CastStore, emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../src/store/cast-pg.ts';
 import { ChronicleStore } from '../src/store/chronicle-pg.ts';
 import { GraphStore } from '../src/store/graph-pg.ts';
+import {
+  assertPrivateStoryCreationReady,
+  assertPrivateStoryMigrationReady,
+  migratePrivateStories,
+} from '../src/store/private-story-migration-pg.ts';
 import { IllustrationStore } from '../src/store/illustration-pg.ts';
-import { ConsequenceStore, DirectiveStore, StoryStore, ThreadStore, createStory, deleteStory, getStory, listStoriesForUser, resolveOrCreateStoryForUser } from '../src/store/world-pg.ts';
+import {
+  ConsequenceStore,
+  DirectiveStore,
+  StoryStore,
+  ThreadStore,
+  createStory,
+  deleteStory,
+  getStory,
+  listStoriesForUser,
+  listStoriesForUserWithPrivateValues,
+  resolveOrCreateStoryForUser,
+} from '../src/store/world-pg.ts';
+import { blocklistFor } from '../src/store/access-pg.ts';
 import {
   World,
   createWorld,
@@ -55,6 +72,196 @@ function blankSheet(entityId: string): CharacterSheet {
     isPlayer: false,
   };
 }
+
+test('owner migration copies a legacy blocklist to every owned story before enabling v1', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'migration');
+    const owner = 'migration-owner';
+    const first = await createStory(db, { worldIds: [worldId], ownerUserId: owner, title: 'First secret' });
+    const second = await createStory(db, { worldIds: [worldId], ownerUserId: owner, title: 'Second secret' });
+    await db.query(
+      `INSERT INTO user_encryption_keys
+         (user_id, version, passphrase_kdf, passphrase_kdf_params, passphrase_salt,
+          passphrase_nonce, passphrase_ciphertext, recovery_salt, recovery_nonce,
+          recovery_ciphertext, recovery_code_hint)
+       VALUES ($1,1,'pbkdf2-sha256','{"iterations":600000}','\\x00','\\x00','\\x00',
+               '\\x00','\\x00','\\x00','test')`,
+      [owner],
+    );
+    await assert.rejects(() => assertPrivateStoryCreationReady(db, owner), /browser key provisioning/);
+    const plaintextChronicle = new ChronicleStore({ db, storyId: first.id });
+    await plaintextChronicle.addTurn({
+      scene: 1,
+      turn: 1,
+      rawInput: 'open the hidden gate',
+      intent: null,
+      delta: null,
+      bookProse: 'The hidden gate opens.',
+      pinned: false,
+      meta: { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] },
+    });
+    await plaintextChronicle.addEvent({
+      scene: 1,
+      turn: 1,
+      text: 'The witness remembers.',
+      participants: ['character:witness'],
+      locationId: 'place:hidden-hall',
+      significance: 0.8,
+      visibility: 'onscreen',
+      fromConsequenceId: null,
+    });
+    await plaintextChronicle.upsertScene(1, {
+      title: 'The hidden hall',
+      summary: 'A secret meeting.',
+      locationId: 'place:hidden-hall',
+      chapter: 1,
+    });
+    await plaintextChronicle.addDivergence(1, 'character', 'The witness refuses.', 'The witness agreed.');
+    await db.query(`INSERT INTO prose_blocklist (user_id, pattern, note) VALUES ($1,$2,$3)`, [
+      owner,
+      'violet crown',
+      'avoid it',
+    ]);
+    const firstKey = randomBytes(32);
+    const secondKey = randomBytes(32);
+    await assert.rejects(
+      () => migratePrivateStories(db, owner, new Map([[first.id, firstKey]]), 'data/images'),
+      /missing active keys/,
+    );
+    assert.equal((await getStory(db, first.id))?.encryptionVersion, 0);
+
+    const keys = new Map([
+      [first.id, firstKey],
+      [second.id, secondKey],
+    ]);
+    await migratePrivateStories(db, owner, keys, 'data/images');
+    assert.equal((await getStory(db, first.id))?.encryptionVersion, 1);
+    assert.equal((await getStory(db, second.id))?.encryptionVersion, 1);
+    assert.equal(
+      Number(
+        (
+          await db.one<{ n: string }>(
+            `SELECT count(*) n FROM prose_blocklist WHERE user_id=$1 AND pattern='violet crown'`,
+            [owner],
+          )
+        )!.n,
+      ),
+      0,
+    );
+    assert.equal(
+      Number(
+        (
+          await db.one<{ n: string }>(
+            `SELECT count(*) n FROM prose_blocklist WHERE user_id=$1 AND pattern LIKE 'private:%'`,
+            [owner],
+          )
+        )!.n,
+      ),
+      2,
+    );
+    assert.equal(
+      Number(
+        (
+          await db.one<{ n: string }>(
+            `SELECT count(*) n FROM encrypted_story_values
+              WHERE story_id=$1 AND table_name='prose_blocklist'`,
+            [first.id],
+          )
+        )!.n,
+      ),
+      2,
+    );
+    const encryptedChronicle = new ChronicleStore({
+      db,
+      storyId: first.id,
+      crypto: { keyForStory: () => firstKey },
+    });
+    const [event] = await encryptedChronicle.events();
+    assert.equal(event?.text, 'The witness remembers.');
+    assert.deepEqual(event?.participants, ['character:witness']);
+    assert.equal(event?.locationId, 'place:hidden-hall');
+    const [scene] = await encryptedChronicle.scenes();
+    assert.equal(scene?.title, 'The hidden hall');
+    assert.equal(scene?.locationId, 'place:hidden-hall');
+    const [divergence] = await encryptedChronicle.divergences();
+    assert.equal(divergence?.kind, 'character');
+    assert.equal(divergence?.detail, 'The witness refuses.');
+    assert.deepEqual(
+      await blocklistFor(db, testUser(owner), {
+        storyId: first.id,
+        crypto: { keyForStory: () => firstKey },
+      }),
+      [{ pattern: 'violet crown', note: 'avoid it' }],
+    );
+    assert.deepEqual(
+      (
+        await listStoriesForUserWithPrivateValues(db, owner, {
+          keyForStory: (storyId) => keys.get(storyId) ?? null,
+        })
+      )
+        .map(({ title }) => title)
+        .sort(),
+      ['First secret', 'Second secret'],
+    );
+    assert.equal(
+      (await db.one<{ raw_input: string }>(`SELECT raw_input FROM turns WHERE story_id=$1`, [first.id]))
+        ?.raw_input,
+      '',
+    );
+    await assert.rejects(() => assertPrivateStoryCreationReady(db, owner), /browser key provisioning/);
+    await migratePrivateStories(db, owner, keys, 'data/images');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('owner migration resumes after a file failure without premature v1 activation', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'fabulist-migration-resume-'));
+  try {
+    const ran = await withPg(async (db) => {
+      const worldId = await makeWorld(db, 'migration-resume');
+      const owner = 'migration-resume-owner';
+      const story = await createStory(db, {
+        worldIds: [worldId],
+        ownerUserId: owner,
+        title: 'Recoverable secret',
+      });
+      const illustrations = new IllustrationStore(db, story.id, dir);
+      const requested = await illustrations.reserve({
+        subject: { kind: 'scene', turnId: 'turn:migration-resume', locationId: null },
+        visualStyle: 'drawing',
+        prompt: 'a private moonlit hall',
+        negativePrompt: '',
+        seed: null,
+        provider: 'mock',
+        createdScene: 1,
+      });
+      const bytes = Buffer.from('private-image-bytes');
+      const completed = await illustrations.complete(requested.id, bytes, 'image/png', null);
+      const plaintextPath = illustrations.absolutePath(completed!)!;
+      unlinkSync(plaintextPath);
+
+      const key = randomBytes(32);
+      const keys = new Map([[story.id, key]]);
+      await assert.rejects(() => migratePrivateStories(db, owner, keys, dir), /missing illustration file/);
+      assert.equal((await getStory(db, story.id))?.encryptionVersion, 0);
+      await assert.rejects(() => assertPrivateStoryMigrationReady(db, story.id), /migration is incomplete/);
+
+      writeFileSync(plaintextPath, bytes);
+      await migratePrivateStories(db, owner, keys, dir);
+      assert.equal((await getStory(db, story.id))?.encryptionVersion, 1);
+      await assert.doesNotReject(() => assertPrivateStoryMigrationReady(db, story.id));
+
+      const encryptedStore = new IllustrationStore(db, story.id, dir, { keyForStory: () => key });
+      const migrated = await encryptedStore.get(requested.id);
+      assert.ok(migrated?.path?.endsWith('.enc'));
+      assert.deepEqual(await encryptedStore.readBytes(migrated!), bytes);
+      assert.equal(existsSync(plaintextPath), false);
+    });
+    if (!ran) t.skip('no Postgres configured');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 async function encryptStoryValueForTest(
   db: Db,
@@ -1165,7 +1372,7 @@ test('withEncryptionRollout binds bootstrap email to user id and keeps it stable
   if (!ran) t.skip('no Postgres configured');
 });
 
-test('a rollout-enabled user auto-creates an encryption v1 story on first visit', async (t) => {
+test('a rollout-enabled user keeps a new story plaintext until verified migration', async (t) => {
   const ran = await withPg(async (db) => {
     const worldId = await makeWorld(db, 'enc-default', 'Encryption default');
     await db.query(
