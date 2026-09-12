@@ -55,18 +55,23 @@ import {
   previewIngestTool,
   proposeTurnTool,
   regenerateTurnTool,
+  removeEdgeTool,
+  replaceTurnProseTool,
   rebuildCanonTool,
   resetStoryTool,
   resolveInterruptTool,
   resolveWikiTool,
   rollbackTool,
   searchEntitiesTool,
+  setCurrentLocationTool,
   searchTool,
   startStoryTool,
   switchStoryTool,
   setStorySourcesTool,
   tickTool,
   updateKnobsTool,
+  upsertEdgeTool,
+  upsertEntityTool,
   updateSheetTool,
   updateStyleTool,
   updateThreadTool,
@@ -184,7 +189,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
 
   server.registerTool(
     'list_worlds',
-    { description: 'List every world (shared canon + graph) this deployment knows about, marking which one is currently open.',
+    {
+      description:
+        'List every world (shared canon + graph) this deployment knows about, marking which one is currently open.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => toolResult(await listWorldsTool(ctx)),
@@ -207,7 +214,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
 
   server.registerTool(
     'list_stories',
-    { description: 'List every story (an independent playthrough) in the currently open world, marking which one is current.',
+    {
+      description:
+        'List every story (an independent playthrough) in the currently open world, marking which one is current.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => toolResult(await listStoriesTool(ctx)),
@@ -234,7 +243,12 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       inputSchema: {
         fromStoryId: z.string().optional().describe('The story to fork from; defaults to whichever story is current.'),
         title: z.string().optional(),
-        atScene: z.number().int().positive().optional().describe('Copy the source story\u2019s chronicle up to (not including) this scene.'),
+        atScene: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Copy the source story\u2019s chronicle up to (not including) this scene.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -247,12 +261,15 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       description:
         'Undo the last chapter or scene of the currently open story \u2014 the backward move fork_story never covered. ' +
         "Pass exactly one of scene or chapter. Defaults to mode 'fork': branches at the target boundary into a new " +
-        "sibling story and switches to it, leaving the discarded tail intact as a story you can still open. Pass " +
+        'sibling story and switches to it, leaving the discarded tail intact as a story you can still open. Pass ' +
         "mode 'destructive' to truncate the current story in place instead, with no sibling and no way back.",
       inputSchema: {
         scene: z.number().int().positive().optional().describe('Roll back to the start of this scene.'),
         chapter: z.number().int().positive().optional().describe('Roll back to the start of this chapter.'),
-        mode: z.enum(['fork', 'destructive']).optional().describe("Defaults to 'fork' (safe, keeps the tail as a sibling story)."),
+        mode: z
+          .enum(['fork', 'destructive'])
+          .optional()
+          .describe("Defaults to 'fork' (safe, keeps the tail as a sibling story)."),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
@@ -273,7 +290,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
 
   server.registerTool(
     'get_state',
-    { description: 'Session position (scene/turn), entity/edge counts, pending consequences, and token usage for the current story.',
+    {
+      description:
+        'Session position (scene/turn), entity/edge counts, pending consequences, and token usage for the current story.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => toolResult(await getStateTool(ctx)),
@@ -282,8 +301,11 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   server.registerTool(
     'get_cast',
     {
-      description: 'The cast of characters, or one character sheet by name (identity, contract/vows, voice, condition, appearance).',
-      inputSchema: { name: z.string().optional().describe('A character name to resolve one sheet; omit to list the whole cast.') },
+      description:
+        'The cast of characters, or one character sheet by name (identity, contract/vows, voice, condition, appearance).',
+      inputSchema: {
+        name: z.string().optional().describe('A character name to resolve one sheet; omit to list the whole cast.'),
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ name }) => toolResult(await getCastTool(ctx, { name })),
@@ -292,7 +314,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   server.registerTool(
     'get_entity',
     {
-      description: 'One entity (any type — character, place, faction, item) by id or name, with its live edges to neighbouring entities.',
+      description:
+        'One entity (any type — character, place, faction, item) by id or name, with its live edges to neighbouring entities.',
       inputSchema: {
         id: z.string().optional().describe("Entity id, e.g. 'char:brother-anselm'."),
         name: z.string().optional().describe('Entity name, resolved if id is omitted.'),
@@ -316,8 +339,67 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   );
 
   server.registerTool(
+    'upsert_entity',
+    {
+      description: 'Create or update an entity in this story’s graph. Manual edits shadow canon only in this story.',
+      inputSchema: {
+        id: z.string().optional().describe('Canonical entity id; omit to derive one from type and name.'),
+        type: z.enum(['character', 'location', 'faction', 'item', 'concept', 'event']),
+        name: z.string(),
+        summary: z.string().optional(),
+        attributes: z.record(z.string(), z.unknown()).optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id, type, name, summary, attributes }) =>
+      toolResult(await upsertEntityTool(ctx, { id, type, name, summary, attributes })),
+  );
+
+  server.registerTool(
+    'upsert_edge',
+    {
+      description:
+        'Create or update a live relationship edge. Use ids when possible; exact unambiguous names also resolve.',
+      inputSchema: {
+        from: z.string(),
+        relation: z.string(),
+        to: z.string(),
+        attributes: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe('Optional weight (number) and note (string).'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ from, relation, to, attributes }) =>
+      toolResult(await upsertEdgeTool(ctx, { from, relation, to, attributes })),
+  );
+
+  server.registerTool(
+    'remove_edge',
+    {
+      description: 'Retire a live relationship edge while retaining its history.',
+      inputSchema: { from: z.string(), relation: z.string(), to: z.string() },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ from, relation, to }) => toolResult(await removeEdgeTool(ctx, { from, relation, to })),
+  );
+
+  server.registerTool(
+    'set_current_location',
+    {
+      description: 'Set the active story and current scene location to an existing Location entity.',
+      inputSchema: { entityId: z.string().optional(), name: z.string().optional() },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ entityId, name }) => toolResult(await setCurrentLocationTool(ctx, { entityId, name })),
+  );
+
+  server.registerTool(
     'get_threads',
-    { description: 'Every open and resolved narrative thread (tension dial, stakes, parties, possible resolutions) in the current story.',
+    {
+      description:
+        'Every open and resolved narrative thread (tension dial, stakes, parties, possible resolutions) in the current story.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => toolResult(await getThreadsTool(ctx)),
@@ -326,7 +408,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   server.registerTool(
     'get_facts',
     {
-      description: 'Facts established as true in the current story\u2019s world (not who knows them \u2014 see the epistemics fields on get_cast for that).',
+      description:
+        'Facts established as true in the current story\u2019s world (not who knows them \u2014 see the epistemics fields on get_cast for that).',
       inputSchema: { limit: z.number().int().positive().max(1000).optional() },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -371,7 +454,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ existing, name, role, goals, vows }) => toolResult(await startStoryTool(ctx, { existing, name, role, goals, vows })),
+    async ({ existing, name, role, goals, vows }) =>
+      toolResult(await startStoryTool(ctx, { existing, name, role, goals, vows })),
   );
 
   server.registerTool(
@@ -383,7 +467,10 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         'not implement the two-step split, or whose own model should not be the one writing this world\u2019s prose style.',
       inputSchema: {
         input: z.string().describe("The player's turn, in their own words."),
-        overrideIntegrity: z.boolean().optional().describe('Bypass the character-integrity gate, same as resolve_interrupt\u2019s "override".'),
+        overrideIntegrity: z
+          .boolean()
+          .optional()
+          .describe('Bypass the character-integrity gate, same as resolve_interrupt\u2019s "override".'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -416,7 +503,11 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         'Runs the prose gate, extracts the state delta, and commits it \u2014 the same steps a turn always runs after its prose exists, regardless of who wrote it.',
       inputSchema: {
         resumeToken: z.string().describe('The resumeToken from the awaiting-narration response this completes.'),
-        prose: z.string().describe('The finished prose for this turn, written from the narratorSystemPrompt and sceneFrame you were given.'),
+        prose: z
+          .string()
+          .describe(
+            'The finished prose for this turn, written from the narratorSystemPrompt and sceneFrame you were given.',
+          ),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -437,7 +528,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ originalText, effect, actorId }) => toolResult(await resolveInterruptTool(ctx, { originalText, effect, actorId })),
+    async ({ originalText, effect, actorId }) =>
+      toolResult(await resolveInterruptTool(ctx, { originalText, effect, actorId })),
   );
 
   // ------------------------------------------ other turn/session write tools
@@ -446,7 +538,10 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     'pin_turn',
     {
       description: 'Pin (or unpin) a turn\u2019s prose so it survives regenerate_turn/compaction untouched.',
-      inputSchema: { id: z.string().describe('A turn id.'), pinned: z.boolean().optional().describe('Defaults to true.') },
+      inputSchema: {
+        id: z.string().describe('A turn id.'),
+        pinned: z.boolean().optional().describe('Defaults to true.'),
+      },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ id, pinned }) => toolResult(await pinTurnTool(ctx, { id, pinned })),
@@ -457,10 +552,24 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     {
       description:
         'Re-render one turn\u2019s prose in place \u2014 nothing about what happened changes, only how it reads. Refuses a pinned turn.',
-      inputSchema: { id: z.string().describe('A turn id.'), note: z.string().optional().describe('Guidance for the re-render, e.g. "shorter" or "more tension".') },
+      inputSchema: {
+        id: z.string().describe('A turn id.'),
+        note: z.string().optional().describe('Guidance for the re-render, e.g. "shorter" or "more tension".'),
+      },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async ({ id, note }) => toolResult(await regenerateTurnTool(ctx, { id, note })),
+  );
+
+  server.registerTool(
+    'replace_turn_prose',
+    {
+      description:
+        'Commit exact author-supplied prose for a turn while preserving its existing state delta. This is not regenerate_turn.',
+      inputSchema: { id: z.string(), prose: z.string(), stateMode: z.literal('preserve').optional() },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id, prose, stateMode }) => toolResult(await replaceTurnProseTool(ctx, { id, prose, stateMode })),
   );
 
   server.registerTool(
@@ -488,7 +597,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   server.registerTool(
     'lock_sheet_field',
     {
-      description: 'Mark (or unmark) one field path on a character sheet as author-locked, exempt from future auto-drift.',
+      description:
+        'Mark (or unmark) one field path on a character sheet as author-locked, exempt from future auto-drift.',
       inputSchema: {
         id: z.string().describe('A character entity id.'),
         path: z.string().describe('A field path on the sheet, e.g. "identity.arc".'),
@@ -512,7 +622,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id, tension, status, title, stakes }) => toolResult(await updateThreadTool(ctx, { id, tension, status, title, stakes })),
+    async ({ id, tension, status, title, stakes }) =>
+      toolResult(await updateThreadTool(ctx, { id, tension, status, title, stakes })),
   );
 
   server.registerTool(
@@ -529,12 +640,15 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ text, scope, strength, lifetimeScenes }) => toolResult(await addDirectiveTool(ctx, { text, scope, strength, lifetimeScenes })),
+    async ({ text, scope, strength, lifetimeScenes }) =>
+      toolResult(await addDirectiveTool(ctx, { text, scope, strength, lifetimeScenes })),
   );
 
   server.registerTool(
     'delete_directive',
-    { description: 'Retire a directive (never hard-deleted).', inputSchema: { id: z.string() },
+    {
+      description: 'Retire a directive (never hard-deleted).',
+      inputSchema: { id: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ id }) => toolResult(await deleteDirectiveTool(ctx, { id })),
@@ -652,7 +766,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
 
   server.registerTool(
     'delete_illustration',
-    { description: 'Delete a generated illustration.', inputSchema: { id: z.string() },
+    {
+      description: 'Delete a generated illustration.',
+      inputSchema: { id: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     async ({ id }) => toolResult(await deleteIllustrationTool(ctx, { id })),
@@ -660,7 +776,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
 
   server.registerTool(
     'tick',
-    { description: 'Advance seeded consequences toward firing and run whatever else the world clock does per tick.',
+    {
+      description: 'Advance seeded consequences toward firing and run whatever else the world clock does per tick.',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async () => toolResult(await tickTool(ctx)),
@@ -669,7 +786,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   server.registerTool(
     'compact',
     {
-      description: 'Summarise one closed scene on demand (pass scene), or catch up everything that closed unsummarised (omit it).',
+      description:
+        'Summarise one closed scene on demand (pass scene), or catch up everything that closed unsummarised (omit it).',
       inputSchema: { scene: z.number().int().positive().optional(), force: z.boolean().optional() },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -695,12 +813,13 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         'save file on disk \u2014 there are no world files now. To branch within a world use fork_story; this is for getting ' +
         'the prose out.',
       inputSchema: {
-        format: z.enum(['markdown', 'text']).optional().describe("Defaults to markdown."),
+        format: z.enum(['markdown', 'text']).optional().describe('Defaults to markdown.'),
         title: z.string().optional().describe('Title for the manuscript; defaults to the world title.'),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ format, title }) => toolResult(await exportStoryTool(ctx, { ...(format ? { format } : {}), ...(title ? { title } : {}) })),
+    async ({ format, title }) =>
+      toolResult(await exportStoryTool(ctx, { ...(format ? { format } : {}), ...(title ? { title } : {}) })),
   );
 
   // -------------------------------------------------------- setup wizard tools
@@ -770,7 +889,10 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       inputSchema: {
         baseUrl: z.string().describe('Wiki base URL, e.g. "https://memory-alpha.fandom.com".'),
         seeds: z.array(z.string()).describe('Seed page titles to crawl from.'),
-        mode: z.enum(['skim', 'mid', 'deep', 'all']).optional().describe('Defaults to "mid". "all" is the whole wiki, and needs an offline dump ingest.'),
+        mode: z
+          .enum(['skim', 'mid', 'deep', 'all'])
+          .optional()
+          .describe('Defaults to "mid". "all" is the whole wiki, and needs an offline dump ingest.'),
         excludeCategories: z.array(z.string()).optional(),
         title: z.string().optional(),
         ...budgetSchema,
@@ -778,7 +900,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async ({ baseUrl, seeds, mode, excludeCategories, title, maxPages, hops, passBMaxPages }) =>
-      toolResult(await previewIngestTool(ctx, { baseUrl, seeds, mode, excludeCategories, title, maxPages, hops, passBMaxPages })),
+      toolResult(
+        await previewIngestTool(ctx, { baseUrl, seeds, mode, excludeCategories, title, maxPages, hops, passBMaxPages }),
+      ),
   );
 
   server.registerTool(
@@ -792,7 +916,13 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         seeds: z.array(z.string()),
         mode: z.enum(['skim', 'mid', 'deep', 'all']).optional(),
         character: z
-          .object({ existing: z.string().nullable(), name: z.string(), role: z.string(), goals: z.array(z.string()), vows: z.array(z.object({ text: z.string(), rank: z.number() })) })
+          .object({
+            existing: z.string().nullable(),
+            name: z.string(),
+            role: z.string(),
+            goals: z.array(z.string()),
+            vows: z.array(z.object({ text: z.string(), rank: z.number() })),
+          })
           .optional(),
         excludeCategories: z.array(z.string()).optional(),
         title: z.string().optional(),
@@ -801,7 +931,19 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async ({ baseUrl, seeds, mode, character, excludeCategories, title, maxPages, hops, passBMaxPages }) =>
-      toolResult(await discoverWorldTool(ctx, { baseUrl, seeds, mode, character, excludeCategories, title, maxPages, hops, passBMaxPages })),
+      toolResult(
+        await discoverWorldTool(ctx, {
+          baseUrl,
+          seeds,
+          mode,
+          character,
+          excludeCategories,
+          title,
+          maxPages,
+          hops,
+          passBMaxPages,
+        }),
+      ),
   );
 
   server.registerTool(
@@ -813,20 +955,28 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       inputSchema: {
         previewKey: z.string(),
         character: z
-          .object({ existing: z.string().nullable(), name: z.string(), role: z.string(), goals: z.array(z.string()), vows: z.array(z.object({ text: z.string(), rank: z.number() })) })
+          .object({
+            existing: z.string().nullable(),
+            name: z.string(),
+            role: z.string(),
+            goals: z.array(z.string()),
+            vows: z.array(z.object({ text: z.string(), rank: z.number() })),
+          })
           .optional(),
         style: z.record(z.string(), z.unknown()).optional(),
         opening: z.string().optional(),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async ({ previewKey, character, style, opening }) => toolResult(await commitIngestTool(ctx, { previewKey, character, style, opening })),
+    async ({ previewKey, character, style, opening }) =>
+      toolResult(await commitIngestTool(ctx, { previewKey, character, style, opening })),
   );
 
   server.registerTool(
     'create_custom_world',
     {
-      description: 'Build an authored world from a plain-language description, no wiki involved. Runs as a background job (poll with get_setup_job).',
+      description:
+        'Build an authored world from a plain-language description, no wiki involved. Runs as a background job (poll with get_setup_job).',
       inputSchema: { description: z.string(), style: z.record(z.string(), z.unknown()).optional() },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -835,7 +985,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
 
   server.registerTool(
     'use_sample_world',
-    { description: 'Load the built-in example world, for trying the engine with no setup at all.',
+    {
+      description: 'Load the built-in example world, for trying the engine with no setup at all.',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async () => toolResult(await useSampleWorldTool(ctx)),
@@ -874,7 +1025,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
 
   server.registerTool(
     'cancel_setup_job',
-    { description: 'Cooperatively cancel a running setup job; keeps whatever it already wrote.', inputSchema: { id: z.string() },
+    {
+      description: 'Cooperatively cancel a running setup job; keeps whatever it already wrote.',
+      inputSchema: { id: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ id }) => toolResult(await cancelSetupJobTool(ctx, { id })),
@@ -925,7 +1078,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     {
       description:
         'Retrieve the full text and metadata of one item returned by `search`, by its id. Also accepts a bare entity id or turn id.',
-      inputSchema: { id: z.string().describe('An id from a `search` result, e.g. "entity:char:brother-anselm" or "thread:...".') },
+      inputSchema: {
+        id: z.string().describe('An id from a `search` result, e.g. "entity:char:brother-anselm" or "thread:...".'),
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ id }) => toolResult(await fetchTool(ctx, { id })),
@@ -956,7 +1111,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
               wish ? `The player wants: ${wish}` : 'Ask the player what kind of story they want.',
               '',
               'Then, in this order:',
-              world ? `1. switch_world to "${world}".` : '1. list_worlds, and ask which one — or use the one already open.',
+              world
+                ? `1. switch_world to "${world}".`
+                : '1. list_worlds, and ask which one — or use the one already open.',
               '2. list_stories. Open an existing book with switch_story, or create_story for a new one.',
               '3. get_state. If there is no player character, list_characters and then start_story.',
               '4. Play turns: propose_turn, write the prose from the frame it returns, then commit_narration',
