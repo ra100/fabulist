@@ -5,8 +5,9 @@
  * `serve.ts`), never mixed:
  *
  * - **OAuth** (`MCP_OAUTH_ISSUER` set): verifies a JWT against a real OAuth
- *   2.1 authorization server's published JWKS — AuthKit (WorkOS), or any
- *   other spec-compliant issuer. This is the only mode fit for a public,
+ *   2.1 authorization server's published JWKS, located by metadata discovery
+ *   (`MCP_OAUTH_JWKS_URI` overrides it) — AuthKit (WorkOS), or any other
+ *   spec-compliant issuer. This is the only mode fit for a public,
  *   multi-user deployment: the token's `sub` claim is a real, externally
  *   verified user identity, and the issuer (not this server) runs the whole
  *   authorization-code + Dynamic Client Registration dance the MCP spec
@@ -42,7 +43,11 @@ export interface McpAuth {
   /** Throws on a missing, malformed, expired, or wrong-audience token. Never returns a "maybe". */
   verify(authorizationHeader: string | undefined): Promise<VerifiedUser>;
   /** What `WWW-Authenticate` on a 401, and `/.well-known/oauth-protected-resource`, should point at. */
-  protectedResourceMetadata(resourceUrl: string): { resource: string; authorization_servers: string[]; bearer_methods_supported: string[] };
+  protectedResourceMetadata(resourceUrl: string): {
+    resource: string;
+    authorization_servers: string[];
+    bearer_methods_supported: string[];
+  };
   /** Human-readable, for the boot log — which mode is active and against what, so a misconfiguration is visible on startup rather than on the first 401. */
   describe(): string;
 }
@@ -109,11 +114,101 @@ function extractBearer(header: string | undefined): string {
 }
 
 /**
+ * Where to fetch the issuer's signing keys from, in preference order.
+ *
+ * An OAuth 2.1 authorization server publishes its `jwks_uri` in a metadata
+ * document; the *path that document lives at* is standardised, the JWKS path
+ * itself is not. AuthKit happens to serve keys at `/oauth2/jwks`, Keycloak at
+ * `/protocol/openid-connect/certs`, Authelia at `/jwks.json`, Authentik at
+ * `/jwks/`, Zitadel at `/oauth/v2/keys` — so anything that hardcodes one
+ * vendor's path verifies tokens from that vendor only. Discovery is the whole
+ * point: read the document, believe what it says.
+ *
+ * Both well-known suffixes are tried because the two specs that define this
+ * overlap: OIDC Discovery 1.0 (`openid-configuration`) and RFC 8414
+ * (`oauth-authorization-server`). So does the placement — a plain append is
+ * what OIDC specifies and what every issuer above answers on, while RFC 8414
+ * §3.1 inserts the well-known segment *before* the issuer's path component, so
+ * an issuer that has a path (a Keycloak realm, an AuthKit-style tenant path)
+ * gets both forms tried.
+ */
+function discoveryUrls(issuer: string): string[] {
+  let origin: string | undefined;
+  let path = '';
+  try {
+    const url = new URL(issuer);
+    origin = url.origin;
+    path = url.pathname.replace(/\/$/, '');
+  } catch {
+    // Not parseable as a URL — `jwtVerify`'s issuer check will reject every
+    // token anyway; still try the appended form rather than throwing here.
+  }
+  const urls: string[] = [];
+  for (const suffix of ['openid-configuration', 'oauth-authorization-server']) {
+    urls.push(`${issuer}/.well-known/${suffix}`);
+    if (origin && path) urls.push(`${origin}/.well-known/${suffix}${path}`);
+  }
+  return urls;
+}
+
+/**
+ * Resolves the issuer's `jwks_uri` by metadata discovery, falling back to
+ * AuthKit's `/oauth2/jwks` as a last resort.
+ *
+ * The fallback exists so that an issuer serving no metadata at all keeps
+ * working exactly as it did before discovery existed — this function never
+ * rejects, because "discovery failed" must degrade to the old behaviour rather
+ * than take down a deployment that was fine yesterday. It does say so loudly
+ * once, on the first verification, since the alternative is a puzzling 401.
+ *
+ * The `issuer` claimed by the metadata document is checked against the issuer
+ * we asked about (RFC 8414 §3.3): a document that names someone else is a
+ * mix-up, not a key source, and is skipped rather than trusted.
+ */
+async function discoverJwksUri(issuer: string): Promise<string> {
+  const reasons: string[] = [];
+  for (const url of discoveryUrls(issuer)) {
+    try {
+      const res = await fetch(url, { headers: { accept: 'application/json' } });
+      if (!res.ok) {
+        reasons.push(`${url}: HTTP ${res.status}`);
+        continue;
+      }
+      const doc = (await res.json()) as Record<string, unknown>;
+      const claimed = typeof doc.issuer === 'string' ? doc.issuer.replace(/\/$/, '') : undefined;
+      if (claimed && claimed !== issuer) {
+        reasons.push(`${url}: metadata names issuer ${claimed}`);
+        continue;
+      }
+      if (typeof doc.jwks_uri === 'string' && doc.jwks_uri) return doc.jwks_uri;
+      reasons.push(`${url}: no jwks_uri`);
+    } catch (err) {
+      reasons.push(`${url}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const fallback = `${issuer}/oauth2/jwks`;
+  console.warn(
+    `MCP auth: no authorization server metadata at ${issuer}, falling back to ${fallback} (${reasons.join('; ')})`,
+  );
+  return fallback;
+}
+
+/**
  * OAuth mode. `issuer` is the authorization server's base URL (e.g. an
- * AuthKit domain); its JWKS and metadata are fetched from the well-known
- * paths every OAuth 2.0 Authorization Server Metadata (RFC 8414) publisher
- * exposes, AuthKit included (confirmed directly against AuthKit's own docs,
- * not assumed of "any OAuth server").
+ * AuthKit domain, a Keycloak realm, an Authelia/Zitadel/Authentik root); its
+ * signing keys are found by discovery, from the well-known metadata path every
+ * OAuth 2.0 Authorization Server Metadata (RFC 8414) / OIDC Discovery
+ * publisher exposes — AuthKit included, so nothing about the previously
+ * verified AuthKit deployment changes except that the key URL is now read
+ * rather than assumed. `jwksUri` (from `MCP_OAUTH_JWKS_URI`) skips discovery
+ * entirely for an issuer that publishes no usable metadata.
+ *
+ * Discovery is one network round-trip and cannot happen at construction time,
+ * which is synchronous and runs at boot before anything is listening — so it
+ * happens on the first `verify` and is memoized from then on (as is
+ * `createRemoteJWKSet`'s own key cache, which is why the *set* is kept rather
+ * than just the URI). A failed resolution clears the memo so the next request
+ * retries instead of pinning a transient DNS blip for the process's lifetime.
  *
  * Exported directly, alongside `buildDevTokenAuth` below, rather than only
  * reachable through `buildMcpAuth`'s environment lookup, so
@@ -121,14 +216,28 @@ function extractBearer(header: string | undefined): string {
  * without threading values through `process.env` — the environment lookup
  * itself is one line (`buildMcpAuth`) and not worth its own test.
  */
-export function buildOAuthAuth(issuer: string, audience: string): McpAuth {
-  const jwks = createRemoteJWKSet(new URL(`${issuer.replace(/\/$/, '')}/oauth2/jwks`));
+export function buildOAuthAuth(issuer: string, audience: string, jwksUri?: string): McpAuth {
+  const base = issuer.replace(/\/$/, '');
   const verifyOpts: JWTVerifyOptions = { issuer, audience };
+  let jwksPromise: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
+
+  function resolveJwks(): Promise<ReturnType<typeof createRemoteJWKSet>> {
+    if (!jwksPromise) {
+      jwksPromise = (jwksUri ? Promise.resolve(jwksUri) : discoverJwksUri(base))
+        .then((uri) => createRemoteJWKSet(new URL(uri)))
+        .catch((err) => {
+          jwksPromise = undefined;
+          throw err;
+        });
+    }
+    return jwksPromise;
+  }
 
   return {
     async verify(header) {
       const token = extractBearer(header);
       try {
+        const jwks = await resolveJwks();
         const { payload } = await jwtVerify(token, jwks, verifyOpts);
         if (typeof payload.sub !== 'string' || !payload.sub) {
           throw new InvalidTokenError('token has no subject claim');
@@ -143,7 +252,8 @@ export function buildOAuthAuth(issuer: string, audience: string): McpAuth {
       return { resource: resourceUrl, authorization_servers: [issuer], bearer_methods_supported: ['header'] };
     },
     describe() {
-      return `MCP auth: OAuth, issuer=${issuer}, audience=${audience}`;
+      const keys = jwksUri ? `jwks=${jwksUri}` : 'jwks=discovered from issuer metadata';
+      return `MCP auth: OAuth, issuer=${issuer}, audience=${audience}, ${keys}`;
     },
   };
 }
@@ -186,7 +296,7 @@ export function buildMcpAuth(env: Record<string, string | undefined> = process.e
   const issuer = env.MCP_OAUTH_ISSUER;
   if (issuer) {
     const audience = env.MCP_OAUTH_AUDIENCE ?? issuer;
-    return buildOAuthAuth(issuer, audience);
+    return buildOAuthAuth(issuer, audience, env.MCP_OAUTH_JWKS_URI);
   }
   const devToken = env.MCP_DEV_TOKEN;
   if (devToken) {
