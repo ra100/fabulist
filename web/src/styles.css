@@ -1052,6 +1052,78 @@ hr {
   text-decoration: underline;
 }
 
+.private-storage-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--surface-2);
+  box-shadow: none;
+  color: var(--ink-3);
+  font-size: 10px;
+  letter-spacing: 0.025em;
+  white-space: nowrap;
+}
+.private-storage-indicator:hover {
+  border-color: var(--accent-line);
+  background: var(--accent-veil);
+  color: var(--ink);
+}
+.private-storage-indicator b {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+.private-storage-indicator-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ink-3);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ink-3) 18%, transparent);
+}
+.private-storage-indicator.unlocked .private-storage-indicator-dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ok) 20%, transparent);
+}
+.private-storage-indicator.setup .private-storage-indicator-dot,
+.private-storage-indicator.action .private-storage-indicator-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-veil);
+}
+.private-storage-indicator.error .private-storage-indicator-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--danger) 20%, transparent);
+}
+
+.private-storage-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-shrink: 0;
+  padding: 8px var(--s4);
+  border-bottom: 1px solid var(--accent-line);
+  background: var(--accent-veil);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+.private-storage-banner p {
+  flex: 1;
+  margin: 0;
+  line-height: 1.45;
+}
+.private-storage-banner button {
+  flex: none;
+  padding: 5px 10px;
+}
+.private-storage-banner.error {
+  border-bottom-color: var(--danger-line);
+  background: var(--danger-surface);
+  color: var(--danger-ink);
+}
+
 .main {
   flex: 1;
   min-height: 0;
@@ -2606,6 +2678,7 @@ button.link:hover { background: none; color: var(--ink); }
      glance costs nothing a user cannot still get from tapping it, but
      losing the ability to sign out at all on a phone would. */
   .account-who { display: none; }
+  .private-storage-indicator-name { display: none; }
 
   /* The composer's action row: hint copy plus two buttons on one line was
      already tight at 375px and overlapping by 320px. The hint takes the
