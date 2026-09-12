@@ -221,3 +221,26 @@ test('split scene derives historical PostgreSQL grouping and rejects invalid tar
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('PostgreSQL split rejects initial and raw-scene boundaries', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'split-boundaries');
+    const storyId = await makeStory(db, 'split-boundaries-story', [worldId]);
+    const world = await World.forStory(db, storyId);
+    const first = (await commitTurn(db, world, { ...turnInput(1), delta: emptyDelta() })).turn;
+    await world.session.set({ scene: 2, turn: 0 });
+    const second = (await commitTurn(db, world, { ...turnInput(1), delta: emptyDelta() })).turn;
+    const before = Number((await db.one<{ n: string }>(
+      `SELECT count(*) n FROM scene_segments WHERE story_id = $1`, [storyId],
+    ))!.n);
+
+    assert.equal(await world.history.startsScene(first.id), true);
+    assert.equal(await world.history.startsScene(second.id), true);
+    await assert.rejects(() => splitSceneAtTurn(world, first.id), /already starts a scene/);
+    await assert.rejects(() => splitSceneAtTurn(world, second.id), /already starts a scene/);
+    assert.equal(Number((await db.one<{ n: string }>(
+      `SELECT count(*) n FROM scene_segments WHERE story_id = $1`, [storyId],
+    ))!.n), before);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});

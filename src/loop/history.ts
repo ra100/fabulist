@@ -7,6 +7,7 @@ const DEFAULT_CHAPTER_SIZE = 8;
 export function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SIZE): StoryLayout {
   const turns = world.chronicle.turns({ limit: 5000 });
   const eligible = new Map(world.history.eligibleTurns().map((turn) => [turn.turnId, turn]));
+  const segmentStarts = new Set(world.history.sceneStartPositions());
   turns.sort((left, right) => {
     const leftPosition = eligible.get(left.id)?.position;
     const rightPosition = eligible.get(right.id)?.position;
@@ -19,7 +20,7 @@ export function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SIZE): S
   const layoutTurns: StoryLayoutTurn[] = [];
   for (const source of turns) {
     const history = eligible.get(source.id);
-    const boundary = history ? world.history.startsScene(source.id) : false;
+    const boundary = history ? segmentStarts.has(history.position) : false;
     const startsScene = layoutTurns.length === 0 || previousRawScene !== source.scene || (boundary && layoutTurns.length > 0);
     if (startsScene) scene += 1;
     layoutTurns.push({
@@ -42,6 +43,15 @@ export function splitSceneAtTurn(world: World, turnId: string) {
     world.session.set({ scene: layout.currentScene, turn: last?.turn ?? 0 });
     return split;
   });
+}
+
+export function reconcileContinuation(world: World): void {
+  const layout = storyLayout(world);
+  const last = layout.turns.at(-1);
+  world.session.set({ scene: layout.currentScene, turn: last?.turn ?? 0 });
+  world.db
+    .prepare(`UPDATE stories SET active_scene_segment_id = ? WHERE id = ?`)
+    .run(last?.position == null ? null : world.history.activeSegmentAt(last.position), world.storyId);
 }
 
 /** Records an immutable post-authoring snapshot without replacing a turn checkpoint. */

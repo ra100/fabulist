@@ -11,6 +11,7 @@ import { seedWorld } from '../src/seed/verrow.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine.ts';
+import { splitSceneAtTurn } from '../src/loop/history.ts';
 import { createApiServer } from '../src/server/api.ts';
 import type { AuthConfig } from '../src/auth/config.ts';
 import { SESSION_COOKIE } from '../src/auth/config.ts';
@@ -368,6 +369,28 @@ test('the book endpoint returns both registers per turn', async () => {
     assert.equal(turns.length, 1);
     assert.match(turns[0]!.rawInput, /fetch water/, 'the note survives');
     assert.ok(turns[0]!.bookProse.length > 0, 'and the prose exists alongside it');
+  });
+
+  test('book and timeline expose split turns in their derived scenes', async () => {
+    await withServer(async (base, world) => {
+      for (let turn = 0; turn < 4; turn++) await send(base, 'POST', '/api/play', { input: `i act ${turn}` });
+      const turns = world.chronicle.turns();
+      splitSceneAtTurn(world, turns[2]!.id);
+
+      const book = (await get(base, '/api/book')).body as {
+        turns: Array<{ id: string; scene: number; chapter: number; eligible: boolean; startsScene: boolean }>;
+      };
+      assert.deepEqual(book.turns.map(({ scene }) => scene), [1, 1, 2, 2]);
+      assert.equal(book.turns[2]?.startsScene, true);
+      assert.ok(book.turns.every((turn) => turn.eligible));
+
+      const timeline = (await get(base, '/api/timeline')).body as {
+        currentScene: number; scenes: Array<{ scene: number; chapter: number; turnCount: number; eligibleTurnCount: number }>;
+      };
+      assert.equal(timeline.currentScene, 2);
+      assert.deepEqual(timeline.scenes.filter((scene) => scene.turnCount).map((scene) => [scene.scene, scene.turnCount]), [[1, 2], [2, 2]]);
+      assert.deepEqual(timeline.scenes.filter((scene) => scene.turnCount).map((scene) => scene.eligibleTurnCount), [2, 2]);
+    });
   });
 });
 
