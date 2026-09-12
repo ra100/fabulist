@@ -1,4 +1,4 @@
-import type { StoryLayout, StoryLayoutTurn } from '../domain/types.ts';
+import type { SceneSplitResult, StoryLayout, StoryLayoutTurn } from '../domain/types.ts';
 import { tx } from '../db/db.ts';
 import type { World } from '../store/index.ts';
 
@@ -37,11 +37,12 @@ export function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SIZE): S
   return { turns: layoutTurns, currentScene: Math.max(scene, world.session.get().scene) };
 }
 
-export function splitSceneAtTurn(world: World, turnId: string) {
+export function splitSceneAtTurn(world: World, turnId: string): SceneSplitResult {
   return tx(world.db, () => {
     const split = world.history.splitBefore(turnId);
     const layout = storyLayout(world);
-    const target = layout.turns.find((turn) => turn.turnId === turnId)!;
+    const target = layout.turns.find((turn) => turn.turnId === turnId);
+    if (!target) throw new Error(`split_scene: committed turn ${turnId} disappeared during split`);
     const affectedScene = Math.max(1, target.scene - 1);
     world.chronicle.invalidateSummariesFrom(affectedScene, Math.floor((affectedScene - 1) / DEFAULT_CHAPTER_SIZE) + 1);
     // A raw-scene summary can span the newly split child. It has no safe
@@ -50,7 +51,16 @@ export function splitSceneAtTurn(world: World, turnId: string) {
     world.db.prepare(`UPDATE scenes SET title = '', summary = '' WHERE story_id = ?`).run(world.storyId);
     const last = layout.turns.at(-1);
     world.session.set({ scene: layout.currentScene, turn: last?.turn ?? 0 });
-    return split;
+    return {
+      ...split,
+      target: {
+        turnId: target.turnId,
+        scene: target.scene,
+        chapter: target.chapter,
+        turn: target.turn,
+        startsScene: target.startsScene,
+      },
+    };
   });
 }
 

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { jsonGet, row, rows, tx, type Db } from '../db/db.ts';
-import type { EligibleTurn, HistoryCheckpoint, SceneSplit, StoryId, StorySnapshot } from '../domain/types.ts';
+import { SceneSplitTargetError, type EligibleTurn, type HistoryCheckpoint, type SceneSplit, type StoryId, type StorySnapshot } from '../domain/types.ts';
 
 const TABLES = [
   'entities',
@@ -320,11 +320,11 @@ export class HistoryStore {
       const stored = row<{ history_position: number | null }>(
         this.db.prepare(`SELECT history_position FROM turns WHERE id = ? AND story_id = ?`).get(turnId, this.storyId),
       );
-      if (!stored) throw new Error(`split_scene: unknown turn ${turnId}`);
-      if (stored.history_position == null) throw new Error(`split_scene: turn ${turnId} is legacy and has no exact history`);
+      if (!stored) throw new SceneSplitTargetError(`split_scene: unknown turn ${turnId}`);
+      if (stored.history_position == null) throw new SceneSplitTargetError(`split_scene: turn ${turnId} is legacy and has no exact history`);
       const eligible = this.eligibleTurn(turnId);
-      if (!eligible) throw new Error(`split_scene: turn ${turnId} has no exact history checkpoint`);
-      if (this.startsScene(turnId)) throw new Error(`turn ${turnId} already starts a scene`);
+      if (!eligible) throw new SceneSplitTargetError(`split_scene: turn ${turnId} has no exact history checkpoint`);
+      if (this.startsScene(turnId)) throw new SceneSplitTargetError(`turn ${turnId} already starts a scene`);
       const id = `segment:${randomUUID()}`;
       this.db
         .prepare(`INSERT INTO scene_segments (id, story_id, start_position, created_at) VALUES (?,?,?,?)`)

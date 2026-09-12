@@ -9,6 +9,7 @@ import {
   knowledgeBodySchema,
   playResponseSchema,
   rollbackBodySchema,
+  splitSceneBodySchema,
   setupPreviewBodySchema,
   sheetBodySchema,
   stateResponseSchema,
@@ -26,6 +27,10 @@ test('mutation contracts reject unknown fields and invalid nested values', () =>
     illustrationBodySchema.safeParse({ visualStyle: 'oil-painting' }),
     forkStoryBodySchema.safeParse({ atScene: -1 }),
     rollbackBodySchema.safeParse({ scene: 1, chapter: 2 }),
+    rollbackBodySchema.safeParse({}),
+    rollbackBodySchema.safeParse({ scene: 1, turnId: 'turn:2' }),
+    splitSceneBodySchema.safeParse({}),
+    splitSceneBodySchema.safeParse({ turnId: 'turn:2', scene: 1 }),
     storySourcesBodySchema.safeParse({ slugs: [] }),
     worldAccessBodySchema.safeParse({ userId: 'user:a', role: 'writer' }),
     setupPreviewBodySchema.safeParse({ baseUrl: 'not a url', seeds: ['start'] }),
@@ -50,6 +55,11 @@ test('mutation contracts preserve documented defaults and valid clients', () => 
     seeds: ['Start'],
   });
   assert.deepEqual(illustrationBodySchema.parse({}), {});
+  assert.deepEqual(rollbackBodySchema.parse({ turnId: 'turn:2', mode: 'destructive' }), {
+    turnId: 'turn:2',
+    mode: 'destructive',
+  });
+  assert.deepEqual(splitSceneBodySchema.parse({ turnId: 'turn:2' }), { turnId: 'turn:2' });
   assert.equal(encryptionEnrollmentBodySchema.safeParse({
     userKey: {
       version: 1,

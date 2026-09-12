@@ -38,6 +38,8 @@ ${BOLD}commands${RESET}
   /scene                close the current scene and summarise it
   /compact              summarise any scene that closed unsummarised
   /branch <n> <file>    fork the save at scene n, leaving this one intact
+  /rollback-turn <turn-id> safely fork, retaining this committed turn and removing its later history
+  /split-scene <turn-id> begin a real new scene at this eligible committed turn
   /save                 flush to disk
   /quit
 Anything else is played as your character.
@@ -337,6 +339,38 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
         console.log(`${DIM}branched at scene ${atScene} -> ${res.path}${RESET}`);
         console.log(`  ${DIM}discarded ${res.removed.turns} turn(s), ${res.removed.events} event(s), ${res.removed.consequences} consequence(s); restored ${res.removed.retiredEdgesRestored} relation(s)${RESET}`);
         console.log(`  ${DIM}this session is untouched${RESET}`);
+      } catch (err) {
+        console.log(`${YELLOW}${err instanceof Error ? err.message : String(err)}${RESET}`);
+      }
+      return true;
+    }
+    case 'rollback-turn': {
+      if (!arg) {
+        console.log(`${DIM}usage: /rollback-turn <turn-id>${RESET}`);
+        return true;
+      }
+      try {
+        const { rollback } = await import('../loop/branch.ts');
+        const result = rollback(world, { turnId: arg });
+        console.log(`${DIM}retained turn ${result.toTurnId} at scene ${result.toScene}.${RESET}`);
+        if (result.forkedStory) {
+          console.log(`  ${DIM}created safe fork "${result.forkedStory.title}" (${result.forkedStory.id}); this session remains on the original story.${RESET}`);
+        }
+      } catch (err) {
+        console.log(`${YELLOW}${err instanceof Error ? err.message : String(err)}${RESET}`);
+      }
+      return true;
+    }
+    case 'split-scene': {
+      if (!arg) {
+        console.log(`${DIM}usage: /split-scene <turn-id>${RESET}`);
+        return true;
+      }
+      try {
+        const { splitSceneAtTurn } = await import('../loop/history.ts');
+        const split = splitSceneAtTurn(world, arg);
+        const { target } = split;
+        console.log(`${DIM}scene ${target.scene} now begins at retained turn ${split.turnId} (chapter ${target.chapter}, turn ${target.turn}).${RESET}`);
       } catch (err) {
         console.log(`${YELLOW}${err instanceof Error ? err.message : String(err)}${RESET}`);
       }

@@ -283,6 +283,103 @@ test('a turn plays over HTTP and persists', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('PostgreSQL rollback and split endpoints enforce exact turn target contracts', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(db, async (base, world) => {
+      await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+      await send(base, 'POST', '/api/play', { input: 'i check the door' });
+      await send(base, 'POST', '/api/play', { input: 'i hide the psalter' });
+      const turns = await world.chronicle.turns();
+      const target = turns[1]!;
+
+      const rollback = await send(base, 'POST', '/api/rollback', { turnId: target.id });
+      assert.equal(rollback.status, 200);
+      assert.equal(rollback.body.mode, 'fork');
+      assert.equal(rollback.body.toTurnId, target.id);
+      assert.equal((await world.chronicle.turns()).length, 3, 'the source remains intact');
+      const fork = await World.forStory(db, rollback.body.story.id);
+      assert.equal((await fork.chronicle.turns()).length, 2, 'the selected turn is retained');
+
+      const split = await send(base, 'POST', '/api/scene/split', { turnId: target.id });
+      assert.equal(split.status, 200);
+      assert.equal(split.body.startsAtTurnId, target.id);
+      assert.equal(split.body.scene, 2);
+      assert.equal(split.body.startsScene, true);
+      assert.equal(split.body.target, undefined, 'the public response contract does not expose internal transaction metadata');
+      assert.equal((await send(base, 'POST', '/api/scene/split', { turnId: target.id })).status, 400);
+      assert.equal((await send(base, 'POST', '/api/scene/split', { turnId: 'turn:unknown' })).status, 400);
+      assert.equal((await send(base, 'POST', '/api/scene/split', { turnId: '' })).status, 400);
+      const missing = turns[2]!;
+      await db.query(`DELETE FROM history_checkpoints WHERE story_id = $1 AND turn_id = $2`, [world.storyId, missing.id]);
+      assert.equal((await send(base, 'POST', '/api/scene/split', { turnId: missing.id })).status, 400);
+      assert.equal((await send(base, 'POST', '/api/rollback', { scene: 1, turnId: target.id })).status, 400);
+      assert.equal((await send(base, 'POST', '/api/rollback', {})).status, 400);
+      assert.equal((await send(base, 'POST', '/api/rollback', { turnId: '' })).status, 400);
+      assert.equal((await send(base, 'POST', '/api/rollback', { turnId: 'turn:unknown', mode: 'destructive' })).status, 400);
+      assert.equal((await send(base, 'POST', '/api/rollback', { turnId: missing.id, mode: 'destructive' })).status, 400);
+      assert.equal((await send(base, 'POST', '/api/rollback', { scene: 99, mode: 'destructive' })).status, 400);
+
+      const legacy = await world.chronicle.addTurn({
+        scene: 2,
+        turn: 99,
+        rawInput: 'legacy turn',
+        intent: null,
+        delta: null,
+        bookProse: 'Legacy prose.',
+        pinned: false,
+        meta: { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] },
+      });
+      const legacyTarget = await send(base, 'POST', '/api/scene/split', { turnId: legacy.id });
+      assert.equal(legacyTarget.status, 400);
+      assert.match(legacyTarget.body.error, /legacy/);
+      const legacyRollback = await send(base, 'POST', '/api/rollback', { turnId: legacy.id, mode: 'destructive' });
+      assert.equal(legacyRollback.status, 400);
+      assert.match(legacyRollback.body.error, /legacy/);
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL rollback surfaces unexpected checkpoint restore errors as 500', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(db, async (base, world) => {
+      await send(base, 'POST', '/api/play', { input: 'i warm the ink' });
+      const target = (await world.chronicle.turns())[0]!;
+      const originalRestoreTurn = HistoryStore.prototype.restoreTurn;
+      HistoryStore.prototype.restoreTurn = async () => {
+        throw new Error('rollback persistence failed');
+      };
+      try {
+        const failed = await send(base, 'POST', '/api/rollback', { turnId: target.id, mode: 'destructive' });
+        assert.equal(failed.status, 500);
+        assert.match(failed.body.error, /rollback persistence failed/);
+      } finally {
+        HistoryStore.prototype.restoreTurn = originalRestoreTurn;
+      }
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL scene split endpoint surfaces unexpected persistence errors as 500', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(db, async (base) => {
+      const originalSplitBefore = HistoryStore.prototype.splitBefore;
+      HistoryStore.prototype.splitBefore = async () => {
+        throw new Error('split persistence failed');
+      };
+      try {
+        const failed = await send(base, 'POST', '/api/scene/split', { turnId: 'turn:any' });
+        assert.equal(failed.status, 500);
+        assert.match(failed.body.error, /split persistence failed/);
+      } finally {
+        HistoryStore.prototype.splitBefore = originalSplitBefore;
+      }
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('REST authoring writes and regenerate roll back when checkpoint capture fails', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(db, async (base, world, _setup, engine) => {

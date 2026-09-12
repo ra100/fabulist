@@ -1,6 +1,6 @@
 import type { Db } from '../db/pg.ts';
 import type { Engine } from './engine-pg.ts';
-import type { StoryLayout, StoryLayoutTurn } from '../domain/types.ts';
+import type { SceneSplitResult, StoryLayout, StoryLayoutTurn } from '../domain/types.ts';
 import { World } from '../store/index-pg.ts';
 
 const DEFAULT_CHAPTER_SIZE = 8;
@@ -39,11 +39,12 @@ export async function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SI
   return { turns: layoutTurns, currentScene: Math.max(scene, session.scene) };
 }
 
-export async function splitSceneAtTurn(world: World, turnId: string) {
+export async function splitSceneAtTurn(world: World, turnId: string): Promise<SceneSplitResult> {
   const apply = async (transactionWorld: World) => {
     const split = await transactionWorld.history.splitBefore(turnId);
     const layout = await storyLayout(transactionWorld);
-    const target = layout.turns.find((turn) => turn.turnId === turnId)!;
+    const target = layout.turns.find((turn) => turn.turnId === turnId);
+    if (!target) throw new Error(`split_scene: committed turn ${turnId} disappeared during split`);
     const affectedScene = Math.max(1, target.scene - 1);
     await transactionWorld.chronicle.invalidateSummariesFrom(
       affectedScene, Math.floor((affectedScene - 1) / DEFAULT_CHAPTER_SIZE) + 1,
@@ -56,7 +57,16 @@ export async function splitSceneAtTurn(world: World, turnId: string) {
     await transactionWorld.db.query(`UPDATE scenes SET title = '', summary = '' WHERE story_id = $1`, [transactionWorld.storyId]);
     const last = layout.turns.at(-1);
     await transactionWorld.session.set({ scene: layout.currentScene, turn: last?.turn ?? 0 });
-    return split;
+    return {
+      ...split,
+      target: {
+        turnId: target.turnId,
+        scene: target.scene,
+        chapter: target.chapter,
+        turn: target.turn,
+        startsScene: target.startsScene,
+      },
+    };
   };
   const database = world.db as Db;
   if (typeof database.tx !== 'function') return apply(world);
