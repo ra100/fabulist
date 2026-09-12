@@ -1308,10 +1308,10 @@ function normaliseName(name: string): string {
     .replace(/^(the|a|an)\s+/, '');
 }
 
-function normaliseLogicalId(id: string): string {
+export function normaliseLogicalId(id: string): string {
   return id.trim().toLowerCase() || '\u0000';
 }
 
-function normaliseNameForIndex(name: string): string {
+export function normaliseNameForIndex(name: string): string {
   return normaliseName(name) || '\u0000';
 }

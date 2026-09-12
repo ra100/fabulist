@@ -1,8 +1,14 @@
 # Private stories: encrypting user data so the operator cannot read it
 
-Design, not yet built. Companion to `.design/SAAS-MULTIUSER.md` (which established
-identity and per-user isolation as a `WHERE owner_user_id = $1` predicate) and
-`docs/privacy-policy.md` §5 (which currently promises isolation *by policy*).
+Design and pilot implementation record. Companion to `.design/SAAS-MULTIUSER.md`
+(which established identity and per-user isolation as a
+`WHERE owner_user_id = $1` predicate) and `docs/privacy-policy.md` §5.
+
+The pilot implements passphrase/recovery enrollment, process-memory story-key
+grants, encrypted story values and illustration files, per-story blind indexes,
+and an explicit verified migration. Existing stories remain plaintext until
+their owner runs that migration. Creating, claiming, forking, or resetting stories after enrollment is blocked
+until browser-side key provisioning for a new story is implemented.
 
 The goal, stated as the feature request did: **the operator of a deployment —
 holding a database dump, the server filesystem, and root on the box — must not be
@@ -29,13 +35,13 @@ So there are exactly two honest positions:
 
 | | Server sees plaintext | Cost |
 |---|---|---|
-| **A. Encrypted at rest** | transiently, in RAM, only while generating a turn | modest; engine keeps working |
+| **A. Encrypted at rest** | transiently, in RAM, while an unlocked request is handled | modest; engine keeps working |
 | **B. Zero-knowledge** | never | frame assembly + provider calls move to the client; forces per-user BYOK |
 
 **This document specifies A.** A DB dump, a filesystem snapshot, a stolen backup,
-and idle `psql` access all yield nothing readable. A live process handling a turn
-holds that story's key and prose in memory for the duration of the turn, and
-writes neither.
+and idle `psql` access all yield nothing readable. A live process handling an
+unlocked request holds that story's key and requested plaintext in memory for the
+duration of the grant/request, and writes neither.
 
 B is not ruled out forever — the `narrateExternally` split
 (`src/loop/engine-pg.ts:355-374`, `:520-557`) already proves the server can hand
@@ -48,22 +54,20 @@ changing. Making the server blind does. Note also that the existing split still
 sends the whole prompt — including the last six turns verbatim — out to a
 third-party model, so it moves the trust, it does not remove it.
 
-### 1.1 Reads do not need the server at all
+### 1.1 Pilot processing grant
 
-This is the refinement that makes A much stronger than "column encryption."
+The selected pilot favors one consistent browser/API/MCP model over separate
+client-side read decryption. The browser unwraps every story key locally and
+sends those random keys once over HTTPS. The server keeps an owner/story-scoped
+grant in process memory for at most four hours and uses it for reads and writes.
+Lock, logout, expiry, or process restart clears the grant.
 
-The turn loop needs plaintext. **Reading the book does not.** `GET /api/book`,
-`/api/state`, `/api/timeline`, `/api/facts`, `/api/anchors` and the story library
-are pure retrieval, and the browser can decrypt them itself. So:
-
-- **All reads:** server returns ciphertext, client decrypts. The server never
-  holds the plaintext or the key.
-- **The turn path only** (`POST /api/play/stream`, plus scene close, regenerate
-  and illustration): the client sends the story key with the request, the server
-  uses it in memory, and never persists it.
-
-The transient-plaintext window is therefore not "whenever the app is used." It is
-one route family, only while a turn is in flight.
+This means the server sees plaintext while an unlocked story is read or
+processed, not only during generation. It does not persist the key or plaintext,
+and a locked story fails closed. This is weaker than the client-only read model
+previously considered here, but matches the stated threat model: protect
+database dumps, backups, filesystem snapshots, and idle operator access while
+accepting transient backend processing.
 
 ---
 
@@ -889,20 +893,24 @@ key material only, keyed by the WorkOS user id.
 handoff on the turn path; `meta` split (§4.1); client-side export (§6.3). This is
 the bulk of the manuscript and the bulk of the value.
 
-**Stage 3 — the graph.** `chron_entities`, `chron_sheets`, the `name_bidx` blind
-index, opaque emergent ids, `resolveName` rework, chronicle search moved client
-side. The riskiest stage: `resolveName` failing quietly means dropped edges, and
-`commit-pg.ts` is where it bites. Land it behind the per-story flag with the
-overlay tests extended to an encrypted story.
+**Stage 3 — the graph.** `chron_entities`, `chron_sheets`, and per-story keyed
+blind indexes for normalized name and logical-id lookup. Stable entity ids remain
+plaintext structural references; the accepted residual leakage is intra-story
+equality/frequency plus graph shape. The lookup token is an HMAC under the random
+story key, never a raw or unkeyed hash.
 
 **Stage 4 — illustrations.** Encrypt prompts and image bytes at rest, fetch as
 ciphertext, render via object URL, drop the immutable cache header (§6.3).
 
-**Stage 5 — migration of existing stories.** Client-driven, per story, resumable:
-pull plaintext, encrypt, push envelopes, verify by reading back and comparing,
-then clear the plaintext columns in one transaction. Never delete plaintext before
-a verified read-back. Unencrypted stories keep working forever — a mixed fleet is
-the permanent steady state, not a transition.
+**Stage 5 — migration of existing stories.** Explicit, owner-wide, and resumable.
+The browser must unlock every owned story first. The server encrypts each value
+under that story's key, verifies the persisted envelope, then clears the legacy
+column. Illustration files use an atomic encrypted-file write and verification
+before the plaintext file is removed. The legacy prose blocklist is user-wide,
+so verified per-story copies are created for every owned story before its shared
+plaintext rows are deleted. Durable checkpoints block browser and MCP content
+access after any partial failure; every story moves to version 1 only in the
+final successful transaction.
 
 **Stage 6 — documentation.** `docs/privacy-policy.md` §5 currently says story
 content is "never shown to another user"; it should say what is now
