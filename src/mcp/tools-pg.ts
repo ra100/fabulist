@@ -769,8 +769,10 @@ export async function updateSheetTool(
   },
 ) {
   const world = await ctx.world();
-  const existing = await world.cast.get(args.id);
-  if (!existing) throw new Error(`update_sheet: no sheet ${args.id}`);
+  const entity = await world.graph.get(args.id);
+  if (!entity) throw new Error(`update_sheet: no entity ${args.id}`);
+  if (entity.type !== 'Character') throw new Error(`update_sheet: ${args.id} is not a character`);
+  const existing = await world.cast.getOrBlank(args.id);
   await world.cast.put({
     ...existing,
     identity: (args.identity as unknown as typeof existing.identity) ?? existing.identity,

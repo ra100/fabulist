@@ -612,9 +612,26 @@ test('updateSheetTool edits identity/voice/condition without touching appearance
   world.close();
 });
 
-test('updateSheetTool throws a clear error for an unknown sheet', () => {
+test('updateSheetTool creates a blank sheet for an existing character entity', () => {
   const { world, ctx } = setup();
-  assert.throws(() => updateSheetTool(ctx, { id: 'char:nobody' }), /no sheet/);
+  upsertEntityTool(ctx, { id: 'char:aiu-7', type: 'Character', name: 'AIU-7' });
+
+  const out = updateSheetTool(ctx, {
+    id: 'char:aiu-7',
+    identity: { goals: ['protect Lyera'] },
+    voice: { diction: 'precise and spare' },
+  });
+
+  assert.deepEqual(out?.identity.goals, ['protect Lyera']);
+  assert.equal(out?.voice.diction, 'precise and spare');
+  assert.deepEqual(out?.condition.injuries, []);
+  assert.deepEqual(world.cast.get('char:aiu-7'), out);
+  world.close();
+});
+
+test('updateSheetTool throws a clear error for an unknown entity', () => {
+  const { world, ctx } = setup();
+  assert.throws(() => updateSheetTool(ctx, { id: 'char:nobody' }), /no entity/);
   world.close();
 });
 
