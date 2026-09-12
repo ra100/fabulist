@@ -56,12 +56,13 @@ Implemented and verified — not just the plan below, real code with real tests:
   unauthenticated. Verified against a real local JWKS server and real signed JWTs
   (`test/mcp-auth.test.ts`, 13 tests: right issuer, wrong issuer, wrong audience,
   expired, missing subject claim, all independently checked).
-- **`src/mcp/server.ts`**: wraps `tools.ts` in the official
-  `@modelcontextprotocol/sdk`'s `McpServer` + `StreamableHTTPServerTransport`, one
-  fresh instance per request (stateless mode — this server's actual state is the
-  SQLite world files and the engine's own pending-narration map, not an MCP
-  session). Verifies the bearer token before the SDK ever sees the request; the
-  verified user id flows into every tool call via `extra.authInfo`.
+- **`src/mcp/server.ts` / `src/mcp/server-pg.ts`**: wrap the tools in the official
+  `@modelcontextprotocol/sdk`'s `McpServer` + `StreamableHTTPServerTransport`.
+  PostgreSQL production retains the initialized server/transport by its random
+  `Mcp-Session-Id`, because ChatGPT separates initialization and schema discovery
+  from later tool calls. Sessions expire after four idle hours and remain bound to
+  the bearer token's verified subject. The bearer token is still verified before
+  the SDK sees every request.
 - **`src/server/api.ts` / `src/cli/serve.ts`**: `/mcp` and
   `/.well-known/oauth-protected-resource` mounted only when `mcpAuth` *and* a real,
   externally-reachable `mcpResourceUrl` are both present. `serve.ts` refuses to guess
@@ -175,7 +176,8 @@ opt in, the current spec (`2025-06-18`) is specific and non-trivial:
   Claude or ChatGPT register itself as an OAuth client against your server the first
   time a user connects, with no manual "create an OAuth app" step on either side.
 - Every request carries `Authorization: Bearer <token>`, checked on every call, no
-  session-cookie shortcut — MCP is stateless-per-request by design here.
+  browser-session shortcut. The MCP session id correlates protocol lifecycle
+  requests; it never replaces bearer authentication.
 
 None of this is exotic — it's a documented, well-trodden OAuth 2.1 flow, and there are
 small libraries for exactly this (`@modelcontextprotocol/sdk`'s auth helpers, or
@@ -408,4 +410,3 @@ Independent of `SAAS-MULTIUSER.md` Phases 2–4 (BYOK provider config, sharing,
 mobile) entirely — those are about the hosted web UI; this channel has no UI and
 no billing to speak of, since the chat client's own subscription absorbs the LLM
 cost and this project charges nothing regardless.
-
