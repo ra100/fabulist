@@ -36,6 +36,7 @@ import { createApiServer } from '../src/server/api-pg.ts';
 import { buildMcpAuth } from '../src/mcp/auth.ts';
 import type { Db } from '../src/db/pg.ts';
 import { SESSION_COOKIE, type SessionUser } from '../src/auth/config.ts';
+import { HistoryStore } from '../src/store/history-pg.ts';
 
 const MCP_DEV_TOKEN = 'pg-api-mcp-secret';
 
@@ -49,7 +50,7 @@ const MCP_DEV_TOKEN = 'pg-api-mcp-secret';
  */
 async function withServer(
   db: Db,
-  fn: (base: string, world: World, setup: SetupService) => Promise<void>,
+  fn: (base: string, world: World, setup: SetupService, engine: Engine) => Promise<void>,
   opts: { seed?: boolean; wikiFetcher?: SetupServiceOptions['wikiFetcher']; mcp?: boolean } = {},
 ): Promise<void> {
   const worldId = await makeWorld(db, 'verrow', 'Saint Verrow');
@@ -76,7 +77,7 @@ async function withServer(
   await listen(server);
   const { port } = server.address() as AddressInfo;
   try {
-    await fn(`http://127.0.0.1:${port}`, world, setup);
+    await fn(`http://127.0.0.1:${port}`, world, setup, engine);
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
   }
@@ -228,14 +229,71 @@ test('a turn plays over HTTP and persists', async (t) => {
       assert.ok(checkpoint, 'a committed turn receives an exact history checkpoint');
       const style = await send(base, 'PUT', '/api/style', { register: 'plain' });
       assert.equal(style.status, 200);
+      const sheet = await send(base, 'PUT', '/api/sheet/char:brother-anselm', { condition: { mood: 'alert' } });
+      assert.equal(sheet.status, 200);
+      assert.equal(sheet.body.condition.mood, 'alert');
       assert.deepEqual(
         await world.history.checkpointForTurn(turns[0]!.id),
         checkpoint,
         'authoring checkpoints do not replace turn checkpoints',
       );
+      const checkpoints = await db.one<{ count: string }>(
+        `SELECT count(*) AS count FROM history_checkpoints WHERE story_id = $1`,
+        [world.storyId],
+      );
+      assert.equal(Number(checkpoints?.count), 4, 'turn, post-play, REST style, and REST sheet writes each checkpoint exactly once');
       const book = await get(base, '/api/book?limit=5');
       assert.equal(book.body.turns.length, 1);
       assert.equal(book.body.turns[0].bookProse, played.body.outcome.prose);
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('REST authoring writes and regenerate roll back when checkpoint capture fails', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(db, async (base, world, _setup, engine) => {
+      const unknown = await send(base, 'POST', '/api/turn/turn%3Adoes-not-exist/regenerate', {});
+      assert.equal(unknown.status, 404);
+      const styleBefore = (await world.session.get()).style;
+      const originalCapture = HistoryStore.prototype.capture;
+      HistoryStore.prototype.capture = async function () {
+        throw new Error('checkpoint persistence failed');
+      };
+      try {
+        const failedStyle = await send(base, 'PUT', '/api/style', { register: 'plain' });
+        assert.equal(failedStyle.status, 500);
+      } finally {
+        HistoryStore.prototype.capture = originalCapture;
+      }
+      assert.deepEqual((await world.session.get()).style, styleBefore, 'the style mutation is rolled back with its checkpoint');
+
+      const played = await send(base, 'POST', '/api/play', { input: 'i warm the ink and keep copying' });
+      assert.equal(played.status, 200);
+      const turn = (await world.chronicle.turns())[0]!;
+      const originalProse = turn.bookProse;
+      const pinned = await send(base, 'POST', `/api/turn/${turn.id}/pin`, { pinned: true });
+      assert.equal(pinned.status, 200);
+      const refusedPinned = await send(base, 'POST', `/api/turn/${turn.id}/regenerate`, {});
+      assert.equal(refusedPinned.status, 409);
+      await send(base, 'POST', `/api/turn/${turn.id}/pin`, { pinned: false });
+      const originalRegenerate = engine.regenerateProse.bind(engine);
+      engine.regenerateProse = async (turnId, options = {}) => {
+        const transactionWorld = options.world!;
+        await transactionWorld.chronicle.setProse(turnId, 'this prose must be rolled back');
+        return (await transactionWorld.chronicle.getTurn(turnId))!;
+      };
+      HistoryStore.prototype.capture = async function () {
+        throw new Error('checkpoint persistence failed');
+      };
+      try {
+        const failedRegenerate = await send(base, 'POST', `/api/turn/${turn.id}/regenerate`, {});
+        assert.equal(failedRegenerate.status, 500, 'checkpoint persistence failures are not reported as missing turns');
+      } finally {
+        HistoryStore.prototype.capture = originalCapture;
+        engine.regenerateProse = originalRegenerate;
+      }
+      assert.equal((await world.chronicle.getTurn(turn.id))?.bookProse, originalProse, 'the prose mutation rolls back with capture');
     });
   });
   if (!ran) t.skip('no Postgres configured');

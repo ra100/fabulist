@@ -265,6 +265,28 @@ test('authoring checkpoints preserve the committed turn checkpoint', async () =>
   world.close();
 });
 
+test('regenerate rolls back prose when SQLite checkpoint capture fails', async () => {
+  const { world, ctx, engine } = setup();
+  const outcome = await engine.takeTurn('i warm the ink and keep copying');
+  if (outcome.kind !== 'narrated') throw new Error(`expected a narrated turn, received ${outcome.kind}`);
+  const originalProse = outcome.turn.bookProse;
+  const originalCapture = world.history.capture.bind(world.history);
+  world.history.capture = () => {
+    throw new Error('checkpoint persistence failed');
+  };
+  try {
+    await assert.rejects(() => regenerateTurnTool(ctx, { id: outcome.turn.id }), /checkpoint persistence failed/);
+  } finally {
+    world.history.capture = originalCapture;
+  }
+  assert.equal(world.chronicle.getTurn(outcome.turn.id)?.bookProse, originalProse);
+  const count = world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
+    count: number;
+  };
+  assert.equal(Number(count.count), 1, 'the failed reroll does not write a mutation checkpoint');
+  world.close();
+});
+
 test('listWorldsTool and listStoriesTool report the currently open one', () => {
   const root = mkdtempSync(join(tmpdir(), 'fabulist-mcp-tools-'));
   try {

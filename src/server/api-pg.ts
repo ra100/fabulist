@@ -77,7 +77,7 @@ import {
 } from '../store/private-story-migration-pg.ts';
 import { withEncryptionRollout } from '../auth/encryption-rollout-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
-import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
+import { HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
 import {
   createThreadBodySchema,
   createStoryBodySchema,
@@ -510,44 +510,42 @@ route('GET', '/api/cast', async (_req, res, { world }) => {
   );
 });
 
-route('PUT', '/api/sheet/:id', async (_req, res, { world, params, body }) => {
+route('PUT', '/api/sheet/:id', async (_req, res, { db, world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
-  const existing = await world.cast.get(id);
-  if (!existing) return send(res, 404, { error: 'no sheet' });
   const patch = parseBody(sheetBodySchema, body);
-  await world.cast.put({
-    ...existing,
-    identity: patch.identity ?? existing.identity,
-    contract: patch.contract ?? existing.contract,
-    voice: patch.voice ?? existing.voice,
-    condition: patch.condition ?? existing.condition,
-    // A patch's `appearance` never touches `referenceImagePath`/`seed` — those
-    // two fields are written exactly once, by `IllustrationService` on a
-    // successful portrait generation, not through this general-purpose sheet
-    // editor. Explicitly stripped rather than merged-over, so an edit to the
-    // description text cannot accidentally clear a reference that took a real
-    // provider call to produce.
-    appearance: patch.appearance
-      ? {
-          ...existing.appearance,
-          ...(patch.appearance as Record<string, unknown>),
-          referenceImagePath: existing.appearance.referenceImagePath,
-          seed: existing.appearance.seed,
-        }
-      : existing.appearance,
-    locks: (patch.locks as string[]) ?? existing.locks,
+  const sheet = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+    const existing = await transactionWorld.cast.get(id);
+    if (!existing) throw new HttpError(404, 'no sheet');
+    await transactionWorld.cast.put({
+      ...existing,
+      identity: patch.identity ?? existing.identity,
+      contract: patch.contract ?? existing.contract,
+      voice: patch.voice ?? existing.voice,
+      condition: patch.condition ?? existing.condition,
+      appearance: patch.appearance
+        ? {
+            ...existing.appearance,
+            ...(patch.appearance as Record<string, unknown>),
+            referenceImagePath: existing.appearance.referenceImagePath,
+            seed: existing.appearance.seed,
+          }
+        : existing.appearance,
+      locks: (patch.locks as string[]) ?? existing.locks,
+    });
+    return transactionWorld.cast.get(id);
   });
-  await recordAuthoringCheckpoint(world);
-  send(res, 200, await world.cast.get(id));
+  send(res, 200, sheet);
 });
 
-route('POST', '/api/sheet/:id/lock', async (_req, res, { world, params, body }) => {
+route('POST', '/api/sheet/:id/lock', async (_req, res, { db, world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
   const { path, locked } = parseBody(sheetLockBodySchema, body);
-  if (locked === false) await world.cast.unlock(id, path);
-  else await world.cast.lock(id, path);
-  await recordAuthoringCheckpoint(world);
-  send(res, 200, await world.cast.get(id));
+  const sheet = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+    if (locked === false) await transactionWorld.cast.unlock(id, path);
+    else await transactionWorld.cast.lock(id, path);
+    return transactionWorld.cast.get(id);
+  });
+  send(res, 200, sheet);
 });
 
 route('GET', '/api/book', async (_req, res, { world }) => {
@@ -605,12 +603,14 @@ route('GET', '/api/turn/:id', async (_req, res, { world, params }) => {
   send(res, 200, turn);
 });
 
-route('POST', '/api/turn/:id/pin', async (_req, res, { world, params, body }) => {
+route('POST', '/api/turn/:id/pin', async (_req, res, { db, world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
   const { pinned } = parseBody(turnPinBodySchema, body);
-  await world.chronicle.setPinned(id, pinned !== false);
-  await recordAuthoringCheckpoint(world);
-  send(res, 200, await world.chronicle.getTurn(id));
+  const turn = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+    await transactionWorld.chronicle.setPinned(id, pinned !== false);
+    return transactionWorld.chronicle.getTurn(id);
+  });
+  send(res, 200, turn);
 });
 
 /**
@@ -620,30 +620,32 @@ route('POST', '/api/turn/:id/pin', async (_req, res, { world, params, body }) =>
  * so the UI has something concrete to show instead of a passage that just
  * didn't move.
  */
-route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, world, params, body }) => {
+route('POST', '/api/turn/:id/regenerate', async (_req, res, { db, engine, world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
   const { note } = parseBody(regenerateBodySchema, body);
   try {
     // `world` explicit: the per-request (per-user, when login is on) world
     // — see `TakeTurnOptions.world`'s own doc comment for why.
-    const turn = await engine.regenerateProse(id, { ...(note?.trim() ? { note: note.trim() } : {}), world });
-    await recordAuthoringCheckpoint(world);
+    const turn = await recordAuthoringCheckpoint(db, world, (transactionWorld) =>
+      engine.regenerateProse(id, { ...(note?.trim() ? { note: note.trim() } : {}), world: transactionWorld }),
+    );
     send(res, 200, turn);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    send(res, message.includes('pinned') ? 409 : 404, { error: message });
+    if (message.includes('pinned')) return send(res, 409, { error: message });
+    if (message.startsWith('no turn ')) return send(res, 404, { error: message });
+    throw err;
   }
 });
 
-route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
+route('POST', '/api/play', async (_req, res, { db, engine, world, body }) => {
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
 
   // `world` explicit: the per-request (per-user, when login is on) world —
   // see `TakeTurnOptions.world`'s own doc comment for why this must not be
   // left to the engine's own captured getter once two users can each be
   // mid-turn on their own story at the same time.
-  const result = await playTurn(engine, world, input, { overrideIntegrity });
-  if (result.outcome.kind === 'narrated') await recordAuthoringCheckpoint(world);
+  const result = await playTurn(db, engine, world, input, { overrideIntegrity });
   send(res, 200, result);
 });
 
@@ -660,28 +662,31 @@ route('GET', '/api/threads', async (_req, res, { world }) => {
  * know the shape up front — a thread can be given stakes and a resolution
  * later, the way one written by the extractor would be filled in over time.
  */
-route('POST', '/api/threads', async (_req, res, { world, body }) => {
+route('POST', '/api/threads', async (_req, res, { db, world, body }) => {
   const b = parseBody(createThreadBodySchema, body);
-  const created = await world.threads.create({
-    title: b.title.trim(),
-    stakes: b.stakes ?? '',
-    tension: b.tension ?? 0.5,
-    parties: b.parties ?? [],
-    resolutions: b.resolutions ?? [],
-    status: 'open',
-    createdScene: (await world.session.get()).scene,
-  });
-  await recordAuthoringCheckpoint(world);
+  const created = await recordAuthoringCheckpoint(db, world, async (transactionWorld) =>
+    transactionWorld.threads.create({
+      title: b.title.trim(),
+      stakes: b.stakes ?? '',
+      tension: b.tension ?? 0.5,
+      parties: b.parties ?? [],
+      resolutions: b.resolutions ?? [],
+      status: 'open',
+      createdScene: (await transactionWorld.session.get()).scene,
+    }),
+  );
   send(res, 200, created);
 });
 
-route('PUT', '/api/thread/:id', async (_req, res, { world, params, body }) => {
+route('PUT', '/api/thread/:id', async (_req, res, { db, world, params, body }) => {
   const id = decodeURIComponent(params.id ?? '');
-  if (!(await world.threads.get(id))) return send(res, 404, { error: 'no thread' });
   const patch = parseBody(updateThreadBodySchema, body);
-  await world.threads.update(id, patch);
-  await recordAuthoringCheckpoint(world);
-  send(res, 200, await world.threads.get(id));
+  const thread = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+    if (!(await transactionWorld.threads.get(id))) throw new HttpError(404, 'no thread');
+    await transactionWorld.threads.update(id, patch);
+    return transactionWorld.threads.get(id);
+  });
+  send(res, 200, thread);
 });
 
 route('GET', '/api/consequences', async (_req, res, { world }) => {
@@ -765,18 +770,19 @@ route('GET', '/api/facts', async (_req, res, { world }) => {
  * 500 — the same "let the constraint do the work, translate the failure"
  * shape `checkIntegrity` uses elsewhere.
  */
-route('POST', '/api/fact/:id/knowledge', async (_req, res, { world, params, body }) => {
+route('POST', '/api/fact/:id/knowledge', async (_req, res, { db, world, params, body }) => {
   const factId = decodeURIComponent(params.id ?? '');
   const b = parseBody(knowledgeBodySchema, body);
   try {
-    await world.chronicle.setKnowledge(
-      factId,
-      b.entityId,
-      b.level,
-      b.sinceScene ?? (await world.session.get()).scene,
-      b.distortion ?? 0,
-    );
-    await recordAuthoringCheckpoint(world);
+    await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+      await transactionWorld.chronicle.setKnowledge(
+        factId,
+        b.entityId,
+        b.level,
+        b.sinceScene ?? (await transactionWorld.session.get()).scene,
+        b.distortion ?? 0,
+      );
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return send(res, message.includes('FOREIGN KEY') ? 404 : 500, {
@@ -787,11 +793,10 @@ route('POST', '/api/fact/:id/knowledge', async (_req, res, { world, params, body
 });
 
 /** The undo: back to "never told", not to some fourth level meaning "explicitly does not know". */
-route('DELETE', '/api/fact/:id/knowledge/:entityId', async (_req, res, { world, params }) => {
+route('DELETE', '/api/fact/:id/knowledge/:entityId', async (_req, res, { db, world, params }) => {
   const factId = decodeURIComponent(params.id ?? '');
   const entityId = decodeURIComponent(params.entityId ?? '');
-  await world.chronicle.revokeKnowledge(factId, entityId);
-  await recordAuthoringCheckpoint(world);
+  await recordAuthoringCheckpoint(db, world, (transactionWorld) => transactionWorld.chronicle.revokeKnowledge(factId, entityId));
   send(res, 200, { factId, knowers: await world.chronicle.knowersOf(factId) });
 });
 
@@ -803,16 +808,18 @@ route('GET', '/api/directives', async (_req, res, { world }) => {
  * A directive steers the future and reports the recalculation, because silent
  * recalculation in a system with offscreen machinery is how you stop trusting it.
  */
-route('POST', '/api/directive', async (_req, res, { world, body }) => {
+route('POST', '/api/directive', async (_req, res, { db, world, body }) => {
   const b = parseBody(directiveBodySchema, body);
-  const directive = await createDirective(postgresDirectiveRepository(world), b);
-  await recordAuthoringCheckpoint(world);
+  const directive = await recordAuthoringCheckpoint(db, world, (transactionWorld) =>
+    createDirective(postgresDirectiveRepository(transactionWorld), b),
+  );
   send(res, 200, directive);
 });
 
-route('DELETE', '/api/directive/:id', async (_req, res, { world, params }) => {
-  await world.directives.setStatus(decodeURIComponent(params.id ?? ''), 'retired');
-  await recordAuthoringCheckpoint(world);
+route('DELETE', '/api/directive/:id', async (_req, res, { db, world, params }) => {
+  await recordAuthoringCheckpoint(db, world, (transactionWorld) =>
+    transactionWorld.directives.setStatus(decodeURIComponent(params.id ?? ''), 'retired'),
+  );
   send(res, 200, { ok: true });
 });
 
@@ -820,11 +827,14 @@ route('GET', '/api/style', async (_req, res, { world }) => {
   send(res, 200, (await world.session.get()).style);
 });
 
-route('PUT', '/api/style', async (_req, res, { world, body }) => {
-  const cur = await world.session.get();
-  const next = { ...cur.style, ...parseBody(styleBodySchema, body) };
-  await world.session.set({ style: next });
-  await recordAuthoringCheckpoint(world);
+route('PUT', '/api/style', async (_req, res, { db, world, body }) => {
+  const patch = parseBody(styleBodySchema, body);
+  const next = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+    const cur = await transactionWorld.session.get();
+    const next = { ...cur.style, ...patch };
+    await transactionWorld.session.set({ style: next });
+    return next;
+  });
   send(res, 200, next);
 });
 
@@ -832,11 +842,14 @@ route('GET', '/api/knobs', async (_req, res, { world }) => {
   send(res, 200, (await world.session.get()).knobs);
 });
 
-route('PUT', '/api/knobs', async (_req, res, { world, body }) => {
-  const cur = await world.session.get();
-  const next = { ...cur.knobs, ...parseBody(knobsBodySchema, body) };
-  await world.session.set({ knobs: next });
-  await recordAuthoringCheckpoint(world);
+route('PUT', '/api/knobs', async (_req, res, { db, world, body }) => {
+  const patch = parseBody(knobsBodySchema, body);
+  const next = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+    const cur = await transactionWorld.session.get();
+    const next = { ...cur.knobs, ...patch };
+    await transactionWorld.session.set({ knobs: next });
+    return next;
+  });
   send(res, 200, next);
 });
 
@@ -1026,18 +1039,20 @@ route('GET', '/api/anchors', async (_req, res, { world }) => {
   send(res, 200, await world.chronicle.anchors(20));
 });
 
-route('POST', '/api/anchor', async (_req, res, { world, body }) => {
+route('POST', '/api/anchor', async (_req, res, { db, world, body }) => {
   const { text, note } = (body ?? {}) as { text?: string; note?: string };
   if (!text) return send(res, 400, { error: 'text required' });
-  await world.chronicle.addAnchor(text, note ?? '', (await world.session.get()).scene);
-  await recordAuthoringCheckpoint(world);
+  await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+    await transactionWorld.chronicle.addAnchor(text, note ?? '', (await transactionWorld.session.get()).scene);
+  });
   send(res, 200, { ok: true });
 });
 
-route('POST', '/api/tick', async (_req, res, { world }) => {
-  const tick = await tickConsequences(world);
-  const notes = await worldTick(world);
-  await recordAuthoringCheckpoint(world);
+route('POST', '/api/tick', async (_req, res, { db, world }) => {
+  const { tick, notes } = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => ({
+    tick: await tickConsequences(transactionWorld),
+    notes: await worldTick(transactionWorld),
+  }));
   send(res, 200, { tick, notes });
 });
 
@@ -1128,19 +1143,21 @@ route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
  * Without this, scene stays 1 forever unless the extractor happens to set
  * `sceneAdvance`, and hierarchical compaction never runs.
  */
-route('POST', '/api/scene/close', async (_req, res, { world, engine }) => {
-  const before = await world.session.get();
-  const result = await engine.compaction().onSceneClosed(world, before.scene);
-  await world.session.set({ scene: before.scene + 1, turn: 0 });
-  await world.chronicle.upsertScene(before.scene + 1, { chapter: engine.compaction().chapterOf(before.scene + 1) });
-  await recordAuthoringCheckpoint(world);
-  const summary = (await world.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
+route('POST', '/api/scene/close', async (_req, res, { db, world, engine }) => {
+  const result = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
+    const before = await transactionWorld.session.get();
+    const compaction = await engine.compaction().onSceneClosed(transactionWorld, before.scene);
+    await transactionWorld.session.set({ scene: before.scene + 1, turn: 0 });
+    await transactionWorld.chronicle.upsertScene(before.scene + 1, { chapter: engine.compaction().chapterOf(before.scene + 1) });
+    const summary = (await transactionWorld.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
+    return { before, compaction, summary };
+  });
   send(res, 200, {
-    closedScene: before.scene,
-    nowScene: before.scene + 1,
-    summary,
-    scenesSummarised: result.scenesSummarised,
-    chaptersSummarised: result.chaptersSummarised,
+    closedScene: result.before.scene,
+    nowScene: result.before.scene + 1,
+    summary: result.summary,
+    scenesSummarised: result.compaction.scenesSummarised,
+    chaptersSummarised: result.compaction.chaptersSummarised,
   });
 });
 
@@ -1684,7 +1701,7 @@ route('GET', '/api/providers', async (_req, res, ctx) => {
  * Server-sent events rather than a websocket: the traffic is one-directional and
  * short-lived, and SSE reconnects itself.
  */
-route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => {
+route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body }) => {
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
 
   res.writeHead(200, {
@@ -1698,12 +1715,11 @@ route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => 
   };
 
   try {
-    const result = await playTurn(engine, world, input, {
+    const result = await playTurn(db, engine, world, input, {
       overrideIntegrity,
       onStage: (stage) => emit('stage', { stage }),
       onToken: (chunk) => emit('token', { chunk }),
     });
-    if (result.outcome.kind === 'narrated') await recordAuthoringCheckpoint(world);
     emit('done', result);
   } catch (err) {
     emit('error', { error: err instanceof Error ? err.message : String(err) });

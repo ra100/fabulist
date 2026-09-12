@@ -714,17 +714,16 @@ export async function resolveInterruptTool(
  */
 export async function playTool(ctx: McpToolContext, args: { input: string; overrideIntegrity?: boolean }) {
   const world = await ctx.world();
-  const result = await playTurn(ctx.engine, world, args.input, { overrideIntegrity: args.overrideIntegrity });
-  if (result.outcome.kind === 'narrated') await recordAuthoringCheckpoint(world);
-  return result;
+  return playTurn(ctx.db, ctx.engine, world, args.input, { overrideIntegrity: args.overrideIntegrity });
 }
 
 /** `pin_turn`. The MCP-side counterpart of `POST /api/turn/:id/pin` \u2014 a pinned turn's prose survives `regenerate_turn`/compaction untouched. */
 export async function pinTurnTool(ctx: McpToolContext, args: { id: string; pinned?: boolean }) {
   const world = await ctx.world();
-  await world.chronicle.setPinned(args.id, args.pinned !== false);
-  await recordAuthoringCheckpoint(world);
-  return await world.chronicle.getTurn(args.id);
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    await transactionWorld.chronicle.setPinned(args.id, args.pinned !== false);
+    return transactionWorld.chronicle.getTurn(args.id);
+  });
 }
 
 /**
@@ -735,9 +734,12 @@ export async function pinTurnTool(ctx: McpToolContext, args: { id: string; pinne
  */
 export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string; note?: string }) {
   const world = await ctx.world();
-  const turn = await ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
-  await recordAuthoringCheckpoint(world);
-  return turn;
+  return recordAuthoringCheckpoint(ctx.db, world, (transactionWorld) =>
+    ctx.engine.regenerateProse(args.id, {
+      ...(args.note?.trim() ? { note: args.note.trim() } : {}),
+      world: transactionWorld,
+    }),
+  );
 }
 
 /** Author-controlled exact prose replacement; it never re-extracts state. */
@@ -775,37 +777,34 @@ export async function updateSheetTool(
   },
 ) {
   const world = await ctx.world();
-  const entity = await world.graph.get(args.id);
-  if (!entity) throw new Error(`update_sheet: no entity ${args.id}`);
-  if (entity.type !== 'Character') throw new Error(`update_sheet: ${args.id} is not a character`);
-  const existing = await world.cast.getOrBlank(args.id);
-  await world.cast.put({
-    ...existing,
-    identity: (args.identity as unknown as typeof existing.identity) ?? existing.identity,
-    contract: (args.contract as unknown as typeof existing.contract) ?? existing.contract,
-    voice: (args.voice as unknown as typeof existing.voice) ?? existing.voice,
-    condition: (args.condition as unknown as typeof existing.condition) ?? existing.condition,
-    appearance: args.appearance
-      ? {
-          ...existing.appearance,
-          ...args.appearance,
-          referenceImagePath: existing.appearance.referenceImagePath,
-          seed: existing.appearance.seed,
-        }
-      : existing.appearance,
-    locks: args.locks ?? existing.locks,
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    const entity = await transactionWorld.graph.get(args.id);
+    if (!entity) throw new Error(`update_sheet: no entity ${args.id}`);
+    if (entity.type !== 'Character') throw new Error(`update_sheet: ${args.id} is not a character`);
+    const existing = await transactionWorld.cast.getOrBlank(args.id);
+    await transactionWorld.cast.put({
+      ...existing,
+      identity: (args.identity as unknown as typeof existing.identity) ?? existing.identity,
+      contract: (args.contract as unknown as typeof existing.contract) ?? existing.contract,
+      voice: (args.voice as unknown as typeof existing.voice) ?? existing.voice,
+      condition: (args.condition as unknown as typeof existing.condition) ?? existing.condition,
+      appearance: args.appearance
+        ? { ...existing.appearance, ...args.appearance, referenceImagePath: existing.appearance.referenceImagePath, seed: existing.appearance.seed }
+        : existing.appearance,
+      locks: args.locks ?? existing.locks,
+    });
+    return transactionWorld.cast.get(args.id);
   });
-  await recordAuthoringCheckpoint(world);
-  return await world.cast.get(args.id);
 }
 
 /** `lock_sheet_field`. The MCP-side counterpart of `POST /api/sheet/:id/lock` \u2014 marks (or unmarks) one field path as author-locked, exempt from future auto-drift. */
 export async function lockSheetFieldTool(ctx: McpToolContext, args: { id: string; path: string; locked?: boolean }) {
   const world = await ctx.world();
-  if (args.locked === false) await world.cast.unlock(args.id, args.path);
-  else await world.cast.lock(args.id, args.path);
-  await recordAuthoringCheckpoint(world);
-  return await world.cast.get(args.id);
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    if (args.locked === false) await transactionWorld.cast.unlock(args.id, args.path);
+    else await transactionWorld.cast.lock(args.id, args.path);
+    return transactionWorld.cast.get(args.id);
+  });
 }
 
 /** `update_thread`. The MCP-side counterpart of `PUT /api/thread/:id` \u2014 edits a narrative thread's tension, status, title, or stakes. */
@@ -815,9 +814,10 @@ export async function updateThreadTool(
 ) {
   const world = await ctx.world();
   const { id, ...patch } = args;
-  await world.threads.update(id, patch as never);
-  await recordAuthoringCheckpoint(world);
-  return await world.threads.get(id);
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    await transactionWorld.threads.update(id, patch as never);
+    return transactionWorld.threads.get(id);
+  });
 }
 
 /**
@@ -831,63 +831,68 @@ export async function addDirectiveTool(
   args: { text: string; scope?: Directive['scope']; strength?: Directive['strength']; lifetimeScenes?: number },
 ) {
   const world = await ctx.world();
-  const created = await world.directives.create({
-    text: args.text,
-    scope: args.scope ?? 'chapter',
-    strength: args.strength ?? 'push',
-    lifetimeScenes: args.lifetimeScenes ?? 5,
-    status: 'active',
-    createdScene: (await world.session.get()).scene,
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    const created = await transactionWorld.directives.create({
+      text: args.text,
+      scope: args.scope ?? 'chapter',
+      strength: args.strength ?? 'push',
+      lifetimeScenes: args.lifetimeScenes ?? 5,
+      status: 'active',
+      createdScene: (await transactionWorld.session.get()).scene,
+    });
+    const diff = await applyDirectiveRecalc(transactionWorld, created.id, created.text);
+    // One read of every thread rather than a lookup per touched id: a story has few
+    // enough threads that reading them all is the simpler correct thing.
+    const titles = new Map((await transactionWorld.threads.all()).map((t) => [t.id, t.title]));
+    return {
+      directive: created,
+      diff: {
+        ...diff,
+        raisedThreadTitles: diff.raisedThreads.map((tid) => titles.get(tid) ?? tid),
+        loweredThreadTitles: diff.loweredThreads.map((tid) => titles.get(tid) ?? tid),
+      },
+    };
   });
-  const diff = await applyDirectiveRecalc(world, created.id, created.text);
-  await recordAuthoringCheckpoint(world);
-  // One read of every thread rather than a lookup per touched id: a story has few
-  // enough threads that reading them all is the simpler correct thing.
-  const titles = new Map((await world.threads.all()).map((t) => [t.id, t.title]));
-  return {
-    directive: created,
-    diff: {
-      ...diff,
-      raisedThreadTitles: diff.raisedThreads.map((tid) => titles.get(tid) ?? tid),
-      loweredThreadTitles: diff.loweredThreads.map((tid) => titles.get(tid) ?? tid),
-    },
-  };
 }
 
 /** `delete_directive`. The MCP-side counterpart of `DELETE /api/directive/:id` \u2014 retires (never hard-deletes) a directive. */
 export async function deleteDirectiveTool(ctx: McpToolContext, args: { id: string }) {
   const world = await ctx.world();
-  await world.directives.setStatus(args.id, 'retired');
-  await recordAuthoringCheckpoint(world);
-  return { ok: true };
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    await transactionWorld.directives.setStatus(args.id, 'retired');
+    return { ok: true };
+  });
 }
 
 /** `update_style`. The MCP-side counterpart of `PUT /api/style` \u2014 merges a partial patch over the current story's style contract (POV, tense, register, ...). */
 export async function updateStyleTool(ctx: McpToolContext, args: Partial<StyleContract>) {
   const world = await ctx.world();
-  const cur = await world.session.get();
-  const next = { ...cur.style, ...args };
-  await world.session.set({ style: next });
-  await recordAuthoringCheckpoint(world);
-  return next;
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    const cur = await transactionWorld.session.get();
+    const next = { ...cur.style, ...args };
+    await transactionWorld.session.set({ style: next });
+    return next;
+  });
 }
 
 /** `update_knobs`. The MCP-side counterpart of `PUT /api/knobs` \u2014 merges a partial patch over the current story's dials (canon fidelity, danger, pacing, ...). */
 export async function updateKnobsTool(ctx: McpToolContext, args: Partial<Knobs>) {
   const world = await ctx.world();
-  const cur = await world.session.get();
-  const next = { ...cur.knobs, ...args };
-  await world.session.set({ knobs: next });
-  await recordAuthoringCheckpoint(world);
-  return next;
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    const cur = await transactionWorld.session.get();
+    const next = { ...cur.knobs, ...args };
+    await transactionWorld.session.set({ knobs: next });
+    return next;
+  });
 }
 
 /** `add_anchor`. The MCP-side counterpart of `POST /api/anchor` \u2014 records a style-anchor passage (prose the player liked, to steer future generation toward). */
 export async function addAnchorTool(ctx: McpToolContext, args: { text: string; note?: string }) {
   const world = await ctx.world();
-  await world.chronicle.addAnchor(args.text, args.note ?? '', (await world.session.get()).scene);
-  await recordAuthoringCheckpoint(world);
-  return { ok: true };
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    await transactionWorld.chronicle.addAnchor(args.text, args.note ?? '', (await transactionWorld.session.get()).scene);
+    return { ok: true };
+  });
 }
 
 /**
@@ -1003,10 +1008,10 @@ export async function deleteIllustrationTool(ctx: McpToolContext, args: { id: st
 /** `tick`. The MCP-side counterpart of `POST /api/tick` \u2014 advances seeded consequences toward firing and runs whatever else the world clock does per tick. */
 export async function tickTool(ctx: McpToolContext) {
   const world = await ctx.world();
-  const tick = await tickConsequences(world);
-  const notes = await worldTick(world);
-  await recordAuthoringCheckpoint(world);
-  return { tick, notes };
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => ({
+    tick: await tickConsequences(transactionWorld),
+    notes: await worldTick(transactionWorld),
+  }));
 }
 
 /**
@@ -1032,19 +1037,20 @@ export async function compactTool(ctx: McpToolContext, args: { scene?: number; f
  */
 export async function closeSceneTool(ctx: McpToolContext) {
   const world = await ctx.world();
-  const before = await world.session.get();
-  const result = await ctx.engine.compaction().onSceneClosed(world, before.scene);
-  await world.session.set({ scene: before.scene + 1, turn: 0 });
-  await world.chronicle.upsertScene(before.scene + 1, { chapter: ctx.engine.compaction().chapterOf(before.scene + 1) });
-  await recordAuthoringCheckpoint(world);
-  const summary = (await world.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
-  return {
-    closedScene: before.scene,
-    nowScene: before.scene + 1,
-    summary,
-    scenesSummarised: result.scenesSummarised,
-    chaptersSummarised: result.chaptersSummarised,
-  };
+  return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
+    const before = await transactionWorld.session.get();
+    const result = await ctx.engine.compaction().onSceneClosed(transactionWorld, before.scene);
+    await transactionWorld.session.set({ scene: before.scene + 1, turn: 0 });
+    await transactionWorld.chronicle.upsertScene(before.scene + 1, { chapter: ctx.engine.compaction().chapterOf(before.scene + 1) });
+    const summary = (await transactionWorld.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
+    return {
+      closedScene: before.scene,
+      nowScene: before.scene + 1,
+      summary,
+      scenesSummarised: result.scenesSummarised,
+      chaptersSummarised: result.chaptersSummarised,
+    };
+  });
 }
 
 /**

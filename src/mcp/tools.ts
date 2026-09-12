@@ -705,9 +705,7 @@ export function pinTurnTool(ctx: McpToolContext, args: { id: string; pinned?: bo
  */
 export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string; note?: string }) {
   const world = ctx.world();
-  const turn = await ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
-  recordAuthoringCheckpoint(world);
-  return turn;
+  return ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
 }
 
 /** Author-controlled exact prose replacement; it never re-extracts state. */
