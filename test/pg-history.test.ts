@@ -199,6 +199,11 @@ test('split scene derives historical PostgreSQL grouping and rejects invalid tar
     const split = await splitSceneAtTurn(world, turns[2]!.id);
     assert.equal(split.turnId, turns[2]!.id);
     assert.deepEqual(
+      split.target,
+      { turnId: turns[2]!.id, scene: 2, chapter: 1, turn: 3, startsScene: true },
+      'the split returns its selected-turn layout from the locked transaction',
+    );
+    assert.deepEqual(
       (await storyLayout(world)).turns.map(({ turnId, scene }) => [turnId, scene]),
       [[turns[0]!.id, 1], [turns[1]!.id, 1], [turns[2]!.id, 2], [turns[3]!.id, 2]],
     );

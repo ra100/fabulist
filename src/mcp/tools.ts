@@ -14,7 +14,7 @@
  * than reimplementing any part of the turn loop here.
  */
 import type { Engine } from '../loop/engine.ts';
-import { recordAuthoringCheckpoint } from '../loop/history.ts';
+import { recordAuthoringCheckpoint, splitSceneAtTurn } from '../loop/history.ts';
 import { forkStory, branchSave, rollback, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate.ts';
 import type { IllustrationService } from '../illustration/service.ts';
@@ -202,13 +202,14 @@ export function forkStoryTool(ctx: McpToolContext, args: { fromStoryId?: string;
  */
 export function rollbackTool(
   ctx: McpToolContext,
-  args: { scene?: number; chapter?: number; mode?: 'fork' | 'destructive' },
+  args: { scene?: number; chapter?: number; turnId?: string; mode?: 'fork' | 'destructive' },
 ) {
   const world = ctx.world();
   assertOwned(world, world.storyId, ctx.user, 'rollback');
   const result = rollback(world, {
     scene: args.scene,
     chapter: args.chapter,
+    turnId: args.turnId,
     mode: args.mode,
     ownerUserId: ctx.user?.id,
   });
@@ -217,6 +218,21 @@ export function rollbackTool(
     else if (ctx.currentStory) ctx.currentStory.switchTo(result.forkedStory.id);
   }
   return result;
+}
+
+/** Creates a durable scene boundary before an eligible committed turn. */
+export function splitSceneTool(ctx: McpToolContext, args: { turnId: string }) {
+  const world = ctx.world();
+  assertOwned(world, world.storyId, ctx.user, 'split_scene');
+  const split = splitSceneAtTurn(world, args.turnId);
+  const { target, ...boundary } = split;
+  return {
+    ...boundary,
+    startsAtTurnId: target.turnId,
+    scene: target.scene,
+    chapter: target.chapter,
+    startsScene: target.startsScene,
+  };
 }
 
 /**

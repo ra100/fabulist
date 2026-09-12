@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
 import { jsonGet, type Db, type Queryable } from '../db/pg.ts';
-import type { EligibleTurn, HistoryCheckpoint, SceneSplit, StoryId, StorySnapshot } from '../domain/types.ts';
+import { SceneSplitTargetError, type EligibleTurn, type HistoryCheckpoint, type SceneSplit, type StoryId, type StorySnapshot } from '../domain/types.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
 
 const TABLES = [
@@ -291,10 +291,10 @@ export class HistoryStore {
         [turnId, this.storyId],
       );
       const stored = turns[0];
-      if (!stored) throw new Error(`split_scene: unknown turn ${turnId}`);
-      if (stored.history_position == null) throw new Error(`split_scene: turn ${turnId} is legacy and has no exact history`);
+      if (!stored) throw new SceneSplitTargetError(`split_scene: unknown turn ${turnId}`);
+      if (stored.history_position == null) throw new SceneSplitTargetError(`split_scene: turn ${turnId} is legacy and has no exact history`);
       const eligible = await this.eligibleTurnFrom(queryable, turnId);
-      if (!eligible) throw new Error(`split_scene: turn ${turnId} has no exact history checkpoint`);
+      if (!eligible) throw new SceneSplitTargetError(`split_scene: turn ${turnId} has no exact history checkpoint`);
       const [prior, exists] = await Promise.all([
         queryable.query<{ scene: number }>(
           `SELECT scene FROM turns WHERE story_id = $1 AND history_position IS NOT NULL AND history_position < $2
@@ -307,7 +307,7 @@ export class HistoryStore {
         ]),
       ]);
       if (!prior.rows[0] || prior.rows[0].scene !== eligible.scene || exists.rowCount)
-        throw new Error(`turn ${turnId} already starts a scene`);
+        throw new SceneSplitTargetError(`turn ${turnId} already starts a scene`);
       const id = `segment:${randomUUID()}`;
       await queryable.query(`INSERT INTO scene_segments (id, story_id, start_position) VALUES ($1,$2,$3)`, [
         id,

@@ -14,7 +14,7 @@
  * than reimplementing any part of the turn loop here.
  */
 import type { Engine } from '../loop/engine-pg.ts';
-import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint } from '../loop/history-pg.ts';
+import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint, splitSceneAtTurn } from '../loop/history-pg.ts';
 import { forkStory, rollback, type ForkOptions } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
@@ -234,7 +234,7 @@ export async function forkStoryTool(
  */
 export async function rollbackTool(
   ctx: McpToolContext,
-  args: { scene?: number; chapter?: number; mode?: 'fork' | 'destructive' },
+  args: { scene?: number; chapter?: number; turnId?: string; mode?: 'fork' | 'destructive' },
 ) {
   const world = await ctx.world();
   await assertOwned(ctx.db, world.storyId, ctx.user, 'rollback');
@@ -244,6 +244,7 @@ export async function rollbackTool(
   const result = await rollback(ctx.db, world, {
     ...(args.scene === undefined ? {} : { toScene: args.scene }),
     ...(args.chapter === undefined ? {} : { toChapter: args.chapter }),
+    ...(args.turnId === undefined ? {} : { turnId: args.turnId }),
     ...(args.mode === undefined ? {} : { mode: args.mode }),
     ...(ctx.user ? { ownerUserId: ctx.user.id } : {}),
   });
@@ -252,6 +253,21 @@ export async function rollbackTool(
   // to do — the hazard is now unrepresentable rather than merely avoided.
   if (result.mode === 'fork' && result.story) ctx.selectStory?.(result.story.id);
   return result;
+}
+
+/** Creates a durable scene boundary before an eligible committed turn. */
+export async function splitSceneTool(ctx: McpToolContext, args: { turnId: string }) {
+  const world = await ctx.world();
+  await assertOwned(ctx.db, world.storyId, ctx.user, 'split_scene');
+  const split = await splitSceneAtTurn(world, args.turnId);
+  const { target, ...boundary } = split;
+  return {
+    ...boundary,
+    startsAtTurnId: target.turnId,
+    scene: target.scene,
+    chapter: target.chapter,
+    startsScene: target.startsScene,
+  };
 }
 
 /**
