@@ -22,7 +22,7 @@ import {
   deleteStory,
   getStory,
   listStories,
-  listStoriesForUser,
+  listStoriesForUserWithPrivateValues,
   listUnownedStories,
 } from '../store/world-pg.ts';
 import {
@@ -62,6 +62,13 @@ import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
 import { encryptionKeysForUser, enrollEncryptionKeys } from '../auth/encryption-keys-pg.ts';
 import { EphemeralStoryKeyStore } from '../auth/ephemeral-story-keys.ts';
+import {
+  assertPrivateStoryCreationReady,
+  assertPrivateStoryMigrationReady,
+  migratePrivateStories,
+  PrivateStoryMigrationIncompleteError,
+  privateMigrationStatus,
+} from '../store/private-story-migration-pg.ts';
 import { withEncryptionRollout } from '../auth/encryption-rollout-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
@@ -70,6 +77,7 @@ import {
   createStoryBodySchema,
   encryptionEnrollmentBodySchema,
   encryptionLockBodySchema,
+  encryptionMigrationBodySchema,
   encryptionUnlockBodySchema,
   directiveBodySchema,
   forkStoryBodySchema,
@@ -382,6 +390,35 @@ route('POST', '/api/encryption/lock', async (_req, res, { body, user, ephemeralS
   const { storyId } = parseBody(encryptionLockBodySchema, body);
   const lockedStoryIds = ephemeralStoryKeys.lock(user.id, storyId);
   send(res, 200, { lockedStoryIds });
+});
+
+route('GET', '/api/encryption/migration', async (_req, res, { db, user }) => {
+  if (!user?.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
+  send(res, 200, { migration: await privateMigrationStatus(db, user.id) });
+});
+
+route('POST', '/api/encryption/migration', async (_req, res, { body, db, user, ephemeralStoryKeys, world }) => {
+  if (!user?.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
+  parseBody(encryptionMigrationBodySchema, body);
+  const stories = await db.query<{ id: string }>(`SELECT id FROM stories WHERE owner_user_id = $1`, [user.id]);
+  const missing = stories.rows.filter(({ id }) => !ephemeralStoryKeys.get(user.id, id)).map(({ id }) => id);
+  if (missing.length) {
+    return send(res, 409, { error: 'unlock every private story before migrating', missingStoryIds: missing });
+  }
+  try {
+    await migratePrivateStories(
+      db,
+      user.id,
+      new Map(stories.rows.map(({ id }) => [id, ephemeralStoryKeys.get(user.id, id)!])),
+      world.illustrations.imagesDir,
+    );
+    send(res, 200, { migration: await privateMigrationStatus(db, user.id) });
+  } catch (error) {
+    send(res, 409, {
+      error: error instanceof Error ? error.message : 'private story migration failed',
+      migration: await privateMigrationStatus(db, user.id),
+    });
+  }
 });
 
 route('GET', '/api/state', async (_req, res, { world }) => {
@@ -1096,6 +1133,7 @@ route('POST', '/api/branch', async (_req, res, { world, db, body, user }) => {
   // them a file. A branch is a story now, so this is a fork — which is what the
   // route already meant, minus the filesystem.
   try {
+    if (user) await assertPrivateStoryCreationReady(db, user.id);
     const result = await forkStory(db, world, {
       fromStoryId: world.storyId,
       atScene,
@@ -1156,7 +1194,9 @@ async function ownsStoryOrRespond(
  * feature look missing rather than merely unlabelled.
  */
 route('GET', '/api/stories', async (_req, res, { world, db, user }) => {
-  const stories = user ? await listStoriesForUser(db, user.id) : await listStories(db);
+  const stories = user
+    ? await listStoriesForUserWithPrivateValues(db, user.id, world.crypto ?? { keyForStory: () => null })
+    : await listStories(db);
   send(
     res,
     200,
@@ -1185,9 +1225,14 @@ route('GET', '/api/stories/unowned', async (_req, res, { db }) => {
  */
 route('POST', '/api/stories/claim', async (_req, res, { db, url, user }) => {
   if (!user) return send(res, 400, { error: 'sign in first: there is no owner to claim these for' });
-  const storyId = url.searchParams.get('storyId') ?? undefined;
-  const claimed = await claimUnownedStories(db, user.id, storyId);
-  send(res, 200, { claimed });
+  try {
+    await assertPrivateStoryCreationReady(db, user.id);
+    const storyId = url.searchParams.get('storyId') ?? undefined;
+    const claimed = await claimUnownedStories(db, user.id, storyId);
+    send(res, 200, { claimed });
+  } catch (error) {
+    send(res, 409, { error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 /**
@@ -1198,6 +1243,13 @@ route('POST', '/api/stories/claim', async (_req, res, { db, url, user }) => {
  */
 route('POST', '/api/stories', async (_req, res, { world, db, body, user }) => {
   const { title } = parseBody(createStoryBodySchema, body);
+  if (user) {
+    try {
+      await assertPrivateStoryCreationReady(db, user.id);
+    } catch (error) {
+      return send(res, 409, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
   // The new story reads the same canon worlds the current one does. Under SQLite
   // that was implicit — every story in a file shared its canon — and omitting it
   // here produced a story with no sources, which fails as soon as anything tries to
@@ -1232,6 +1284,7 @@ route('POST', '/api/stories/fork', async (_req, res, { world, db, body, user }) 
   const sourceId = fromStoryId || world.storyId;
   if (!(await ownsStoryOrRespond(res, db, sourceId, user))) return;
   try {
+    if (user) await assertPrivateStoryCreationReady(db, user.id);
     send(
       res,
       201,
@@ -1284,6 +1337,7 @@ route('POST', '/api/rollback', async (_req, res, { world, db, body, user }) => {
   // login-off, because mutating a server-wide pointer dragged every other user
   // onto one caller's rollback.
   try {
+    if (effectiveMode === 'fork' && user) await assertPrivateStoryCreationReady(db, user.id);
     const result = await rollback(db, world, {
       ...(scene === undefined ? {} : { toScene: scene }),
       ...(chapter === undefined ? {} : { toChapter: chapter }),
@@ -1943,11 +1997,12 @@ route('GET', '/api/setup/packs', (_req, res, { setup }) => {
  * install creates one story per scenario, and the story this server was bound to
  * beforehand is not the one the player just chose.
  */
-route('POST', '/api/setup/pack', async (_req, res, { setup, body }) => {
+route('POST', '/api/setup/pack', async (_req, res, { setup, body, db, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { packId, scenarioId } = parseBody(setupPackBodySchema, body);
   try {
+    if (user) await assertPrivateStoryCreationReady(db, user.id);
     // No pointer to rebind: `createStory` stamps `last_played_at`, so the chosen
     // scenario's story is what the next request resolves to. The client also gets
     // `storyId` back and records it, so a second tab is not dragged along.
@@ -2063,9 +2118,16 @@ route('POST', '/api/setup/continue', async (_req, res, { setup, body, user, auth
  * same button. They are separate routes now, which is the user/system split made
  * reachable: see `POST /api/canon/rebuild` for the other half.
  */
-route('POST', '/api/setup/reset', async (_req, res, { setup }) => {
+route('POST', '/api/setup/reset', async (_req, res, { setup, db, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
+  if (user) {
+    try {
+      await assertPrivateStoryCreationReady(db, user.id);
+    } catch (error) {
+      return send(res, 409, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
   // `createStory` stamps `last_played_at`, so the replacement is what the next
   // request resolves to — no server-wide pointer to rebind.
   const storyId = await svc.resetMyStory();
@@ -2203,12 +2265,15 @@ export function createApiServer(opts: ServerOptions) {
     // Async now, and resolved per call rather than from a process-wide pointer.
     // `selected` still lives in this closure for exactly the reason it always did:
     // one client switching books must not drag every other reader along.
-    const world = () =>
-      worldFor(db, user, {
+    const world = async () => {
+      const resolved = await worldFor(db, user, {
         ...(selected ? { storyIdOverride: selected } : {}),
         imagesDir,
         crypto: { keyForStory: (storyId) => (user ? ephemeralStoryKeys.get(user.id, storyId) : null) },
       });
+      await assertPrivateStoryMigrationReady(db, resolved.storyId);
+      return resolved;
+    };
     return {
       world,
       db,
@@ -2394,6 +2459,16 @@ export function createApiServer(opts: ServerOptions) {
               ...(user ? { crypto: { keyForStory: (storyId: string) => ephemeralStoryKeys.get(user.id, storyId) } } : {}),
             })
           : await getWorld();
+        if (!url.pathname.startsWith('/api/encryption/') && url.pathname !== '/api/meta') {
+          try {
+            await assertPrivateStoryMigrationReady(db, world.storyId);
+          } catch (error) {
+            if (error instanceof PrivateStoryMigrationIncompleteError) {
+              return send(res, 423, { error: error.message });
+            }
+            throw error;
+          }
+        }
         await match.handler(req, res, {
           world,
           db,

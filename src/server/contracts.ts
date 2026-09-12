@@ -170,6 +170,7 @@ export const encryptionUnlockBodySchema = z.object({
 export const encryptionLockBodySchema = z.object({
   storyId: nonEmptyText.optional(),
 }).strict().default({});
+export const encryptionMigrationBodySchema = z.object({}).strict().default({});
 export const forkStoryBodySchema = z.object({
   title: optionalTitle,
   atScene: z.number().int().nonnegative().optional(),

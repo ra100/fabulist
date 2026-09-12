@@ -587,6 +587,8 @@ export const REQUIRED_ROUTES = [
   'POST /api/encryption/enroll',
   'POST /api/encryption/unlock',
   'POST /api/encryption/lock',
+  'GET /api/encryption/migration',
+  'POST /api/encryption/migration',
   'GET /api/worlds',
   'POST /api/worlds',
   // `POST /api/worlds/:slug/switch` is deliberately absent: a world is a row now
@@ -648,6 +650,8 @@ export const api = {
       post<{ enrolled: true }>('/encryption/enroll', enrollment),
     unlock: (storyKeys: StoryKeyHandoff[]) => post<{ grants: StoryKeyGrant[] }>('/encryption/unlock', { storyKeys }),
     lock: (storyId?: string) => post<{ lockedStoryIds: string[] }>('/encryption/lock', storyId ? { storyId } : {}),
+    migration: () => req<{ migration: { status: string; error: string | null; blocklist_done: boolean } | null }>('/encryption/migration'),
+    migrate: () => post<{ migration: { status: string; error: string | null; blocklist_done: boolean } }>('/encryption/migration', {}),
   },
   state: () => parsedReq<State>('/state', stateResponseSchema),
   /**

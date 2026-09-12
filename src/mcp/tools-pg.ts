@@ -28,7 +28,13 @@ import type { Job } from '../setup/jobs.ts';
 import { World, getWorldBySlug, listWorlds, setStorySources } from '../store/index-pg.ts';
 import { assertWorldAccess, worldsVisibleTo } from '../store/access-pg.ts';
 import type { Db } from '../db/pg.ts';
-import { createStory, getStory, listStories, listStoriesForUser } from '../store/world-pg.ts';
+import {
+  createStory,
+  getStory,
+  listStories,
+  listStoriesForUserWithPrivateValues,
+} from '../store/world-pg.ts';
+import { assertPrivateStoryCreationReady } from '../store/private-story-migration-pg.ts';
 import type { SessionUser } from '../auth/config.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId } from '../domain/types.ts';
 import { playTurn } from '../application/play-pg.ts';
@@ -143,7 +149,9 @@ export async function setStorySourcesTool(ctx: McpToolContext, args: { slugs: st
  */
 export async function listStoriesTool(ctx: McpToolContext) {
   const world = await ctx.world();
-  const stories = ctx.user ? await listStoriesForUser(ctx.db, ctx.user.id) : await listStories(ctx.db);
+  const stories = ctx.user
+    ? await listStoriesForUserWithPrivateValues(ctx.db, ctx.user.id, world.crypto ?? { keyForStory: () => null })
+    : await listStories(ctx.db);
   return {
     stories: stories.map((st) => ({ ...st, current: st.id === world.storyId })),
   };
@@ -177,6 +185,7 @@ async function assertOwned(db: Db, storyId: string, user: SessionUser | null | u
  */
 export async function createStoryTool(ctx: McpToolContext, args: { title?: string }) {
   const world = await ctx.world();
+  if (ctx.user) await assertPrivateStoryCreationReady(ctx.db, ctx.user.id);
   const story = await createStory(world.db, {
     title: args.title?.trim() ?? '',
     ...(ctx.user ? { ownerUserId: ctx.user.id } : {}),
@@ -195,6 +204,7 @@ export async function createStoryTool(ctx: McpToolContext, args: { title?: strin
  */
 export async function forkStoryTool(ctx: McpToolContext, args: { fromStoryId?: string; title?: string; atScene?: number }) {
   const world = await ctx.world();
+  if (ctx.user) await assertPrivateStoryCreationReady(ctx.db, ctx.user.id);
   const sourceId = args.fromStoryId || world.storyId;
   // The *source* must be readable by this caller: forking someone else's book
   // would hand over every scene of it under a story the forker now owns, the
@@ -229,6 +239,9 @@ export async function rollbackTool(
 ) {
   const world = await ctx.world();
   await assertOwned(ctx.db, world.storyId, ctx.user, 'rollback');
+  if ((args.mode ?? 'fork') === 'fork' && ctx.user) {
+    await assertPrivateStoryCreationReady(ctx.db, ctx.user.id);
+  }
   const result = await rollback(ctx.db, world, {
     ...(args.scene === undefined ? {} : { toScene: args.scene }),
     ...(args.chapter === undefined ? {} : { toChapter: args.chapter }),
@@ -1001,6 +1014,7 @@ export async function listWorldPacksTool(ctx: McpToolContext) {
  */
 export async function useWorldPackTool(ctx: McpToolContext, args: { packId: string; scenarioId?: string }) {
   if (!ctx.setup) throw new Error('use_world_pack: this server has no setup service enabled');
+  if (ctx.user) await assertPrivateStoryCreationReady(ctx.db, ctx.user.id);
   const result = await ctx.setup.usePack(args.packId, args.scenarioId);
   // This connection follows the scenario it just installed. No server-wide pointer
   // to move, so no other client is dragged along.
@@ -1031,6 +1045,7 @@ export async function cancelSetupJobTool(ctx: McpToolContext, args: { id: string
  */
 export async function resetStoryTool(ctx: McpToolContext) {
   if (!ctx.setup) throw new Error('reset_story: this server has no setup service enabled');
+  if (ctx.user) await assertPrivateStoryCreationReady(ctx.db, ctx.user.id);
   // Renamed from `reset_world`, and narrowed to match. The old tool deleted every
   // story in the file *and* canon, which is why its own doc warned there was no
   // undo; this discards one playthrough and leaves canon and every other story

@@ -85,26 +85,32 @@ Transport security is HTTPS/TLS when you use the hosted deployment, and OAuth
 tokens for browser/MCP access are transmitted over that same encrypted
 channel.
 
-At-rest protection is being rolled out in stages. The private-storage pilot
-creates a random browser-held master key and lets the browser wrap it
+The private-storage pilot creates a random browser-held master key and lets the browser wrap it
 independently with a passphrase and a recovery code. The database receives
 only those encrypted wraps and public derivation metadata; there is no
 maintainer recovery or escrow key. Losing both the passphrase and recovery
 code makes future encrypted content unrecoverable.
 
-Key enrollment is not content encryption. Until a selected story has completed
-and verified its content migration, its existing durable content remains
+Key enrollment alone is not content encryption. Until the owner-wide migration
+has completed and verified every enrolled story, existing durable content remains
 plaintext and is not cryptographically opaque to the operator. We therefore
 do **not** claim a zero-knowledge design. Because a turn must be processed to
-generate a response, plaintext also exists in application memory during
-request handling.
+generate a response — and because the current pilot also decrypts reads on the
+server — plaintext exists in application memory while an unlocked request is
+handled.
 
 When an enrolled user unlocks a private story in the browser, the browser may
 send its random story key over HTTPS for a short-lived, owner-scoped processing
 grant. The app keeps that key only in its running process memory; it is neither
 written to Postgres, a cookie, a log, nor a cache, and is cleared on logout,
-explicit lock, expiry, or process restart. This unlock mechanism is in place
-ahead of the separate content-migration release.
+explicit lock, expiry, or process restart. The migration writes authenticated
+ciphertext, verifies it, removes the corresponding legacy plaintext, and fails
+closed if interrupted. Database and filesystem backups taken after successful
+migration contain ciphertext plus structural metadata, not readable story prose.
+
+While private storage is enrolled, operations that would create or adopt
+another story are temporarily unavailable. This prevents a new plaintext story
+from being created without a browser-wrapped story key.
 
 ## 6. What the MCP connector, specifically, can see and do
 
