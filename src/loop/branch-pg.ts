@@ -36,7 +36,7 @@ import { randomUUID } from 'node:crypto';
 import type { Db, Queryable } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
 import { createStory, getStory } from '../store/world-pg.ts';
-import type { Story, StoryId } from '../domain/types.ts';
+import type { HistoryCheckpoint, Story, StoryId, StoryLayout } from '../domain/types.ts';
 
 export interface TruncateResult {
   turns: number;
@@ -169,6 +169,8 @@ export interface RollbackOptions {
   toScene?: number;
   /** Or to the start of this chapter, resolved through `firstSceneOfChapter`. */
   toChapter?: number;
+  /** Retain this exact committed turn and discard only subsequent history. */
+  turnId?: string;
   /**
    * `'fork'` (the default) leaves the long version completely untouched as a
    * story you can switch back to, so "I want it back" means "open the other
@@ -182,6 +184,7 @@ export interface RollbackOptions {
 export interface RollbackResult {
   mode: 'fork' | 'destructive';
   atScene: number;
+  toTurnId?: string;
   /** Present for `mode: 'fork'` — the new sibling story. */
   story: Story | null;
   /** Present for `mode: 'destructive'`. */
@@ -189,12 +192,16 @@ export interface RollbackResult {
 }
 
 export async function rollback(db: Db, world: World, opts: RollbackOptions): Promise<RollbackResult> {
+  const targets = [opts.toScene, opts.toChapter, opts.turnId].filter((target) => target !== undefined);
+  if (targets.length !== 1) throw new Error('rollback: pass exactly one of toScene, toChapter, or turnId');
   const mode = opts.mode ?? 'fork';
+  if (opts.turnId !== undefined) return rollbackToTurn(db, world, opts.turnId, mode, opts.ownerUserId);
   let scene = opts.toScene;
   if (scene === undefined && opts.toChapter !== undefined) {
     scene = await firstSceneOfChapter(world, opts.toChapter);
     if (scene === undefined) throw new Error(`chapter ${opts.toChapter} has no recorded scenes to roll back to`);
   }
+
   if (scene === undefined) throw new Error('rollback needs toScene or toChapter');
   if (scene < 1) throw new Error('scene must be 1 or greater');
 
@@ -211,6 +218,39 @@ export async function rollback(db: Db, world: World, opts: RollbackOptions): Pro
   return { mode, atScene: scene, story: forked.story, removed: null };
 }
 
+/** Restores or forks at the immutable checkpoint directly after `turnId`. */
+export async function rollbackToTurn(
+  db: Db,
+  world: World,
+  turnId: string,
+  mode: 'fork' | 'destructive',
+  ownerUserId?: string,
+): Promise<RollbackResult> {
+  const checkpoint = await exactTurnCheckpoint(world, turnId, 'rollback');
+  if (mode === 'destructive') {
+    await world.history.restoreTurn(turnId);
+    return { mode, atScene: checkpoint.state.session.scene, toTurnId: turnId, story: null, removed: null };
+  }
+  const forked = await forkStory(db, world, {
+    fromStoryId: world.storyId,
+    atTurnId: turnId,
+    ...(ownerUserId === undefined ? {} : { ownerUserId }),
+  });
+  return { mode, atScene: checkpoint.state.session.scene, toTurnId: turnId, story: forked.story, removed: null };
+}
+
+async function exactTurnCheckpoint(world: World, turnId: string, operation: string): Promise<HistoryCheckpoint> {
+  const { rows } = await world.db.query<{ history_position: number | null }>(
+    `SELECT history_position FROM turns WHERE id = $1 AND story_id = $2`,
+    [turnId, world.storyId],
+  );
+  if (!rows[0]) throw new Error(`${operation}: unknown turn ${turnId}`);
+  if (rows[0].history_position == null) throw new Error(`${operation}: turn ${turnId} is legacy and has no exact history`);
+  const checkpoint = await world.history.checkpointForTurn(turnId);
+  if (!checkpoint) throw new Error(`${operation}: turn ${turnId} has no exact history checkpoint`);
+  return checkpoint;
+}
+
 export interface ForkOptions {
   fromStoryId: StoryId;
   title?: string;
@@ -221,6 +261,8 @@ export interface ForkOptions {
    * continuation, "branch from here".
    */
   atScene?: number;
+  /** Retain history through this exact committed turn, including the turn itself. */
+  atTurnId?: string;
   ownerUserId?: string;
 }
 
@@ -272,6 +314,14 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
   const source = await getStory(db, opts.fromStoryId);
   if (!source) throw new Error(`no story ${opts.fromStoryId}`);
   if (opts.atScene !== undefined && opts.atScene < 1) throw new Error('scene must be 1 or greater');
+  if (opts.atScene !== undefined && opts.atTurnId !== undefined) throw new Error('fork: pass atScene or atTurnId, not both');
+  if (opts.atTurnId !== undefined && opts.fromStoryId !== world.storyId)
+    throw new Error('fork: exact turn target must belong to the current story');
+  const checkpoint = opts.atTurnId === undefined ? undefined : await exactTurnCheckpoint(world, opts.atTurnId, 'fork');
+  if (checkpoint && source.encryptionVersion !== 0)
+    throw new Error('fork: private story exact-history fork is not ready for this key');
+  const retainedPosition = checkpoint?.position;
+  const retainedCheckpoints = checkpoint ? await world.history.checkpointsThrough(checkpoint.position) : [];
 
   return db.tx(async (tx) => {
     // The fork reads the same canon worlds the source did — that is what makes it
@@ -280,18 +330,45 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
       `SELECT world_id FROM story_sources WHERE story_id = $1 ORDER BY ordinal`,
       [opts.fromStoryId],
     );
+    const turnScene =
+      opts.atTurnId === undefined
+        ? undefined
+        : (
+            await tx.query<{ scene: number }>(`SELECT scene FROM turns WHERE id = $1 AND story_id = $2`, [
+              opts.atTurnId,
+              opts.fromStoryId,
+            ])
+          ).rows[0]!.scene;
+    const forkScene = opts.atScene ?? turnScene;
     const story = await createStory(tx, {
       title: opts.title ?? (source.title ? `${source.title} (fork)` : ''),
       worldIds: sources.map((r) => Number(r.world_id)),
-      ...(opts.atScene === undefined ? {} : { forkedFrom: opts.fromStoryId, forkedAtScene: opts.atScene }),
+      ...(forkScene === undefined ? {} : { forkedFrom: opts.fromStoryId, forkedAtScene: forkScene }),
       ...(opts.ownerUserId === undefined ? {} : { ownerUserId: opts.ownerUserId }),
     });
 
-    if (opts.atScene === undefined) {
+    if (forkScene === undefined) {
       return { story, copiedFrom: null, copiedUpToScene: null };
     }
 
-    const scene = opts.atScene;
+    const scene = forkScene;
+    const segmentIds = new Map<string, string>();
+    if (checkpoint) {
+      const { rows: segments } = await tx.query<{ id: string; start_position: number; created_at: Date | string }>(
+        `SELECT id, start_position, created_at FROM scene_segments WHERE story_id = $1 AND start_position <= $2 ORDER BY start_position`,
+        [opts.fromStoryId, retainedPosition],
+      );
+      for (const segment of segments) {
+        const id = `segment:${randomUUID()}`;
+        segmentIds.set(segment.id, id);
+        await tx.query(`INSERT INTO scene_segments (id, story_id, start_position, created_at) VALUES ($1,$2,$3,$4)`, [
+          id,
+          story.id,
+          segment.start_position,
+          segment.created_at,
+        ]);
+      }
+    }
     // `createStory` opens scene 1 for every new story. A fork is the one caller
     // that then copies the source's own scene rows over the same range, so the
     // placeholder is dropped first rather than colliding on the way in.
@@ -332,7 +409,24 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
       const params: unknown[] = [opts.fromStoryId];
       if (spec.scene) params.push(scene);
 
-      if (!spec.freshId) {
+      if (!spec.freshId && checkpoint) {
+        const sourceRows: Record<string, unknown>[] = checkpoint.state.tables[spec.table] ?? [];
+        if (!sourceRows.length) continue;
+        for (const row of sourceRows) {
+          const values = copyable.map((column) => {
+            if (column === 'story_id') return story.id;
+            if (column === 'scene_segment_id' && row[column] != null) return segmentIds.get(String(row[column])) ?? null;
+            return row[column];
+          });
+          await tx.query(
+            `INSERT INTO ${spec.table} (${copyable.join(', ')}) VALUES (${copyable.map((_, i) => `$${i + 1}`).join(', ')})`,
+            values,
+          );
+        }
+        continue;
+      }
+
+      if (!spec.freshId && !checkpoint) {
         // No id to rewrite: one INSERT ... SELECT and the database does the copy.
         // `story_id` is substituted; everything else comes across as-is.
         const select = copyable.map((c) => (c === 'story_id' ? `$${params.length + 1}` : c)).join(', ');
@@ -347,11 +441,24 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
 
       // Text ids must be fresh, and other tables may reference them, so these are
       // read out, remapped in JS, and inserted back. Only four tables need this.
-      const { rows: sourceRows } = await tx.query<Record<string, unknown>>(
-        `SELECT ${columns.filter((c) => !generated.has(c) || c === 'id').join(', ')}
-           FROM ${spec.table} WHERE story_id = $1${bound}`,
-        params,
-      );
+      const selectColumns = columns.filter((c) => !generated.has(c) || c === 'id').join(', ');
+      const sourceRows = checkpoint
+        ? spec.table === 'turns'
+          ? (
+              await tx.query<Record<string, unknown>>(
+                `SELECT ${selectColumns} FROM turns
+                  WHERE story_id = $1 AND (history_position IS NULL OR history_position <= $2)
+                  ORDER BY history_position`,
+                [opts.fromStoryId, retainedPosition],
+              )
+            ).rows
+          : checkpoint.state.tables[spec.table] ?? []
+        : (
+            await tx.query<Record<string, unknown>>(
+              `SELECT ${selectColumns} FROM ${spec.table} WHERE story_id = $1${bound}`,
+              params,
+            )
+          ).rows;
       if (!sourceRows.length) continue;
 
       const ownMap = new Map<string, string>();
@@ -367,6 +474,7 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
 
         const values = insertCols.map((c) => {
           if (c === 'story_id') return story.id;
+          if (c === 'scene_segment_id' && row[c] != null) return segmentIds.get(String(row[c])) ?? null;
           if (c === 'id') return freshId;
           const refTable = refs[c];
           if (refTable && row[c] != null) {
@@ -390,21 +498,88 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
     const factMap = idMaps.get('facts');
     if (factMap) {
       for (const [oldFactId, newFactId] of factMap) {
-        await tx.query(
-          `INSERT INTO fact_knowledge (fact_id, entity_id, level, since_scene, distortion)
-           SELECT $1, entity_id, level, since_scene, distortion
-             FROM fact_knowledge WHERE fact_id = $2 AND since_scene < $3`,
-          [newFactId, oldFactId, scene],
-        );
+        if (checkpoint) {
+          for (const entry of checkpoint.state.tables.fact_knowledge ?? []) {
+            if (entry.fact_id !== oldFactId) continue;
+            await tx.query(
+              `INSERT INTO fact_knowledge (fact_id, entity_id, level, since_scene, distortion) VALUES ($1,$2,$3,$4,$5)`,
+              [newFactId, entry.entity_id, entry.level, entry.since_scene, entry.distortion],
+            );
+          }
+        } else {
+          await tx.query(
+            `INSERT INTO fact_knowledge (fact_id, entity_id, level, since_scene, distortion)
+             SELECT $1, entity_id, level, since_scene, distortion
+               FROM fact_knowledge WHERE fact_id = $2 AND since_scene < $3`,
+            [newFactId, oldFactId, scene],
+          );
+        }
       }
     }
 
-    // The new story resumes exactly where the copy ends, same as truncateToScene.
-    const forkedWorld = new World({ db: tx, storyId: story.id, sources: world.sources });
-    await forkedWorld.session.set({ scene, turn: 0 });
+    const forkedWorld = new World({ db: tx, storyId: story.id, sources: world.sources, crypto: world.crypto });
+    if (checkpoint) {
+      await copyRetainedCheckpoints(tx, story.id, retainedCheckpoints, idMaps, segmentIds);
+      const session = checkpoint.state.session as StoryLayout['session'] & { active_scene_segment_id?: string | null };
+      await forkedWorld.session.set(session);
+      await tx.query(`UPDATE stories SET active_scene_segment_id = $1 WHERE id = $2`, [
+        session.active_scene_segment_id ? segmentIds.get(session.active_scene_segment_id) ?? null : null,
+        story.id,
+      ]);
+    } else {
+      // The new story resumes exactly where the copy ends, same as truncateToScene.
+      await forkedWorld.session.set({ scene, turn: 0 });
+    }
 
     return { story, copiedFrom: opts.fromStoryId, copiedUpToScene: scene };
   });
+}
+
+async function copyRetainedCheckpoints(
+  tx: Queryable,
+  storyId: StoryId,
+  checkpoints: HistoryCheckpoint[],
+  idMaps: Map<string, Map<string, string>>,
+  segmentIds: Map<string, string>,
+): Promise<void> {
+  for (const checkpoint of checkpoints) {
+    const state = remapCheckpointState(checkpoint.state, storyId, idMaps, segmentIds);
+    const turnId = checkpoint.turnId ? idMaps.get('turns')?.get(checkpoint.turnId) ?? null : null;
+    await tx.query(
+      `INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
+      [`checkpoint:${randomUUID()}`, storyId, turnId, checkpoint.position, JSON.stringify(state), checkpoint.createdAt],
+    );
+  }
+}
+
+function remapCheckpointState(
+  state: StoryLayout,
+  storyId: StoryId,
+  idMaps: Map<string, Map<string, string>>,
+  segmentIds: Map<string, string>,
+): StoryLayout {
+  const copy = JSON.parse(JSON.stringify(state)) as StoryLayout & {
+    session: StoryLayout['session'] & { active_scene_segment_id?: string | null };
+  };
+  copy.session.active_scene_segment_id = copy.session.active_scene_segment_id
+    ? segmentIds.get(copy.session.active_scene_segment_id) ?? null
+    : null;
+  for (const [table, entries] of Object.entries(copy.tables)) {
+    for (const entry of entries) {
+      if ('story_id' in entry) entry.story_id = storyId;
+      if (typeof entry.id === 'string') entry.id = idMaps.get(table)?.get(entry.id) ?? entry.id;
+      if (table === 'fact_knowledge' && typeof entry.fact_id === 'string')
+        entry.fact_id = idMaps.get('facts')?.get(entry.fact_id) ?? entry.fact_id;
+      if (table === 'events' && typeof entry.from_consequence_id === 'string')
+        entry.from_consequence_id = idMaps.get('consequences')?.get(entry.from_consequence_id) ?? null;
+      if (table === 'consequences' && typeof entry.cause_event_id === 'string')
+        entry.cause_event_id = idMaps.get('events')?.get(entry.cause_event_id) ?? null;
+      if (table === 'illustrations' && typeof entry.turn_id === 'string')
+        entry.turn_id = idMaps.get('turns')?.get(entry.turn_id) ?? null;
+    }
+  }
+  return copy;
 }
 
 /**

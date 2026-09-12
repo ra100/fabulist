@@ -45,9 +45,9 @@ import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { World } from '../store/index.ts';
-import { checkpoint, rows, tx } from '../db/db.ts';
+import { checkpoint, row, rows, tx } from '../db/db.ts';
 import { createStory, getStory } from '../store/world.ts';
-import type { Story, StoryId } from '../domain/types.ts';
+import type { HistoryCheckpoint, Story, StoryId, StoryLayout } from '../domain/types.ts';
 
 export interface BranchResult {
   path: string;
@@ -177,10 +177,12 @@ export function firstSceneOfChapter(world: World, chapter: number): number | und
 }
 
 export interface RollbackOptions {
-  /** Roll back to the start of this scene — everything at or after it is discarded. Mutually exclusive with `chapter`. */
+  /** Roll back to the start of this scene — everything at or after it is discarded. Mutually exclusive with `chapter` and `turnId`. */
   scene?: number;
-  /** Roll back to the start of this chapter — resolved via `firstSceneOfChapter`. Mutually exclusive with `scene`. */
+  /** Roll back to the start of this chapter — resolved via `firstSceneOfChapter`. Mutually exclusive with `scene` and `turnId`. */
   chapter?: number;
+  /** Retain this exact committed turn and discard only subsequent history. */
+  turnId?: string;
   /**
    * `'fork'` (the default): the safer option GAPS.md's §3.6 left open.
    * Forks the current story at the target scene into a new sibling —
@@ -198,6 +200,8 @@ export interface RollbackOptions {
 export interface RollbackResult {
   mode: 'fork' | 'destructive';
   toScene: number;
+  /** The retained final turn for an exact turn rollback. */
+  toTurnId?: string;
   /** Present only for `mode: 'destructive'`, and per-table, exactly like `BranchResult.removed` — what actually got deleted. */
   removed?: BranchResult['removed'];
   /** Present only for `mode: 'fork'` — the new story to switch to; `truncateToScene`'s own return only reports counts, but a fork produces a whole new place to land. */
@@ -213,9 +217,13 @@ export interface RollbackResult {
  * beside it anyway, on purpose, as the safe default.
  */
 export function rollback(world: World, opts: RollbackOptions): RollbackResult {
-  if ((opts.scene === undefined) === (opts.chapter === undefined)) {
-    throw new Error('rollback: pass exactly one of scene or chapter');
+  const targets = [opts.scene, opts.chapter, opts.turnId].filter((target) => target !== undefined);
+  if (targets.length !== 1) {
+    throw new Error('rollback: pass exactly one of scene, chapter, or turnId');
   }
+  const mode = opts.mode ?? 'fork';
+  if (opts.turnId !== undefined) return rollbackToTurn(world, opts.turnId, mode, opts.ownerUserId);
+
   let scene = opts.scene;
   if (opts.chapter !== undefined) {
     scene = firstSceneOfChapter(world, opts.chapter);
@@ -225,7 +233,6 @@ export function rollback(world: World, opts: RollbackOptions): RollbackResult {
   const current = world.session.get().scene;
   if (scene > current) throw new Error(`rollback: scene ${scene} has not happened yet (currently at scene ${current})`);
 
-  const mode = opts.mode ?? 'fork';
   if (mode === 'destructive') {
     const removed = truncateToScene(world, scene);
     return { mode, toScene: scene, removed };
@@ -233,6 +240,33 @@ export function rollback(world: World, opts: RollbackOptions): RollbackResult {
 
   const fork = forkStory(world, { fromStoryId: world.storyId, atScene: scene, ownerUserId: opts.ownerUserId });
   return { mode, toScene: scene, forkedStory: fork.story };
+}
+
+/** Restores or forks at the immutable checkpoint directly after `turnId`. */
+export function rollbackToTurn(
+  world: World,
+  turnId: string,
+  mode: 'fork' | 'destructive',
+  ownerUserId?: string,
+): RollbackResult {
+  const checkpoint = exactTurnCheckpoint(world, turnId, 'rollback');
+  if (mode === 'destructive') {
+    world.history.restoreTurn(turnId);
+    return { mode, toScene: checkpoint.state.session.scene, toTurnId: turnId };
+  }
+  const fork = forkStory(world, { fromStoryId: world.storyId, atTurnId: turnId, ownerUserId });
+  return { mode, toScene: checkpoint.state.session.scene, toTurnId: turnId, forkedStory: fork.story };
+}
+
+function exactTurnCheckpoint(world: World, turnId: string, operation: string): HistoryCheckpoint {
+  const turn = row<{ history_position: number | null }>(
+    world.db.prepare(`SELECT history_position FROM turns WHERE id = ? AND story_id = ?`).get(turnId, world.storyId),
+  );
+  if (!turn) throw new Error(`${operation}: unknown turn ${turnId}`);
+  if (turn.history_position == null) throw new Error(`${operation}: turn ${turnId} is legacy and has no exact history`);
+  const checkpoint = world.history.checkpointForTurn(turnId);
+  if (!checkpoint) throw new Error(`${operation}: turn ${turnId} has no exact history checkpoint`);
+  return checkpoint;
 }
 
 /**
@@ -292,6 +326,8 @@ export interface ForkOptions {
    * that scene — a continuation / "branch from here".
    */
   atScene?: number;
+  /** Retain history through this exact committed turn, including the turn itself. */
+  atTurnId?: string;
   /**
    * Who owns the *new* forked story — the calling user, when login is on
    * (`src/auth/config.ts`). Deliberately not inherited from the source
@@ -326,20 +362,49 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
   const source = getStory(world.db, opts.fromStoryId);
   if (!source) throw new Error(`no story ${opts.fromStoryId} in this world`);
   if (opts.atScene !== undefined && opts.atScene < 1) throw new Error('scene must be 1 or greater');
+  if (opts.atScene !== undefined && opts.atTurnId !== undefined) throw new Error('fork: pass atScene or atTurnId, not both');
+  const checkpoint = opts.atTurnId === undefined ? undefined : exactTurnCheckpoint(world, opts.atTurnId, 'fork');
+  const retainedPosition = checkpoint?.position;
+  const retainedCheckpoints = checkpoint ? world.history.checkpointsThrough(checkpoint.position) : [];
 
   return tx(world.db, () => {
+    const turnScene =
+      opts.atTurnId === undefined
+        ? undefined
+        : row<{ scene: number }>(world.db.prepare(`SELECT scene FROM turns WHERE id = ? AND story_id = ?`).get(opts.atTurnId, opts.fromStoryId))!
+            .scene;
+    const forkScene = opts.atScene ?? turnScene;
     const story = createStory(world.db, {
       title: opts.title ?? (source.title ? `${source.title} (fork)` : ''),
-      forkedFrom: opts.atScene === undefined ? undefined : opts.fromStoryId,
-      forkedAtScene: opts.atScene,
+      forkedFrom: forkScene === undefined ? undefined : opts.fromStoryId,
+      forkedAtScene: forkScene,
       ownerUserId: opts.ownerUserId,
     });
 
-    if (opts.atScene === undefined) {
+    if (forkScene === undefined) {
       return { story, copiedFrom: null, copiedUpToScene: null };
     }
 
-    const scene = opts.atScene;
+    const scene = forkScene;
+    const segmentIds = new Map<string, string>();
+    if (checkpoint) {
+      const position = retainedPosition!;
+      const segments = rows<{ id: string }>(
+        world.db
+          .prepare(`SELECT id FROM scene_segments WHERE story_id = ? AND start_position <= ? ORDER BY start_position`)
+          .all(opts.fromStoryId, position),
+      );
+      for (const segment of segments) {
+        const id = `segment:${randomUUID()}`;
+        segmentIds.set(segment.id, id);
+        world.db
+          .prepare(
+            `INSERT INTO scene_segments (id, story_id, start_position, created_at)
+             SELECT ?, ?, start_position, created_at FROM scene_segments WHERE id = ? AND story_id = ?`,
+          )
+          .run(id, story.id, segment.id, opts.fromStoryId);
+      }
+    }
     // `createStory` opens scene 1 for every new story (see its own comment on
     // why that is a property of a story existing). A fork is the one caller
     // that then copies the *source's* scene rows over the same range, so the
@@ -373,11 +438,23 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
       // column forced in either — `scenes`/`chapters` key on `story_id` plus
       // a natural column and have no `id` column at all.
       const selectCols = idColumn === 'integer' ? ['id', ...cols] : cols;
-      const source_rows = rows<Record<string, unknown>>(
-        world.db
-          .prepare(`SELECT ${selectCols.join(', ')} FROM ${table} WHERE story_id = ? ${extra} ${sceneClause}`)
-          .all(...(selectArgs as never[])),
-      );
+      const source_rows: Record<string, unknown>[] = checkpoint
+        ? table === 'turns'
+          ? rows<Record<string, unknown>>(
+              world.db
+                .prepare(
+                  `SELECT ${selectCols.join(', ')} FROM turns
+                    WHERE story_id = ? AND (history_position IS NULL OR history_position <= ?)
+                    ORDER BY history_position`,
+                )
+                .all(opts.fromStoryId, retainedPosition!),
+            )
+          : checkpoint.state.tables[table] ?? []
+        : rows<Record<string, unknown>>(
+            world.db
+              .prepare(`SELECT ${selectCols.join(', ')} FROM ${table} WHERE story_id = ? ${extra} ${sceneClause}`)
+              .all(...(selectArgs as never[])),
+          );
       if (!source_rows.length) continue;
 
       const ownMap: Map<string, string> | null = idColumn ? new Map() : null;
@@ -397,6 +474,7 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
         }
         const values = cols.map((c) => {
           if (c === 'story_id') return story.id;
+          if (c === 'scene_segment_id' && row[c] != null) return segmentIds.get(String(row[c])) ?? null;
           if (c === 'id' && idColumn === 'text') {
             const fresh = `${String(row.id).split(':')[0] ?? table}:${randomUUID()}`;
             ownMap!.set(String(row.id), fresh);
@@ -427,7 +505,9 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
     if (factMap) {
       for (const [oldFactId, newFactId] of factMap) {
         const knowledge = rows<Record<string, unknown>>(
-          world.db.prepare(`SELECT * FROM fact_knowledge WHERE fact_id = ? AND since_scene < ?`).all(oldFactId, scene),
+          checkpoint
+            ? (checkpoint.state.tables.fact_knowledge ?? []).filter((entry: Record<string, unknown>) => entry.fact_id === oldFactId)
+            : world.db.prepare(`SELECT * FROM fact_knowledge WHERE fact_id = ? AND since_scene < ?`).all(oldFactId, scene),
         );
         for (const k of knowledge) {
           world.db
@@ -437,11 +517,65 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
       }
     }
 
-    // The new story resumes exactly where the copy ends, same as truncateToScene.
-    world.withStory(story.id).session.set({ scene, turn: 0 });
+    if (checkpoint) {
+      copyRetainedCheckpoints(world.db, story.id, retainedCheckpoints, idMaps, segmentIds);
+      const session = checkpoint.state.session as StoryLayout['session'] & { active_scene_segment_id?: string | null };
+      world.withStory(story.id).session.set(session);
+      world.db
+        .prepare(`UPDATE stories SET active_scene_segment_id = ? WHERE id = ?`)
+        .run(session.active_scene_segment_id ? segmentIds.get(session.active_scene_segment_id) ?? null : null, story.id);
+    } else {
+      // The new story resumes exactly where the copy ends, same as truncateToScene.
+      world.withStory(story.id).session.set({ scene, turn: 0 });
+    }
 
     return { story, copiedFrom: opts.fromStoryId, copiedUpToScene: scene };
   });
+}
+
+function copyRetainedCheckpoints(
+  db: World['db'],
+  storyId: StoryId,
+  checkpoints: HistoryCheckpoint[],
+  idMaps: Map<string, Map<string, string>>,
+  segmentIds: Map<string, string>,
+): void {
+  for (const checkpoint of checkpoints) {
+    const state = remapCheckpointState(checkpoint.state, storyId, idMaps, segmentIds);
+    const turnId = checkpoint.turnId ? idMaps.get('turns')?.get(checkpoint.turnId) ?? null : null;
+    db
+      .prepare(`INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at) VALUES (?,?,?,?,?,?)`)
+      .run(`checkpoint:${randomUUID()}`, storyId, turnId, checkpoint.position, JSON.stringify(state), checkpoint.createdAt);
+  }
+}
+
+function remapCheckpointState(
+  state: StoryLayout,
+  storyId: StoryId,
+  idMaps: Map<string, Map<string, string>>,
+  segmentIds: Map<string, string>,
+): StoryLayout {
+  const copy = JSON.parse(JSON.stringify(state)) as StoryLayout & {
+    session: StoryLayout['session'] & { active_scene_segment_id?: string | null };
+  };
+  copy.session.active_scene_segment_id = copy.session.active_scene_segment_id
+    ? segmentIds.get(copy.session.active_scene_segment_id) ?? null
+    : null;
+  for (const [table, entries] of Object.entries(copy.tables)) {
+    for (const entry of entries) {
+      if ('story_id' in entry) entry.story_id = storyId;
+      if (typeof entry.id === 'string') entry.id = idMaps.get(table)?.get(entry.id) ?? entry.id;
+      if (table === 'fact_knowledge' && typeof entry.fact_id === 'string')
+        entry.fact_id = idMaps.get('facts')?.get(entry.fact_id) ?? entry.fact_id;
+      if (table === 'events' && typeof entry.from_consequence_id === 'string')
+        entry.from_consequence_id = idMaps.get('consequences')?.get(entry.from_consequence_id) ?? null;
+      if (table === 'consequences' && typeof entry.cause_event_id === 'string')
+        entry.cause_event_id = idMaps.get('events')?.get(entry.cause_event_id) ?? null;
+      if (table === 'illustrations' && typeof entry.turn_id === 'string')
+        entry.turn_id = idMaps.get('turns')?.get(entry.turn_id) ?? null;
+    }
+  }
+  return copy;
 }
 
 export interface BranchOptions {
