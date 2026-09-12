@@ -14,6 +14,7 @@
  * than reimplementing any part of the turn loop here.
  */
 import type { Engine } from '../loop/engine.ts';
+import { recordAuthoringCheckpoint } from '../loop/history.ts';
 import { forkStory, branchSave, rollback, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate.ts';
 import type { IllustrationService } from '../illustration/service.ts';
@@ -683,6 +684,7 @@ export async function playTool(ctx: McpToolContext, args: { input: string; overr
     seeded = seedConsequences(world, outcome.delta, outcome.commit.events).length;
     tick = tickConsequences(world);
     worldTick(world);
+    recordAuthoringCheckpoint(world);
   }
   return { outcome, seeded, tick };
 }
@@ -691,6 +693,7 @@ export async function playTool(ctx: McpToolContext, args: { input: string; overr
 export function pinTurnTool(ctx: McpToolContext, args: { id: string; pinned?: boolean }) {
   const world = ctx.world();
   world.chronicle.setPinned(args.id, args.pinned !== false);
+  recordAuthoringCheckpoint(world);
   return world.chronicle.getTurn(args.id);
 }
 
@@ -702,7 +705,9 @@ export function pinTurnTool(ctx: McpToolContext, args: { id: string; pinned?: bo
  */
 export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string; note?: string }) {
   const world = ctx.world();
-  return ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
+  const turn = await ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
+  recordAuthoringCheckpoint(world);
+  return turn;
 }
 
 /** Author-controlled exact prose replacement; it never re-extracts state. */
@@ -756,6 +761,7 @@ export function updateSheetTool(
       : existing.appearance,
     locks: args.locks ?? existing.locks,
   });
+  recordAuthoringCheckpoint(world);
   return world.cast.get(args.id);
 }
 
@@ -764,6 +770,7 @@ export function lockSheetFieldTool(ctx: McpToolContext, args: { id: string; path
   const world = ctx.world();
   if (args.locked === false) world.cast.unlock(args.id, args.path);
   else world.cast.lock(args.id, args.path);
+  recordAuthoringCheckpoint(world);
   return world.cast.get(args.id);
 }
 
@@ -775,6 +782,7 @@ export function updateThreadTool(
   const world = ctx.world();
   const { id, ...patch } = args;
   world.threads.update(id, patch as never);
+  recordAuthoringCheckpoint(world);
   return world.threads.get(id);
 }
 
@@ -798,6 +806,7 @@ export function addDirectiveTool(
     createdScene: world.session.get().scene,
   });
   const diff = applyDirectiveRecalc(world, created.id, created.text);
+  recordAuthoringCheckpoint(world);
   return {
     directive: created,
     diff: {
@@ -812,6 +821,7 @@ export function addDirectiveTool(
 export function deleteDirectiveTool(ctx: McpToolContext, args: { id: string }) {
   const world = ctx.world();
   world.directives.setStatus(args.id, 'retired');
+  recordAuthoringCheckpoint(world);
   return { ok: true };
 }
 
@@ -821,6 +831,7 @@ export function updateStyleTool(ctx: McpToolContext, args: Partial<StyleContract
   const cur = world.session.get();
   const next = { ...cur.style, ...args };
   world.session.set({ style: next });
+  recordAuthoringCheckpoint(world);
   return next;
 }
 
@@ -830,6 +841,7 @@ export function updateKnobsTool(ctx: McpToolContext, args: Partial<Knobs>) {
   const cur = world.session.get();
   const next = { ...cur.knobs, ...args };
   world.session.set({ knobs: next });
+  recordAuthoringCheckpoint(world);
   return next;
 }
 
@@ -837,6 +849,7 @@ export function updateKnobsTool(ctx: McpToolContext, args: Partial<Knobs>) {
 export function addAnchorTool(ctx: McpToolContext, args: { text: string; note?: string }) {
   const world = ctx.world();
   world.chronicle.addAnchor(args.text, args.note ?? '', world.session.get().scene);
+  recordAuthoringCheckpoint(world);
   return { ok: true };
 }
 
@@ -951,6 +964,7 @@ export function tickTool(ctx: McpToolContext) {
   const world = ctx.world();
   const tick = tickConsequences(world);
   const notes = worldTick(world);
+  recordAuthoringCheckpoint(world);
   return { tick, notes };
 }
 
@@ -981,6 +995,7 @@ export async function closeSceneTool(ctx: McpToolContext) {
   const result = await ctx.engine.compaction().onSceneClosed(before.scene);
   world.session.set({ scene: before.scene + 1, turn: 0 });
   world.chronicle.upsertScene(before.scene + 1, { chapter: ctx.engine.compaction().chapterOf(before.scene + 1) });
+  recordAuthoringCheckpoint(world);
   const summary = world.chronicle.scenes().find((s) => s.scene === before.scene)?.summary ?? null;
   return {
     closedScene: before.scene,

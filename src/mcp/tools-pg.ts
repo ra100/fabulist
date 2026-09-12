@@ -14,6 +14,7 @@
  * than reimplementing any part of the turn loop here.
  */
 import type { Engine } from '../loop/engine-pg.ts';
+import { recordAuthoringCheckpoint } from '../loop/history-pg.ts';
 import { forkStory, rollback, type ForkOptions } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
@@ -713,13 +714,16 @@ export async function resolveInterruptTool(
  */
 export async function playTool(ctx: McpToolContext, args: { input: string; overrideIntegrity?: boolean }) {
   const world = await ctx.world();
-  return playTurn(ctx.engine, world, args.input, { overrideIntegrity: args.overrideIntegrity });
+  const result = await playTurn(ctx.engine, world, args.input, { overrideIntegrity: args.overrideIntegrity });
+  if (result.outcome.kind === 'narrated') await recordAuthoringCheckpoint(world);
+  return result;
 }
 
 /** `pin_turn`. The MCP-side counterpart of `POST /api/turn/:id/pin` \u2014 a pinned turn's prose survives `regenerate_turn`/compaction untouched. */
 export async function pinTurnTool(ctx: McpToolContext, args: { id: string; pinned?: boolean }) {
   const world = await ctx.world();
   await world.chronicle.setPinned(args.id, args.pinned !== false);
+  await recordAuthoringCheckpoint(world);
   return await world.chronicle.getTurn(args.id);
 }
 
@@ -731,7 +735,9 @@ export async function pinTurnTool(ctx: McpToolContext, args: { id: string; pinne
  */
 export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string; note?: string }) {
   const world = await ctx.world();
-  return ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
+  const turn = await ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
+  await recordAuthoringCheckpoint(world);
+  return turn;
 }
 
 /** Author-controlled exact prose replacement; it never re-extracts state. */
@@ -789,6 +795,7 @@ export async function updateSheetTool(
       : existing.appearance,
     locks: args.locks ?? existing.locks,
   });
+  await recordAuthoringCheckpoint(world);
   return await world.cast.get(args.id);
 }
 
@@ -797,6 +804,7 @@ export async function lockSheetFieldTool(ctx: McpToolContext, args: { id: string
   const world = await ctx.world();
   if (args.locked === false) await world.cast.unlock(args.id, args.path);
   else await world.cast.lock(args.id, args.path);
+  await recordAuthoringCheckpoint(world);
   return await world.cast.get(args.id);
 }
 
@@ -808,6 +816,7 @@ export async function updateThreadTool(
   const world = await ctx.world();
   const { id, ...patch } = args;
   await world.threads.update(id, patch as never);
+  await recordAuthoringCheckpoint(world);
   return await world.threads.get(id);
 }
 
@@ -831,6 +840,7 @@ export async function addDirectiveTool(
     createdScene: (await world.session.get()).scene,
   });
   const diff = await applyDirectiveRecalc(world, created.id, created.text);
+  await recordAuthoringCheckpoint(world);
   // One read of every thread rather than a lookup per touched id: a story has few
   // enough threads that reading them all is the simpler correct thing.
   const titles = new Map((await world.threads.all()).map((t) => [t.id, t.title]));
@@ -848,6 +858,7 @@ export async function addDirectiveTool(
 export async function deleteDirectiveTool(ctx: McpToolContext, args: { id: string }) {
   const world = await ctx.world();
   await world.directives.setStatus(args.id, 'retired');
+  await recordAuthoringCheckpoint(world);
   return { ok: true };
 }
 
@@ -857,6 +868,7 @@ export async function updateStyleTool(ctx: McpToolContext, args: Partial<StyleCo
   const cur = await world.session.get();
   const next = { ...cur.style, ...args };
   await world.session.set({ style: next });
+  await recordAuthoringCheckpoint(world);
   return next;
 }
 
@@ -866,6 +878,7 @@ export async function updateKnobsTool(ctx: McpToolContext, args: Partial<Knobs>)
   const cur = await world.session.get();
   const next = { ...cur.knobs, ...args };
   await world.session.set({ knobs: next });
+  await recordAuthoringCheckpoint(world);
   return next;
 }
 
@@ -873,6 +886,7 @@ export async function updateKnobsTool(ctx: McpToolContext, args: Partial<Knobs>)
 export async function addAnchorTool(ctx: McpToolContext, args: { text: string; note?: string }) {
   const world = await ctx.world();
   await world.chronicle.addAnchor(args.text, args.note ?? '', (await world.session.get()).scene);
+  await recordAuthoringCheckpoint(world);
   return { ok: true };
 }
 
@@ -989,8 +1003,9 @@ export async function deleteIllustrationTool(ctx: McpToolContext, args: { id: st
 /** `tick`. The MCP-side counterpart of `POST /api/tick` \u2014 advances seeded consequences toward firing and runs whatever else the world clock does per tick. */
 export async function tickTool(ctx: McpToolContext) {
   const world = await ctx.world();
-  const tick = tickConsequences(world);
-  const notes = worldTick(world);
+  const tick = await tickConsequences(world);
+  const notes = await worldTick(world);
+  await recordAuthoringCheckpoint(world);
   return { tick, notes };
 }
 
@@ -1021,6 +1036,7 @@ export async function closeSceneTool(ctx: McpToolContext) {
   const result = await ctx.engine.compaction().onSceneClosed(world, before.scene);
   await world.session.set({ scene: before.scene + 1, turn: 0 });
   await world.chronicle.upsertScene(before.scene + 1, { chapter: ctx.engine.compaction().chapterOf(before.scene + 1) });
+  await recordAuthoringCheckpoint(world);
   const summary = (await world.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
   return {
     closedScene: before.scene,

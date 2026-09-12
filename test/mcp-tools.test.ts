@@ -229,6 +229,39 @@ test('getBookTool returns turns in order, most recent last', async () => {
   const out = getBookTool(ctx, {});
   assert.equal(out.turns.length, 1);
   assert.equal(out.turns[0]?.turn, 1);
+  const checkpoint = world.history.checkpointForTurn(out.turns[0]!.id);
+  assert.ok(checkpoint, 'a committed turn receives an exact history checkpoint');
+  updateStyleTool(ctx, { register: 'plain' });
+  assert.deepEqual(world.history.checkpointForTurn(out.turns[0]!.id), checkpoint, 'authoring checkpoints retain turn checkpoints');
+  world.close();
+});
+
+test('authoring checkpoints preserve the committed turn checkpoint', async () => {
+  const { world, ctx, engine } = setup();
+  const outcome = await engine.takeTurn('i warm the ink and keep copying');
+  if (outcome.kind !== 'narrated') throw new Error(`expected a narrated turn, received ${outcome.kind}`);
+  const turn = outcome.turn;
+  const committed = world.history.checkpointForTurn(turn.id);
+  assert.ok(committed);
+
+  updateSheetTool(ctx, { id: 'char:brother-anselm', condition: { mood: 'alert' } });
+  lockSheetFieldTool(ctx, { id: 'char:brother-anselm', path: 'condition.mood' });
+  pinTurnTool(ctx, { id: turn.id, pinned: false });
+  await regenerateTurnTool(ctx, { id: turn.id });
+  updateThreadTool(ctx, { id: world.threads.all()[0]!.id, tension: 0.6 });
+  const { directive } = addDirectiveTool(ctx, { text: 'the captain becomes suspicious' });
+  deleteDirectiveTool(ctx, { id: directive.id });
+  updateStyleTool(ctx, { register: 'plain' });
+  updateKnobsTool(ctx, { pacing: 0.7 });
+  addAnchorTool(ctx, { text: 'The bridge stays open.' });
+  tickTool(ctx);
+  await closeSceneTool(ctx);
+
+  assert.deepEqual(world.history.checkpointForTurn(turn.id), committed);
+  const count = world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
+    count: number;
+  };
+  assert.equal(Number(count.count), 13, 'one turn checkpoint plus one checkpoint for each authoring mutation');
   world.close();
 });
 

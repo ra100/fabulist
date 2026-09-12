@@ -224,6 +224,15 @@ test('a turn plays over HTTP and persists', async (t) => {
       // Persisted, not merely returned.
       const turns = await world.chronicle.turns();
       assert.equal(turns.length, 1);
+      const checkpoint = await world.history.checkpointForTurn(turns[0]!.id);
+      assert.ok(checkpoint, 'a committed turn receives an exact history checkpoint');
+      const style = await send(base, 'PUT', '/api/style', { register: 'plain' });
+      assert.equal(style.status, 200);
+      assert.deepEqual(
+        await world.history.checkpointForTurn(turns[0]!.id),
+        checkpoint,
+        'authoring checkpoints do not replace turn checkpoints',
+      );
       const book = await get(base, '/api/book?limit=5');
       assert.equal(book.body.turns.length, 1);
       assert.equal(book.body.turns[0].bookProse, played.body.outcome.prose);

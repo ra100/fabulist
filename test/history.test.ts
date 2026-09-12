@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { World } from '../src/store/index.ts';
-import type { Turn } from '../src/domain/types.ts';
+import { emptyDelta, type Turn } from '../src/domain/types.ts';
+import { commitDelta, commitTurn } from '../src/loop/commit.ts';
+import { recordAuthoringCheckpoint } from '../src/loop/history.ts';
 
 function turnInput(turn: number): Omit<Turn, 'id' | 'createdAt'> {
   return {
@@ -50,5 +52,42 @@ test('legacy turn has no eligible checkpoint', () => {
   const legacy = world.chronicle.addTurn(turnInput(1));
   assert.equal(world.history.checkpointForTurn(legacy.id), undefined);
   assert.equal(world.history.eligibleTurn(legacy.id), undefined);
+  world.close();
+});
+
+test('committed turn checkpoint is retained when authoring checkpoints are recorded', () => {
+  const world = World.open(':memory:');
+  const { turn } = commitTurn(world, {
+    ...turnInput(1),
+    rawInput: 'take the lantern',
+    delta: emptyDelta(),
+    bookProse: 'The lantern is taken.',
+  });
+
+  const checkpoint = world.history.checkpointForTurn(turn.id);
+  assert.ok(checkpoint);
+  assert.equal(world.history.eligibleTurn(turn.id)?.position, checkpoint.position);
+  assert.deepEqual(
+    { scene: checkpoint.state.session.scene, turn: checkpoint.state.session.turn },
+    { scene: 1, turn: 1 },
+    'the checkpoint is taken after the turn cursor advances',
+  );
+
+  world.session.set({ style: { ...world.session.get().style, register: 'plain' } });
+  recordAuthoringCheckpoint(world);
+
+  assert.deepEqual(world.history.checkpointForTurn(turn.id), checkpoint);
+  const count = world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
+    count: number;
+  };
+  assert.equal(Number(count.count), 2);
+  world.close();
+});
+
+test('partial commit delta creates no turn rollback checkpoint', () => {
+  const world = World.open(':memory:');
+  const legacy = world.chronicle.addTurn(turnInput(1));
+  commitDelta(world, emptyDelta());
+  assert.equal(world.history.checkpointForTurn(legacy.id), undefined);
   world.close();
 });
