@@ -8,7 +8,7 @@
  * history and the world model, and the Referee loses the ability to check
  * anything that happened more than a scene ago.
  */
-import type { EntityId } from '../domain/types.ts';
+import type { EntityId, StoryEvent } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
 import { checkpoint } from '../db/db.ts';
 import { adaptRequest, extractJson, type JsonSchema, type Provider } from '../providers/provider.ts';
@@ -92,7 +92,12 @@ export class Compactor {
    * has a summary is left alone unless `force` is set, so this is safe to call
    * on every scene advance.
    */
-  async summariseScene(scene: number, force = false, suppliedLayout?: StoryLayout): Promise<string | null> {
+  async summariseScene(
+    scene: number,
+    force = false,
+    suppliedLayout?: StoryLayout,
+    suppliedEvents?: StoryEvent[],
+  ): Promise<string | null> {
     const world = this.getWorld();
     const layout = suppliedLayout ?? storyLayout(world, this.chapterSize);
     const entries = layout.turns.filter((entry) => entry.scene === scene);
@@ -121,8 +126,7 @@ export class Compactor {
       .join('\n');
 
     const eventScene = new Map(layout.turns.map((entry) => [`${entry.source.scene}:${entry.source.turn}`, entry.metadataKey]));
-    const events = world.chronicle
-      .events({ limit: Number.MAX_SAFE_INTEGER })
+    const events = (suppliedEvents ?? world.chronicle.events({ limit: Number.MAX_SAFE_INTEGER }))
       .filter((e) => eventScene.get(`${e.scene}:${e.turn}`) === identity)
       .map((e) => `- ${e.text}`)
       .join('\n');
@@ -203,10 +207,20 @@ export class Compactor {
     const layout = storyLayout(world, this.chapterSize);
     const scenesWithTurns = new Set(layout.turns.map((turn) => turn.scene));
     const activeScene = layout.currentScene || currentScene;
+    const eventIdentity = new Map(layout.turns.map((entry) => [`${entry.source.scene}:${entry.source.turn}`, entry.metadataKey]));
+    const eventsByIdentity = new Map<string, StoryEvent[]>();
+    for (const event of world.chronicle.events({ limit: Number.MAX_SAFE_INTEGER })) {
+      const identity = eventIdentity.get(`${event.scene}:${event.turn}`);
+      if (!identity) continue;
+      const events = eventsByIdentity.get(identity) ?? [];
+      events.push(event);
+      eventsByIdentity.set(identity, events);
+    }
     for (const scene of [...scenesWithTurns].sort((a, b) => a - b)) {
       if (scene >= activeScene) continue; // the current scene stays verbatim
       if (have.get(scene)) continue;
-      const summary = await this.summariseScene(scene, false, layout);
+      const identity = layout.turns.find((entry) => entry.scene === scene)?.metadataKey;
+      const summary = await this.summariseScene(scene, false, layout, identity ? eventsByIdentity.get(identity) ?? [] : []);
       if (summary) result.scenesSummarised.push(scene);
     }
     return result;

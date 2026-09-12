@@ -185,6 +185,82 @@ const surfaces: Surface[] = [
   },
 ];
 
+/**
+ * Scene metadata was introduced after private stories already encrypted their
+ * legacy `scenes/<scene>` values.  A metadata envelope has different AAD, so
+ * the old ciphertext cannot be moved: it must be decrypted with the active
+ * story key and encrypted again for its new identity.
+ */
+async function migrateSceneMetadata(db: Db, storyId: string, key: Buffer): Promise<void> {
+  const { rows } = await db.query<{ identity: string; scene: number; title: string; summary: string }>(
+    `SELECT identity, scene, title, summary FROM scene_metadata WHERE story_id = $1`,
+    [storyId],
+  );
+  for (const metadata of rows) {
+    const existing = await db.query<EncryptedRow>(
+      `SELECT field_name, version, nonce, ciphertext
+         FROM encrypted_story_values
+        WHERE story_id = $1 AND table_name = 'scene_metadata' AND record_id = $2`,
+      [storyId, metadata.identity],
+    );
+    if (existing.rows.length) {
+      const names = new Set(existing.rows.map(({ field_name }) => field_name));
+      if (existing.rows.length !== 2 || !names.has('title') || !names.has('summary')) {
+        throw new Error(`partial envelope scene_metadata/${metadata.identity}`);
+      }
+      for (const envelope of existing.rows) decryptEnvelope(key, storyId, 'scene_metadata', metadata.identity, envelope);
+      await db.query(`UPDATE scene_metadata SET title = '', summary = '' WHERE story_id = $1 AND identity = $2`, [
+        storyId,
+        metadata.identity,
+      ]);
+      continue;
+    }
+
+    let title = metadata.title;
+    let summary = metadata.summary;
+    if (metadata.identity === `raw:${metadata.scene}` && !title && !summary) {
+      const legacy = await db.query<EncryptedRow>(
+        `SELECT field_name, version, nonce, ciphertext
+           FROM encrypted_story_values
+          WHERE story_id = $1 AND table_name = 'scenes' AND record_id = $2`,
+        [storyId, String(metadata.scene)],
+      );
+      if (legacy.rows.length) {
+        const names = new Set(legacy.rows.map(({ field_name }) => field_name));
+        if (legacy.rows.length !== 2 || !names.has('title') || !names.has('summary')) {
+          throw new Error(`partial envelope scenes/${metadata.scene}`);
+        }
+        for (const envelope of legacy.rows) {
+          const value = decryptEnvelope(key, storyId, 'scenes', String(metadata.scene), envelope);
+          if (envelope.field_name === 'title') title = String(value);
+          else summary = String(value);
+        }
+      }
+    }
+
+    await db.tx(async (tx) => {
+      for (const [field, value] of [['title', title], ['summary', summary]] as const) {
+        const envelope = encryptStoryValue(key, {
+          storyId,
+          table: 'scene_metadata',
+          recordId: metadata.identity,
+          field,
+        }, value);
+        await tx.query(
+          `INSERT INTO encrypted_story_values
+             (story_id, table_name, record_id, field_name, version, nonce, ciphertext)
+           VALUES ($1,'scene_metadata',$2,$3,$4,$5,$6)`,
+          [storyId, metadata.identity, field, envelope.version, envelope.nonce, envelope.ciphertext],
+        );
+      }
+      await tx.query(`UPDATE scene_metadata SET title = '', summary = '' WHERE story_id = $1 AND identity = $2`, [
+        storyId,
+        metadata.identity,
+      ]);
+    });
+  }
+}
+
 function decryptEnvelope(key: Buffer, storyId: string, table: string, recordId: string, row: EncryptedRow): unknown {
   return decryptStoryValue(
     key,
@@ -536,7 +612,10 @@ export async function migratePrivateStories(
     const pending = await pendingStories(db, owned);
     const legacy = await legacyBlocklist(db, userId);
     const prior = await privateMigrationStatus(db, userId);
-    if (!pending.length && !legacy.length && prior?.status === 'complete') return;
+    if (!pending.length && !legacy.length && prior?.status === 'complete') {
+      for (const story of owned) await migrateSceneMetadata(db, story.id, keys.get(story.id)!);
+      return;
+    }
 
     await claimMigration(db, userId, owned, pending);
     try {
@@ -559,6 +638,12 @@ export async function migratePrivateStories(
             WHERE story_id = $1`,
           [story.id],
         );
+      }
+
+      // This runs for completed v1 stories too. Migration 007 can add its
+      // plaintext projection after their original enrollment finished.
+      for (const story of owned) {
+        await migrateSceneMetadata(db, story.id, keys.get(story.id)!);
       }
 
       await migrateLegacyBlocklist(db, userId, owned, keys);

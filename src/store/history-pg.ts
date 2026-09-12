@@ -211,8 +211,76 @@ export class HistoryStore {
         retained.position,
       ]);
       await this.reconcileContinuation(queryable, retained.position);
+      await this.invalidateStaleSummaries(queryable, key);
       return retained;
     });
+  }
+
+  /**
+   * Segments are durable layout state rather than checkpoint state. A
+   * checkpoint from before a split can therefore restore its parent summary
+   * into a now-split layout; retain only metadata whose identity and chapter
+   * membership still describe that layout.
+   */
+  async invalidateStaleSummaries(queryable: Queryable = this.db, suppliedKey?: Buffer | null): Promise<void> {
+    const key = suppliedKey === undefined ? await this.privateKey(queryable) : suppliedKey;
+    const [{ rows: turns }, { rows: segmentRows }, { rows: metadata }, { rows: chapters }] = await Promise.all([
+      queryable.query<{ scene: number; history_position: number }>(
+        `SELECT scene, history_position FROM turns
+          WHERE story_id = $1 AND history_position IS NOT NULL
+          ORDER BY history_position`,
+        [this.storyId],
+      ),
+      queryable.query<{ id: string; start_position: number }>(
+        `SELECT id, start_position FROM scene_segments WHERE story_id = $1`,
+        [this.storyId],
+      ),
+      queryable.query<{ identity: string; scene: number; chapter: number }>(
+        `SELECT identity, scene, chapter FROM scene_metadata WHERE story_id = $1`,
+        [this.storyId],
+      ),
+      queryable.query<{ chapter: number }>(`SELECT chapter FROM chapters WHERE story_id = $1`, [this.storyId]),
+    ]);
+    const segments = new Map(segmentRows.map((segment) => [segment.start_position, segment.id]));
+    const expected = new Map<string, { scene: number; chapter: number }>();
+    const identitiesByRawScene = new Map<number, Set<string>>();
+    let previousRawScene: number | undefined;
+    let segmentId: string | undefined;
+    let scene = 0;
+    for (const turn of turns) {
+      if (previousRawScene !== turn.scene) segmentId = undefined;
+      if (segments.has(turn.history_position) && scene > 0) segmentId = segments.get(turn.history_position);
+      if (previousRawScene !== turn.scene || (segments.has(turn.history_position) && scene > 0)) scene += 1;
+      const identity = segmentId ? `segment:${segmentId}` : `raw:${turn.scene}`;
+      expected.set(identity, { scene, chapter: Math.floor((scene - 1) / 8) + 1 });
+      const identities = identitiesByRawScene.get(turn.scene) ?? new Set<string>();
+      identities.add(identity);
+      identitiesByRawScene.set(turn.scene, identities);
+      previousRawScene = turn.scene;
+    }
+    const stale = metadata.filter((entry) => {
+      const layout = expected.get(entry.identity);
+      const rawScene = /^raw:(\d+)$/.exec(entry.identity);
+      return !layout ||
+        layout.scene !== entry.scene ||
+        layout.chapter !== entry.chapter ||
+        (rawScene !== null && (identitiesByRawScene.get(Number(rawScene[1]))?.size ?? 0) > 1);
+    });
+    for (const entry of stale) await this.clearSummary(queryable, key, 'scene_metadata', entry.identity);
+
+    const expectedByChapter = new Map<number, Set<string>>();
+    for (const [identity, layout] of expected) {
+      const group = expectedByChapter.get(layout.chapter) ?? new Set<string>();
+      group.add(identity);
+      expectedByChapter.set(layout.chapter, group);
+    }
+    for (const { chapter } of chapters) {
+      const stored = new Set(metadata.filter((entry) => entry.chapter === chapter).map((entry) => entry.identity));
+      const expectedGroup = expectedByChapter.get(chapter) ?? new Set<string>();
+      if (stored.size !== expectedGroup.size || [...stored].some((identity) => !expectedGroup.has(identity))) {
+        await this.clearSummary(queryable, key, 'chapters', String(chapter));
+      }
+    }
   }
 
   async splitBefore(turnId: string): Promise<SceneSplit> {
@@ -478,6 +546,30 @@ export class HistoryStore {
     if (!key) throw new Error(`private story ${this.storyId} is locked`);
     if (key.length !== 32) throw new Error('invalid private-story key');
     return Buffer.from(key);
+  }
+
+  private async clearSummary(
+    queryable: Queryable,
+    key: Buffer | null,
+    table: 'scene_metadata' | 'chapters',
+    recordId: string,
+  ): Promise<void> {
+    const idColumn = table === 'scene_metadata' ? 'identity' : 'chapter';
+    await queryable.query(
+      `UPDATE ${table} SET title = '', summary = '' WHERE story_id = $1 AND ${idColumn} = $2`,
+      [this.storyId, recordId],
+    );
+    if (!key) return;
+    for (const field of ['title', 'summary'] as const) {
+      const envelope = encryptStoryValue(key, { storyId: this.storyId, table, recordId, field }, '');
+      await queryable.query(
+        `INSERT INTO encrypted_story_values (story_id, table_name, record_id, field_name, version, nonce, ciphertext)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (story_id, table_name, record_id, field_name) DO UPDATE SET
+           version = EXCLUDED.version, nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, updated_at = now()`,
+        [this.storyId, table, recordId, field, envelope.version, envelope.nonce, envelope.ciphertext],
+      );
+    }
   }
 
   private async reconcileContinuation(queryable: Queryable, position: number): Promise<void> {

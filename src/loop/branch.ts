@@ -530,6 +530,7 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
         .prepare(`UPDATE stories SET active_scene_segment_id = ? WHERE id = ?`)
         .run(session.active_scene_segment_id ? segmentIds.get(session.active_scene_segment_id) ?? null : null, story.id);
       reconcileContinuation(world.withStory(story.id));
+      world.withStory(story.id).history.invalidateStaleSummaries();
     } else {
       // The new story resumes exactly where the copy ends, same as truncateToScene.
       world.withStory(story.id).session.set({ scene, turn: 0 });

@@ -530,6 +530,7 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
         story.id,
       ]);
       await reconcileContinuation(forkedWorld);
+      await forkedWorld.history.invalidateStaleSummaries();
     } else {
       // The new story resumes exactly where the copy ends, same as truncateToScene.
       await forkedWorld.session.set({ scene, turn: 0 });
