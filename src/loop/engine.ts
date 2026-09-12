@@ -10,6 +10,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { StoryActivity } from '../application/activity.ts';
+import { tx } from '../db/db.ts';
 import type {
   Delta,
   EntityId,
@@ -568,10 +569,12 @@ export class Engine {
       }
     }
 
-    world.chronicle.setProse(turnId, finalProse);
-    world.chronicle.appendRerollMeta(turnId, { providerCalls: calls, lint });
-
-    return world.chronicle.getTurn(turnId)!;
+    return tx(world.db, () => {
+      world.chronicle.setProse(turnId, finalProse);
+      world.chronicle.appendRerollMeta(turnId, { providerCalls: calls, lint });
+      world.history.capture();
+      return world.chronicle.getTurn(turnId)!;
+    });
   }
 
   /** Answers a world question from state without advancing the story. */

@@ -1,5 +1,7 @@
 import { seedConsequences, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
+import type { Db } from '../db/pg.ts';
 import type { Engine, TakeTurnOptions } from '../loop/engine-pg.ts';
+import { recordAuthoringCheckpoint } from '../loop/history-pg.ts';
 import type { World } from '../store/index-pg.ts';
 import { runPlayTurn } from './play-workflow.ts';
 
@@ -15,7 +17,7 @@ export interface PlayTurnOptions {
  * HTTP and MCP are transports over this operation; neither should be able to
  * forget consequence seeding or the world tick after a successful commit.
  */
-export async function playTurn(engine: Engine, world: World, input: string, opts: PlayTurnOptions = {}) {
+export async function playTurn(db: Db, engine: Engine, world: World, input: string, opts: PlayTurnOptions = {}) {
   return runPlayTurn(
     {
       takeTurn: (resolvedWorld, text, options) =>
@@ -35,6 +37,7 @@ export async function playTurn(engine: Engine, world: World, input: string, opts
         ).length,
       tickConsequences,
       worldTick,
+      recordAuthoringCheckpoint: (resolvedWorld, mutate) => recordAuthoringCheckpoint(db, resolvedWorld, mutate),
     },
     world,
     input,
