@@ -550,13 +550,16 @@ route('POST', '/api/sheet/:id/lock', async (_req, res, { db, world, params, body
 
 route('GET', '/api/book', async (_req, res, { world }) => {
   const layout = await storyLayout(world);
-  const derivedSceneForRaw = new Map<number, number>();
-  for (const turn of layout.turns) derivedSceneForRaw.set(turn.source.scene, derivedSceneForRaw.get(turn.source.scene) ?? turn.scene);
+  const derivedSceneForIdentity = new Map<string, number>();
+  for (const turn of layout.turns) derivedSceneForIdentity.set(turn.metadataKey, turn.scene);
   send(res, 200, {
-    scenes: (await world.chronicle.scenes()).map((scene) => ({
+    scenes: (await world.chronicle.scenes()).flatMap((scene) => {
+      const derived = derivedSceneForIdentity.get(scene.identity);
+      return derived === undefined ? [] : [{
       ...scene,
-      scene: derivedSceneForRaw.get(scene.scene) ?? scene.scene,
-    })),
+      scene: derived,
+    }];
+    }),
     turns: layout.turns.slice(0, 1000).map(({ source: t, scene, chapter, eligible, position, startsScene }) => ({
       id: t.id, scene, chapter, turn: t.turn, historyPosition: position, eligible, startsScene,
       rawInput: t.rawInput, bookProse: t.bookProse, pinned: t.pinned, move: t.meta.move,
@@ -1074,8 +1077,14 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
   const chapters = await world.chronicle.chapters();
   const divergences = await world.chronicle.divergences();
   const layout = await storyLayout(world);
-  const derivedSceneForRaw = new Map<number, number>();
-  for (const turn of layout.turns) derivedSceneForRaw.set(turn.source.scene, derivedSceneForRaw.get(turn.source.scene) ?? turn.scene);
+  const derivedSceneForIdentity = new Map<string, number>();
+  const chapterByScene = new Map<number, number>();
+  const derivedSceneForTurn = new Map<string, number>();
+  for (const turn of layout.turns) {
+    derivedSceneForIdentity.set(turn.metadataKey, turn.scene);
+    chapterByScene.set(turn.scene, turn.chapter);
+    derivedSceneForTurn.set(`${turn.source.scene}:${turn.source.turn}`, turn.scene);
+  }
 
   const turnCounts = new Map<number, number>();
   const eligibleTurnCounts = new Map<number, number>();
@@ -1086,7 +1095,10 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
 
   const divergencesByScene = new Map<number, typeof divergences>();
   for (const d of divergences) {
-    const scene = derivedSceneForRaw.get(d.scene) ?? d.scene;
+    const scene = d.turn == null
+      ? derivedSceneForIdentity.get(`raw:${d.scene}`) ?? d.scene
+      : derivedSceneForTurn.get(`${d.scene}:${d.turn}`)
+        ?? derivedSceneForIdentity.get(`raw:${d.scene}`) ?? d.scene;
     const list = divergencesByScene.get(scene) ?? [];
     list.push(d);
     divergencesByScene.set(scene, list);
@@ -1101,12 +1113,15 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
   // in it has committed yet (a directive/override can fire before the turn
   // that reports it finishes). Unioned and ordered.
   const sceneNumbers = new Set<number>([
-    ...scenes.map((s) => derivedSceneForRaw.get(s.scene) ?? s.scene),
+    ...scenes.flatMap((s) => derivedSceneForIdentity.get(s.identity) ?? []),
     ...turnCounts.keys(),
     ...divergencesByScene.keys(),
     (await world.session.get()).scene,
   ]);
-  const sceneMeta = new Map(scenes.map((s) => [derivedSceneForRaw.get(s.scene) ?? s.scene, s]));
+  const sceneMeta = new Map(scenes.flatMap((s) => {
+    const derived = derivedSceneForIdentity.get(s.identity);
+    return derived === undefined ? [] : [[derived, s] as const];
+  }));
 
   const sceneEntries = [...sceneNumbers]
     .sort((a, b) => a - b)
@@ -1116,7 +1131,7 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
         scene,
         title: meta?.title ?? '',
         summary: meta?.summary ?? '',
-        chapter: layout.turns.find((turn) => turn.scene === scene)?.chapter ?? meta?.chapter ?? 1,
+        chapter: chapterByScene.get(scene) ?? meta?.chapter ?? 1,
         turnCount: turnCounts.get(scene) ?? 0,
         eligibleTurnCount: eligibleTurnCounts.get(scene) ?? 0,
         divergences: divergencesByScene.get(scene) ?? [],
