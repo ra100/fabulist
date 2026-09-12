@@ -353,6 +353,11 @@ export class ChronicleStore {
     );
   }
 
+  invalidateSummariesFrom(scene: number, chapter: number): void {
+    this.db.prepare(`UPDATE scenes SET title = '', summary = '' WHERE story_id = ? AND scene >= ?`).run(this.storyId, scene);
+    this.db.prepare(`UPDATE chapters SET title = '', summary = '' WHERE story_id = ? AND chapter >= ?`).run(this.storyId, chapter);
+  }
+
   // ----------------------------------------------------------------- meta
   // World-level, unscoped by design: describes the file (e.g. worldTitle),
   // not any one story built on top of it.

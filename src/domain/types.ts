@@ -371,9 +371,26 @@ export interface Turn {
  * A serializable, story-only projection. It intentionally contains neither
  * canon nor world metadata, so restoring it cannot affect another story.
  */
-export interface StoryLayout {
+export interface StorySnapshot {
   session: SessionState;
   tables: Record<string, Array<Record<string, unknown>>>;
+}
+
+export interface StoryLayoutTurn {
+  turnId: string;
+  scene: number;
+  chapter: number;
+  turn: number;
+  startsScene: boolean;
+  eligible: boolean;
+  position: number | null;
+  source: Turn;
+}
+
+/** Read-only scene/chapter arrangement derived from immutable turn history. */
+export interface StoryLayout {
+  turns: StoryLayoutTurn[];
+  currentScene: number;
 }
 
 /** An immutable story projection recorded after a turn or authoring mutation. */
@@ -382,7 +399,7 @@ export interface HistoryCheckpoint {
   storyId: StoryId;
   turnId: string | null;
   position: number;
-  state: StoryLayout;
+  state: StorySnapshot;
   createdAt: string;
 }
 

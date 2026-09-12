@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
 import { jsonGet, type Db, type Queryable } from '../db/pg.ts';
-import type { EligibleTurn, HistoryCheckpoint, SceneSplit, StoryId, StoryLayout } from '../domain/types.ts';
+import type { EligibleTurn, HistoryCheckpoint, SceneSplit, StoryId, StorySnapshot } from '../domain/types.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
 
 const TABLES = [
@@ -43,7 +43,7 @@ interface EncryptedRow {
   ciphertext: string;
 }
 
-type HistoryLayout = StoryLayout & { encryptedValues?: EncryptedRow[] };
+type HistoryLayout = StorySnapshot & { encryptedValues?: EncryptedRow[] };
 
 function isoOf(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : value;
@@ -184,8 +184,16 @@ export class HistoryStore {
 
   async splitBefore(turnId: string): Promise<SceneSplit> {
     return this.transaction(async (queryable) => {
+      await queryable.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [this.storyId]);
+      const { rows: turns } = await queryable.query<{ history_position: number | null }>(
+        `SELECT history_position FROM turns WHERE id = $1 AND story_id = $2`,
+        [turnId, this.storyId],
+      );
+      const stored = turns[0];
+      if (!stored) throw new Error(`split_scene: unknown turn ${turnId}`);
+      if (stored.history_position == null) throw new Error(`split_scene: turn ${turnId} is legacy and has no exact history`);
       const eligible = await this.eligibleTurnFrom(queryable, turnId);
-      if (!eligible) throw new Error(`turn ${turnId} has no exact history checkpoint`);
+      if (!eligible) throw new Error(`split_scene: turn ${turnId} has no exact history checkpoint`);
       const exists = await queryable.query(`SELECT 1 FROM scene_segments WHERE story_id = $1 AND start_position = $2`, [
         this.storyId,
         eligible.position,
@@ -193,11 +201,6 @@ export class HistoryStore {
       if (exists.rowCount) throw new Error(`turn ${turnId} already starts a scene`);
       const id = `segment:${randomUUID()}`;
       await queryable.query(`INSERT INTO scene_segments (id, story_id, start_position) VALUES ($1,$2,$3)`, [
-        id,
-        this.storyId,
-        eligible.position,
-      ]);
-      await queryable.query(`UPDATE turns SET scene_segment_id = $1 WHERE story_id = $2 AND history_position >= $3`, [
         id,
         this.storyId,
         eligible.position,
@@ -296,7 +299,7 @@ export class HistoryStore {
   }
 
   private async layout(queryable: Queryable, key: Buffer | null): Promise<HistoryLayout> {
-    const tables: StoryLayout['tables'] = {};
+    const tables: StorySnapshot['tables'] = {};
     for (const table of TABLES) {
       const query =
         table === 'fact_knowledge'
@@ -304,7 +307,7 @@ export class HistoryStore {
           : `SELECT * FROM ${table} WHERE story_id = $1`;
       tables[table] = (await queryable.query<Record<string, unknown>>(query, [this.storyId])).rows;
     }
-    const { rows } = await queryable.query<StoryLayout['session'] & { active_scene_segment_id: string | null }>(
+    const { rows } = await queryable.query<StorySnapshot['session'] & { active_scene_segment_id: string | null }>(
       `SELECT scene, turn, player_character_id AS "playerCharacterId", current_location_id AS "currentLocationId",
               style, knobs, active_scene_segment_id
          FROM stories WHERE id = $1`,
@@ -338,7 +341,7 @@ export class HistoryStore {
   }
 
   private async readState(queryable: Queryable, checkpoint: CheckpointRow, key: Buffer | null): Promise<HistoryLayout> {
-    if (!key) return jsonGet<HistoryLayout>(checkpoint.state, { session: {} as StoryLayout['session'], tables: {} });
+    if (!key) return jsonGet<HistoryLayout>(checkpoint.state, { session: {} as StorySnapshot['session'], tables: {} });
     const { rows } = await queryable.query<{ version: number; nonce: Buffer; ciphertext: Buffer }>(
       `SELECT version, nonce, ciphertext FROM encrypted_story_values
         WHERE story_id = $1 AND table_name = 'history_checkpoints' AND record_id = $2 AND field_name = 'state'`,
@@ -384,7 +387,7 @@ export class HistoryStore {
         ],
       );
     }
-    const session = layout.session as StoryLayout['session'] & { active_scene_segment_id?: string | null };
+    const session = layout.session as StorySnapshot['session'] & { active_scene_segment_id?: string | null };
     await queryable.query(
       `UPDATE stories SET scene=$1, turn=$2, player_character_id=$3, current_location_id=$4, style=$5::jsonb, knobs=$6::jsonb,
        active_scene_segment_id=$7 WHERE id=$8`,
