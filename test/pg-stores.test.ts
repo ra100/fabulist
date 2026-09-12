@@ -183,6 +183,42 @@ test('owner migration copies a legacy blocklist to every owned story before enab
     const [scene] = await encryptedChronicle.scenes();
     assert.equal(scene?.title, 'The hidden hall');
     assert.equal(scene?.locationId, 'place:hidden-hall');
+    const metadataValues = await db.query<{ title: string; summary: string }>(
+      `SELECT title, summary FROM scene_metadata WHERE story_id = $1`,
+      [first.id],
+    );
+    assert.ok(metadataValues.rows.every((row) => row.title === '' && row.summary === ''));
+    assert.equal(
+      Number((await db.one<{ n: string }>(
+        `SELECT count(*) n FROM encrypted_story_values WHERE story_id = $1 AND table_name = 'scene_metadata'`,
+        [first.id],
+      ))!.n),
+      2,
+    );
+
+    // Simulate migration 007 arriving after this v1 story was already
+    // enrolled. The old envelope decrypts only under `scenes/<scene>` AAD;
+    // reads must work before re-enrollment, then migration writes new AAD.
+    await db.query(`DELETE FROM encrypted_story_values WHERE story_id = $1 AND table_name = 'scene_metadata'`, [first.id]);
+    await db.query(`DELETE FROM scene_metadata WHERE story_id = $1`, [first.id]);
+    await db.query(
+      `INSERT INTO scene_metadata (story_id, identity, scene, title, summary, location_id, chapter)
+       SELECT story_id, 'raw:' || scene, scene, title, summary, location_id, chapter FROM scenes WHERE story_id = $1`,
+      [first.id],
+    );
+    assert.equal((await encryptedChronicle.scenes())[0]?.summary, 'A secret meeting.');
+    await migratePrivateStories(db, owner, keys, 'data/images');
+    assert.equal((await encryptedChronicle.scenes())[0]?.summary, 'A secret meeting.');
+    assert.equal(
+      Number((await db.one<{ n: string }>(
+        `SELECT count(*) n FROM encrypted_story_values WHERE story_id = $1 AND table_name = 'scene_metadata'`,
+        [first.id],
+      ))!.n),
+      2,
+    );
+    assert.ok((await db.query<{ title: string; summary: string }>(
+      `SELECT title, summary FROM scene_metadata WHERE story_id = $1`, [first.id],
+    )).rows.every((row) => row.title === '' && row.summary === ''));
     const [divergence] = await encryptedChronicle.divergences();
     assert.equal(divergence?.kind, 'character');
     assert.equal(divergence?.detail, 'The witness refuses.');

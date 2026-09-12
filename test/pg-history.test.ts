@@ -244,3 +244,52 @@ test('PostgreSQL split rejects initial and raw-scene boundaries', async (t) => {
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('PostgreSQL exact rollback and fork discard revived parent summaries after a split', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'split-summary-rollback');
+    const storyId = await makeStory(db, 'split-summary-rollback-story', [worldId]);
+    const world = await World.forStory(db, storyId);
+    for (const turn of [1, 2]) {
+      const value = await world.chronicle.addTurn(turnInput(turn));
+      await world.history.capture(value.id);
+    }
+    await world.session.set({ scene: 2, turn: 0 });
+    const secondScene: Turn[] = [];
+    for (const turn of [1, 2, 3, 4]) {
+      const value = await world.chronicle.addTurn({ ...turnInput(turn), scene: 2 });
+      if (turn === 4) {
+        await world.chronicle.upsertScene(1, { title: 'Safe', summary: 'The first scene remains whole.', chapter: 1 });
+        await world.chronicle.upsertScene(2, { title: 'Parent', summary: 'This spans the later split.', chapter: 1 });
+        await world.chronicle.upsertChapter(1, { title: 'Old chapter', summary: 'Contains the parent scene.' });
+      }
+      await world.history.capture(value.id);
+      secondScene.push(value);
+    }
+    await splitSceneAtTurn(world, secondScene[2]!.id);
+
+    const forkResult = await rollback(db, world, { turnId: secondScene[3]!.id, mode: 'fork' });
+    const fork = await World.forStory(db, forkResult.story!.id);
+    assert.equal((await fork.chronicle.scenes()).find((scene) => scene.identity === 'raw:1')?.summary, 'The first scene remains whole.');
+    assert.equal((await fork.chronicle.scenes()).find((scene) => scene.identity === 'raw:2')?.summary, '');
+    assert.equal((await fork.chronicle.chapter(1))?.summary, '');
+    assert.equal((await fork.history.sceneSegments()).length, 2);
+    assert.deepEqual(
+      { scene: (await fork.session.get()).scene, turn: (await fork.session.get()).turn },
+      { scene: 3, turn: 4 },
+    );
+    assert.ok(await fork.history.activeSegmentAt(6));
+
+    await rollback(db, world, { turnId: secondScene[3]!.id, mode: 'destructive' });
+    assert.equal((await world.chronicle.scenes()).find((scene) => scene.identity === 'raw:1')?.summary, 'The first scene remains whole.');
+    assert.equal((await world.chronicle.scenes()).find((scene) => scene.identity === 'raw:2')?.summary, '');
+    assert.equal((await world.chronicle.chapter(1))?.summary, '');
+    assert.equal((await world.history.sceneSegments()).length, 2);
+    assert.deepEqual(
+      { scene: (await world.session.get()).scene, turn: (await world.session.get()).turn },
+      { scene: 3, turn: 4 },
+    );
+    assert.ok(await world.history.activeSegmentAt(6));
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
