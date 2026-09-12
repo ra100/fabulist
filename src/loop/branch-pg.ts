@@ -36,7 +36,7 @@ import { randomUUID } from 'node:crypto';
 import type { Db, Queryable } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
 import { createStory, getStory } from '../store/world-pg.ts';
-import type { HistoryCheckpoint, Story, StoryId, StoryLayout } from '../domain/types.ts';
+import type { HistoryCheckpoint, Story, StoryId, StorySnapshot } from '../domain/types.ts';
 
 export interface TruncateResult {
   turns: number;
@@ -520,7 +520,7 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
     const forkedWorld = new World({ db: tx, storyId: story.id, sources: world.sources, crypto: world.crypto });
     if (checkpoint) {
       await copyRetainedCheckpoints(tx, story.id, retainedCheckpoints, idMaps, segmentIds);
-      const session = checkpoint.state.session as StoryLayout['session'] & { active_scene_segment_id?: string | null };
+      const session = checkpoint.state.session as StorySnapshot['session'] & { active_scene_segment_id?: string | null };
       await forkedWorld.session.set(session);
       await tx.query(`UPDATE stories SET active_scene_segment_id = $1 WHERE id = $2`, [
         session.active_scene_segment_id ? segmentIds.get(session.active_scene_segment_id) ?? null : null,
@@ -554,13 +554,13 @@ async function copyRetainedCheckpoints(
 }
 
 function remapCheckpointState(
-  state: StoryLayout,
+  state: StorySnapshot,
   storyId: StoryId,
   idMaps: Map<string, Map<string, string>>,
   segmentIds: Map<string, string>,
-): StoryLayout {
-  const copy = JSON.parse(JSON.stringify(state)) as StoryLayout & {
-    session: StoryLayout['session'] & { active_scene_segment_id?: string | null };
+): StorySnapshot {
+  const copy = JSON.parse(JSON.stringify(state)) as StorySnapshot & {
+    session: StorySnapshot['session'] & { active_scene_segment_id?: string | null };
   };
   copy.session.active_scene_segment_id = copy.session.active_scene_segment_id
     ? segmentIds.get(copy.session.active_scene_segment_id) ?? null

@@ -755,6 +755,11 @@ export class ChronicleStore {
     });
   }
 
+  async invalidateSummariesFrom(scene: number, chapter: number): Promise<void> {
+    await this.db.query(`UPDATE scenes SET title = '', summary = '' WHERE story_id = $1 AND scene >= $2`, [this.storyId, scene]);
+    await this.db.query(`UPDATE chapters SET title = '', summary = '' WHERE story_id = $1 AND chapter >= $2`, [this.storyId, chapter]);
+  }
+
   // ----------------------------------------------------------------- meta
   // World-level, and now explicitly per world rather than per file — see this
   // file's header for why a global key was wrong once a story could read two

@@ -47,7 +47,7 @@ import { dirname } from 'node:path';
 import { World } from '../store/index.ts';
 import { checkpoint, row, rows, tx } from '../db/db.ts';
 import { createStory, getStory } from '../store/world.ts';
-import type { HistoryCheckpoint, Story, StoryId, StoryLayout } from '../domain/types.ts';
+import type { HistoryCheckpoint, Story, StoryId, StorySnapshot } from '../domain/types.ts';
 
 export interface BranchResult {
   path: string;
@@ -521,7 +521,7 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
 
     if (checkpoint) {
       copyRetainedCheckpoints(world.db, story.id, retainedCheckpoints, idMaps, segmentIds);
-      const session = checkpoint.state.session as StoryLayout['session'] & { active_scene_segment_id?: string | null };
+      const session = checkpoint.state.session as StorySnapshot['session'] & { active_scene_segment_id?: string | null };
       world.withStory(story.id).session.set(session);
       world.db
         .prepare(`UPDATE stories SET active_scene_segment_id = ? WHERE id = ?`)
@@ -552,13 +552,13 @@ function copyRetainedCheckpoints(
 }
 
 function remapCheckpointState(
-  state: StoryLayout,
+  state: StorySnapshot,
   storyId: StoryId,
   idMaps: Map<string, Map<string, string>>,
   segmentIds: Map<string, string>,
-): StoryLayout {
-  const copy = JSON.parse(JSON.stringify(state)) as StoryLayout & {
-    session: StoryLayout['session'] & { active_scene_segment_id?: string | null };
+): StorySnapshot {
+  const copy = JSON.parse(JSON.stringify(state)) as StorySnapshot & {
+    session: StorySnapshot['session'] & { active_scene_segment_id?: string | null };
   };
   copy.session.active_scene_segment_id = copy.session.active_scene_segment_id
     ? segmentIds.get(copy.session.active_scene_segment_id) ?? null

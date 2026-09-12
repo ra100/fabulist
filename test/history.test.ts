@@ -3,7 +3,12 @@ import { test } from 'node:test';
 import { World } from '../src/store/index.ts';
 import { emptyDelta, type Turn } from '../src/domain/types.ts';
 import { commitDelta, commitTurn } from '../src/loop/commit.ts';
-import { recordAuthoringCheckpoint } from '../src/loop/history.ts';
+import { recordAuthoringCheckpoint, splitSceneAtTurn, storyLayout } from '../src/loop/history.ts';
+import { Compactor } from '../src/loop/compact.ts';
+import { exportMarkdown } from '../src/loop/export.ts';
+import { buildNarratorFrame } from '../src/frame/builders.ts';
+import { tokenizerFor } from '../src/frame/tokenizer.ts';
+import { MockProvider } from '../src/providers/mock.ts';
 
 function turnInput(turn: number): Omit<Turn, 'id' | 'createdAt'> {
   return {
@@ -89,5 +94,66 @@ test('partial commit delta creates no turn rollback checkpoint', () => {
   const legacy = world.chronicle.addTurn(turnInput(1));
   commitDelta(world, emptyDelta());
   assert.equal(world.history.checkpointForTurn(legacy.id), undefined);
+  world.close();
+});
+
+test('split scene derives historical grouping and keeps continuation in the new segment', async () => {
+  const world = World.open(':memory:');
+  const turns = [1, 2, 3, 4].map((turn) =>
+    commitTurn(world, { ...turnInput(turn), delta: emptyDelta(), bookProse: `Prose ${turn}.` }).turn,
+  );
+  world.chronicle.upsertScene(1, { title: 'Stale scene', summary: 'All four turns.' });
+  world.chronicle.upsertChapter(1, { title: 'Stale chapter', summary: 'Stale rollup.' });
+
+  const split = splitSceneAtTurn(world, turns[2]!.id);
+  assert.equal(split.turnId, turns[2]!.id);
+  assert.equal(split.position, world.history.eligibleTurn(turns[2]!.id)?.position);
+  assert.deepEqual(
+    storyLayout(world).turns.map(({ turnId, scene }) => [turnId, scene]),
+    [[turns[0]!.id, 1], [turns[1]!.id, 1], [turns[2]!.id, 2], [turns[3]!.id, 2]],
+  );
+  assert.equal(world.history.startsScene(turns[2]!.id), true);
+  assert.throws(() => splitSceneAtTurn(world, turns[2]!.id), /already starts a scene/);
+  assert.deepEqual(
+    { scene: world.session.get().scene, turn: world.session.get().turn },
+    { scene: 2, turn: 4 },
+  );
+  assert.equal(world.chronicle.scenes()[0]?.summary, '');
+  assert.equal(world.chronicle.chapter(1)?.summary, '');
+
+  const compactor = new Compactor({ world, provider: new MockProvider(), minTurns: 1 });
+  assert.ok(await compactor.summariseScene(1));
+  const markdown = exportMarkdown(world);
+  assert.ok(markdown.indexOf('### Scene 1') < markdown.indexOf('Prose 1.'));
+  assert.ok(markdown.indexOf('### Scene 2') < markdown.indexOf('Prose 3.'));
+  const frame = buildNarratorFrame({
+    world, session: world.session.get(), tokenizer: tokenizerFor(4), budget: 20_000, rawInput: 'continue',
+  });
+  assert.match(frame.text, /scene 1:/);
+
+  const continuation = commitTurn(world, { ...turnInput(5), delta: emptyDelta(), bookProse: 'Prose 5.' }).turn;
+  const last = storyLayout(world).turns.at(-1)!;
+  assert.equal(last.turnId, continuation.id);
+  assert.equal(last.scene, 2);
+  assert.equal(last.source.scene, 1);
+  world.close();
+});
+
+test('invalid split targets leave history unchanged', () => {
+  const world = World.open(':memory:');
+  const legacy = world.chronicle.addTurn(turnInput(1));
+  const committed = commitTurn(world, { ...turnInput(2), delta: emptyDelta() }).turn;
+  assert.throws(() => splitSceneAtTurn(world, 'turn:unknown'), /unknown/);
+  assert.throws(() => splitSceneAtTurn(world, legacy.id), /legacy/);
+  world.db.prepare(`DELETE FROM history_checkpoints WHERE story_id = ? AND turn_id = ?`).run(world.storyId, committed.id);
+  const before = {
+    layout: storyLayout(world).turns.map((turn) => [turn.turnId, turn.scene]),
+    segments: Number((world.db.prepare(`SELECT COUNT(*) AS n FROM scene_segments`).get() as { n: number }).n),
+    session: world.session.get(),
+  };
+  assert.throws(() => splitSceneAtTurn(world, committed.id), /checkpoint/);
+  assert.deepEqual(storyLayout(world).turns.map((turn) => [turn.turnId, turn.scene]), before.layout);
+  assert.equal(Number((world.db.prepare(`SELECT COUNT(*) AS n FROM scene_segments`).get() as { n: number }).n), before.segments);
+  assert.deepEqual(world.session.get(), before.session);
   world.close();
 });

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { jsonGet, row, rows, tx, type Db } from '../db/db.ts';
-import type { EligibleTurn, HistoryCheckpoint, SceneSplit, StoryId, StoryLayout } from '../domain/types.ts';
+import type { EligibleTurn, HistoryCheckpoint, SceneSplit, StoryId, StorySnapshot } from '../domain/types.ts';
 
 const TABLES = [
   'entities',
@@ -37,7 +37,7 @@ function toCheckpoint(rowValue: CheckpointRow): HistoryCheckpoint {
     storyId: rowValue.story_id,
     turnId: rowValue.turn_id,
     position: rowValue.position,
-    state: jsonGet<StoryLayout>(rowValue.state, { session: {} as StoryLayout['session'], tables: {} }),
+    state: jsonGet<StorySnapshot>(rowValue.state, { session: {} as StorySnapshot['session'], tables: {} }),
     createdAt: rowValue.created_at,
   };
 }
@@ -219,23 +219,25 @@ export class HistoryStore {
 
   splitBefore(turnId: string): SceneSplit {
     return tx(this.db, () => {
+      const stored = row<{ history_position: number | null }>(
+        this.db.prepare(`SELECT history_position FROM turns WHERE id = ? AND story_id = ?`).get(turnId, this.storyId),
+      );
+      if (!stored) throw new Error(`split_scene: unknown turn ${turnId}`);
+      if (stored.history_position == null) throw new Error(`split_scene: turn ${turnId} is legacy and has no exact history`);
       const eligible = this.eligibleTurn(turnId);
-      if (!eligible) throw new Error(`turn ${turnId} has no exact history checkpoint`);
+      if (!eligible) throw new Error(`split_scene: turn ${turnId} has no exact history checkpoint`);
       if (this.startsScene(turnId)) throw new Error(`turn ${turnId} already starts a scene`);
       const id = `segment:${randomUUID()}`;
       this.db
         .prepare(`INSERT INTO scene_segments (id, story_id, start_position, created_at) VALUES (?,?,?,?)`)
         .run(id, this.storyId, eligible.position, new Date().toISOString());
-      this.db
-        .prepare(`UPDATE turns SET scene_segment_id = ? WHERE story_id = ? AND history_position >= ?`)
-        .run(id, this.storyId, eligible.position);
       this.db.prepare(`UPDATE stories SET active_scene_segment_id = ? WHERE id = ?`).run(id, this.storyId);
       return { id, storyId: this.storyId, turnId, position: eligible.position };
     });
   }
 
-  private layout(): StoryLayout {
-    const tables: StoryLayout['tables'] = {};
+  private layout(): StorySnapshot {
+    const tables: StorySnapshot['tables'] = {};
     for (const table of TABLES) {
       const query =
         table === 'fact_knowledge'
@@ -245,7 +247,7 @@ export class HistoryStore {
             : `SELECT * FROM ${table} WHERE story_id = ?`;
       tables[table] = rows<Record<string, unknown>>(this.db.prepare(query).all(this.storyId));
     }
-    const session = row<StoryLayout['session'] & { active_scene_segment_id?: string | null }>(
+    const session = row<StorySnapshot['session'] & { active_scene_segment_id?: string | null }>(
       this.db
         .prepare(
           `SELECT scene, turn, player_character_id AS playerCharacterId, current_location_id AS currentLocationId,
@@ -258,14 +260,14 @@ export class HistoryStore {
     return {
       session: {
         ...session,
-        style: jsonGet(session.style, {}) as StoryLayout['session']['style'],
-        knobs: jsonGet(session.knobs, {}) as StoryLayout['session']['knobs'],
+        style: jsonGet(session.style, {}) as StorySnapshot['session']['style'],
+        knobs: jsonGet(session.knobs, {}) as StorySnapshot['session']['knobs'],
       },
       tables,
     };
   }
 
-  private restoreLayout(layout: StoryLayout): void {
+  private restoreLayout(layout: StorySnapshot): void {
     for (const table of DELETE_ORDER) {
       const query =
         table === 'fact_knowledge'
@@ -303,8 +305,8 @@ export class HistoryStore {
       .run(...(columns.map((column) => entry[column]) as never[]));
   }
 
-  private activeSegment(layout: StoryLayout): string | null {
-    const session = layout.session as StoryLayout['session'] & { active_scene_segment_id?: string | null };
+  private activeSegment(layout: StorySnapshot): string | null {
+    const session = layout.session as StorySnapshot['session'] & { active_scene_segment_id?: string | null };
     return session.active_scene_segment_id ?? null;
   }
 }
