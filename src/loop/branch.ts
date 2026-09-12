@@ -48,6 +48,7 @@ import { World } from '../store/index.ts';
 import { checkpoint, row, rows, tx } from '../db/db.ts';
 import { createStory, getStory } from '../store/world.ts';
 import type { HistoryCheckpoint, Story, StoryId, StorySnapshot } from '../domain/types.ts';
+import { reconcileContinuation } from './history.ts';
 
 export interface BranchResult {
   path: string;
@@ -252,7 +253,8 @@ export function rollbackToTurn(
   const checkpoint = exactTurnCheckpoint(world, turnId, 'rollback');
   if (mode === 'destructive') {
     world.history.restoreTurn(turnId);
-    return { mode, toScene: checkpoint.state.session.scene, toTurnId: turnId };
+    reconcileContinuation(world);
+    return { mode, toScene: world.session.get().scene, toTurnId: turnId };
   }
   const fork = forkStory(world, { fromStoryId: world.storyId, atTurnId: turnId, ownerUserId });
   return { mode, toScene: checkpoint.state.session.scene, toTurnId: turnId, forkedStory: fork.story };
@@ -526,6 +528,7 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
       world.db
         .prepare(`UPDATE stories SET active_scene_segment_id = ? WHERE id = ?`)
         .run(session.active_scene_segment_id ? segmentIds.get(session.active_scene_segment_id) ?? null : null, story.id);
+      reconcileContinuation(world.withStory(story.id));
     } else {
       // The new story resumes exactly where the copy ends, same as truncateToScene.
       world.withStory(story.id).session.set({ scene, turn: 0 });

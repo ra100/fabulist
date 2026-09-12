@@ -429,6 +429,27 @@ test('encrypted chronicle sheets and relationship notes round-trip without base-
       trust: 0.5, affection: 0.2, respect: 0.4, note: 'The guide hid the map.',
     });
 
+    test('invalidating private summaries replaces encrypted scene and chapter prose', async (t) => {
+      const ran = await withPg(async (db) => {
+        const { storyId } = await setup(db, 'private-summary-invalidation');
+        await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [storyId]);
+        const chronicle = new ChronicleStore({ db, storyId, crypto: { keyForStory: () => randomBytes(32) } });
+        await chronicle.upsertScene(2, { chapter: 1, title: 'Stale scene', summary: 'Stale scene summary' });
+        await chronicle.upsertChapter(1, { title: 'Stale chapter', summary: 'Stale chapter summary' });
+
+        await chronicle.invalidateSummariesFrom(2, 1);
+
+        assert.deepEqual(await chronicle.scenes(), [{ scene: 2, chapter: 1, title: '', summary: '' }]);
+        assert.deepEqual(await chronicle.chapters(), [{ chapter: 1, title: '', summary: '' }]);
+        const values = await db.query<{ title: string; summary: string }>(
+          `SELECT title, summary FROM scenes WHERE story_id = $1 UNION ALL SELECT title, summary FROM chapters WHERE story_id = $1`,
+          [storyId],
+        );
+        assert.ok(values.rows.every((row) => row.title === '' && row.summary === ''));
+      });
+      if (!ran) t.skip('no Postgres configured');
+    });
+
     const canon = blankSheet('char:canon');
     canon.identity.arc = 'Unchanged source material.';
     await plain.put(canon, 'canon');

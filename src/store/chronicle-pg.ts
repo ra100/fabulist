@@ -756,6 +756,34 @@ export class ChronicleStore {
   }
 
   async invalidateSummariesFrom(scene: number, chapter: number): Promise<void> {
+    const key = await this.privateKey();
+    if (key) {
+      const [{ rows: scenes }, { rows: chapters }] = await Promise.all([
+        this.db.query<{ scene: number }>(`SELECT scene FROM scenes WHERE story_id = $1 AND scene >= $2`, [this.storyId, scene]),
+        this.db.query<{ chapter: number }>(`SELECT chapter FROM chapters WHERE story_id = $1 AND chapter >= $2`, [this.storyId, chapter]),
+      ]);
+      for (const row of scenes) {
+        await this.writePrivateValues(
+          `UPDATE scenes SET title = '', summary = '' WHERE story_id = $1 AND scene = $2 RETURNING true AS inserted`,
+          [this.storyId, row.scene],
+          'scenes',
+          String(row.scene),
+          key,
+          [{ field: 'title', value: '' }, { field: 'summary', value: '' }],
+        );
+      }
+      for (const row of chapters) {
+        await this.writePrivateValues(
+          `UPDATE chapters SET title = '', summary = '' WHERE story_id = $1 AND chapter = $2 RETURNING true AS inserted`,
+          [this.storyId, row.chapter],
+          'chapters',
+          String(row.chapter),
+          key,
+          [{ field: 'title', value: '' }, { field: 'summary', value: '' }],
+        );
+      }
+      return;
+    }
     await this.db.query(`UPDATE scenes SET title = '', summary = '' WHERE story_id = $1 AND scene >= $2`, [this.storyId, scene]);
     await this.db.query(`UPDATE chapters SET title = '', summary = '' WHERE story_id = $1 AND chapter >= $2`, [this.storyId, chapter]);
   }

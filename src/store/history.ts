@@ -175,11 +175,33 @@ export class HistoryStore {
   startsScene(turnId: string): boolean {
     const eligible = this.eligibleTurn(turnId);
     if (!eligible) return false;
-    return Boolean(
+    const prior = row<{ scene: number }>(
+      this.db
+        .prepare(
+          `SELECT scene FROM turns WHERE story_id = ? AND history_position IS NOT NULL AND history_position < ?
+           ORDER BY history_position DESC LIMIT 1`,
+        )
+        .get(this.storyId, eligible.position),
+    );
+    return !prior || prior.scene !== eligible.scene || Boolean(
       this.db
         .prepare(`SELECT 1 FROM scene_segments WHERE story_id = ? AND start_position = ?`)
         .get(this.storyId, eligible.position),
     );
+  }
+
+  sceneStartPositions(): number[] {
+    return rows<{ start_position: number }>(
+      this.db.prepare(`SELECT start_position FROM scene_segments WHERE story_id = ?`).all(this.storyId),
+    ).map(({ start_position }) => start_position);
+  }
+
+  activeSegmentAt(position: number): string | null {
+    return row<{ id: string }>(
+      this.db
+        .prepare(`SELECT id FROM scene_segments WHERE story_id = ? AND start_position <= ? ORDER BY start_position DESC LIMIT 1`)
+        .get(this.storyId, position),
+    )?.id ?? null;
   }
 
   restore(checkpoint: HistoryCheckpoint): void {
@@ -213,6 +235,7 @@ export class HistoryStore {
       this.db
         .prepare(`DELETE FROM history_checkpoints WHERE story_id = ? AND position > ?`)
         .run(this.storyId, retained.position);
+      this.reconcileContinuation(retained.position);
       return retained;
     });
   }
@@ -308,5 +331,22 @@ export class HistoryStore {
   private activeSegment(layout: StorySnapshot): string | null {
     const session = layout.session as StorySnapshot['session'] & { active_scene_segment_id?: string | null };
     return session.active_scene_segment_id ?? null;
+  }
+
+  private reconcileContinuation(position: number): void {
+    const turns = rows<{ scene: number; turn: number; history_position: number }>(
+      this.db.prepare(`SELECT scene, turn, history_position FROM turns WHERE story_id = ? AND history_position <= ? ORDER BY history_position`).all(this.storyId, position),
+    );
+    const starts = new Set(this.sceneStartPositions());
+    let previousScene: number | undefined;
+    let scene = 0;
+    for (const turn of turns) {
+      if (previousScene !== turn.scene || starts.has(turn.history_position)) scene += 1;
+      previousScene = turn.scene;
+    }
+    const last = turns.at(-1);
+    this.db.prepare(`UPDATE stories SET scene = ?, turn = ?, active_scene_segment_id = ? WHERE id = ?`).run(
+      scene || 1, last?.turn ?? 0, this.activeSegmentAt(position), this.storyId,
+    );
   }
 }
