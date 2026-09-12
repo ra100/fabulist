@@ -384,11 +384,13 @@ case "$action" in
     # endpoint answered from memory and would have reported success throughout the
     # restart loop this deploy path exists to catch.
     echo "--- waiting for the app to answer, database included (up to 180s) ---"
+    app_healthy=false
     for _ in $(seq 1 60); do
       if docker compose exec -T fabulist node -e \
         "require('http').get('http://127.0.0.1:4317/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))" \
         >/dev/null 2>&1; then
         echo "app is answering"
+        app_healthy=true
         break
       fi
       sleep 3
@@ -434,6 +436,10 @@ case "$action" in
         "d=/parent/$(basename "${FABULIST_PG_DIR:-./fabulist-pg}"); ls -ldn \"\$d\"; ls -an \"\$d\" | head -5; touch \"\$d/.probe\" 2>&1 && echo 'root CAN write the mount' && rm -f \"\$d/.probe\" || echo 'root CANNOT write the mount'" 2>&1 || true
     fi
     echo "--- end ---"
+    if [ "$app_healthy" != true ]; then
+      echo "deploy.sh: app did not become healthy within 180 seconds" >&2
+      exit 1
+    fi
     # Drops now-unreferenced image layers from the previous release. Neither the
     # app's /data nor the database directory is touched by `image prune` — both are
     # bind mounts on the host disk, not volumes, and `image prune` only removes
