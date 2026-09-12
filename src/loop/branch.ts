@@ -480,6 +480,8 @@ export function forkStory(world: World, opts: ForkOptions): ForkResult {
         const values = cols.map((c) => {
           if (c === 'story_id') return story.id;
           if (c === 'scene_segment_id' && row[c] != null) return segmentIds.get(String(row[c])) ?? null;
+          if (table === 'scene_metadata' && c === 'identity' && typeof row[c] === 'string')
+            return remapSceneMetadataIdentity(row[c], segmentIds);
           if (c === 'id' && idColumn === 'text') {
             const fresh = `${String(row.id).split(':')[0] ?? table}:${randomUUID()}`;
             ownMap!.set(String(row.id), fresh);
@@ -571,6 +573,8 @@ function remapCheckpointState(
   for (const [table, entries] of Object.entries(copy.tables)) {
     for (const entry of entries) {
       if ('story_id' in entry) entry.story_id = storyId;
+      if (table === 'scene_metadata' && typeof entry.identity === 'string')
+        entry.identity = remapSceneMetadataIdentity(entry.identity, segmentIds);
       if (typeof entry.id === 'string') entry.id = idMaps.get(table)?.get(entry.id) ?? entry.id;
       if (table === 'fact_knowledge' && typeof entry.fact_id === 'string')
         entry.fact_id = idMaps.get('facts')?.get(entry.fact_id) ?? entry.fact_id;
@@ -583,6 +587,13 @@ function remapCheckpointState(
     }
   }
   return copy;
+}
+
+function remapSceneMetadataIdentity(identity: string, segmentIds: Map<string, string>): string {
+  if (!identity.startsWith('segment:')) return identity;
+  const sourceSegmentId = identity.slice('segment:'.length);
+  const forkSegmentId = segmentIds.get(sourceSegmentId);
+  return forkSegmentId ? `segment:${forkSegmentId}` : identity;
 }
 
 export interface BranchOptions {

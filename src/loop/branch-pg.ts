@@ -419,6 +419,8 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
           const values = copyable.map((column) => {
             if (column === 'story_id') return story.id;
             if (column === 'scene_segment_id' && row[column] != null) return segmentIds.get(String(row[column])) ?? null;
+            if (spec.table === 'scene_metadata' && column === 'identity' && typeof row[column] === 'string')
+              return remapSceneMetadataIdentity(row[column], segmentIds);
             return row[column];
           });
           await tx.query(
@@ -573,6 +575,8 @@ function remapCheckpointState(
   for (const [table, entries] of Object.entries(copy.tables)) {
     for (const entry of entries) {
       if ('story_id' in entry) entry.story_id = storyId;
+      if (table === 'scene_metadata' && typeof entry.identity === 'string')
+        entry.identity = remapSceneMetadataIdentity(entry.identity, segmentIds);
       if (typeof entry.id === 'string') entry.id = idMaps.get(table)?.get(entry.id) ?? entry.id;
       if (table === 'fact_knowledge' && typeof entry.fact_id === 'string')
         entry.fact_id = idMaps.get('facts')?.get(entry.fact_id) ?? entry.fact_id;
@@ -585,6 +589,13 @@ function remapCheckpointState(
     }
   }
   return copy;
+}
+
+function remapSceneMetadataIdentity(identity: string, segmentIds: Map<string, string>): string {
+  if (!identity.startsWith('segment:')) return identity;
+  const sourceSegmentId = identity.slice('segment:'.length);
+  const forkSegmentId = segmentIds.get(sourceSegmentId);
+  return forkSegmentId ? `segment:${forkSegmentId}` : identity;
 }
 
 /**
