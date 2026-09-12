@@ -13,7 +13,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Engine } from '../loop/engine.ts';
-import { recordAuthoringCheckpoint, storyLayout } from '../loop/history.ts';
+import { recordAuthoringCheckpoint, splitSceneAtTurn, storyLayout } from '../loop/history.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { forkStory, rollback } from '../loop/branch.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export.ts';
@@ -64,6 +64,7 @@ import {
   setupResolveBodySchema,
   sheetBodySchema,
   sheetLockBodySchema,
+  splitSceneBodySchema,
   sqliteBranchBodySchema,
   styleBodySchema,
   turnPinBodySchema,
@@ -1074,7 +1075,7 @@ route('POST', '/api/stories/fork', (_req, res, { world, body, user }) => {
  * pulled along too.
  */
 route('POST', '/api/rollback', (_req, res, { world, currentStory, body, user }) => {
-  const { scene, chapter, mode } = parseBody(rollbackBodySchema, body);
+  const { scene, chapter, turnId, mode } = parseBody(rollbackBodySchema, body);
   if (!ownsStoryOrRespond(res, world, world.storyId, user)) return;
   const effectiveMode = mode ?? 'fork';
   // The switch below only runs in login-off mode (see this route's own doc
@@ -1084,11 +1085,29 @@ route('POST', '/api/rollback', (_req, res, { world, currentStory, body, user }) 
     return send(res, 503, { error: 'rollback in fork mode needs story management enabled on this server' });
   }
   try {
-    const result = rollback(world, { scene, chapter, mode: effectiveMode, ownerUserId: user?.id });
+    const result = rollback(world, { scene, chapter, turnId, mode: effectiveMode, ownerUserId: user?.id });
     if (result.mode === 'fork' && result.forkedStory && !user) currentStory!.switchTo(result.forkedStory.id);
     send(res, 200, result);
   } catch (err) {
-    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+route('POST', '/api/scene/split', (_req, res, { world, body, user }) => {
+  const { turnId } = parseBody(splitSceneBodySchema, body);
+  if (!ownsStoryOrRespond(res, world, world.storyId, user)) return;
+  try {
+    const split = splitSceneAtTurn(world, turnId);
+    const { target, ...boundary } = split;
+    send(res, 200, {
+      ...boundary,
+      startsAtTurnId: target.turnId,
+      scene: target.scene,
+      chapter: target.chapter,
+      startsScene: target.startsScene,
+    });
+  } catch (err) {
+    send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
   }
 });
 

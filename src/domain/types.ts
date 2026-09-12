@@ -421,6 +421,36 @@ export interface SceneSplit {
   position: number;
 }
 
+/** The selected turn's layout as it existed when its split committed. */
+export interface SceneSplitTarget {
+  turnId: string;
+  scene: number;
+  chapter: number;
+  turn: number;
+  startsScene: boolean;
+}
+
+/** A committed split plus its transaction-consistent selected-turn layout. */
+export interface SceneSplitResult extends SceneSplit {
+  target: SceneSplitTarget;
+}
+
+/** An invalid split target supplied by a caller, rather than a persistence failure. */
+export class SceneSplitTargetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SceneSplitTargetError';
+  }
+}
+
+/** An invalid rollback target supplied by a caller, rather than a restore or fork failure. */
+export class RollbackTargetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RollbackTargetError';
+  }
+}
+
 export type InputClass = 'action' | 'dialogue' | 'ooc-directive' | 'meta-query';
 
 export interface Intent {

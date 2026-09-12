@@ -64,6 +64,7 @@ import {
   searchEntitiesTool,
   setCurrentLocationTool,
   searchTool,
+  splitSceneTool,
   startStoryTool,
   switchStoryTool,
   setStorySourcesTool,
@@ -261,20 +262,33 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     {
       description:
         'Undo the last chapter or scene of the currently open story \u2014 the backward move fork_story never covered. ' +
-        "Pass exactly one of scene or chapter. Defaults to mode 'fork': branches at the target boundary into a new " +
-        'sibling story and switches to it, leaving the discarded tail intact as a story you can still open. Pass ' +
+        "Pass exactly one of scene, chapter, or turnId. Defaults to mode 'fork': branches at the target boundary into a new " +
+        "sibling story and switches to it, leaving the discarded tail intact as a story you can still open. Pass " +
         "mode 'destructive' to truncate the current story in place instead, with no sibling and no way back.",
-      inputSchema: {
+      inputSchema: z.object({
         scene: z.number().int().positive().optional().describe('Roll back to the start of this scene.'),
         chapter: z.number().int().positive().optional().describe('Roll back to the start of this chapter.'),
-        mode: z
-          .enum(['fork', 'destructive'])
-          .optional()
-          .describe("Defaults to 'fork' (safe, keeps the tail as a sibling story)."),
-      },
+        turnId: z.string().min(1).optional().describe('Retain this committed turn and discard only later history.'),
+        mode: z.enum(['fork', 'destructive']).optional().describe("Defaults to 'fork' (safe, keeps the tail as a sibling story)."),
+      }).strict().refine(
+        (input) => [input.scene, input.chapter, input.turnId].filter((target) => target !== undefined).length === 1,
+        'provide exactly one of scene, chapter, or turnId',
+      ),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ scene, chapter, mode }) => toolResult(await rollbackTool(ctx, { scene, chapter, mode })),
+    async ({ scene, chapter, turnId, mode }) => toolResult(await rollbackTool(ctx, { scene, chapter, turnId, mode })),
+  );
+
+  server.registerTool(
+    'split_scene',
+    {
+      description: 'Start a real new scene at an eligible committed turn. The selected turn must not already start a scene.',
+      inputSchema: z.object({
+        turnId: z.string().min(1).describe('The eligible committed turn that starts the new scene.'),
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ turnId }) => toolResult(await splitSceneTool(ctx, { turnId })),
   );
 
   server.registerTool(

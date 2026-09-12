@@ -180,10 +180,12 @@ export const renameBodySchema = z.object({ title: nonEmptyText }).strict();
 export const rollbackBodySchema = z.object({
   scene: z.number().int().nonnegative().optional(),
   chapter: z.number().int().positive().optional(),
+  turnId: nonEmptyText.optional(),
   mode: z.enum(['fork', 'destructive']).optional(),
-}).strict().refine((body) => (body.scene === undefined) !== (body.chapter === undefined), {
-  message: 'provide exactly one of scene or chapter',
+}).strict().refine((body) => [body.scene, body.chapter, body.turnId].filter((target) => target !== undefined).length === 1, {
+  message: 'provide exactly one of scene, chapter, or turnId',
 });
+export const splitSceneBodySchema = z.object({ turnId: nonEmptyText }).strict();
 export const sqliteBranchBodySchema = z.object({
   atScene: z.number().int().nonnegative(),
   toPath: nonEmptyText,

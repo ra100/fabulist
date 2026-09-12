@@ -47,7 +47,7 @@ import { dirname } from 'node:path';
 import { World } from '../store/index.ts';
 import { checkpoint, row, rows, tx } from '../db/db.ts';
 import { createStory, getStory } from '../store/world.ts';
-import type { HistoryCheckpoint, Story, StoryId, StorySnapshot } from '../domain/types.ts';
+import { RollbackTargetError, type HistoryCheckpoint, type Story, type StoryId, type StorySnapshot } from '../domain/types.ts';
 import { reconcileContinuation } from './history.ts';
 
 export interface BranchResult {
@@ -220,7 +220,7 @@ export interface RollbackResult {
 export function rollback(world: World, opts: RollbackOptions): RollbackResult {
   const targets = [opts.scene, opts.chapter, opts.turnId].filter((target) => target !== undefined);
   if (targets.length !== 1) {
-    throw new Error('rollback: pass exactly one of scene, chapter, or turnId');
+    throw new RollbackTargetError('rollback: pass exactly one of scene, chapter, or turnId');
   }
   const mode = opts.mode ?? 'fork';
   if (opts.turnId !== undefined) return rollbackToTurn(world, opts.turnId, mode, opts.ownerUserId);
@@ -228,11 +228,11 @@ export function rollback(world: World, opts: RollbackOptions): RollbackResult {
   let scene = opts.scene;
   if (opts.chapter !== undefined) {
     scene = firstSceneOfChapter(world, opts.chapter);
-    if (scene === undefined) throw new Error(`rollback: chapter ${opts.chapter} has no recorded scenes`);
+    if (scene === undefined) throw new RollbackTargetError(`rollback: chapter ${opts.chapter} has no recorded scenes`);
   }
-  if (scene === undefined || scene < 1) throw new Error('rollback: scene must be 1 or greater');
+  if (scene === undefined || scene < 1) throw new RollbackTargetError('rollback: scene must be 1 or greater');
   const current = world.session.get().scene;
-  if (scene > current) throw new Error(`rollback: scene ${scene} has not happened yet (currently at scene ${current})`);
+  if (scene > current) throw new RollbackTargetError(`rollback: scene ${scene} has not happened yet (currently at scene ${current})`);
 
   if (mode === 'destructive') {
     const removed = truncateToScene(world, scene);
@@ -250,7 +250,7 @@ export function rollbackToTurn(
   mode: 'fork' | 'destructive',
   ownerUserId?: string,
 ): RollbackResult {
-  const checkpoint = exactTurnCheckpoint(world, turnId, 'rollback');
+  const checkpoint = exactTurnCheckpoint(world, turnId, 'rollback', (message) => new RollbackTargetError(message));
   if (mode === 'destructive') {
     world.history.restoreTurn(turnId);
     reconcileContinuation(world);
@@ -260,14 +260,19 @@ export function rollbackToTurn(
   return { mode, toScene: checkpoint.state.session.scene, toTurnId: turnId, forkedStory: fork.story };
 }
 
-function exactTurnCheckpoint(world: World, turnId: string, operation: string): HistoryCheckpoint {
+function exactTurnCheckpoint(
+  world: World,
+  turnId: string,
+  operation: string,
+  invalidTarget: (message: string) => Error = (message) => new Error(message),
+): HistoryCheckpoint {
   const turn = row<{ history_position: number | null }>(
     world.db.prepare(`SELECT history_position FROM turns WHERE id = ? AND story_id = ?`).get(turnId, world.storyId),
   );
-  if (!turn) throw new Error(`${operation}: unknown turn ${turnId}`);
-  if (turn.history_position == null) throw new Error(`${operation}: turn ${turnId} is legacy and has no exact history`);
+  if (!turn) throw invalidTarget(`${operation}: unknown turn ${turnId}`);
+  if (turn.history_position == null) throw invalidTarget(`${operation}: turn ${turnId} is legacy and has no exact history`);
   const checkpoint = world.history.checkpointForTurn(turnId);
-  if (!checkpoint) throw new Error(`${operation}: turn ${turnId} has no exact history checkpoint`);
+  if (!checkpoint) throw invalidTarget(`${operation}: turn ${turnId} has no exact history checkpoint`);
   return checkpoint;
 }
 
