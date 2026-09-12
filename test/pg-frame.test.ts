@@ -303,9 +303,8 @@ test('a frame is built with a bounded number of queries, not one per character',
     // count is asserted rather than assumed because it is what makes the
     // query-count comparison below meaningful.
     assert.equal(data.presentIds.length, 12, `expected the extra cast on stage, got ${data.presentIds.length}`);
-    assert.equal(
-      withThirteenOnStage,
-      withThreeOnStage,
+    assert.ok(
+      withThirteenOnStage <= withThreeOnStage,
       `query count must not grow with cast size (${withThreeOnStage} -> ${withThirteenOnStage})`,
     );
     // A small, stated ceiling rather than an exact number, so adding a slot is
