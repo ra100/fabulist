@@ -37,10 +37,12 @@ import type {
   Fact,
   Frame,
   SessionState,
+  StoryLayout,
   Thread,
   Turn,
 } from '../domain/types.ts';
 import type { World } from '../store/index-pg.ts';
+import { storyLayout } from '../loop/history-pg.ts';
 import { assembleFrame, Priority, type SlotSpec } from './budget.ts';
 import type { Tokenizer } from './tokenizer.ts';
 
@@ -69,6 +71,7 @@ export interface FrameData {
   sheets: Map<EntityId, CharacterSheet>;
   neighbours: Map<EntityId, Array<{ edge: Edge; otherId: EntityId }>>;
   recentTurns: Turn[];
+  layout: StoryLayout;
   scenes: Array<{ scene: number; title: string; summary: string; locationId: string | null; chapter: number }>;
   knowledge: Array<{ level: string; distortion: number; text: string }>;
   hiddenFacts: Fact[];
@@ -317,11 +320,12 @@ export async function loadFrameData(
   const seedIds = [...presentIds];
   if (session.currentLocationId) seedIds.push(session.currentLocationId);
 
-  const [neighbours, recentTurns, scenes, knowledgeRaw, hiddenFacts, divergencesRaw, anchorsRaw, threads, directives, pending, othersRaw] =
+  const [neighbours, recentTurns, scenes, layout, knowledgeRaw, hiddenFacts, divergencesRaw, anchorsRaw, threads, directives, pending, othersRaw] =
     await Promise.all([
       world.graph.neighboursMany(seedIds, session.scene),
       world.chronicle.recentTurns(opts.recentTurns ?? 8),
       world.chronicle.scenes(),
+      storyLayout(world),
       session.playerCharacterId ? world.chronicle.knowledgeOf(session.playerCharacterId) : Promise.resolve([]),
       session.playerCharacterId ? world.chronicle.factsUnknownTo(session.playerCharacterId, 12) : Promise.resolve([]),
       world.chronicle.divergences(),
@@ -353,6 +357,7 @@ export async function loadFrameData(
     sheets,
     neighbours,
     recentTurns,
+    layout,
     scenes,
     knowledge: knowledgeRaw.map((k) => ({ level: k.level, distortion: k.distortion, text: k.text })),
     hiddenFacts,
@@ -402,8 +407,9 @@ function recentProse(data: FrameData, maxTurns = 8): string {
 }
 
 function sceneSummaries(data: FrameData, currentScene: number): string {
+  const completedScenes = new Set(data.layout.turns.filter((turn) => turn.scene < currentScene).map((turn) => turn.scene));
   return data.scenes
-    .filter((s) => s.scene < currentScene && s.summary)
+    .filter((s) => completedScenes.has(s.scene) && s.summary)
     .map((s) => `scene ${s.scene}: ${s.summary}`)
     .join('\n');
 }

@@ -6,6 +6,9 @@ import type { Turn } from '../src/domain/types.ts';
 import { World } from '../src/store/index-pg.ts';
 import { makeStory, makeWorld, withPg } from './pg-harness.ts';
 import { rollback } from '../src/loop/branch-pg.ts';
+import { splitSceneAtTurn, storyLayout } from '../src/loop/history-pg.ts';
+import { commitTurn } from '../src/loop/commit-pg.ts';
+import { emptyDelta } from '../src/domain/types.ts';
 
 function turnInput(turn: number): Omit<Turn, 'id' | 'createdAt'> {
   return {
@@ -177,6 +180,44 @@ test('legacy turn rollback rejects the target without changing PostgreSQL histor
       (await world.chronicle.turns()).map(({ id }) => id),
       [legacy.id, committed.id],
     );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('split scene derives historical PostgreSQL grouping and rejects invalid targets', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'split-history');
+    const storyId = await makeStory(db, 'split-history-story', [worldId]);
+    const world = await World.forStory(db, storyId);
+    const turns: Turn[] = [];
+    for (let turn = 1; turn <= 4; turn++) {
+      turns.push((await commitTurn(db, world, { ...turnInput(turn), delta: emptyDelta() })).turn);
+    }
+
+    const split = await splitSceneAtTurn(world, turns[2]!.id);
+    assert.equal(split.turnId, turns[2]!.id);
+    assert.deepEqual(
+      (await storyLayout(world)).turns.map(({ turnId, scene }) => [turnId, scene]),
+      [[turns[0]!.id, 1], [turns[1]!.id, 1], [turns[2]!.id, 2], [turns[3]!.id, 2]],
+    );
+    const session = await world.session.get();
+    assert.deepEqual({ scene: session.scene, turn: session.turn }, { scene: 2, turn: 4 });
+    await assert.rejects(() => splitSceneAtTurn(world, turns[2]!.id), /already starts a scene/);
+    await assert.rejects(() => splitSceneAtTurn(world, 'turn:unknown'), /unknown/);
+    const legacy = await world.chronicle.addTurn(turnInput(5));
+    await assert.rejects(() => splitSceneAtTurn(world, legacy.id), /legacy/);
+    const missing = (await commitTurn(db, world, { ...turnInput(6), delta: emptyDelta() })).turn;
+    await db.query(`DELETE FROM history_checkpoints WHERE story_id = $1 AND turn_id = $2`, [storyId, missing.id]);
+    const before = {
+      segments: Number((await db.one<{ n: string }>(`SELECT count(*) n FROM scene_segments WHERE story_id = $1`, [storyId]))!.n),
+      session: await world.session.get(),
+    };
+    await assert.rejects(() => splitSceneAtTurn(world, missing.id), /checkpoint/);
+    assert.equal(
+      Number((await db.one<{ n: string }>(`SELECT count(*) n FROM scene_segments WHERE story_id = $1`, [storyId]))!.n),
+      before.segments,
+    );
+    assert.deepEqual(await world.session.get(), before.session);
   });
   if (!ran) t.skip('no Postgres configured');
 });

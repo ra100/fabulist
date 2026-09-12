@@ -13,6 +13,7 @@
  * raw player input and mechanical meta stay in the app, not the export.
  */
 import type { World } from '../store/index.ts';
+import { storyLayout } from './history.ts';
 
 export interface ExportOptions {
   /** Book title, defaulting to the world's own title (`meta.worldTitle`) or "Untitled". */
@@ -33,13 +34,13 @@ export function exportMarkdown(world: World, opts: ExportOptions = {}): string {
   const title = opts.title ?? (world.chronicle.getMeta('worldTitle', '') || 'Untitled');
   const scenes = world.chronicle.scenes();
   const chapters = world.chronicle.chapters();
-  const turns = world.chronicle.turns({ limit: 5000 });
+  const layout = storyLayout(world);
 
-  const turnsByScene = new Map<number, typeof turns>();
-  for (const t of turns) {
-    const list = turnsByScene.get(t.scene) ?? [];
-    list.push(t);
-    turnsByScene.set(t.scene, list);
+  const turnsByScene = new Map<number, typeof layout.turns>();
+  for (const turn of layout.turns) {
+    const list = turnsByScene.get(turn.scene) ?? [];
+    list.push(turn);
+    turnsByScene.set(turn.scene, list);
   }
 
   const sceneMeta = new Map(scenes.map((s) => [s.scene, s]));
@@ -72,7 +73,7 @@ export function exportMarkdown(world: World, opts: ExportOptions = {}): string {
     }
 
     for (const t of turnsByScene.get(scene) ?? []) {
-      if (t.bookProse.trim()) lines.push(t.bookProse.trim(), '');
+      if (t.source.bookProse.trim()) lines.push(t.source.bookProse.trim(), '');
     }
   }
 
