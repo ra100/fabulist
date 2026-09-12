@@ -28,6 +28,7 @@ import { randomUUID } from 'node:crypto';
 import type { SessionUser } from '../auth/config.ts';
 import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
+import { PrivateStoryLockedError } from './private-story-access.ts';
 
 /** What a user may do with a world, in increasing order of power. */
 export type WorldRole = 'reader' | 'ingest' | 'owner';
@@ -236,7 +237,7 @@ async function privateStoryKey(
   if (version !== 0 && version !== 1) throw new Error(`unsupported private-story format ${version}`);
   if (version === 0) return null;
   const key = crypto?.keyForStory(storyId) ?? null;
-  if (!key) throw new Error(`private story ${storyId} is locked`);
+  if (!key) throw new PrivateStoryLockedError(storyId);
   if (key.length !== 32) throw new Error('invalid private-story key');
   return Buffer.from(key);
 }

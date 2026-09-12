@@ -122,6 +122,8 @@ Getting oriented
 3. \`get_state\` tells you where you are. If it reports no player character, the book is not
    playable yet: \`list_characters\` to see who is available, then \`start_story\` to become one of
    them (or to place an original). \`start_story\` returns a proposed opening line to play from.
+If a tool returns \`status: "locked"\`, ask the user to open Fabulist in their browser and unlock
+Private Storage, then retry. This is an expected privacy state, not a connector or transport failure.
 
 Playing a turn — the part worth reading twice
 The normal loop is two calls, and skipping the second one loses the turn:

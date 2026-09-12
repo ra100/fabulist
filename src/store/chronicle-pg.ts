@@ -30,6 +30,7 @@
 import { randomUUID } from 'node:crypto';
 import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
 import { jsonGet, type Queryable } from '../db/pg.ts';
+import { PrivateStoryLockedError } from './private-story-access.ts';
 import type {
   Delta,
   EntityId,
@@ -169,7 +170,7 @@ export class ChronicleStore {
     }
     if (this.encryptionVersion === 0) return null;
     const key = this.crypto?.keyForStory(this.storyId) ?? null;
-    if (!key) throw new Error(`private story ${this.storyId} is locked`);
+    if (!key) throw new PrivateStoryLockedError(this.storyId);
     if (key.length !== 32) throw new Error('invalid private-story key');
     return Buffer.from(key);
   }
