@@ -16,7 +16,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeWorld, withPg } from './pg-harness.ts';
 import { sourcesFor } from '../src/db/overlay.ts';
-import { withEncryptionRollout } from '../src/auth/encryption-rollout-pg.ts';
 import { encryptStoryValue } from '../src/crypto/story-envelope.ts';
 import { CastStore, emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../src/store/cast-pg.ts';
 import { ChronicleStore } from '../src/store/chronicle-pg.ts';
@@ -1427,40 +1426,13 @@ test('resolution prefers a book with writing over a newer empty one', async (t) 
   if (!ran) t.skip('no Postgres configured');
 });
 
-test('withEncryptionRollout binds bootstrap email to user id and keeps it stable', async (t) => {
-  const ran = await withPg(async (db) => {
-    const user = testUser('user_fabulist', 'fabulist@rast.io');
-    const enriched = await withEncryptionRollout(db, user);
-    assert.equal(enriched?.encryptionPilot, true);
-    assert.equal(enriched?.encryptNewStories, true);
-
-    const row = await db.one<{ user_id: string; bootstrap_email: string }>(
-      `SELECT user_id, bootstrap_email FROM encryption_rollout WHERE bootstrap_email = 'fabulist@rast.io'`,
-    );
-    assert.equal(row?.user_id, 'user_fabulist');
-
-    // Once bound, email changes do not drop rollout eligibility.
-    const renamed = await withEncryptionRollout(db, { ...user, email: 'new-address@example.com' });
-    assert.equal(renamed?.encryptionPilot, true);
-    assert.equal(renamed?.encryptNewStories, true);
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('a rollout-enabled user keeps a new story plaintext until verified migration', async (t) => {
+test('an un-enrolled user keeps a new story plaintext until they opt into private storage', async (t) => {
   const ran = await withPg(async (db) => {
     const worldId = await makeWorld(db, 'enc-default', 'Encryption default');
-    await db.query(
-      `INSERT INTO encryption_rollout (bootstrap_email, enabled, encrypt_new_stories, updated_at)
-       VALUES ($1, true, true, now())
-       ON CONFLICT (bootstrap_email)
-       DO UPDATE SET enabled = EXCLUDED.enabled, encrypt_new_stories = EXCLUDED.encrypt_new_stories, updated_at = now()`,
-      ['pilot@example.com'],
-    );
-    const user = await withEncryptionRollout(db, testUser('user_pilot', 'pilot@example.com'));
+    const user = testUser('user_private', 'private@example.com');
     const world = await worldFor(db, user, { worldIds: [worldId] });
     const created = await getStory(db, world.storyId);
-    assert.equal(created?.ownerUserId, 'user_pilot');
+    assert.equal(created?.ownerUserId, 'user_private');
     assert.equal(created?.encryptionVersion, 0);
   });
   if (!ran) t.skip('no Postgres configured');

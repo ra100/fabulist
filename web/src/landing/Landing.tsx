@@ -554,8 +554,8 @@ export function Landing() {
             </p>
             <p className="lp-note">
               Privacy posture: transport is encrypted (HTTPS/TLS), and encrypted story storage is
-              rolling out per account in stages. The current deployment is in pilot mode, so treat this
-              as staged hardening rather than a zero-knowledge guarantee; details are in the{' '}
+              an optional setting for every signed-in account. Treat this as hardening rather than a
+              zero-knowledge guarantee; details are in the{' '}
               <a href={`${REPO}/blob/main/docs/privacy-policy.md`}>privacy policy</a>.
             </p>
             <div className="lp-actions">

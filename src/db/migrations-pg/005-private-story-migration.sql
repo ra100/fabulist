@@ -1,4 +1,4 @@
--- Durable, owner-level checkpointing for the explicit private-storage pilot.
+-- Durable, owner-level checkpointing for private-storage migration.
 CREATE TABLE IF NOT EXISTS user_private_story_migrations (
   user_id TEXT PRIMARY KEY,
   status TEXT NOT NULL CHECK (status IN ('migrating', 'failed', 'complete')),

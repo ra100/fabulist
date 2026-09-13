@@ -90,10 +90,10 @@ DECLARE
     'chron_sheets', 'relationships', 'facts', 'fact_knowledge', 'threads', 'events',
     'consequences', 'turns', 'scenes', 'chapters', 'directives', 'divergences',
     'style_anchors', 'prose_blocklist', 'illustrations', 'history_checkpoints', 'scene_segments',
-    -- User-scoped encryption rollout and key-wrap state. The key tables contain
+    -- User-scoped encryption key-wrap state. The key tables contain
     -- browser-produced ciphertext only; no role, including the operator's app
     -- process, can derive the plaintext key from them.
-    'encryption_rollout', 'user_encryption_keys', 'story_encryption_keys',
+    'user_encryption_keys', 'story_encryption_keys',
     'encrypted_story_values', 'chron_entity_blind_indexes',
     'user_private_story_migrations', 'story_private_story_migrations'];
   system_tables TEXT[] := ARRAY[

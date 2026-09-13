@@ -1,4 +1,4 @@
--- Private-story pilot key material. Browser-generated wraps only: no plaintext
+-- Private-story key material. Browser-generated wraps only: no plaintext
 -- passphrase, recovery code, master key, or per-story key is ever stored here.
 CREATE TABLE IF NOT EXISTS user_encryption_keys (
   user_id                 TEXT PRIMARY KEY,
