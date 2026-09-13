@@ -8,8 +8,9 @@ A creative-writing / role-play system where an AI game master runs a story insid
 existing fictional universe, keeps a real world-model behind the scenes, and stays
 consistent when you do something unplanned.
 
-`DESIGN.md` is the reasoning. `PLAN.md` is the implementation decisions. This is how to
-run it.
+`DESIGN.md` is the reasoning, [`docs/DECISIONS.md`](docs/DECISIONS.md) records the
+durable choices, and [`docs/ROADMAP.md`](docs/ROADMAP.md) is the evidence-gated future
+plan. This is how to run it.
 
 ---
 
@@ -785,6 +786,9 @@ Node 24 runs TypeScript directly, so there is no backend build step. That rules 
 ---
 
 ## Known gaps
+
+The short, prioritised view is [`docs/ROADMAP.md`](docs/ROADMAP.md). The details below
+are retained as implementation evidence and constraints.
 
 - **Streaming stops at the narrator.** The mechanical roles are not streamed and should not
   be, but that means a turn still has a silent stretch before prose starts.
