@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
   checkServerFreshness,
+  getSelectedStoryId,
   setSelectedStoryId,
   type BookTurn,
   type CurrentUser,
@@ -17,6 +18,7 @@ import {
   type Sheet,
   type PlayResponse,
   type ProvidersReport,
+  type RollbackTarget,
   type StaleServer,
   type State,
   type Story,
@@ -34,6 +36,7 @@ import { FactsView } from './views/FactsView.tsx';
 import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
+import { HistoryRequestGate } from './history-request-gate.ts';
 import {
   privateStoragePresentation,
   type PrivateStorageSnapshot,
@@ -67,6 +70,11 @@ function roman(n: number): string {
   return out;
 }
 
+/** The server supplies both coordinates; this only presents its stable label. */
+function chapterTurnLabel(turn: Pick<BookTurn, 'chapter' | 'turn'>): string {
+  return `${turn.chapter}-${turn.turn}`;
+}
+
 /** 12,483 -> "12.5k". Full precision is in the tooltip; the topbar needs a glance. */
 function formatTokens(n: number): string {
   if (n < 1000) return String(n);
@@ -81,6 +89,7 @@ function ErrorNotice({ error }: { error: string | null }) {
 export function App() {
   const [tab, setTab] = useState<Tab>('book');
   const [state, setState] = useState<State | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // null while unknown, so the wizard does not flash before the check returns.
   const [fresh, setFresh] = useState<boolean | null>(null);
@@ -108,6 +117,18 @@ export function App() {
   const [privateStorage, setPrivateStorage] = useState<PrivateStorageSnapshot | null>(null);
   const [privateStorageError, setPrivateStorageError] = useState<string | null>(null);
 
+  const stateRequestGate = useRef(new HistoryRequestGate());
+
+  const invalidateRefreshRequests = useCallback(() => {
+    stateRequestGate.current.invalidate();
+  }, []);
+
+  const selectStory = useCallback((storyId: string) => {
+    invalidateRefreshRequests();
+    setHistoryRevision((revision) => revision + 1);
+    setSelectedStoryId(storyId);
+  }, [invalidateRefreshRequests]);
+
   // Most actions have their own local recovery. This is the last line of
   // defence for one that does not: React does not render rejected async event
   // handlers, so without it an API failure only reaches the browser console.
@@ -126,6 +147,8 @@ export function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    const revision = stateRequestGate.current.beginRequest();
+    const storyId = getSelectedStoryId();
     try {
       // Freshness is re-checked on every refresh, not just at mount. Switching
       // worlds can move you into an *empty* world, and that has to open the
@@ -137,30 +160,33 @@ export function App() {
         api.state(),
         api.setup.status().catch(() => null),
       ]);
+      if (!stateRequestGate.current.isCurrent(revision) || getSelectedStoryId() !== storyId) return false;
       setState(nextState);
-      // Null means the setup routes are disabled; leave the current answer
-      // alone rather than guessing a world exists.
+      // Null means the setup routes are disabled. Preserve an answer already
+      // received, but let first paint proceed for older servers.
       if (status) {
         setFresh(status.fresh);
         setHasPlayer(status.hasPlayer);
+      } else {
+        setFresh((previous) => previous ?? false);
       }
       setError(null);
+      return true;
     } catch (e) {
+      if (!stateRequestGate.current.isCurrent(revision) || getSelectedStoryId() !== storyId) return false;
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     }
   }, []);
 
-  useEffect(() => {
-    void (async () => {
-      try {
-        setFresh((await api.setup.status()).fresh);
-      } catch {
-        // Setup routes disabled: assume there is a world and let the views say otherwise.
-        setFresh(false);
-      }
-      await refresh();
-    })();
+  const refreshHistory = useCallback(async () => {
+    if (await refresh()) setHistoryRevision((revision) => revision + 1);
   }, [refresh]);
+
+  useEffect(() => {
+    void refresh();
+    return () => invalidateRefreshRequests();
+  }, [invalidateRefreshRequests, refresh]);
 
   // Independent of the world check: a stale server is worth saying even when
   // everything else looks fine, because the symptom appears later and elsewhere.
@@ -359,8 +385,16 @@ export function App() {
         />
       ) : null}
 
-      {tab === 'book' ? <BookTab state={state} hasPlayer={hasPlayer} onChanged={refresh} /> : null}
-      {tab === 'timeline' ? <TimelineView /> : null}
+      {tab === 'book' ? (
+        <BookTab
+          state={state}
+          hasPlayer={hasPlayer}
+          onChanged={refreshHistory}
+          onMutationStart={invalidateRefreshRequests}
+          onStorySelected={selectStory}
+        />
+      ) : null}
+      {tab === 'timeline' ? <TimelineView refreshKey={historyRevision} /> : null}
       {tab === 'graph' ? <GraphTab /> : null}
       {tab === 'cast' ? <CastTab state={state} /> : null}
       {tab === 'threads' ? <ThreadsView state={state} onChanged={refresh} /> : null}
@@ -373,6 +407,8 @@ export function App() {
             setTab('book');
             void refresh();
           }}
+          onMutationStart={invalidateRefreshRequests}
+          onStorySelected={selectStory}
           onResetToWizard={() => setFresh(true)}
         />
       ) : null}
@@ -758,7 +794,19 @@ function jobPercent(job: Job): number | null {
 
 // ---------------------------------------------------------------------- book
 
-function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlayer: boolean | null; onChanged: () => void }) {
+function BookTab({
+  state,
+  hasPlayer,
+  onChanged,
+  onMutationStart,
+  onStorySelected,
+}: {
+  state: State | null;
+  hasPlayer: boolean | null;
+  onChanged: () => void | Promise<void>;
+  onMutationStart: () => void;
+  onStorySelected: (storyId: string) => void;
+}) {
   const [turns, setTurns] = useState<BookTurn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -793,17 +841,35 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
   const [chapters, setChapters] = useState<Array<{ chapter: number; title: string; summary: string }>>([]);
+  const [splittingId, setSplittingId] = useState<string | null>(null);
+  const [mutationPending, setMutationPending] = useState(false);
+  const historyRequestGate = useRef(new HistoryRequestGate());
+  const historyMutationLock = useRef(false);
 
   const load = useCallback(async () => {
-    const book = await api.book();
-    setTurns(book.turns);
+    const revision = historyRequestGate.current.beginRequest();
+    const firstPage = await api.book();
+    const turns = [...firstPage.turns];
+    let offset = firstPage.nextOffset ?? null;
+    while (offset !== null) {
+      if (!historyRequestGate.current.isCurrent(revision)) return;
+      const page = await api.book({ offset });
+      if (!historyRequestGate.current.isCurrent(revision)) return;
+      turns.push(...page.turns);
+      offset = page.nextOffset ?? null;
+    }
+    if (!historyRequestGate.current.isCurrent(revision)) return;
+    setTurns(turns);
     // The why panel reads the last turn's stored meta rather than holding its
     // own copy, so a reload or a tab switch does not lose it — the meta was
     // already persisted with the turn; only the read was missing.
-    const last = book.turns[book.turns.length - 1];
+    const last = turns[turns.length - 1];
     if (last) {
+      setLastMeta(null);
       try {
-        setLastMeta((await api.turn(last.id)).meta);
+        const meta = await api.turn(last.id);
+        if (!historyRequestGate.current.isCurrent(revision)) return;
+        setLastMeta(meta.meta);
       } catch {
         // A stale panel is better than a crashed book view.
       }
@@ -812,8 +878,29 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
     }
   }, []);
 
+  const invalidateHistoryRequests = (): number => {
+    const revision = historyRequestGate.current.invalidate();
+    onMutationStart();
+    return revision;
+  };
+
+  const beginHistoryMutation = (): number | null => {
+    if (historyMutationLock.current) return null;
+    historyMutationLock.current = true;
+    setMutationPending(true);
+    return invalidateHistoryRequests();
+  };
+
+  const endHistoryMutation = () => {
+    historyMutationLock.current = false;
+    setMutationPending(false);
+  };
+
   useEffect(() => {
     void load();
+    return () => {
+      historyRequestGate.current.invalidate();
+    };
   }, [load]);
 
   // Turns can arrive from outside this browser — the MCP connector plays into
@@ -824,7 +911,7 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
   useLivePoll(() => {
     void load();
     onChanged();
-  }, busy || regeneratingId !== null || closingScene);
+  }, busy || mutationPending);
 
   // The first render is history, not an arrival, so it does not animate.
   useEffect(() => {
@@ -845,7 +932,7 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
   }, [turns.length, awaiting]);
 
   async function play(text: string, override = false) {
-    if (!text.trim() || busy) return;
+    if (!text.trim() || busy || beginHistoryMutation() === null) return;
     setBusy(true);
     setNotes([]);
     setStreaming('');
@@ -875,7 +962,7 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
         if (res.tick?.transmissions.length) n.push(`${res.tick.transmissions.length} rumour(s) travelled`);
         setNotes(n);
         await load();
-        onChanged();
+        await onChanged();
       } else if (o.kind === 'answered') {
         setNotes([o.text]);
       } else if (o.kind === 'blocked') {
@@ -883,15 +970,27 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
       }
     };
 
+    let finished = false;
     try {
       await api.playStream(text, override, {
         onStage: setStage,
         onToken: (chunk) => setStreaming((prev) => prev + chunk),
-        onDone: (res) => void finish(res),
-        onError: (message) => setNotes([message]),
+        onDone: (res) => {
+          finished = true;
+          void finish(res).catch((e: unknown) => {
+            setNotes([e instanceof Error ? e.message : String(e)]);
+          }).finally(endHistoryMutation);
+        },
+        onError: (message) => {
+          setNotes([message]);
+          endHistoryMutation();
+        },
       });
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
+      endHistoryMutation();
+    } finally {
+      if (!finished) endHistoryMutation();
     }
     // The committed turn is now in the book, so the provisional copy can go.
     window.clearTimeout(revealAwaiting);
@@ -907,7 +1006,7 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
    * This calls the exact same compaction path.
    */
   async function closeScene() {
-    if (busy || closingScene || !turns.length) return;
+    if (busy || closingScene || !turns.length || beginHistoryMutation() === null) return;
     setClosingScene(true);
     try {
       const res = await api.closeScene();
@@ -916,11 +1015,13 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
       if (res.chaptersSummarised.length) n.push(`chapter ${res.chaptersSummarised[0]} rolled up`);
       setNotes(n);
       await load();
-      onChanged();
+      await onChanged();
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
+    } finally {
+      setClosingScene(false);
+      endHistoryMutation();
     }
-    setClosingScene(false);
   }
 
   /** Opens the rollback panel, loading the chapter list it needs on demand rather than on every book load. */
@@ -942,27 +1043,63 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
    * so it gets its own confirmation dialog on top of the panel already
    * having to be opened deliberately.
    */
-  async function doRollback(target: { scene?: number; chapter?: number }, mode: 'fork' | 'destructive') {
-    if (rollbackBusy) return;
+  async function doRollback(target: RollbackTarget, mode: 'fork' | 'destructive') {
+    if (rollbackBusy || historyMutationLock.current) return;
     if (mode === 'destructive') {
-      const label = target.scene !== undefined ? `scene ${target.scene}` : `chapter ${target.chapter}`;
-      if (!window.confirm(`Permanently discard everything from ${label} onward? This cannot be undone.`)) return;
+      const label = 'turnId' in target
+        ? 'the selected turn and every newer turn'
+        : target.scene !== undefined ? `scene ${target.scene} and every later scene` : `chapter ${target.chapter} and every later chapter`;
+      if (!window.confirm(`Discard ${label} permanently from this book? This cannot be undone.`)) return;
     }
+    const sourceStoryId = getSelectedStoryId();
+    const mutationRevision = beginHistoryMutation();
+    if (mutationRevision === null) return;
     setRollbackBusy(true);
     try {
       const result = await api.rollback({ ...target, mode });
+      if (!historyRequestGate.current.isCurrent(mutationRevision) || getSelectedStoryId() !== sourceStoryId) return;
+      const selectedTurn = 'turnId' in target ? turns.find((turn) => turn.id === target.turnId) : null;
+      const targetLabel = selectedTurn ? `turn ${chapterTurnLabel(selectedTurn)}` : `scene ${result.toScene}`;
       if (result.mode === 'fork' && result.forkedStory) {
-        setNotes([`rolled back to scene ${result.toScene} — switched to a new book "${result.forkedStory.title || 'untitled'}"; this one is untouched`]);
+        // `storyId` makes all subsequent PostgreSQL reads use this safe fork.
+        onStorySelected(result.forkedStory.id);
+        setNotes([`Rolled back to ${targetLabel} in a safe fork. This book is unchanged; the new book is "${result.forkedStory.title || 'untitled'}".`]);
       } else {
-        setNotes([`rolled back to scene ${result.toScene}, discarding what followed`]);
+        setNotes([`Rolled back to ${targetLabel}. The discarded history cannot be restored.`]);
       }
       setRollbackOpen(false);
-      await load();
-      onChanged();
+      try {
+        await load();
+        await onChanged();
+      } catch (e) {
+        setNotes((notes) => [...notes, `The rollback succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);
+      }
     } catch (e) {
-      setNotes([e instanceof Error ? e.message : String(e)]);
+      setNotes([`Rollback was not applied: ${e instanceof Error ? e.message : String(e)}. Try again.`]);
+    } finally {
+      setRollbackBusy(false);
+      endHistoryMutation();
     }
-    setRollbackBusy(false);
+  }
+
+  async function splitScene(turn: BookTurn) {
+    if (splittingId || beginHistoryMutation() === null) return;
+    setSplittingId(turn.id);
+    try {
+      const split = await api.splitScene(turn.id);
+      setNotes([`Started scene ${split.scene} at turn ${chapterTurnLabel(turn)}.`]);
+      try {
+        await load();
+        await onChanged();
+      } catch (e) {
+        setNotes((notes) => [...notes, `The scene split succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);
+      }
+    } catch (e) {
+      setNotes([`The scene was not split at turn ${chapterTurnLabel(turn)}: ${e instanceof Error ? e.message : String(e)}. Try again.`]);
+    } finally {
+      setSplittingId(null);
+      endHistoryMutation();
+    }
   }
 
   /**
@@ -972,7 +1109,7 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
    * but fix this one thing" rather than a blind retry.
    */
   async function regenerate(id: string, note: string) {
-    if (regeneratingId) return;
+    if (regeneratingId || beginHistoryMutation() === null) return;
     setRegeneratingId(id);
     try {
       await api.regenerate(id, note.trim() || undefined);
@@ -981,8 +1118,10 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
       await load();
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
+    } finally {
+      setRegeneratingId(null);
+      endHistoryMutation();
     }
-    setRegeneratingId(null);
   }
 
   return (
@@ -1006,7 +1145,7 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
             {turns.map((t, i) => {
               // A scene opening earns the rubricated initial and, unless it is the
               // very first, a break above it.
-              const opensScene = i === 0 || turns[i - 1]!.scene !== t.scene;
+              const opensScene = t.startsScene;
               return (
               <Fragment key={t.id}>
                 {opensScene && i > 0 ? (
@@ -1036,7 +1175,7 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
                     />
                     <button
                       className="primary"
-                      disabled={regeneratingId === t.id}
+                      disabled={mutationPending}
                       onClick={() => regenerate(t.id, rerollNote)}
                     >
                       {regeneratingId === t.id ? 'rerolling…' : 'reroll'}
@@ -1048,10 +1187,16 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
                   {t.move ? <span className="move" title="gm move">{t.move}</span> : null}
                   {t.integrity && t.integrity !== 'in-character' ? <span className="status ripening">{t.integrity}</span> : null}
                   {t.lintScore != null && t.lintScore > 0 ? <span className="mono">lint {t.lintScore}</span> : null}
+                  <span className="turn-position" title={`chapter ${t.chapter}, turn ${t.turn}`}>ch. {chapterTurnLabel(t)}</span>
                   <span className="grow" />
+                  {t.eligible && !t.startsScene ? (
+                    <button disabled={mutationPending} onClick={() => void splitScene(t)}>
+                      {splittingId === t.id ? 'splitting…' : 'split scene here'}
+                    </button>
+                  ) : null}
                   <button
                     title={t.pinned ? 'pinned passages are never rewritten' : 'different sentences, same events — what happened does not change'}
-                    disabled={t.pinned || regeneratingId === t.id}
+                    disabled={t.pinned || mutationPending}
                     onClick={() => {
                       if (rerollOpenId === t.id) { setRerollOpenId(null); setRerollNote(''); }
                       else { setRerollOpenId(t.id); setRerollNote(''); }
@@ -1060,10 +1205,18 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
                     reroll
                   </button>
                   <button
+                    disabled={mutationPending}
                     onClick={async () => {
-                      await api.pin(t.id, !t.pinned);
-                      if (!t.pinned) await api.addAnchor(t.bookProse.slice(0, 300), 'pinned by the author');
-                      await load();
+                      if (beginHistoryMutation() === null) return;
+                      try {
+                        await api.pin(t.id, !t.pinned);
+                        if (!t.pinned) await api.addAnchor(t.bookProse.slice(0, 300), 'pinned by the author');
+                        await load();
+                      } catch (e) {
+                        setNotes([e instanceof Error ? e.message : String(e)]);
+                      } finally {
+                        endHistoryMutation();
+                      }
                     }}
                   >
                     {t.pinned ? 'unpin' : 'pin'}
@@ -1140,7 +1293,7 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
               </div>
             ) : null}
 
-            {rollbackOpen ? <RollbackPanel state={state} chapters={chapters} busy={rollbackBusy} onRollback={doRollback} onCancel={() => setRollbackOpen(false)} /> : null}
+            {rollbackOpen ? <RollbackPanel state={state} chapters={chapters} turns={turns} busy={mutationPending} onRollback={doRollback} onCancel={() => setRollbackOpen(false)} /> : null}
 
             <textarea
               value={input}
@@ -1175,19 +1328,19 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
               <button
                 className={rollbackOpen ? 'primary' : ''}
                 title="undo the last chapter or scene"
-                disabled={busy || !turns.length}
+                disabled={mutationPending || !turns.length}
                 onClick={() => void openRollback()}
               >
                 roll back…
               </button>
               <button
                 title="close the current scene and summarise it"
-                disabled={busy || closingScene || !turns.length}
+                disabled={mutationPending || !turns.length}
                 onClick={() => void closeScene()}
               >
                 {closingScene ? 'closing…' : 'close scene'}
               </button>
-              <button className="primary" disabled={busy || !input.trim()} onClick={() => void play(input)}>
+              <button className="primary" disabled={mutationPending || !input.trim()} onClick={() => void play(input)}>
                 {busy ? 'writing…' : 'play'}
               </button>
             </div>
@@ -1259,58 +1412,93 @@ function BookTab({ state, hasPlayer, onChanged }: { state: State | null; hasPlay
 
 /**
  * The backward move (GAPS.md 3.6): "undo the last chapter" or "back to a
- * specific scene". Chapter is the default granularity since that is the
- * user-facing unit; scene is available for finer control. Always shows both
- * outcomes side by side — fork (the safe default) and destructive (behind
- * its own confirm) — rather than a single button whose behaviour depends on
- * a mode nobody remembers they set.
+ * specific scene or exact turn. Chapter is the default granularity since that
+ * is the user-facing unit; scene and turn are available for finer control.
+ * Always shows both outcomes side by side — fork (the safe default) and
+ * destructive (behind its own confirm) — rather than a single button whose
+ * behaviour depends on a mode nobody remembers they set.
  */
 function RollbackPanel({
-  state, chapters, busy, onRollback, onCancel,
+  state, chapters, turns, busy, onRollback, onCancel,
 }: {
   state: State | null;
   chapters: Array<{ chapter: number; title: string; summary: string }>;
+  turns: BookTurn[];
   busy: boolean;
-  onRollback: (target: { scene?: number; chapter?: number }, mode: 'fork' | 'destructive') => void;
+  onRollback: (target: RollbackTarget, mode: 'fork' | 'destructive') => void;
   onCancel: () => void;
 }) {
-  const [unit, setUnit] = useState<'chapter' | 'scene'>(chapters.length ? 'chapter' : 'scene');
+  const [unit, setUnit] = useState<'chapter' | 'scene' | 'turn'>(chapters.length ? 'chapter' : 'scene');
   const [chapter, setChapter] = useState(chapters.length ? String(chapters[chapters.length - 1]!.chapter) : '');
   const currentScene = state?.session.scene ?? 1;
   const [scene, setScene] = useState(String(Math.max(1, currentScene - 1)));
+  const eligibleTurns = turns.filter((turn) => turn.eligible);
+  const [turnId, setTurnId] = useState(eligibleTurns.at(-1)?.id ?? '');
+  const hasIneligibleTurns = turns.some((turn) => !turn.eligible);
 
   const target = unit === 'chapter'
     ? (chapter.trim() ? { chapter: Number(chapter) } : null)
-    : (scene.trim() ? { scene: Number(scene) } : null);
-  const valid = target !== null && Number.isFinite(unit === 'chapter' ? target.chapter : target.scene);
+    : unit === 'scene'
+      ? (scene.trim() ? { scene: Number(scene) } : null)
+      : (eligibleTurns.some((turn) => turn.id === turnId) ? { turnId } : null);
+  const valid = target !== null && (unit === 'turn' || Number.isFinite(unit === 'chapter' ? target.chapter : target.scene));
+  const retention = unit === 'turn'
+    ? 'A turn target is kept; only newer history is removed.'
+    : 'A scene or chapter target and all newer history are removed.';
 
   return (
-    <div className="notice" role="region" aria-label="roll back">
+    <section className="notice" aria-label="roll back">
       <b>Roll back</b>
       <p className="small dim" style={{ margin: '4px 0 var(--s3)' }}>
-        Currently at scene {currentScene}. The default (fork) leaves this book untouched and switches you
-        to a shorter sibling; destructive discards the tail here, with no way back.
+        Currently at scene {currentScene}. Fork (safe) creates and switches to a shorter sibling while this book
+        remains untouched. Discard permanently changes this book and cannot be undone. {retention}
       </p>
+      {hasIneligibleTurns ? (
+        <p className="small dim" style={{ margin: '0 0 var(--s2)' }}>
+          Turns without exact history are readable but unavailable here; choose an eligible turn instead.
+        </p>
+      ) : null}
       <div className="row" style={{ marginBottom: 'var(--s2)' }}>
-        <select value={unit} onChange={(e) => setUnit(e.target.value as 'chapter' | 'scene')}>
-          <option value="chapter" disabled={!chapters.length}>chapter{chapters.length ? '' : ' (none recorded yet)'}</option>
-          <option value="scene">scene</option>
-        </select>
-        {unit === 'chapter' ? (
-          <select value={chapter} onChange={(e) => setChapter(e.target.value)}>
-            {chapters.map((c) => (
-              <option key={c.chapter} value={c.chapter}>
-                chapter {c.chapter}{c.title ? ` — ${c.title}` : ''}
-              </option>
-            ))}
+        <label className="rollback-field">
+          <span>target</span>
+          <select value={unit} onChange={(e) => setUnit(e.target.value as 'chapter' | 'scene' | 'turn')} disabled={busy}>
+            <option value="chapter" disabled={!chapters.length}>chapter{chapters.length ? '' : ' (none recorded yet)'}</option>
+            <option value="scene">scene</option>
+            <option value="turn" disabled={!eligibleTurns.length}>turn{eligibleTurns.length ? '' : ' (none with exact history)'}</option>
           </select>
+        </label>
+        {unit === 'chapter' ? (
+          <label className="rollback-field">
+            <span>chapter</span>
+            <select value={chapter} onChange={(e) => setChapter(e.target.value)} disabled={busy}>
+              {chapters.map((c) => (
+                <option key={c.chapter} value={c.chapter}>
+                  chapter {c.chapter}{c.title ? ` — ${c.title}` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : unit === 'scene' ? (
+          <label className="rollback-field">
+            <span>scene</span>
+            <input
+              type="number" min={1} max={Math.max(1, currentScene - 1)}
+              value={scene} onChange={(e) => setScene(e.target.value)}
+              disabled={busy}
+              style={{ width: '5rem' }}
+            />
+          </label>
         ) : (
-          <input
-            type="number" min={1} max={Math.max(1, currentScene - 1)}
-            value={scene} onChange={(e) => setScene(e.target.value)}
-            aria-label="scene to roll back to"
-            style={{ width: '5rem' }}
-          />
+          <label className="rollback-field">
+            <span>turn</span>
+            <select value={turnId} onChange={(e) => setTurnId(e.target.value)} disabled={busy || !eligibleTurns.length}>
+              {eligibleTurns.map((turn) => (
+                <option key={turn.id} value={turn.id}>
+                  {chapterTurnLabel(turn)} · scene {turn.scene}
+                </option>
+              ))}
+            </select>
+          </label>
         )}
       </div>
       <div className="row wrap">
@@ -1330,7 +1518,7 @@ function RollbackPanel({
         </button>
         <button onClick={onCancel} disabled={busy}>cancel</button>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -2039,9 +2227,11 @@ function SettingsTab({
  * `world_access` — which is strictly better than an admin flag, because it can say
  * "you own this one world" rather than only "you administer everything".
  */
-function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
+function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySelected, onResetToWizard }: {
   currentSceneTurn: string;
   onSwitched: () => void;
+  onMutationStart: () => void;
+  onStorySelected: (storyId: string) => void;
   onResetToWizard: () => void;
 }) {
   const [stories, setStories] = useState<Story[] | null>(null);
@@ -2091,6 +2281,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
       return;
     }
     setSourceError(null);
+    onMutationStart();
     setBusy('sources');
     try {
       await api.story.setSources(next);
@@ -2129,6 +2320,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
   useEffect(() => void load(), [load]);
 
   const run = async (id: string, label: string, fn: () => Promise<void>) => {
+    onMutationStart();
     setBusy(id + label);
     try {
       await fn();
@@ -2369,7 +2561,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                               // this, every request after a successful switch
                               // would keep resolving back to "my most recently
                               // played" rather than the one just picked.
-                              setSelectedStoryId(s.id);
+                              onStorySelected(s.id);
                               await load();
                               onSwitched();
                             })}
@@ -2527,6 +2719,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
               className="warn"
               onClick={async () => {
                 if (!window.confirm('Discard this book and start a blank one? Its scenes and prose go; canon and every other book stay.')) return;
+                onMutationStart();
                 await api.setup.reset();
                 onResetToWizard();
               }}

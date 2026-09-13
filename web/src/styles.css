@@ -1488,6 +1488,20 @@ hr {
 .turn:hover .turn-tools button,
 .turn-tools button:focus-visible { opacity: 1; }
 .turn.pinned .turn-tools button { opacity: 1; }
+.turn-position {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.rollback-field {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: 11px;
+  color: var(--ink-3);
+}
 
 /* ---- the rubricated initial ---------------------------------------------- */
 /* One per scene, in the display face, in the rubric colour, hanging out past
@@ -1972,6 +1986,17 @@ td.actions button { flex: none; }
   border-bottom: 1px solid var(--rule-soft);
 }
 .timeline-scene.current { border-left-color: var(--accent); }
+.timeline-boundary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s1);
+  margin: var(--s1) 0 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+.timeline-boundary > span { color: var(--divergent); }
 .timeline-divergence {
   padding: 5px var(--s2);
   border-radius: var(--r-sm);

@@ -1,15 +1,35 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, type Timeline } from '../api.ts';
+import { HistoryRequestGate } from '../history-request-gate.ts';
 
-export function TimelineView() {
+export function TimelineView({ refreshKey }: { refreshKey: number }) {
   const [timeline, setTimeline] = useState<Timeline | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [reveal, setReveal] = useState<Set<number>>(new Set());
+  const requestGate = useRef(new HistoryRequestGate());
 
   useEffect(() => {
-    void api.timeline().then(setTimeline);
-  }, []);
+    const revision = requestGate.current.beginRequest();
+    let disposed = false;
+    setError(null);
+    void api.timeline()
+      .then((nextTimeline) => {
+        if (disposed || !requestGate.current.isCurrent(revision)) return;
+        setTimeline(nextTimeline);
+      })
+      .catch((reason: unknown) => {
+        if (disposed || !requestGate.current.isCurrent(revision)) return;
+        setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => {
+      disposed = true;
+      requestGate.current.invalidate();
+    };
+  }, [refreshKey]);
 
-  if (!timeline) return <div className="main"><div className="pane"><p className="empty">Loading.</p></div></div>;
+  if (!timeline) {
+    return <div className="main"><div className="pane"><p className="empty">{error ?? 'Loading.'}</p></div></div>;
+  }
 
   const chapterMeta = new Map(timeline.chapters.map((c) => [c.chapter, c]));
   const byChapter = new Map<number, Timeline['scenes']>();
@@ -19,11 +39,11 @@ export function TimelineView() {
     byChapter.set(scene.chapter, list);
   }
   const chapterNumbers = [...byChapter.keys()].sort((a, b) => a - b);
-
   return (
     <div className="main">
       <div className="pane">
         <div className="measure-tool">
+          {error ? <div className="card warn">{error}</div> : null}
           <p className="lede">
             The record of how this playthrough actually went — where it diverged from canon, and by how
             much, scene by scene.
@@ -41,10 +61,7 @@ export function TimelineView() {
                     <p className="small dim" style={{ margin: '0 0 var(--s3)' }}>{chapterInfo.summary}</p>
                   ) : null}
                   {byChapter.get(chapter)!.map((scene) => (
-                    <div
-                      key={scene.scene}
-                      className={`timeline-scene${scene.scene === timeline.currentScene ? ' current' : ''}`}
-                    >
+                    <div key={scene.scene} className={`timeline-scene${scene.scene === timeline.currentScene ? ' current' : ''}`}>
                       <div className="row baseline">
                         <span className="mono" style={{ minWidth: '3.5rem' }}>s{scene.scene}</span>
                         <span className="grow small">{scene.title || (scene.turnCount ? '' : 'not yet played')}</span>
@@ -53,6 +70,12 @@ export function TimelineView() {
                         </span>
                         {scene.scene === timeline.currentScene ? <span className="tag locked">current</span> : null}
                       </div>
+                      {scene.boundary ? (
+                        <div className="timeline-boundary">
+                          <span aria-hidden="true">◆</span>
+                          Begins at chapter-turn {scene.boundary.label}
+                        </div>
+                      ) : null}
                       {scene.summary ? <p className="small dim" style={{ margin: '4px 0 0' }}>{scene.summary}</p> : null}
                       {scene.divergences.length ? (
                         <div className="stack" style={{ marginTop: 'var(--s2)' }}>

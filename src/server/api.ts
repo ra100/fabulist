@@ -366,8 +366,23 @@ route('POST', '/api/sheet/:id/lock', (_req, res, { world, params, body }) => {
   send(res, 200, world.cast.get(id));
 });
 
-route('GET', '/api/book', (_req, res, { world }) => {
+const BOOK_TURN_LIMIT = 1000;
+
+/** A smaller limit is useful to paged readers and endpoint tests; never exceed the public cap. */
+function bookTurnWindow(req: IncomingMessage): { limit: number; offset: number } {
+  const params = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).searchParams;
+  const raw = params.get('limit');
+  const limit = raw === null ? BOOK_TURN_LIMIT : Number(raw);
+  const offset = Number(params.get('offset'));
+  return {
+    limit: Number.isInteger(limit) && limit > 0 ? Math.min(limit, BOOK_TURN_LIMIT) : BOOK_TURN_LIMIT,
+    offset: Number.isInteger(offset) && offset >= 0 ? offset : 0,
+  };
+}
+
+route('GET', '/api/book', (req, res, { world }) => {
   const layout = storyLayout(world);
+  const { limit, offset } = bookTurnWindow(req);
   const derivedSceneForIdentity = new Map<string, number>();
   for (const turn of layout.turns) derivedSceneForIdentity.set(turn.metadataKey, turn.scene);
   send(res, 200, {
@@ -378,11 +393,12 @@ route('GET', '/api/book', (_req, res, { world }) => {
       scene: derived,
     }];
     }),
-    turns: layout.turns.slice(0, 1000).map(({ source: t, scene, chapter, eligible, position, startsScene }) => ({
+    turns: layout.turns.slice(offset, offset + limit).map(({ source: t, scene, chapter, eligible, position, startsScene }) => ({
       id: t.id, scene, chapter, turn: t.turn, historyPosition: position, eligible, startsScene,
       rawInput: t.rawInput, bookProse: t.bookProse, pinned: t.pinned, move: t.meta.move,
       integrity: t.meta.integrity?.distance ?? null, lintScore: t.meta.lint?.score ?? null,
     })),
+    nextOffset: offset + limit < layout.turns.length ? offset + limit : null,
   });
 });
 
@@ -836,10 +852,19 @@ route('GET', '/api/timeline', (_req, res, { world }) => {
   const derivedSceneForIdentity = new Map<string, number>();
   const chapterByScene = new Map<number, number>();
   const derivedSceneForTurn = new Map<string, number>();
+  const boundaryByScene = new Map<number, { turnId: string; chapter: number; turn: number; label: string }>();
   for (const turn of layout.turns) {
     derivedSceneForIdentity.set(turn.metadataKey, turn.scene);
     chapterByScene.set(turn.scene, turn.chapter);
     derivedSceneForTurn.set(`${turn.source.scene}:${turn.source.turn}`, turn.scene);
+    if (turn.startsScene) {
+      boundaryByScene.set(turn.scene, {
+        turnId: turn.turnId,
+        chapter: turn.chapter,
+        turn: turn.turn,
+        label: `${turn.chapter}-${turn.turn}`,
+      });
+    }
   }
 
   const turnCounts = new Map<number, number>();
@@ -890,6 +915,7 @@ route('GET', '/api/timeline', (_req, res, { world }) => {
         chapter: chapterByScene.get(scene) ?? meta?.chapter ?? 1,
         turnCount: turnCounts.get(scene) ?? 0,
         eligibleTurnCount: eligibleTurnCounts.get(scene) ?? 0,
+        boundary: boundaryByScene.get(scene) ?? null,
         divergences: divergencesByScene.get(scene) ?? [],
       };
     });
