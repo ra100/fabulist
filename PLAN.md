@@ -1,7 +1,10 @@
-# Implementation plan
+# Implementation plan (completed)
 
-Companion to `DESIGN.md`. That document is the *what* and *why*; this is the *how*,
-with the decisions pinned down.
+The original implementation plan is complete: the foundation, integrity gate,
+ingest, director, consequences, and inspector all shipped. Its durable choices now
+live in [`docs/DECISIONS.md`](docs/DECISIONS.md); active, evidence-gated work lives
+in [`docs/ROADMAP.md`](docs/ROADMAP.md). This file remains as the compact rationale
+for the architectural baseline below, rather than an outdated sequence of slices.
 
 ---
 
@@ -53,25 +56,6 @@ seed/           hand-authored canon for Slice 0
 
 ---
 
-## Build order
-
-Follows DESIGN §13, which front-loads the risky parts. Each slice ends green and
-committed.
-
-- **S0 — foundation.** Domain types, SQLite schema, migrations, stores, mock
-  provider, tokenizer, budget allocator, turn loop, delta extraction + validator.
-  Playable against hand-authored seed canon with zero API keys.
-- **S0.5 — integrity gate.** Character contracts, coherence distance, the interrupt.
-- **S0.75 — registers + prose gate.** Four registers per turn, style contract,
-  deterministic fiction lint.
-- **S1 — ingest, skim.** MediaWiki client, discovery preview, Pass A.
-- **S2 — depth modes.** Pass B, voice cards, per-node depth, JIT deepening.
-- **S3 — Director.** Threads, move library, world tick, directives.
-- **S4 — consequences.** Queue, maturity, rumor transmission, visibility classes.
-- **S5 — UI.** Inspector: graph, sheets, timeline, causality map, knobs, frame budget.
-
----
-
 ## Decisions the design left open
 
 **Tokenizer.** Real BPE per provider is a dependency and a maintenance burden. Use a
@@ -99,21 +83,6 @@ idempotent; UUIDs for chronicle events and consequences.
 
 ---
 
-## Parallelization
-
-The core must stay coherent, so I build it directly. Once interfaces are frozen at
-the end of S0, three pieces are genuinely independent and get delegated in parallel:
-
-1. **Lint engine** — pure functions, string in / findings out. No DB, no provider.
-2. **MediaWiki ingest** — HTTP client and parsers behind a fixed store interface.
-3. **Web UI** — consumes a documented HTTP API.
-
----
-
-## Definition of done
-
-- `pnpm test` green with no network and no API keys.
-- `pnpm play` runs an interactive session against seed canon via the mock provider.
-- `pnpm dev` serves the inspector; graph, sheets, timeline, and knobs all work.
-- A real provider can be configured and swapped without touching engine code.
-- Twenty-turn scripted session ends in identical graph state across providers.
+The former definition of done is now the maintenance baseline: tests run without
+network or API keys, the mock remains playable, the inspector works end to end, and
+providers remain interchangeable behind the adapter interface.
