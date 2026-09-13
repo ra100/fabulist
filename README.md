@@ -695,6 +695,32 @@ silently replaces the previous backup is a footgun, not a safety net.
 The result is a save in its own right, not just bytes: `pnpm integrity` passes on it and
 `World.open` will play it.
 
+### Publishing a release pack
+
+```bash
+pnpm pack-world data/worlds/acotar/acotar.db --to=releases/acotar
+tar -C releases -czf acotar-world.tar.gz acotar
+```
+
+`pack-world` snapshots a potentially live database safely, validates its references, and
+produces a ready-to-extract directory:
+
+```text
+acotar/
+  world.db
+  images/              # only when the source has illustrations
+  manifest.json
+  SHA256SUMS
+```
+
+Publish the archive as a release asset rather than committing the SQLite binary to Git.
+Recipients verify it with `(cd acotar && sha256sum -c SHA256SUMS)`, then extract the directory
+under `data/worlds/` and run `pnpm serve-sqlite`; the world library discovers
+`data/worlds/acotar/world.db` automatically. The manifest records the world title, counts, app
+version and recorded ingest context. Before distributing a fandom-derived world, read [the legal
+briefing](docs/legal-briefing-fandom-ingest.md): its recommended default is a reproducible ingest
+recipe rather than a content payload.
+
 ---
 
 ## Linting
