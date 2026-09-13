@@ -257,7 +257,7 @@ route('GET', '/api/state', (_req, res, { world }) => {
   const session = world.session.get();
   send(res, 200, {
     session,
-    worldTitle: world.chronicle.getMeta('worldTitle', 'Untitled world'),
+    worldTitle: world.chronicle.getMeta('worldTitle', 'Fabulist'),
     counts: world.graph.counts(),
     scenes: world.chronicle.scenes(),
     threads: world.threads.open(20),

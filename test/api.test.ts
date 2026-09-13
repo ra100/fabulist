@@ -93,6 +93,16 @@ test('state endpoint reports the world at a glance', async () => {
   });
 });
 
+test('state endpoint uses the app name when a world has no title', async () => {
+  await withServer(async (base, world) => {
+    world.db.prepare(`DELETE FROM meta WHERE key = 'worldTitle'`).run();
+
+    const { status, body } = await get(base, '/api/state');
+    assert.equal(status, 200);
+    assert.equal((body as { worldTitle: string }).worldTitle, 'Fabulist');
+  });
+});
+
 test('graph endpoint filters by layer so canon is distinguishable', async () => {
   await withServer(async (base) => {
     const all = await get(base, '/api/graph');
