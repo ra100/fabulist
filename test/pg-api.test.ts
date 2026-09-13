@@ -262,7 +262,11 @@ test('a turn plays over HTTP and persists', async (t) => {
       assert.ok(checkpoint, 'a committed turn receives an exact history checkpoint');
       const style = await send(base, 'PUT', '/api/style', { register: 'plain' });
       assert.equal(style.status, 200);
-      const sheet = await send(base, 'PUT', '/api/sheet/char:brother-anselm', { condition: { mood: 'alert' } });
+      const existingSheet = await world.cast.get('char:brother-anselm');
+      assert.ok(existingSheet);
+      const sheet = await send(base, 'PUT', '/api/sheet/char:brother-anselm', {
+        condition: { ...existingSheet.condition, mood: 'alert' },
+      });
       assert.equal(sheet.status, 200);
       assert.equal(sheet.body.condition.mood, 'alert');
       assert.deepEqual(
