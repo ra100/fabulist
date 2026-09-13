@@ -75,7 +75,6 @@ import {
   PrivateStoryMigrationIncompleteError,
   privateMigrationStatus,
 } from '../store/private-story-migration-pg.ts';
-import { withEncryptionRollout } from '../auth/encryption-rollout-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
 import {
@@ -348,14 +347,12 @@ route('GET', '/api/auth/me', (_req, res, { user }) => {
 
 route('GET', '/api/encryption/keys', async (_req, res, { db, user, ephemeralStoryKeys }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
-  if (!user.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
   const keys = await encryptionKeysForUser(db, user.id);
   send(res, 200, { enrolled: keys.userKey !== null, grants: ephemeralStoryKeys.list(user.id), ...keys });
 });
 
 route('POST', '/api/encryption/enroll', async (_req, res, { body, db, user }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
-  if (!user.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
   const enrollment = parseBody(encryptionEnrollmentBodySchema, body);
   try {
     await enrollEncryptionKeys(db, user.id, enrollment.userKey, enrollment.storyKeys);
@@ -369,7 +366,6 @@ route('POST', '/api/encryption/enroll', async (_req, res, { body, db, user }) =>
 
 route('POST', '/api/encryption/unlock', async (_req, res, { body, db, user, ephemeralStoryKeys }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
-  if (!user.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
   const { storyKeys } = parseBody(encryptionUnlockBodySchema, body);
   if (new Set(storyKeys.map((item) => item.storyId)).size !== storyKeys.length) {
     return send(res, 400, { error: 'duplicate private-story key' });
@@ -400,12 +396,12 @@ route('POST', '/api/encryption/lock', async (_req, res, { body, user, ephemeralS
 });
 
 route('GET', '/api/encryption/migration', async (_req, res, { db, user }) => {
-  if (!user?.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
+  if (!user) return send(res, 401, { error: 'sign-in required' });
   send(res, 200, { migration: await privateMigrationStatus(db, user.id) });
 });
 
 route('POST', '/api/encryption/migration', async (_req, res, { body, db, user, ephemeralStoryKeys, world }) => {
-  if (!user?.encryptionPilot) return send(res, 403, { error: 'private-story encryption is not enabled for this account' });
+  if (!user) return send(res, 401, { error: 'sign-in required' });
   parseBody(encryptionMigrationBodySchema, body);
   const stories = await db.query<{ id: string }>(`SELECT id FROM stories WHERE owner_user_id = $1`, [user.id]);
   const missing = stories.rows.filter(({ id }) => !ephemeralStoryKeys.get(user.id, id)).map(({ id }) => id);
@@ -2409,7 +2405,7 @@ export function createApiServer(opts: ServerOptions) {
    * UI's own `?storyId=` selection has.
    */
   const mcpToolContextFor = async (verified: { userId: string; raw: Record<string, unknown> }): Promise<McpToolContext> => {
-    const user = await withEncryptionRollout(db, mcpSessionUser(verified, authConfig));
+    const user = mcpSessionUser(verified, authConfig);
     let selected: string | undefined;
     // Async now, and resolved per call rather than from a process-wide pointer.
     // `selected` still lives in this closure for exactly the reason it always did:
@@ -2596,7 +2592,6 @@ export function createApiServer(opts: ServerOptions) {
         }
         return send(res, 401, { error: 'sign-in required' });
       }
-      user = await withEncryptionRollout(db, user);
     }
 
     if (url.pathname.startsWith('/api/')) {

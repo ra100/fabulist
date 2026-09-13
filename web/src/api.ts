@@ -577,8 +577,6 @@ export interface CurrentUser {
   firstName: string | null;
   lastName: string | null;
   isAdmin: boolean;
-  encryptionPilot?: boolean;
-  encryptNewStories?: boolean;
 }
 
 export interface EncryptionKeyBundle {

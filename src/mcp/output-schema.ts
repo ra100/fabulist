@@ -16,7 +16,7 @@ type UntypedToolRegistrar = (
  * Keeps OpenAI's tool scanner from treating an otherwise well-described MCP
  * tool as incomplete while preserving existing structuredContent shapes.
  */
-export function addDefaultOutputSchema(server: McpServer): void {
+export function addDefaultOutputSchema(server: McpServer, resourceUrl: string): void {
   // `registerTool` is a generic method, so `Parameters<>` collapses to `never`.
   // The narrow runtime adapter preserves its public generic signature for all
   // call sites while adding the MCP metadata default in one place.
@@ -27,10 +27,12 @@ export function addDefaultOutputSchema(server: McpServer): void {
         return await callback(...args);
       } catch (error) {
         if (!(error instanceof PrivateStoryLockedError)) throw error;
+        const settingsUrl = new URL('/settings', resourceUrl).toString();
         const state = {
           status: 'locked',
           error: 'Private stories are locked.',
-          nextStep: 'Open Fabulist in your browser, unlock Private Storage, then retry this tool.',
+          settingsUrl,
+          nextStep: 'Open Settings in Fabulist, unlock Private Storage with your passcode, then retry this tool.',
         };
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(state) }],
