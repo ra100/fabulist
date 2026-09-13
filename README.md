@@ -614,6 +614,19 @@ closed unsummarised. Summaries deliberately keep entity ids (`char:brother-ansel
 looks ugly and is the point: it keeps the graph reachable from the summary, so the Referee
 can still check things that happened twenty scenes ago.
 
+The Book labels every committed turn with its chapter-turn position. Use **roll back** to
+target a chapter, scene, or an eligible exact-history turn: a turn target is retained, while
+later history is removed. **Fork** is the default and switches to a shorter sibling without
+changing the original; **Discard permanently** changes the current book only after a browser
+confirmation. Turns from saves made before exact history was introduced stay readable but
+cannot be chosen for turn rollback.
+
+Use **split scene here** beside an eligible non-opening turn to make that turn the start of a
+new scene. The Book, Timeline, compaction, exports, and later play all use that durable
+boundary; it does not rewrite what already happened. The same operations are available in the
+terminal as `/rollback-turn <turn-id>` and `/split-scene <turn-id>`, and over MCP through
+`rollback` with `turnId` and `split_scene` with `turnId`.
+
 `/branch <scene> <file>` forks the save and leaves the current one untouched:
 
 ```

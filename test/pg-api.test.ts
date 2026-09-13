@@ -295,7 +295,9 @@ test('PostgreSQL rollback and split endpoints enforce exact turn target contract
       const rollback = await send(base, 'POST', '/api/rollback', { turnId: target.id });
       assert.equal(rollback.status, 200);
       assert.equal(rollback.body.mode, 'fork');
+      assert.equal(rollback.body.toScene, 1, 'the SQLite-compatible response states the destination scene');
       assert.equal(rollback.body.toTurnId, target.id);
+      assert.equal(rollback.body.forkedStory.id, rollback.body.story.id, 'the stable safe-fork response identifies the new story');
       assert.equal((await world.chronicle.turns()).length, 3, 'the source remains intact');
       const fork = await World.forStory(db, rollback.body.story.id);
       assert.equal((await fork.chronicle.turns()).length, 2, 'the selected turn is retained');
@@ -306,6 +308,17 @@ test('PostgreSQL rollback and split endpoints enforce exact turn target contract
       assert.equal(split.body.scene, 2);
       assert.equal(split.body.startsScene, true);
       assert.equal(split.body.target, undefined, 'the public response contract does not expose internal transaction metadata');
+      const limitedBook = await get(base, '/api/book?limit=1');
+      assert.deepEqual(limitedBook.body.turns.map((turn: { id: string }) => turn.id), [turns[0]!.id]);
+      assert.equal(limitedBook.body.nextOffset, 1);
+      const secondBookPage = await get(base, '/api/book?offset=1&limit=1');
+      assert.deepEqual(secondBookPage.body.turns.map((turn: { id: string }) => turn.id), [turns[1]!.id]);
+      const timeline = await get(base, '/api/timeline');
+      assert.deepEqual(
+        timeline.body.scenes.find((scene: { scene: number }) => scene.scene === 2)?.boundary,
+        { turnId: target.id, chapter: 1, turn: 2, label: '1-2' },
+        'timeline uses the full canonical layout after the book page ends',
+      );
       assert.equal((await send(base, 'POST', '/api/scene/split', { turnId: target.id })).status, 400);
       assert.equal((await send(base, 'POST', '/api/scene/split', { turnId: 'turn:unknown' })).status, 400);
       assert.equal((await send(base, 'POST', '/api/scene/split', { turnId: '' })).status, 400);
