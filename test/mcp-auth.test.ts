@@ -34,6 +34,14 @@ interface IssuerOptions {
   alsoServeAuthKitPath?: boolean;
   /** What the metadata document claims its own `issuer` is (RFC 8414 §3.3). */
   claimedIssuer?: string;
+  /** What the metadata document gives as `jwks_uri`, when not this issuer's own `jwksPath`. */
+  advertisedJwksUri?: string;
+  /**
+   * While `active`, every metadata request fails transiently — the connection
+   * is dropped, or answered 503 — and then the issuer recovers once the test
+   * flips it off.
+   */
+  metadataOutage?: { active: boolean; kind: 'reset' | 'unavailable' };
 }
 
 /**
@@ -52,8 +60,13 @@ async function startIssuer(jwk: Record<string, unknown>, opts: IssuerOptions = {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify(body));
     };
+    if (opts.metadataOutage?.active && req.url?.startsWith('/.well-known/')) {
+      if (opts.metadataOutage.kind === 'reset') req.socket.destroy();
+      else res.writeHead(503).end();
+      return;
+    }
     if (discovery !== 'none' && req.url === `/.well-known/${discovery}`) {
-      json({ issuer: opts.claimedIssuer ?? issuer, jwks_uri: `${issuer}${jwksPath}` });
+      json({ issuer: opts.claimedIssuer ?? issuer, jwks_uri: opts.advertisedJwksUri ?? `${issuer}${jwksPath}` });
       return;
     }
     if (req.url === jwksPath || (opts.alsoServeAuthKitPath && req.url === '/oauth2/jwks')) {
@@ -347,3 +360,113 @@ test('discovery happens once and is reused across verifications', async () => {
     server.close();
   }
 });
+
+// ------------------------------------------- key-source transport security
+
+test('OAuth mode refuses a cleartext issuer or MCP_OAUTH_JWKS_URI unless it is on loopback', () => {
+  for (const issuer of [
+    'http://idp.example',
+    'http://10.0.0.5:8080',
+    'http://127.0.0.1.idp.example',
+    'ftp://idp.example',
+  ]) {
+    assert.throws(() => buildOAuthAuth(issuer, 'https://mcp.example.com/mcp'), /MCP_OAUTH_ISSUER must be an https URL/);
+  }
+  assert.throws(
+    () => buildMcpAuth({ MCP_OAUTH_ISSUER: 'https://idp.example', MCP_OAUTH_JWKS_URI: 'http://idp.example/keys' }),
+    /MCP_OAUTH_JWKS_URI must be an https URL/,
+  );
+  for (const issuer of ['https://idp.example', 'http://127.0.0.1:8080', 'http://localhost:8080', 'http://[::1]:8080']) {
+    assert.doesNotThrow(() => buildOAuthAuth(issuer, 'https://mcp.example.com/mcp'));
+  }
+});
+
+test('a discovered cleartext jwks_uri is never fetched, so an on-path attacker cannot substitute the keys', async () => {
+  // The issuer's metadata names a plain-http, non-loopback key URL. Anyone on
+  // that path answers it — simulated here by intercepting `fetch` for that
+  // host and serving the attacker's own key, which then signs the token.
+  const { jwk } = await signingKey();
+  const attacker = await signingKey();
+  const cleartextJwks = 'http://keys.idp.example/jwks';
+  const { server, issuer } = await startIssuer(jwk, { advertisedJwksUri: cleartextJwks });
+  let attackerHits = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    if (url.hostname === 'keys.idp.example') {
+      attackerHits += 1;
+      return Response.json({ keys: [attacker.jwk] });
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    const auth = buildOAuthAuth(issuer, `${issuer}/mcp`);
+    const forged = await signFor(attacker.privateKey, issuer, `${issuer}/mcp`);
+    await assert.rejects(() => auth.verify(`Bearer ${forged}`), InvalidTokenError);
+    assert.equal(attackerHits, 0);
+  } finally {
+    globalThis.fetch = realFetch;
+    server.close();
+  }
+});
+
+// ------------------------------------------------ discovery under failure
+
+for (const [label, stall] of [
+  ['never answers', 'no-response'],
+  ['sends headers and then never finishes the body', 'no-body'],
+] as const) {
+  test(`discovery gives up on a metadata server that ${label}, for every waiting request`, {
+    timeout: 10_000,
+  }, async () => {
+    const { privateKey } = await signingKey();
+    const server = createServer((req, res) => {
+      if (stall === 'no-body') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write('{"issuer":');
+      }
+      // …and nothing more, ever.
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const issuer = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+
+    try {
+      const auth = buildOAuthAuth(issuer, `${issuer}/mcp`, { discoveryTimeoutMs: 200 });
+      const header = `Bearer ${await signFor(privateKey, issuer, `${issuer}/mcp`)}`;
+      const started = Date.now();
+      const results = await Promise.allSettled([auth.verify(header), auth.verify(header)]);
+      assert.ok(Date.now() - started < 5_000);
+      for (const result of results) {
+        assert.equal(result.status, 'rejected');
+        assert.ok(result.reason instanceof InvalidTokenError);
+        assert.match(result.reason.message, /authorization server metadata/);
+      }
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+}
+
+for (const kind of ['reset', 'unavailable'] as const) {
+  test(`a transient metadata failure (${kind}) is retried, not pinned to the AuthKit fallback`, async () => {
+    // During the outage there is no answer to fall back *from*: settling on
+    // /oauth2/jwks (which this issuer does not serve) would leave every later
+    // token rejected until restart, long after the issuer came back.
+    const { privateKey, jwk } = await signingKey();
+    const outage = { active: true, kind };
+    const { server, issuer } = await startIssuer(jwk, { metadataOutage: outage });
+
+    try {
+      const auth = buildOAuthAuth(issuer, `${issuer}/mcp`);
+      const header = `Bearer ${await signFor(privateKey, issuer, `${issuer}/mcp`)}`;
+      await assert.rejects(() => auth.verify(header), InvalidTokenError);
+      outage.active = false;
+      const user = await auth.verify(header);
+      assert.equal(user.userId, 'user_abc123');
+    } finally {
+      server.close();
+    }
+  });
+}
