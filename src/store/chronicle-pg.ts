@@ -665,26 +665,29 @@ export class ChronicleStore {
     Array<{ identity: string; scene: number; title: string; summary: string; locationId: string | null; chapter: number }>
   > {
     const key = await this.privateKey();
-    const { rows } = await this.db.query<{
-      scene: number;
-      title: string;
-      summary: string;
-      location_id: string | null;
-      chapter: number;
-    }>(`SELECT scene, title, summary, location_id, chapter FROM scenes WHERE story_id = $1 ORDER BY scene`, [
-      this.storyId,
-    ]);
-    const legacy = rows.map((r) => ({
-      identity: `raw:${r.scene}`, scene: r.scene,
-      title: r.title,
-      summary: r.summary,
-      locationId: r.location_id,
-      chapter: r.chapter,
-    }));
     const { rows: metadata } = await this.db.query<{ identity: string; scene: number; title: string; summary: string; location_id: string | null; chapter: number }>(
       `SELECT identity, scene, title, summary, location_id, chapter FROM scene_metadata WHERE story_id = $1 ORDER BY scene`, [this.storyId],
     );
-    if (!key) return [...new Map([...legacy, ...metadata.map((r) => ({ ...r, locationId: r.location_id }))].map((s) => [s.identity, s])).values()];
+    if (!key) {
+      const { rows } = await this.db.query<{
+        scene: number;
+        title: string;
+        summary: string;
+        location_id: string | null;
+        chapter: number;
+      }>(`SELECT scene, title, summary, location_id, chapter FROM scenes WHERE story_id = $1 ORDER BY scene`, [
+        this.storyId,
+      ]);
+      const legacy = rows.map((r) => ({
+        identity: `raw:${r.scene}`,
+        scene: r.scene,
+        title: r.title,
+        summary: r.summary,
+        locationId: r.location_id,
+        chapter: r.chapter,
+      }));
+      return [...new Map([...legacy, ...metadata.map((r) => ({ ...r, locationId: r.location_id }))].map((s) => [s.identity, s])).values()];
+    }
     const values = await this.encryptedValuesOptional('scene_metadata', metadata.map((row) => row.identity), ['title', 'summary'], key);
     const legacyRows = metadata.filter(
       (row) => !values.get(row.identity)?.size && row.identity === `raw:${row.scene}`,
@@ -709,7 +712,8 @@ export class ChronicleStore {
         chapter: row.chapter,
       };
     });
-    return [...new Map([...legacy, ...secured].map((scene) => [scene.identity, scene])).values()];
+    // Private-story migration re-encrypts every legacy raw scene as metadata.
+    return secured;
   }
 
   private async encryptedValuesOptional(

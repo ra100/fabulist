@@ -476,7 +476,9 @@ test('encrypted chronicle sheets and relationship notes round-trip without base-
 
         await chronicle.invalidateSummariesFrom(2, 1);
 
-        assert.deepEqual(await chronicle.scenes(), [{ identity: 'raw:2', scene: 2, chapter: 1, title: '', summary: '' }]);
+        assert.deepEqual(await chronicle.scenes(), [
+          { identity: 'raw:2', scene: 2, chapter: 1, title: '', summary: '', locationId: null },
+        ]);
         assert.deepEqual(await chronicle.chapters(), [{ chapter: 1, title: '', summary: '' }]);
         const values = await db.query<{ title: string; summary: string }>(
           `SELECT title, summary FROM scenes WHERE story_id = $1 UNION ALL SELECT title, summary FROM chapters WHERE story_id = $1`,
