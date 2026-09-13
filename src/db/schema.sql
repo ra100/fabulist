@@ -264,7 +264,6 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_order ON turns(story_id, scene, turn);
-CREATE INDEX IF NOT EXISTS idx_turns_history_position ON turns(story_id, history_position);
 
 -- ----------------------------------------------------------- turn history
 -- Checkpoints are immutable story-only projections. A turn checkpoint is

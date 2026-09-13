@@ -35,6 +35,7 @@
     "play": "node --disable-warning=ExperimentalWarning src/cli/play.ts",
     "seed": "node --disable-warning=ExperimentalWarning src/cli/seed.ts",
     "backup": "node --disable-warning=ExperimentalWarning src/cli/backup.ts",
+    "pack-world": "node --disable-warning=ExperimentalWarning src/cli/pack-world.ts",
     "ingest": "node --disable-warning=ExperimentalWarning src/cli/ingest.ts",
     "integrity": "node --disable-warning=ExperimentalWarning src/cli/integrity.ts",
     "repair-events": "node --disable-warning=ExperimentalWarning src/cli/repairevents.ts",
