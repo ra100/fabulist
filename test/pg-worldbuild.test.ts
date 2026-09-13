@@ -13,9 +13,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorld, withPg } from './pg-harness.ts';
-import { World, createWorld } from '../src/store/index-pg.ts';
+import { World, createWorld, ensureCanonWorldFor } from '../src/store/index-pg.ts';
 import { createStory, getStory } from '../src/store/world-pg.ts';
-import { SetupService } from '../src/setup/service-pg.ts';
+import { SetupBusyError, SetupService } from '../src/setup/service-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { installPack } from '../src/packs/apply-pg.ts';
@@ -23,7 +23,8 @@ import { PACKS } from '../src/packs/index.ts';
 import { seedWorld } from '../src/seed/verrow-pg.ts';
 import { applyCustomWorld, applyStyle, assignPlayerCharacter, proposeOpening } from '../src/setup/apply-pg.ts';
 import { checkIntegrity, formatIntegrityReport } from '../src/store/integrity-pg.ts';
-import type { Db } from '../src/db/pg.ts';
+import type { Db, Queryable } from '../src/db/pg.ts';
+import type { SessionUser } from '../src/auth/config.ts';
 
 async function emptyWorld(db: Db, slug = 'w'): Promise<World> {
   const worldId = await makeWorld(db, slug);
@@ -244,6 +245,193 @@ test('the custom-world wizard binds a canon world to a story that has none', asy
     // meta with no pre-existing `story_sources` binding.
     assert.equal(await bound.chronicle.getMeta('worldTitle'), 'The Long Silence');
     assert.equal((await checkIntegrity(db)).ok, true);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+async function settle(service: SetupService, id: string) {
+  for (let i = 0; i < 400 && service.jobs.get(id)?.status === 'running'; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return service.jobs.get(id)!;
+}
+
+/**
+ * Two *different* stories binding at once must not land on the same empty world.
+ *
+ * Each binder locks its own story row, so the story lock never made them wait
+ * for each other, and `story_sources.world_id` is not unique — both picked the
+ * placeholder and both bindings committed, leaving two players' canon in one
+ * world.
+ *
+ * Staged first, so the window is not left to scheduling: story A's binder is a
+ * real `ensureCanonWorldFor`, paused inside its transaction just before it writes
+ * the binding — the world chosen, whatever locks it takes held, nothing
+ * committed. B binds while A is paused. Then unstaged, several stories at once
+ * over the pool, which is also what caught two binders passed over the
+ * placeholder colliding on `worlds_slug_key` as they each created a world.
+ */
+test('two stories binding concurrently never share a canon world', async (t) => {
+  const ran = await withPg(async (db) => {
+    const placeholder = await createWorld(db, '');
+    const a = await createStory(db, { title: 'a' });
+    const b = await createStory(db, { title: 'b' });
+
+    let aboutToBind!: () => void;
+    let proceed!: () => void;
+    const paused = new Promise<void>((r) => (aboutToBind = r));
+    const mayProceed = new Promise<void>((r) => (proceed = r));
+    const pausing = {
+      tx: <T>(fn: (client: Queryable) => Promise<T>) =>
+        db.tx((client) =>
+          fn({
+            query: async (sql: string, params?: unknown[]) => {
+              if (sql.startsWith('INSERT INTO story_sources')) {
+                aboutToBind();
+                await mayProceed;
+              }
+              return client.query(sql, params);
+            },
+          } as Queryable),
+        ),
+    } as unknown as Db;
+
+    const bindingA = ensureCanonWorldFor(pausing, a.id);
+    await paused;
+    const bindingB = ensureCanonWorldFor(db, b.id);
+    // Long enough for an unserialised B to have finished; a serialised one is
+    // waiting on A either way, and sees A's binding once A commits.
+    await new Promise((r) => setTimeout(r, 100));
+    proceed();
+    const [worldA, worldB] = await Promise.all([bindingA, bindingB]);
+
+    assert.equal(worldA, placeholder.id, 'A adopted the placeholder');
+    assert.notEqual(worldB, placeholder.id, 'B did not adopt the world A had chosen');
+    const { rows } = await db.query<{ n: string }>(`SELECT count(*) n FROM story_sources WHERE world_id = $1`, [
+      placeholder.id,
+    ]);
+    assert.equal(Number(rows[0]!.n), 1, 'the placeholder is read by exactly one story');
+
+    const stories = await Promise.all(Array.from({ length: 6 }, (_, i) => createStory(db, { title: `s${i}` })));
+    await createWorld(db, '');
+    const bound = await Promise.all(stories.map((s) => ensureCanonWorldFor(db, s.id)));
+    assert.equal(new Set(bound).size, bound.length, `every story got its own world: ${bound.join(', ')}`);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * An empty world somebody has claimed is not free for the taking. A world made
+ * private, or granted to a user, before anything was ingested into it is theirs;
+ * binding another story to it would put that story's canon in their world.
+ */
+test('binding passes over an empty world that is private or granted to someone', async (t) => {
+  const ran = await withPg(async (db) => {
+    const privateWorld = await createWorld(db, 'private');
+    await db.query(`UPDATE worlds SET visibility = 'private' WHERE id = $1`, [privateWorld.id]);
+    const granted = await createWorld(db, 'granted');
+    await db.query(`INSERT INTO world_access (world_id, user_id, role) VALUES ($1, 'user:alice', 'owner')`, [granted.id]);
+
+    const story = await createStory(db, { title: '' });
+    const worldId = await ensureCanonWorldFor(db, story.id);
+    assert.ok(![privateWorld.id, granted.id].includes(worldId), 'a new world rather than a claimed one');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * The setup service is process-wide, but authoring acts for whoever asked.
+ *
+ * Its own `world` getter is `serve-pg`'s login-off resolver, the most recently
+ * played story on the instance. Authoring through it bound and filled that story
+ * for a signed-in request, not the requester's — and because binding persists, a
+ * wrong resolution was a write, not a stale read. The request's world is passed
+ * in, and the story's owner is checked under the binding's lock.
+ */
+test('setup authors into the requester’s own story, and refuses somebody else’s', async (t) => {
+  const ran = await withPg(async (db) => {
+    const alice: SessionUser = { id: 'user:alice', email: 'a@example.com', firstName: null, lastName: null, isAdmin: false };
+    await createWorld(db, '');
+    const loginOff = await createStory(db, { title: 'nobody’s' });
+    const mine = await createStory(db, { title: 'alice', ownerUserId: alice.id });
+    const theirs = await createStory(db, { title: 'bob', ownerUserId: 'user:bob' });
+
+    const service = new SetupService({
+      world: () => World.forStory(db, loginOff.id),
+      db,
+      providers: new ProviderRegistry(new MockProvider()),
+    });
+
+    await service.useSample({ world: await World.forStory(db, mine.id), user: alice });
+    const aliceWorld = await World.forStory(db, mine.id);
+    assert.equal(aliceWorld.sources.length, 1, 'the requester’s story was bound');
+    assert.equal(await aliceWorld.chronicle.getMeta('worldTitle'), 'Saint Verrow');
+    assert.deepEqual((await World.forStory(db, loginOff.id)).sources, [], 'the service’s own story untouched');
+
+    await assert.rejects(
+      async () => service.useSample({ world: await World.forStory(db, theirs.id), user: alice }),
+      /does not belong to this user/,
+    );
+    assert.deepEqual((await World.forStory(db, theirs.id)).sources, [], 'nothing bound to a story alice does not own');
+
+    // The refusal released its claim: the owner can still set their story up.
+    const bob: SessionUser = { ...alice, id: 'user:bob', email: 'b@example.com' };
+    await service.useSample({ world: await World.forStory(db, theirs.id), user: bob });
+    assert.equal((await World.forStory(db, theirs.id)).sources.length, 1);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * One authoring job per story, and per world, for the job's whole lifetime.
+ *
+ * The binding's row lock ends when the binding does; an ingest then writes canon
+ * for as long as the crawl takes. Two jobs for one story each bound safely and
+ * then interleaved their writes into one world, and two stories reading one world
+ * did the same. The second is refused synchronously — before a job exists and
+ * before the model is paid — and the claim is released when the first settles.
+ */
+test('a second authoring job for the same story or world is refused until the first settles', async (t) => {
+  const ran = await withPg(async (db) => {
+    await createWorld(db, '');
+    const story = await createStory(db, { title: '' });
+    const service = new SetupService({
+      world: () => World.forStory(db, story.id),
+      db,
+      providers: new ProviderRegistry(new MockProvider()),
+    });
+    const target = async (id: string) => ({ world: await World.forStory(db, id), user: null });
+    const description = 'A city where the weights-and-measures office decides what may be sold.';
+
+    const first = service.startCustomWorld(description, undefined, await target(story.id));
+    const same = await target(story.id);
+    assert.throws(() => service.startCustomWorld(description, undefined, same), SetupBusyError);
+    await assert.rejects(() => service.useSample(same), SetupBusyError, 'a non-job authoring call is refused too');
+    assert.equal(service.jobs.list().length, 1, 'no second job was started');
+
+    assert.equal((await settle(service, first.id)).status, 'done');
+    const worldId = (await World.forStory(db, story.id)).worldId!;
+
+    // Released on completion: the same story may author again, and while that
+    // runs a *different* story reading the same world is refused.
+    const again = service.startCustomWorld(description, undefined, await target(story.id));
+    const sibling = await target((await createStory(db, { title: 'sibling', worldIds: [worldId] })).id);
+    assert.throws(
+      () => service.startCustomWorld(description, undefined, sibling),
+      new RegExp(`world ${worldId} already has a custom-world job`),
+    );
+    assert.equal((await settle(service, again.id)).status, 'done');
+
+    // Released on failure too: a job refused mid-way (not the requester's story)
+    // does not leave the story locked against its owner.
+    const owned = await createStory(db, { title: 'owned', ownerUserId: 'user:bob' });
+    const stranger: SessionUser = { id: 'user:mallory', email: 'm@example.com', firstName: null, lastName: null, isAdmin: false };
+    const refused = service.startCustomWorld(description, undefined, { world: await World.forStory(db, owned.id), user: stranger });
+    const failed = await settle(service, refused.id);
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error ?? '', /does not belong to this user/);
+    const retried = service.startCustomWorld(description, undefined, await target(owned.id));
+    assert.equal((await settle(service, retried.id)).status, 'done');
   });
   if (!ran) t.skip('no Postgres configured');
 });

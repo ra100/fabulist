@@ -386,29 +386,67 @@ export async function renameWorld(db: Queryable, slug: string, title: string): P
  * A world that already holds canon is never adopted. Authoring a described
  * world into somebody's ingested Star Trek is precisely the mistake the stores'
  * refusal exists to prevent, and this must not reintroduce it by picking the
- * first row it finds.
+ * first row it finds. Nor is a world somebody has claimed while it is still
+ * empty — made private, or granted to a user — since binding it would put this
+ * story's canon in a world that is theirs.
+ *
+ * `user` is who is asking, checked against the story's owner under the same
+ * lock, with the rule `resolveStoryFor` applies: login off (`null`) or an
+ * unowned story passes, somebody else's story throws. Checked here rather than
+ * only by the caller because the binding is persistent — resolving the wrong
+ * story once is a stale read, binding it is a write into another user's book.
  *
  * Needs the ingest role: creating a world is a system write (see
  * `schema-pg-roles.sql`).
  */
-export async function ensureCanonWorldFor(db: Db, storyId: StoryId, title = ''): Promise<number> {
+export async function ensureCanonWorldFor(
+  db: Db,
+  storyId: StoryId,
+  opts: { title?: string; user?: SessionUser | null } = {},
+): Promise<number> {
   return db.tx(async (tx) => {
     // The story row is locked for the duration, so two setup steps started
     // against one fresh story cannot each decide it is unbound, create a world
     // apiece and leave the story reading both. `ON CONFLICT DO NOTHING` would
     // stop the duplicate row, not the duplicate world.
-    await tx.query(`SELECT id FROM stories WHERE id = $1 FOR UPDATE`, [storyId]);
+    const { rows: storyRows } = await tx.query<{ owner_user_id: string | null }>(
+      `SELECT owner_user_id FROM stories WHERE id = $1 FOR UPDATE`,
+      [storyId],
+    );
+    const story = storyRows[0];
+    if (!story) throw new Error(`no story ${storyId}`);
+    if (opts.user && story.owner_user_id !== null && story.owner_user_id !== opts.user.id) {
+      throw new Error(`story ${storyId} does not belong to this user`);
+    }
 
     const bound = await sourcesFor(tx, storyId);
     if (bound[0]) return bound[0].worldId;
 
+    // The story lock does not cover the *world*: two different stories lock two
+    // different rows, both found the same empty world free, and
+    // `story_sources.world_id` is not unique, so both bindings landed — two
+    // players' canon in one world. So choosing a world is serialised across
+    // every binder on the instance, for the rest of this transaction.
+    //
+    // One lock for the whole choice rather than a row lock on the candidate
+    // (`FOR UPDATE SKIP LOCKED`). A row lock does not serialise the *other* way
+    // out, creating a world: binders passed over a reserved placeholder raced
+    // `uniqueSlug` and collided on `worlds_slug_key`. And under READ COMMITTED a
+    // row lock still admits a binder whose snapshot predates the commit that
+    // took the row, which would need a second check to catch. Taken before the
+    // candidate query, this lock means that query's snapshot already includes
+    // every earlier binding. Binding happens once per story, in a transaction of
+    // a few statements, so an instance-wide lock costs nothing that shows.
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, ['fabulist-bind-canon-world']);
     const { rows } = await tx.query<{ id: string }>(
       `SELECT w.id FROM worlds w
-         WHERE NOT EXISTS (SELECT 1 FROM canon_entities c WHERE c.world_id = w.id)
+         WHERE w.visibility = 'public'
+           AND NOT EXISTS (SELECT 1 FROM world_access a WHERE a.world_id = w.id)
+           AND NOT EXISTS (SELECT 1 FROM canon_entities c WHERE c.world_id = w.id)
            AND NOT EXISTS (SELECT 1 FROM story_sources ss WHERE ss.world_id = w.id)
          ORDER BY w.id LIMIT 1`,
     );
-    const worldId = rows[0] ? Number(rows[0].id) : (await createWorld(tx, title)).id;
+    const worldId = rows[0] ? Number(rows[0].id) : (await createWorld(tx, opts.title ?? '')).id;
 
     await tx.query(`INSERT INTO story_sources (story_id, world_id, ordinal) VALUES ($1,$2,1)`, [
       storyId,

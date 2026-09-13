@@ -1144,11 +1144,17 @@ export async function commitIngestTool(
   args: { previewKey: string; character?: CharacterSketch; style?: Partial<IngestPlan['style']>; opening?: string },
 ): Promise<Job<IngestJobResult>> {
   if (!ctx.setup) throw new Error('commit_ingest: this server has no setup service enabled');
-  return ctx.setup.startIngest(args.previewKey, {
-    character: args.character ?? { existing: null, name: '', role: '', goals: [], vows: [] },
-    style: args.style ?? {},
-    opening: args.opening ?? '',
-  });
+  // Authored into this connection's own story, not the setup service's
+  // process-wide one — see `AuthoringTarget`.
+  return ctx.setup.startIngest(
+    args.previewKey,
+    {
+      character: args.character ?? { existing: null, name: '', role: '', goals: [], vows: [] },
+      style: args.style ?? {},
+      opening: args.opening ?? '',
+    },
+    { world: await ctx.world(), user: ctx.user ?? null },
+  );
 }
 
 /** `create_custom_world`. The MCP-side counterpart of `POST /api/setup/custom` \u2014 builds an authored world from a description, no wiki involved. Runs as a background job (poll with `get_setup_job`). */
@@ -1157,13 +1163,13 @@ export async function createCustomWorldTool(
   args: { description: string; style?: Partial<IngestPlan['style']> },
 ): Promise<Job<ApplyCustomResult>> {
   if (!ctx.setup) throw new Error('create_custom_world: this server has no setup service enabled');
-  return ctx.setup.startCustomWorld(args.description.trim(), args.style);
+  return ctx.setup.startCustomWorld(args.description.trim(), args.style, { world: await ctx.world(), user: ctx.user ?? null });
 }
 
 /** `use_sample_world`. The MCP-side counterpart of `POST /api/setup/sample` \u2014 the built-in example, for trying the engine with no setup at all. */
 export async function useSampleWorldTool(ctx: McpToolContext) {
   if (!ctx.setup) throw new Error('use_sample_world: this server has no setup service enabled');
-  return ctx.setup.useSample();
+  return ctx.setup.useSample({ world: await ctx.world(), user: ctx.user ?? null });
 }
 
 /** `list_world_packs`. The MCP-side counterpart of `GET /api/setup/packs` \u2014 the shipped original worlds and the scenarios each one offers. */
@@ -1183,7 +1189,7 @@ export async function listWorldPacksTool(ctx: McpToolContext) {
 export async function useWorldPackTool(ctx: McpToolContext, args: { packId: string; scenarioId?: string }) {
   if (!ctx.setup) throw new Error('use_world_pack: this server has no setup service enabled');
   if (ctx.user) await assertPrivateStoryCreationReady(ctx.db, ctx.user.id);
-  const result = await ctx.setup.usePack(args.packId, args.scenarioId);
+  const result = await ctx.setup.usePack(args.packId, args.scenarioId, { world: await ctx.world(), user: ctx.user ?? null });
   // This connection follows the scenario it just installed. No server-wide pointer
   // to move, so no other client is dragged along.
   ctx.selectStory?.(result.storyId);

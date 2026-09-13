@@ -24,7 +24,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { makeWorld, withPg } from './pg-harness.ts';
 import { World, createWorld, worldFor } from '../src/store/index-pg.ts';
-import { claimUnownedStories, createStory, listStories } from '../src/store/world-pg.ts';
+import { claimUnownedStories, createStory, listStories, listStoriesForUser } from '../src/store/world-pg.ts';
 import { seedWorld } from '../src/seed/verrow-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
@@ -35,7 +35,7 @@ import { WIKI } from './fixtures/wiki.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
 import { buildMcpAuth } from '../src/mcp/auth.ts';
 import type { Db } from '../src/db/pg.ts';
-import type { SessionUser } from '../src/auth/config.ts';
+import { SESSION_COOKIE, type SessionUser } from '../src/auth/config.ts';
 
 const MCP_DEV_TOKEN = 'pg-api-mcp-secret';
 
@@ -675,6 +675,99 @@ test('continuing a wiki ingest returns a started job, not an empty body', async 
       },
       { wikiFetcher: fixtureFetcher(WIKI) },
     );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+/**
+ * The setup wizard, signed in, on a server whose boot world is somebody else's.
+ *
+ * `serve-pg` builds one process-wide `SetupService` over the login-off resolver,
+ * and the setup routes used to author through it rather than through the
+ * request's own ownership-checked `world`. Once authoring started binding an
+ * unbound story to a canon world, that stopped being a stale read: a signed-in
+ * user's custom world was bound into, and written into, the login-off story.
+ *
+ * Also the route half of per-story serialisation. The model call is held open so
+ * the first job is certainly still running when the second request arrives, and
+ * the second is answered 409 rather than started.
+ */
+test('signed-in setup authors into the requester’s story, one job at a time', async (t) => {
+  const ran = await withPg(async (db) => {
+    await createWorld(db, '');
+    const loginOff = await createStory(db, { title: 'the boot story' });
+    const bootWorld = () => World.forStory(db, loginOff.id);
+
+    let release!: () => void;
+    const modelMayAnswer = new Promise<void>((r) => (release = r));
+    const model = new MockProvider();
+    const complete = model.complete.bind(model);
+    model.complete = async (req) => {
+      await modelMayAnswer;
+      return complete(req);
+    };
+    const providers = new ProviderRegistry(model);
+    const setup = new SetupService({ world: bootWorld, db, providers });
+    const authConfig = {
+      requireLogin: true,
+      clientId: 'client_test',
+      cookiePassword: 'x'.repeat(32),
+      adminEmails: new Set<string>(),
+      workos: {
+        userManagement: {
+          loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
+            authenticate: async () =>
+              sessionData === 'alice'
+                ? {
+                    authenticated: true as const,
+                    user: { id: 'user:alice', email: 'alice@example.com', firstName: null, lastName: null },
+                  }
+                : { authenticated: false as const, reason: 'invalid_session_cookie' as const },
+          }),
+        },
+      },
+    } as unknown as NonNullable<Parameters<typeof createApiServer>[0]['authConfig']>;
+    const server = createApiServer({
+      world: bootWorld,
+      db,
+      engine: new Engine({ world: bootWorld, db, providers }),
+      setup,
+      authConfig,
+    });
+    await listen(server);
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const asAlice = (method: 'GET' | 'POST', path: string, body?: unknown) =>
+      fetch(`${base}${path}`, {
+        method,
+        headers: { cookie: `${SESSION_COOKIE}=alice`, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }).then(async (res) => ({ status: res.status, body: await res.json() }));
+
+    try {
+      const description = { description: 'A city where the weights-and-measures office decides what may be sold.' };
+      const started = await asAlice('POST', '/api/setup/custom', description);
+      assert.equal(started.status, 200, JSON.stringify(started.body));
+      const second = await asAlice('POST', '/api/setup/custom', description);
+      assert.equal(second.status, 409, JSON.stringify(second.body));
+      assert.match(second.body.error, /already has a custom-world job/);
+
+      release();
+      let job = started.body;
+      for (let i = 0; i < 400 && job.status === 'running'; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+        job = (await asAlice('GET', `/api/setup/job/${encodeURIComponent(started.body.id)}`)).body;
+      }
+      assert.equal(job.status, 'done', job.error ?? '');
+
+      const [mine] = await listStoriesForUser(db, 'user:alice');
+      assert.ok(mine, 'alice has a story');
+      const aliceWorld = await World.forStory(db, mine.id);
+      assert.equal(aliceWorld.sources.length, 1, 'alice’s own story was bound');
+      assert.ok((await aliceWorld.graph.counts()).canon > 0, 'and the canon is in its world');
+      assert.deepEqual((await bootWorld()).sources, [], 'the boot story was neither bound nor written');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
   if (!ran) t.skip('no Postgres configured');
 });
