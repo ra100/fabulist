@@ -27,13 +27,9 @@ export function TimelineView({ refreshKey }: { refreshKey: number }) {
     };
   }, [refreshKey]);
 
-  if (!timeline) {
-    return <div className="main"><div className="pane"><p className="empty">{error ?? 'Loading.'}</p></div></div>;
-  }
-
-  const chapterMeta = new Map(timeline.chapters.map((c) => [c.chapter, c]));
+  const chapterMeta = new Map((timeline?.chapters ?? []).map((c) => [c.chapter, c]));
   const byChapter = new Map<number, Timeline['scenes']>();
-  for (const scene of timeline.scenes) {
+  for (const scene of timeline?.scenes ?? []) {
     const list = byChapter.get(scene.chapter) ?? [];
     list.push(scene);
     byChapter.set(scene.chapter, list);
@@ -42,79 +38,83 @@ export function TimelineView({ refreshKey }: { refreshKey: number }) {
   return (
     <div className="main">
       <div className="pane">
-        <div className="measure-tool">
-          {error ? <div className="card warn">{error}</div> : null}
-          <p className="lede">
-            The record of how this playthrough actually went — where it diverged from canon, and by how
-            much, scene by scene.
-          </p>
-          {timeline.scenes.length === 0 ? <p className="empty">Nothing played yet.</p> : null}
-          <div className="timeline">
-            {chapterNumbers.map((chapter) => {
-              const chapterInfo = chapterMeta.get(chapter);
-              return (
-                <Fragment key={chapter}>
-                  <div className="timeline-chapter-head">
-                    <span>Chapter {chapter}{chapterInfo?.title ? `: ${chapterInfo.title}` : ''}</span>
-                  </div>
-                  {chapterInfo?.summary ? (
-                    <p className="small dim" style={{ margin: '0 0 var(--s3)' }}>{chapterInfo.summary}</p>
-                  ) : null}
-                  {byChapter.get(chapter)!.map((scene) => (
-                    <div key={scene.scene} className={`timeline-scene${scene.scene === timeline.currentScene ? ' current' : ''}`}>
-                      <div className="row baseline">
-                        <span className="mono" style={{ minWidth: '3.5rem' }}>s{scene.scene}</span>
-                        <span className="grow small">{scene.title || (scene.turnCount ? '' : 'not yet played')}</span>
-                        <span className="dimmer small">
-                          {scene.turnCount} turn{scene.turnCount === 1 ? '' : 's'}
-                        </span>
-                        {scene.scene === timeline.currentScene ? <span className="tag locked">current</span> : null}
-                      </div>
-                      {scene.boundary ? (
-                        <div className="timeline-boundary">
-                          <span aria-hidden="true">◆</span>
-                          Begins at chapter-turn {scene.boundary.label}
+        {timeline ? (
+          <div className="measure-tool">
+            {error ? <div className="card warn">{error}</div> : null}
+            <p className="lede">
+              The record of how this playthrough actually went — where it diverged from canon, and by how
+              much, scene by scene.
+            </p>
+            {timeline.scenes.length === 0 ? <p className="empty">Nothing played yet.</p> : null}
+            <div className="timeline">
+              {chapterNumbers.map((chapter) => {
+                const chapterInfo = chapterMeta.get(chapter);
+                return (
+                  <Fragment key={chapter}>
+                    <div className="timeline-chapter-head">
+                      <span>Chapter {chapter}{chapterInfo?.title ? `: ${chapterInfo.title}` : ''}</span>
+                    </div>
+                    {chapterInfo?.summary ? (
+                      <p className="small dim" style={{ margin: '0 0 var(--s3)' }}>{chapterInfo.summary}</p>
+                    ) : null}
+                    {byChapter.get(chapter)!.map((scene) => (
+                      <div key={scene.scene} className={`timeline-scene${scene.scene === timeline.currentScene ? ' current' : ''}`}>
+                        <div className="row baseline">
+                          <span className="mono" style={{ minWidth: '3.5rem' }}>s{scene.scene}</span>
+                          <span className="grow small">{scene.title || (scene.turnCount ? '' : 'not yet played')}</span>
+                          <span className="dimmer small">
+                            {scene.turnCount} turn{scene.turnCount === 1 ? '' : 's'}
+                          </span>
+                          {scene.scene === timeline.currentScene ? <span className="tag locked">current</span> : null}
                         </div>
-                      ) : null}
-                      {scene.summary ? <p className="small dim" style={{ margin: '4px 0 0' }}>{scene.summary}</p> : null}
-                      {scene.divergences.length ? (
-                        <div className="stack" style={{ marginTop: 'var(--s2)' }}>
-                          {scene.divergences.map((divergence) => {
-                            const open = reveal.has(divergence.id);
-                            return (
-                              <div key={divergence.id} className="timeline-divergence">
-                                <div className="row baseline">
-                                  <span className="tag chronicle">{divergence.kind}</span>
-                                  <span className="small grow">{divergence.detail}</span>
-                                  {divergence.canon ? (
-                                    <button
-                                      className="link"
-                                      onClick={() => setReveal((previous) => {
-                                        const next = new Set(previous);
-                                        if (next.has(divergence.id)) next.delete(divergence.id);
-                                        else next.add(divergence.id);
-                                        return next;
-                                      })}
-                                    >
-                                      {open ? 'hide canon' : 'vs. canon'}
-                                    </button>
+                        {scene.boundary ? (
+                          <div className="timeline-boundary">
+                            <span aria-hidden="true">◆</span>
+                            Begins at chapter-turn {scene.boundary.label}
+                          </div>
+                        ) : null}
+                        {scene.summary ? <p className="small dim" style={{ margin: '4px 0 0' }}>{scene.summary}</p> : null}
+                        {scene.divergences.length ? (
+                          <div className="stack" style={{ marginTop: 'var(--s2)' }}>
+                            {scene.divergences.map((divergence) => {
+                              const open = reveal.has(divergence.id);
+                              return (
+                                <div key={divergence.id} className="timeline-divergence">
+                                  <div className="row baseline">
+                                    <span className="tag chronicle">{divergence.kind}</span>
+                                    <span className="small grow">{divergence.detail}</span>
+                                    {divergence.canon ? (
+                                      <button
+                                        className="link"
+                                        onClick={() => setReveal((previous) => {
+                                          const next = new Set(previous);
+                                          if (next.has(divergence.id)) next.delete(divergence.id);
+                                          else next.add(divergence.id);
+                                          return next;
+                                        })}
+                                      >
+                                        {open ? 'hide canon' : 'vs. canon'}
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                  {open && divergence.canon ? (
+                                    <p className="small dimmer" style={{ margin: '2px 0 0' }}>{divergence.canon}</p>
                                   ) : null}
                                 </div>
-                                {open && divergence.canon ? (
-                                  <p className="small dimmer" style={{ margin: '2px 0 0' }}>{divergence.canon}</p>
-                                ) : null}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                </Fragment>
-              );
-            })}
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </Fragment>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        ) : (
+          <p className="empty" aria-live="polite">{error ?? 'Loading timeline…'}</p>
+        )}
       </div>
       <aside className="side">
         <div className="card">
@@ -124,9 +124,11 @@ export function TimelineView({ refreshKey }: { refreshKey: number }) {
             (or the setup) said another. That gap is what makes this a playthrough of the world rather
             than a transcript of it.
           </p>
-          <div className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
-            {timeline.divergenceCount} divergence{timeline.divergenceCount === 1 ? '' : 's'} total
-          </div>
+          {timeline ? (
+            <div className="small dimmer" style={{ marginTop: 'var(--s3)' }}>
+              {timeline.divergenceCount} divergence{timeline.divergenceCount === 1 ? '' : 's'} total
+            </div>
+          ) : null}
         </div>
       </aside>
     </div>
