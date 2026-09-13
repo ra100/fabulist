@@ -29,6 +29,7 @@
  * "the tool is reachable with no check."
  */
 import { timingSafeEqual } from 'node:crypto';
+import { isIPv4 } from 'node:net';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyOptions } from 'jose';
 import type { SessionUser } from '../auth/config.ts';
 
@@ -133,58 +134,113 @@ function extractBearer(header: string | undefined): string {
  * gets both forms tried.
  */
 function discoveryUrls(issuer: string): string[] {
-  let origin: string | undefined;
-  let path = '';
-  try {
-    const url = new URL(issuer);
-    origin = url.origin;
-    path = url.pathname.replace(/\/$/, '');
-  } catch {
-    // Not parseable as a URL — `jwtVerify`'s issuer check will reject every
-    // token anyway; still try the appended form rather than throwing here.
-  }
+  const { origin, pathname } = new URL(issuer);
+  const path = pathname.replace(/\/$/, '');
   const urls: string[] = [];
   for (const suffix of ['openid-configuration', 'oauth-authorization-server']) {
     urls.push(`${issuer}/.well-known/${suffix}`);
-    if (origin && path) urls.push(`${origin}/.well-known/${suffix}${path}`);
+    if (path) urls.push(`${origin}/.well-known/${suffix}${path}`);
   }
   return urls;
 }
+
+/**
+ * Whether signing keys (or the metadata document naming where they are) may be
+ * read from `url`.
+ *
+ * Whoever can substitute the key set can mint tokens this server accepts, so
+ * the keys have to arrive over an authenticated channel: `https:` only. The one
+ * exception is plain `http:` to a loopback address — a local issuer during
+ * development, or one behind a reverse proxy on the same host — because there
+ * is no network path there for anyone to sit on. `localhost`, `127.0.0.0/8`
+ * and `[::1]` count; a private-network or container hostname does not.
+ */
+function isTrustedKeySource(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'https:') return true;
+  if (parsed.protocol !== 'http:') return false;
+  const host = parsed.hostname;
+  return host === 'localhost' || host === '[::1]' || (isIPv4(host) && host.startsWith('127.'));
+}
+
+/**
+ * How long one discovery attempt — every metadata URL, bodies included — may
+ * take in total. Every concurrent `verify` waits on the same attempt, so an
+ * issuer that accepts a connection and never answers must not be able to hold
+ * authentication open indefinitely. (The JWKS fetch itself is bounded by
+ * `createRemoteJWKSet`'s own `timeoutDuration`.)
+ */
+const DISCOVERY_TIMEOUT_MS = 10_000;
 
 /**
  * Resolves the issuer's `jwks_uri` by metadata discovery, falling back to
  * AuthKit's `/oauth2/jwks` as a last resort.
  *
  * The fallback exists so that an issuer serving no metadata at all keeps
- * working exactly as it did before discovery existed — this function never
- * rejects, because "discovery failed" must degrade to the old behaviour rather
- * than take down a deployment that was fine yesterday. It does say so loudly
- * once, on the first verification, since the alternative is a puzzling 401.
+ * working exactly as it did before discovery existed — "this issuer publishes
+ * no metadata" must degrade to the old behaviour rather than take down a
+ * deployment that was fine yesterday. It does say so loudly once, since the
+ * alternative is a puzzling 401.
+ *
+ * Only a *confirmed* absence earns the fallback, though: every URL answered,
+ * and none with a usable document. If any attempt failed transiently — a
+ * network or DNS error, the deadline, a 5xx/408/429 — this rejects instead, so
+ * the caller retries discovery on the next request rather than settling for
+ * a vendor-specific guess that a non-AuthKit issuer will never serve.
  *
  * The `issuer` claimed by the metadata document is checked against the issuer
  * we asked about (RFC 8414 §3.3): a document that names someone else is a
- * mix-up, not a key source, and is skipped rather than trusted.
+ * mix-up, not a key source, and is skipped rather than trusted. So is one whose
+ * `jwks_uri` fails `isTrustedKeySource`. Redirects are not followed (as
+ * `createRemoteJWKSet` doesn't follow them either), so a metadata fetch cannot
+ * be bounced onto a cleartext hop.
  */
-async function discoverJwksUri(issuer: string): Promise<string> {
+async function discoverJwksUri(issuer: string, timeoutMs: number): Promise<string> {
+  const signal = AbortSignal.timeout(timeoutMs);
   const reasons: string[] = [];
+  let transient = false;
   for (const url of discoveryUrls(issuer)) {
     try {
-      const res = await fetch(url, { headers: { accept: 'application/json' } });
+      const res = await fetch(url, { headers: { accept: 'application/json' }, redirect: 'manual', signal });
       if (!res.ok) {
         reasons.push(`${url}: HTTP ${res.status}`);
+        if (res.status >= 500 || res.status === 408 || res.status === 429) transient = true;
         continue;
       }
-      const doc = (await res.json()) as Record<string, unknown>;
-      const claimed = typeof doc.issuer === 'string' ? doc.issuer.replace(/\/$/, '') : undefined;
+      const doc: unknown = await res.json();
+      if (!doc || typeof doc !== 'object') {
+        reasons.push(`${url}: not a JSON object`);
+        continue;
+      }
+      const { issuer: claimedIssuer, jwks_uri: jwksUri } = doc as Record<string, unknown>;
+      const claimed = typeof claimedIssuer === 'string' ? claimedIssuer.replace(/\/$/, '') : undefined;
       if (claimed && claimed !== issuer) {
         reasons.push(`${url}: metadata names issuer ${claimed}`);
         continue;
       }
-      if (typeof doc.jwks_uri === 'string' && doc.jwks_uri) return doc.jwks_uri;
-      reasons.push(`${url}: no jwks_uri`);
+      if (typeof jwksUri !== 'string' || !jwksUri) {
+        reasons.push(`${url}: no jwks_uri`);
+        continue;
+      }
+      if (!isTrustedKeySource(jwksUri)) {
+        reasons.push(`${url}: jwks_uri ${jwksUri} is not https (or loopback http)`);
+        continue;
+      }
+      return jwksUri;
     } catch (err) {
       reasons.push(`${url}: ${err instanceof Error ? err.message : String(err)}`);
+      // A body that isn't JSON is an answer (typically an HTML page served for
+      // any path); anything else — reset, DNS, timeout — is not.
+      if (!(err instanceof SyntaxError)) transient = true;
     }
+  }
+  if (transient) {
+    throw new Error(`could not read authorization server metadata at ${issuer}, will retry (${reasons.join('; ')})`);
   }
   const fallback = `${issuer}/oauth2/jwks`;
   console.warn(
@@ -200,8 +256,12 @@ async function discoverJwksUri(issuer: string): Promise<string> {
  * OAuth 2.0 Authorization Server Metadata (RFC 8414) / OIDC Discovery
  * publisher exposes — AuthKit included, so nothing about the previously
  * verified AuthKit deployment changes except that the key URL is now read
- * rather than assumed. `jwksUri` (from `MCP_OAUTH_JWKS_URI`) skips discovery
- * entirely for an issuer that publishes no usable metadata.
+ * rather than assumed. `options.jwksUri` (from `MCP_OAUTH_JWKS_URI`) skips
+ * discovery entirely for an issuer that publishes no usable metadata.
+ *
+ * Both the issuer and an explicit `jwksUri` must pass `isTrustedKeySource`, or
+ * this throws — at boot, where a misconfiguration is visible, rather than
+ * quietly verifying tokens against keys read over cleartext.
  *
  * Discovery is one network round-trip and cannot happen at construction time,
  * which is synchronous and runs at boot before anything is listening — so it
@@ -209,6 +269,7 @@ async function discoverJwksUri(issuer: string): Promise<string> {
  * `createRemoteJWKSet`'s own key cache, which is why the *set* is kept rather
  * than just the URI). A failed resolution clears the memo so the next request
  * retries instead of pinning a transient DNS blip for the process's lifetime.
+ * `options.discoveryTimeoutMs` bounds each attempt; it exists for tests.
  *
  * Exported directly, alongside `buildDevTokenAuth` below, rather than only
  * reachable through `buildMcpAuth`'s environment lookup, so
@@ -216,14 +277,25 @@ async function discoverJwksUri(issuer: string): Promise<string> {
  * without threading values through `process.env` — the environment lookup
  * itself is one line (`buildMcpAuth`) and not worth its own test.
  */
-export function buildOAuthAuth(issuer: string, audience: string, jwksUri?: string): McpAuth {
+export function buildOAuthAuth(
+  issuer: string,
+  audience: string,
+  options: { jwksUri?: string; discoveryTimeoutMs?: number } = {},
+): McpAuth {
+  const { jwksUri, discoveryTimeoutMs = DISCOVERY_TIMEOUT_MS } = options;
+  if (!isTrustedKeySource(issuer)) {
+    throw new Error(`MCP_OAUTH_ISSUER must be an https URL (plain http only on a loopback address), got ${issuer}`);
+  }
+  if (jwksUri !== undefined && !isTrustedKeySource(jwksUri)) {
+    throw new Error(`MCP_OAUTH_JWKS_URI must be an https URL (plain http only on a loopback address), got ${jwksUri}`);
+  }
   const base = issuer.replace(/\/$/, '');
   const verifyOpts: JWTVerifyOptions = { issuer, audience };
   let jwksPromise: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
 
   function resolveJwks(): Promise<ReturnType<typeof createRemoteJWKSet>> {
     if (!jwksPromise) {
-      jwksPromise = (jwksUri ? Promise.resolve(jwksUri) : discoverJwksUri(base))
+      jwksPromise = (jwksUri ? Promise.resolve(jwksUri) : discoverJwksUri(base, discoveryTimeoutMs))
         .then((uri) => createRemoteJWKSet(new URL(uri)))
         .catch((err) => {
           jwksPromise = undefined;
@@ -296,7 +368,7 @@ export function buildMcpAuth(env: Record<string, string | undefined> = process.e
   const issuer = env.MCP_OAUTH_ISSUER;
   if (issuer) {
     const audience = env.MCP_OAUTH_AUDIENCE ?? issuer;
-    return buildOAuthAuth(issuer, audience, env.MCP_OAUTH_JWKS_URI);
+    return buildOAuthAuth(issuer, audience, { jwksUri: env.MCP_OAUTH_JWKS_URI });
   }
   const devToken = env.MCP_DEV_TOKEN;
   if (devToken) {
