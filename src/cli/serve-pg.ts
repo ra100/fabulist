@@ -25,7 +25,7 @@
  */
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { Db, applyMigrations, applyRoles, applySchema, checkCapacity, connectionStringFromEnv } from '../db/pg.ts';
+import { Db, applyRoles, applySchemaAndMigrations, checkCapacity, connectionStringFromEnv } from '../db/pg.ts';
 import { findSqliteWorlds, importSqliteWorlds } from '../db/import-sqlite.ts';
 import { createWorld, listWorlds, worldFor } from '../store/index-pg.ts';
 import { listStories } from '../store/world-pg.ts';
@@ -155,10 +155,9 @@ async function boot(): Promise<void> {
     process.exit(1);
   }
 
-  // 2. Schema, idempotently. `applySchema` is CREATE TABLE IF NOT EXISTS
-  //    throughout, so this is also the upgrade path for a new table.
-  await applySchema(ingest);
-  await applyMigrations(ingest);
+  // 2. The current schema for fresh databases and ordered migrations for
+  //    existing ones.
+  await applySchemaAndMigrations(ingest);
   await applyRoles(ingest);
 
   // 3. The automatic first-boot import.
