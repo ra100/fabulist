@@ -1,8 +1,8 @@
 name: release
 
-# Publishes to Docker Hub and deploys to the VPS on a version tag — nothing
-# runs on an ordinary push to main, so a release is a deliberate `git tag
-# vX.Y.Z && git push origin vX.Y.Z`, not a side effect of merging.
+# Publishes to Docker Hub and deploys to the VPS on a version tag. The
+# post-merge version-bump workflow dispatches this workflow explicitly because
+# tags created with GitHub's automation token do not trigger push workflows.
 #
 # No npm job: `npm publish` from CI needs either a fully non-interactive
 # Automation token or an OTP prompt neither this workflow nor a headless
@@ -13,6 +13,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
   metadata:

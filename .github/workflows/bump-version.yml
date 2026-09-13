@@ -1,0 +1,75 @@
+name: Bump version after merge
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: main-version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Choose release increment
+        id: increment
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if [[ "$PR_TITLE" =~ ^[^:]+!:\  ]] || [[ "$PR_BODY" == *"BREAKING CHANGE:"* ]]; then
+            echo "value=major" >> "$GITHUB_OUTPUT"
+          elif [[ "$PR_TITLE" =~ ^feat(\([^)]+\))?:\  ]]; then
+            echo "value=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update package version
+        id: version
+        run: |
+          set -euo pipefail
+          pnpm version "${{ steps.increment.outputs.value }}" --no-git-tag-version
+          version="$(node -p "require('./package.json').version")"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag release
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json pnpm-lock.yaml
+          git commit -m "chore(release): bump version to $VERSION"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin main "v$VERSION"
+
+      - name: Start deployment for the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: gh workflow run release.yml --ref "v$VERSION"
