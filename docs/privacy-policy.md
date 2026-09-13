@@ -30,7 +30,7 @@ it means the maintainer operating the deployment you connected to.
 | Email, first/last name | WorkOS (AuthKit) sign-in, or an MCP OAuth token issued by the same identity provider | To tell your stories apart from everyone else's, and nothing else — see §3 |
 | A session cookie (browser) or a bearer token (MCP connector) | Set at login/authorization | Keeps you signed in; contains no password |
 | Your stories: turns, character sheets, threads, facts, directives, illustrations you generate | Written by you, playing | This *is* the product — a story you're writing |
-| Encryption rollout state and opaque browser-created key wraps | Fabulist app database (`encryption_rollout`, `user_encryption_keys`, `story_encryption_keys`) | Gradual per-user rollout. Key-wrap records contain salts, nonces, and ciphertext, not a passphrase, recovery code, master key, or story key |
+| Opaque browser-created key wraps | Fabulist app database (`user_encryption_keys`, `story_encryption_keys`) | Optional private storage. Key-wrap records contain salts, nonces, and ciphertext, not a passcode, recovery code, master key, or story key |
 | Which worlds you may access, and your role on each | `world_access` table, set by an admin or a world's owner | Access control — decides which shared canon you can read or ingest |
 | A personal "prose blocklist" (phrases you never want to see) | Something you added | A per-user preference, nothing else |
 | Token usage totals per story | Computed from your own turns | Informational only — lets you see what your own configured provider is costing you (§4). Never billed by us. |
@@ -85,17 +85,17 @@ Transport security is HTTPS/TLS when you use the hosted deployment, and OAuth
 tokens for browser/MCP access are transmitted over that same encrypted
 channel.
 
-The private-storage pilot creates a random browser-held master key and lets the browser wrap it
-independently with a passphrase and a recovery code. The database receives
+Optional private storage creates a random browser-held master key and lets the browser wrap it
+independently with a passcode and a recovery code. The database receives
 only those encrypted wraps and public derivation metadata; there is no
-maintainer recovery or escrow key. Losing both the passphrase and recovery
+maintainer recovery or escrow key. Losing both the passcode and recovery
 code makes future encrypted content unrecoverable.
 
 Key enrollment alone is not content encryption. Until the owner-wide migration
 has completed and verified every enrolled story, existing durable content remains
 plaintext and is not cryptographically opaque to the operator. We therefore
 do **not** claim a zero-knowledge design. Because a turn must be processed to
-generate a response — and because the current pilot also decrypts reads on the
+generate a response — and because the current implementation also decrypts reads on the
 server — plaintext exists in application memory while an unlocked request is
 handled.
 

@@ -187,7 +187,7 @@ function serverInfo(resourceUrl: string) {
 
 function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
   const server = new McpServer(serverInfo(resourceUrl), { instructions: INSTRUCTIONS });
-  addDefaultOutputSchema(server);
+  addDefaultOutputSchema(server, resourceUrl);
 
   server.registerTool(
     'list_worlds',

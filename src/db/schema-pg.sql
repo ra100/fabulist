@@ -319,31 +319,8 @@ CREATE INDEX IF NOT EXISTS idx_story_private_migrations_user
 ALTER TABLE stories
   ADD COLUMN IF NOT EXISTS encryption_version INTEGER NOT NULL DEFAULT 0;
 
--- Per-user encryption rollout controls.
---
--- `bootstrap_email` lets an operator pre-enrol one address before knowing the
--- stable WorkOS id. On first login, the app binds that row to `user_id` and
--- all later checks key off the id, not the mutable email.
-CREATE TABLE IF NOT EXISTS encryption_rollout (
-  bootstrap_email     TEXT PRIMARY KEY,
-  user_id             TEXT UNIQUE,
-  enabled             BOOLEAN NOT NULL DEFAULT false,
-  encrypt_new_stories BOOLEAN NOT NULL DEFAULT false,
-  bound_at            TIMESTAMPTZ,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_encryption_rollout_user_id ON encryption_rollout (user_id);
-
--- Initial pilot account: enabled for encrypted story creation once that user
--- first signs in and the row is bound to their WorkOS id.
-INSERT INTO encryption_rollout (bootstrap_email, enabled, encrypt_new_stories, updated_at)
-VALUES ('fabulist@rast.io', true, true, now())
-ON CONFLICT (bootstrap_email) DO NOTHING;
-
--- Browser-generated encryption material for a user enrolled in the private-story
--- pilot. This table stores only authenticated ciphertext and public KDF inputs:
+-- Browser-generated encryption material for an opted-in private-storage user.
+-- This table stores only authenticated ciphertext and public KDF inputs:
 -- the passphrase, recovery code, master key, and story keys never persist here.
 --
 -- A master key has two independent wraps. The passphrase wrap uses the recorded
@@ -367,7 +344,7 @@ CREATE TABLE IF NOT EXISTS user_encryption_keys (
 
 -- One random data-encryption key (DEK) per story, wrapped by its owner's
 -- browser-held master key. `story_id` is the key because sharing is outside the
--- pilot; adding it later can add recipient wraps without changing ciphertext.
+-- current owner-only model; adding it later can add recipient wraps without changing ciphertext.
 CREATE TABLE IF NOT EXISTS story_encryption_keys (
   story_id                TEXT PRIMARY KEY REFERENCES stories(id) ON DELETE CASCADE,
   owner_user_id           TEXT NOT NULL,
