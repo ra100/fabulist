@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { applyMigrations } from '../src/db/pg.ts';
 import type { Turn } from '../src/domain/types.ts';
 import { World } from '../src/store/index-pg.ts';
 import { makeStory, makeWorld, withPg } from './pg-harness.ts';
@@ -89,6 +90,30 @@ test('history checkpoint migration grants history tables to deployed play role',
   assert.match(migration, /ARRAY\['history_checkpoints', 'scene_segments'\]/);
   assert.match(migration, /ARRAY\['fabulist_play', 'fabulist_ingest'\]/);
   assert.match(migration, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I\.%I TO %I/);
+});
+
+test('history position repair migration is additive', () => {
+  const migration = readFileSync(new URL('../src/db/migrations-pg/008-repair-turn-history.sql', import.meta.url), 'utf8');
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS history_position INTEGER/);
+});
+
+test('migrations restore history position after a recorded history migration drifted', async (t) => {
+  const ran = await withPg(async (db) => {
+    await db.query(`ALTER TABLE turns DROP COLUMN history_position`);
+    await db.query(`DELETE FROM migrations WHERE version = 8`);
+    await applyMigrations(db);
+    const column = await db.one<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'turns'
+           AND column_name = 'history_position'
+       ) AS exists`,
+    );
+    assert.equal(column?.exists, true);
+  });
+  if (!ran) t.skip('no Postgres configured');
 });
 
 test('history checkpoint captures allocate unique positions per story inside transactions', async (t) => {
