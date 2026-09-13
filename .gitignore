@@ -16,6 +16,8 @@ dist/
 *.config.local.json
 
 data/
+# `pnpm pack-world` output is published as a release asset, not Git history.
+releases/
 .cache/
 coverage/
 .DS_Store
