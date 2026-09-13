@@ -156,7 +156,9 @@ export interface Timeline {
     summary: string;
     chapter: number;
     turnCount: number;
-    eligibleTurnCount?: number;
+    eligibleTurnCount: number;
+    /** The canonical layout boundary; absent only when reading an older server. */
+    boundary?: { turnId: string; chapter: number; turn: number; label: string } | null;
     divergences: Array<{ id: number; scene: number; kind: string; detail: string; canon: string }>;
   }>;
   divergenceCount: number;
@@ -164,9 +166,38 @@ export interface Timeline {
 
 
 export interface BookTurn {
-  id: string; scene: number; turn: number; rawInput: string; bookProse: string;
+  id: string; scene: number; chapter: number; turn: number; rawInput: string; bookProse: string;
   pinned: boolean; move: string | null; integrity: string | null; lintScore: number | null;
-  eligible?: boolean; historyPosition?: number | null; startsScene?: boolean;
+  eligible: boolean; historyPosition: number | null; startsScene: boolean;
+}
+
+export type RollbackTarget =
+  | { chapter: number; scene?: never; turnId?: never }
+  | { scene: number; chapter?: never; turnId?: never }
+  | { turnId: string; chapter?: never; scene?: never };
+
+export interface RollbackResult {
+  mode: 'fork' | 'destructive';
+  toScene: number;
+  toTurnId?: string;
+  removed?: Record<string, number>;
+  forkedStory?: { id: string; title: string };
+}
+
+type LegacyPostgresRollbackResult = {
+  mode: 'fork' | 'destructive';
+  atScene: number;
+  toTurnId?: string;
+  removed?: Record<string, number> | null;
+  story: { id: string; title: string } | null;
+};
+
+export interface SceneSplitResult {
+  turnId: string;
+  startsAtTurnId: string;
+  scene: number;
+  chapter: number;
+  startsScene: true;
 }
 
 export interface Interrupt {
@@ -607,6 +638,8 @@ export const REQUIRED_ROUTES = [
   'DELETE /api/worlds/:slug',
   'GET /api/images/providers',
   'POST /api/images/profile',
+  'POST /api/rollback',
+  'POST /api/scene/split',
 ] as const;
 
 export interface StaleServer {
@@ -676,7 +709,13 @@ export const api = {
   },
   entity: (id: string) => req<EntityDetail>(`/entity/${encodeURIComponent(id)}`),
   cast: () => req<Array<{ sheet: Sheet; entity: Entity | null }>>('/cast'),
-  book: () => req<{ scenes: State['scenes']; turns: BookTurn[] }>('/book'),
+  book: (params: { limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    if (params.offset !== undefined) query.set('offset', String(params.offset));
+    const suffix = query.size ? `?${query}` : '';
+    return req<{ scenes: State['scenes']; turns: BookTurn[]; nextOffset: number | null }>(`/book${suffix}`);
+  },
   play: (input: string, overrideIntegrity = false) =>
     parsedReq<PlayResponse>('/play', playResponseSchema, {
       method: 'POST',
@@ -721,17 +760,21 @@ export const api = {
     ),
   chapters: () => req<{ chapters: Array<{ chapter: number; title: string; summary: string }>; scenes: State['scenes'] }>('/chapters'),
   /**
-   * Rolls the current book back to a scene or chapter boundary (GAPS.md
-   * 3.6). `mode` defaults to `'fork'` server-side — the safe option — so an
-   * unset `mode` here mirrors that rather than picking one client-side.
+   * `mode` defaults to `'fork'` server-side — the safe option — so an unset
+   * mode here mirrors that rather than choosing a destructive default.
    */
-  rollback: (target: { scene?: number; chapter?: number; mode?: 'fork' | 'destructive' }) =>
-    post<{
-      mode: 'fork' | 'destructive';
-      toScene: number;
-      removed?: Record<string, number>;
-      forkedStory?: { id: string; title: string };
-    }>('/rollback', target),
+  rollback: async (target: RollbackTarget & { mode?: 'fork' | 'destructive' }): Promise<RollbackResult> => {
+    const result = await post<RollbackResult | LegacyPostgresRollbackResult>('/rollback', target);
+    if ('toScene' in result) return result;
+    return {
+      mode: result.mode,
+      toScene: result.atScene,
+      ...(result.toTurnId ? { toTurnId: result.toTurnId } : {}),
+      ...(result.removed ? { removed: result.removed } : {}),
+      ...(result.story ? { forkedStory: result.story } : {}),
+    };
+  },
+  splitScene: (turnId: string) => post<SceneSplitResult>('/scene/split', { turnId }),
   /** The bytes live behind this URL, same shape as `illustrate.imageUrl` — a plain `<a href>`/download link, not a fetch-then-blob dance. */
   exportUrl: (format: 'markdown' | 'text') => withStoryId(`/api/export?format=${format}`),
   /** §11's "chronicle with the divergence points marked" — one call assembling scenes, chapters and divergences into a spine. */

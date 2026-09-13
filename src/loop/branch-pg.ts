@@ -391,6 +391,7 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
 
     for (const spec of FORK_TABLES) {
       const columns = await columnsOf(tx, spec.table);
+      const jsonColumns = await jsonColumnsOf(tx, spec.table);
       // Which columns a copy may carry, and why this is asked of the catalog rather
       // than listed here.
       //
@@ -429,7 +430,7 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
             if (column === 'scene_segment_id' && row[column] != null) return segmentIds.get(String(row[column])) ?? null;
             if (spec.table === 'scene_metadata' && column === 'identity' && typeof row[column] === 'string')
               return remapSceneMetadataIdentity(row[column], segmentIds);
-            return row[column];
+            return jsonColumns.has(column) && row[column] != null ? JSON.stringify(row[column]) : row[column];
           });
           await tx.query(
             `INSERT INTO ${spec.table} (${copyable.join(', ')}) VALUES (${copyable.map((_, i) => `$${i + 1}`).join(', ')})`,
@@ -496,7 +497,7 @@ export async function forkStory(db: Db, world: World, opts: ForkOptions): Promis
             // becomes NULL rather than a dangling pointer.
             return idMaps.get(refTable)?.get(String(row[c])) ?? null;
           }
-          return row[c];
+          return jsonColumns.has(c) && row[c] != null ? JSON.stringify(row[c]) : row[c];
         });
         await tx.query(
           `INSERT INTO ${spec.table} (${insertCols.join(', ')}) VALUES (${insertCols.map((_, i) => `$${i + 1}`).join(', ')})`,
@@ -616,6 +617,7 @@ function remapSceneMetadataIdentity(identity: string, segmentIds: Map<string, st
  * and the catalog does not change mid-transaction.
  */
 const columnCache = new Map<string, string[]>();
+const jsonColumnCache = new Map<string, Set<string>>();
 
 async function columnsOf(tx: Queryable, table: string): Promise<string[]> {
   const cached = columnCache.get(table);
@@ -629,6 +631,20 @@ async function columnsOf(tx: Queryable, table: string): Promise<string[]> {
   const cols = rows.map((r) => r.column_name);
   columnCache.set(table, cols);
   return cols;
+}
+
+/** node-postgres encodes JS arrays as SQL arrays, not JSON arrays. */
+async function jsonColumnsOf(tx: Queryable, table: string): Promise<Set<string>> {
+  const cached = jsonColumnCache.get(table);
+  if (cached) return cached;
+  const { rows } = await tx.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = $1 AND data_type = 'jsonb'`,
+    [table],
+  );
+  const columns = new Set(rows.map((row) => row.column_name));
+  jsonColumnCache.set(table, columns);
+  return columns;
 }
 
 /**

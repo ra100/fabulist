@@ -379,18 +379,45 @@ test('the book endpoint returns both registers per turn', async (t) => {
       splitSceneAtTurn(world, turns[2]!.id);
 
       const book = (await get(base, '/api/book')).body as {
-        turns: Array<{ id: string; scene: number; chapter: number; eligible: boolean; startsScene: boolean }>;
+        turns: Array<{ id: string; scene: number; chapter: number; turn: number; historyPosition: number | null; eligible: boolean; startsScene: boolean }>;
       };
       assert.deepEqual(book.turns.map(({ scene }) => scene), [1, 1, 2, 2]);
+      assert.deepEqual(book.turns.map(({ chapter, turn }) => [chapter, turn]), [[1, 1], [1, 2], [1, 3], [1, 4]], 'book provides stable chapter-turn labels');
+      assert.ok(
+        book.turns.every((turn, index) => typeof turn.historyPosition === 'number' && (index === 0 || turn.historyPosition > book.turns[index - 1]!.historyPosition!)),
+        'book positions remain immutable ordering metadata even when authoring checkpoints are interleaved',
+      );
       assert.equal(book.turns[2]?.startsScene, true);
       assert.ok(book.turns.every((turn) => turn.eligible));
 
+      const limitedBook = (await get(base, '/api/book?limit=2')).body as {
+        turns: Array<{ id: string }>;
+        nextOffset: number | null;
+      };
+      assert.deepEqual(limitedBook.turns.map((turn) => turn.id), turns.slice(0, 2).map((turn) => turn.id));
+      assert.equal(limitedBook.nextOffset, 2);
+      const secondBookPage = (await get(base, '/api/book?offset=2&limit=2')).body as {
+        turns: Array<{ id: string }>;
+        nextOffset: number | null;
+      };
+      assert.deepEqual(secondBookPage.turns.map((turn) => turn.id), turns.slice(2).map((turn) => turn.id));
+      assert.equal(secondBookPage.nextOffset, null);
+
       const timeline = (await get(base, '/api/timeline')).body as {
-        currentScene: number; scenes: Array<{ scene: number; chapter: number; turnCount: number; eligibleTurnCount: number }>;
+        currentScene: number;
+        scenes: Array<{
+          scene: number; chapter: number; turnCount: number; eligibleTurnCount: number;
+          boundary: { turnId: string; chapter: number; turn: number; label: string } | null;
+        }>;
       };
       assert.equal(timeline.currentScene, 2);
       assert.deepEqual(timeline.scenes.filter((scene) => scene.turnCount).map((scene) => [scene.scene, scene.turnCount]), [[1, 2], [2, 2]]);
       assert.deepEqual(timeline.scenes.filter((scene) => scene.turnCount).map((scene) => scene.eligibleTurnCount), [2, 2]);
+      assert.deepEqual(
+        timeline.scenes.find((scene) => scene.scene === 2)?.boundary,
+        { turnId: turns[2]!.id, chapter: 1, turn: 3, label: '1-3' },
+        'timeline boundaries use the full canonical layout, not the paged book response',
+      );
     });
   });
 });
@@ -795,6 +822,7 @@ test('POST /api/rollback defaults to fork mode: switches to a new sibling, leave
     const result = body as { mode: string; toScene: number; forkedStory: { id: string } };
     assert.equal(result.mode, 'fork');
     assert.equal(result.toScene, 2);
+    assert.ok(result.forkedStory.id, 'the stable safe-fork response identifies the selected sibling');
 
     // The route switched the server-wide pointer (login-off) to the fork.
     assert.equal(currentStory.id(), result.forkedStory.id);
