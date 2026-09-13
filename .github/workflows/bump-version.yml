@@ -40,9 +40,11 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
-          if [[ "$PR_TITLE" =~ ^[^:]+!:\  ]] || [[ "$PR_BODY" == *"BREAKING CHANGE:"* ]]; then
+          breaking_title_pattern='^[^:]+!:[[:space:]]'
+          feature_title_pattern='^feat(\([^)]+\))?:[[:space:]]'
+          if [[ "$PR_TITLE" =~ $breaking_title_pattern ]] || [[ "$PR_BODY" == *"BREAKING CHANGE:"* ]]; then
             echo "value=major" >> "$GITHUB_OUTPUT"
-          elif [[ "$PR_TITLE" =~ ^feat(\([^)]+\))?:\  ]]; then
+          elif [[ "$PR_TITLE" =~ $feature_title_pattern ]]; then
             echo "value=minor" >> "$GITHUB_OUTPUT"
           else
             echo "value=patch" >> "$GITHUB_OUTPUT"
