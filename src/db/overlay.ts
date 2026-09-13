@@ -60,6 +60,8 @@ export interface OverlaySource {
   ordinal: number;
   /** Namespace prefix for ids that collide with another source; '' when unique. */
   alias: string;
+  /** The world-record title shown in the library and masthead. */
+  title?: string;
 }
 
 /**
@@ -72,11 +74,15 @@ export interface OverlaySource {
  * overlay can afford to trust anyone else with.
  */
 export async function sourcesFor(db: Queryable, storyId: string): Promise<OverlaySource[]> {
-  const { rows } = await db.query<{ world_id: string; ordinal: number; alias: string }>(
-    `SELECT world_id, ordinal, alias FROM story_sources WHERE story_id = $1 ORDER BY ordinal`,
+  const { rows } = await db.query<{ world_id: string; ordinal: number; alias: string; title: string }>(
+    `SELECT ss.world_id, ss.ordinal, ss.alias, w.title
+       FROM story_sources ss
+       JOIN worlds w ON w.id = ss.world_id
+      WHERE ss.story_id = $1
+      ORDER BY ss.ordinal`,
     [storyId],
   );
-  return rows.map((r) => ({ worldId: Number(r.world_id), ordinal: r.ordinal, alias: r.alias }));
+  return rows.map((r) => ({ worldId: Number(r.world_id), ordinal: r.ordinal, alias: r.alias, title: r.title }));
 }
 
 const ENTITY_COLUMNS =

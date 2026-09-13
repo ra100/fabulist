@@ -428,7 +428,7 @@ route('GET', '/api/state', async (_req, res, { world }) => {
   const session = await world.session.get();
   send(res, 200, {
     session,
-    worldTitle: await world.chronicle.getMeta('worldTitle', 'Untitled world'),
+    worldTitle: world.sources[0]?.title || (await world.chronicle.getMeta('worldTitle', 'Fabulist')),
     counts: await world.graph.counts(),
     scenes: await world.chronicle.scenes(),
     threads: await world.threads.open(20),
