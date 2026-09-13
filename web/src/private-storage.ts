@@ -11,6 +11,10 @@ export interface PrivateStoragePresentation {
   detail: string;
 }
 
+export function isPrivateStoryLockedError(error: string): boolean {
+  return /^private story .+ is locked$/.test(error);
+}
+
 export function privateStoragePresentation(
   snapshot: PrivateStorageSnapshot | null,
   error: string | null,
