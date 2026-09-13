@@ -39,6 +39,7 @@ import { Mark } from './Mark.tsx';
 import { HistoryRequestGate } from './history-request-gate.ts';
 import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
 import {
+  isPrivateStoryLockedError,
   privateStoragePresentation,
   type PrivateStorageSnapshot,
 } from './private-storage.ts';
@@ -187,10 +188,17 @@ export function App() {
       return true;
     } catch (e) {
       if (!stateRequestGate.current.isCurrent(revision) || getSelectedStoryId() !== storyId) return false;
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      if (isPrivateStoryLockedError(message)) {
+        setFresh(false);
+        setError(null);
+        navigateToTab('settings');
+        return false;
+      }
+      setError(message);
       return false;
     }
-  }, []);
+  }, [navigateToTab]);
 
   const refreshHistory = useCallback(async () => {
     if (await refresh()) setHistoryRevision((revision) => revision + 1);
