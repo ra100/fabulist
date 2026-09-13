@@ -46,7 +46,7 @@ import {
 } from '../store/access-pg.ts';
 import { tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
 import type { Entity, VisualStyle } from '../domain/types.ts';
-import { limitsFromWire, type SetupService } from '../setup/service-pg.ts';
+import { limitsFromWire, SetupBusyError, type SetupService } from '../setup/service-pg.ts';
 import type { IngestLimits } from '../ingest/depth-pg.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
@@ -1954,34 +1954,63 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
   }
 });
 
-/** Commits a previewed scope. Returns a job to poll. */
-route('POST', '/api/setup/ingest', (_req, res, { setup, body }) => {
+/**
+ * 409 when canon is already being written for this story or world — a conflict
+ * the caller can wait out — else `otherwise`, the route's own failure status.
+ */
+function setupFailureStatus(err: unknown, otherwise: number): number {
+  return err instanceof SetupBusyError ? 409 : otherwise;
+}
+
+/**
+ * Commits a previewed scope. Returns a job to poll.
+ *
+ * This, `/custom`, `/sample` and `/pack` author canon into the *request's* story —
+ * `world`, which `worldFor` resolved for this user and ownership-checked — never
+ * the service's own process-wide world. Authoring binds an unbound story to a
+ * canon world, so resolving the wrong story here is a persistent write into it.
+ */
+route('POST', '/api/setup/ingest', (_req, res, { setup, body, world, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { previewKey, character, style, opening } = parseBody(setupIngestBodySchema, body);
   try {
-    const job = svc.startIngest(previewKey, {
-      character: character ?? { existing: null, name: '', role: '', goals: [], vows: [] },
-      style: style ?? {},
-      opening: opening ?? '',
-    });
+    const job = svc.startIngest(
+      previewKey,
+      {
+        character: character ?? { existing: null, name: '', role: '', goals: [], vows: [] },
+        style: style ?? {},
+        opening: opening ?? '',
+      },
+      { world, user },
+    );
     send(res, 200, job);
   } catch (err) {
-    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    send(res, setupFailureStatus(err, 400), { error: err instanceof Error ? err.message : String(err) });
   }
 });
 
-route('POST', '/api/setup/custom', (_req, res, { setup, body }) => {
+route('POST', '/api/setup/custom', (_req, res, { setup, body, world, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { description, style } = parseBody(setupCustomBodySchema, body);
-  send(res, 200, svc.startCustomWorld(description.trim(), style));
+  try {
+    send(res, 200, svc.startCustomWorld(description.trim(), style, { world, user }));
+  } catch (err) {
+    if (!(err instanceof SetupBusyError)) throw err;
+    send(res, 409, { error: err.message });
+  }
 });
 
-route('POST', '/api/setup/sample', async (_req, res, { setup }) => {
+route('POST', '/api/setup/sample', async (_req, res, { setup, world, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  send(res, 200, await svc.useSample());
+  try {
+    send(res, 200, await svc.useSample({ world, user }));
+  } catch (err) {
+    if (!(err instanceof SetupBusyError)) throw err;
+    send(res, 409, { error: err.message });
+  }
 });
 
 /**
@@ -2002,7 +2031,7 @@ route('GET', '/api/setup/packs', (_req, res, { setup }) => {
  * install creates one story per scenario, and the story this server was bound to
  * beforehand is not the one the player just chose.
  */
-route('POST', '/api/setup/pack', async (_req, res, { setup, body, db, user }) => {
+route('POST', '/api/setup/pack', async (_req, res, { setup, body, db, world, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { packId, scenarioId } = parseBody(setupPackBodySchema, body);
@@ -2011,10 +2040,10 @@ route('POST', '/api/setup/pack', async (_req, res, { setup, body, db, user }) =>
     // No pointer to rebind: `createStory` stamps `last_played_at`, so the chosen
     // scenario's story is what the next request resolves to. The client also gets
     // `storyId` back and records it, so a second tab is not dragged along.
-    const result = await svc.usePack(packId, scenarioId);
+    const result = await svc.usePack(packId, scenarioId, { world, user });
     send(res, 200, result);
   } catch (err) {
-    send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    send(res, setupFailureStatus(err, 400), { error: err instanceof Error ? err.message : String(err) });
   }
 });
 

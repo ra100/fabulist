@@ -8,6 +8,7 @@
  */
 import { ensureCanonWorldFor, type World } from '../store/index-pg.ts';
 import type { Db } from '../db/pg.ts';
+import type { SessionUser } from '../auth/config.ts';
 import { createStory, defaultWorldIds } from '../store/world-pg.ts';
 import type { StoryId } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
@@ -39,6 +40,38 @@ export interface SetupServiceOptions {
   directoryOptions?: DirectoryOptions;
   wikiFetcher?: ConstructorParameters<typeof WikiClient>[0]['fetcher'];
   jobs?: JobRegistry;
+}
+
+/**
+ * Who a canon-authoring call acts for: the world the *request* resolved, and the
+ * user it was resolved for.
+ *
+ * Passed per call rather than read from the service's own `world` getter, which
+ * is built once per process — in `serve-pg` it is the login-off resolver, the
+ * most recently played story on the instance. For a read that is at worst the
+ * wrong answer; for authoring it is a persistent write, because a story with no
+ * canon world gets *bound* to one on the way in. A signed-in wizard run through
+ * that getter bound and filled whichever story was current for nobody in
+ * particular, not the requester's. Omitted only where there is no request to act
+ * for — tests and scripts — and there the getter is the right answer.
+ */
+export interface AuthoringTarget {
+  world: World;
+  /** Checked against the story's owner before anything is bound or written. */
+  user: SessionUser | null;
+}
+
+/**
+ * Canon is already being written for this story or world.
+ *
+ * Its own class so routes can answer 409 — a conflict the caller can wait out —
+ * rather than folding it into "your request was malformed".
+ */
+export class SetupBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SetupBusyError';
+  }
 }
 
 export interface PreviewResult {
@@ -206,6 +239,69 @@ export interface IngestHealth {
   pagesPending: number;
 }
 
+/**
+ * One unit of canon-authoring work's hold on the story and world it writes.
+ *
+ * Binding a world is transactional (`ensureCanonWorldFor`), but the story lock
+ * ends when that transaction does, and an ingest or a pack install then writes
+ * canon for minutes to hours outside it. Two such jobs for one story — a double
+ * click, a retry while the first is still crawling, the web UI and an MCP client
+ * at once — each bound safely and then interleaved Pass A upserts, meta and the
+ * opening scene into the same world. Two *stories* reading one world do the same
+ * thing to it, so the world is claimed as well as the story.
+ *
+ * Held in memory, for the whole lifetime of the work rather than for one
+ * statement: a session advisory lock would pin a pooled connection for an entire
+ * crawl, and `serve-pg` is a single process holding a single `SetupService`, so
+ * the process is the scope that matters. A second claim is refused, not queued —
+ * a queued ingest the player cannot see is indistinguishable from a hung one.
+ */
+class AuthoringClaim {
+  private readonly inFlight: Map<string, string>;
+  private readonly kind: string;
+  private readonly held = new Set<string>();
+
+  constructor(inFlight: Map<string, string>, kind: string) {
+    this.inFlight = inFlight;
+    this.kind = kind;
+  }
+
+  /** Claims this world's story and, once it has one, its canon world. All or none. */
+  take(world: World): void {
+    const keys = [`story:${world.storyId}`, ...(world.worldId === undefined ? [] : [`world:${world.worldId}`])].filter(
+      (key) => !this.held.has(key),
+    );
+    for (const key of keys) {
+      const holder = this.inFlight.get(key);
+      if (holder) {
+        throw new SetupBusyError(
+          `${key.replace(':', ' ')} already has a ${holder} job writing canon; wait for it to finish, or cancel it`,
+        );
+      }
+    }
+    for (const key of keys) {
+      this.inFlight.set(key, this.kind);
+      this.held.add(key);
+    }
+  }
+
+  release(): void {
+    for (const key of this.held) this.inFlight.delete(key);
+    this.held.clear();
+  }
+
+  /** `work`, releasing this claim when it settles, however it settles. */
+  around<T>(work: (handle: JobHandle) => Promise<T>): (handle: JobHandle) => Promise<T> {
+    return async (handle) => {
+      try {
+        return await work(handle);
+      } finally {
+        this.release();
+      }
+    };
+  }
+}
+
 export class SetupService {
   /**
    * A getter, not a resolved `World`. Same reasoning as `Engine`/`Compactor`:
@@ -227,6 +323,11 @@ export class SetupService {
     string,
     { crawl: CrawlResult; baseUrl: string; mode: DepthMode; limits: IngestLimits; title: string; seeds: string[]; excludeCategories: string[] }
   >();
+  /**
+   * Canon writes in flight, keyed `story:<id>` and `world:<id>`, valued by the
+   * kind of work holding the key. See `claimAuthoring`.
+   */
+  private authoring = new Map<string, string>();
 
   constructor(opts: SetupServiceOptions) {
     this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
@@ -408,6 +509,7 @@ export class SetupService {
   startIngest(
     previewKey: string,
     plan: { character: CharacterSketch; style: Partial<IngestPlan['style']>; opening: string },
+    target?: AuthoringTarget,
   ): Job<IngestJobResult> {
     const cached = this.crawls.get(previewKey);
     if (!cached) throw new Error('no preview for that key; run a preview first');
@@ -415,14 +517,15 @@ export class SetupService {
     const { crawl: scoped, baseUrl, mode, limits, title, seeds, excludeCategories } = cached;
     const spec = specFor(mode, limits);
     const wikiName = new URL(baseUrl).hostname.split('.')[0] ?? 'wiki';
+    const claim = this.claimAuthoring('ingest', target);
 
-    return this.jobs.start<IngestJobResult>('ingest', async (handle) => {
+    return this.jobs.start<IngestJobResult>('ingest', claim.around(async (handle) => {
       // Resolved once, when the job actually starts running, not when it was
       // scheduled — and held for the job's whole lifetime rather than
       // re-resolved per step: an ingest is one continuous act of writing canon,
       // and letting the target world change mid-write would split the ingest
       // across two stories/worlds, which is a real corruption, not a stale-read.
-      const world = await this.authoringWorld(title || wikiName);
+      const world = await this.authoringWorld(claim, target, title || wikiName);
       await world.chronicle.setMeta('worldTitle', title || wikiName);
       // Persisted so a later session can offer "continue reading this wiki"
       // without asking the player to re-enter the universe, seeds and mode —
@@ -500,7 +603,7 @@ export class SetupService {
         opening,
         warnings,
       };
-    });
+    }));
   }
 
   /**
@@ -693,8 +796,10 @@ export class SetupService {
     const spec = specFor(mode, limits);
     assertBudgetIsServable(mode, spec);
     const wikiName = context.wikiName;
+    // Writes canon into the same world an ingest does, so it takes the same claim.
+    const claim = this.claimAuthoring('continue-ingest', { world, user: null });
 
-    return this.jobs.start<IngestJobResult>('continue-ingest', async (handle) => {
+    return this.jobs.start<IngestJobResult>('continue-ingest', claim.around(async (handle) => {
       handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
       const client = this.client(baseUrl);
       const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages, onProgress: (info) => {
@@ -766,21 +871,29 @@ export class SetupService {
         opening: '',
         warnings,
       };
-    });
+    }));
   }
 
   /** Builds an authored world from a description. No wiki involved. */
-  startCustomWorld(description: string, style?: Partial<IngestPlan['style']>): Job<ApplyCustomResult> {
+  startCustomWorld(
+    description: string,
+    style?: Partial<IngestPlan['style']>,
+    target?: AuthoringTarget,
+  ): Job<ApplyCustomResult> {
     const planner = this.planner;
+    // Claimed before the model is called, not after: a second request for the
+    // same story is refused up front instead of paying to invent a world it
+    // could never have written down.
+    const claim = this.claimAuthoring('custom-world', target);
 
-    return this.jobs.start<ApplyCustomResult>('custom-world', async (handle) => {
+    return this.jobs.start<ApplyCustomResult>('custom-world', claim.around(async (handle) => {
       handle.stage('inventing the world', 'locations, factions, cast');
       const raw = await planner.customWorld(description);
 
       // Resolved after the (only) await in this job, same reasoning as
       // startIngest: one continuous act of authoring canon, held for its
       // whole lifetime rather than re-resolved mid-write.
-      const world = await this.authoringWorld(String(raw.title ?? ''));
+      const world = await this.authoringWorld(claim, target, String(raw.title ?? ''));
       handle.stage('writing it down');
       const result = await applyCustomWorld(world, raw);
       handle.log(`${result.entities} entities, ${result.edges} relations, ${result.threads} threads`);
@@ -791,18 +904,23 @@ export class SetupService {
 
       handle.stage('done');
       return result;
-    });
+    }));
   }
 
   /** The built-in example, for trying the engine without any setup at all. */
-  async useSample(): Promise<{ playerCharacterId: string; opening: string }> {
-    const world = await this.authoringWorld('Saint Verrow');
-    await seedWorld(world);
-    await world.chronicle.setMeta('worldTitle', 'Saint Verrow');
-    return {
-      playerCharacterId: (await world.session.get()).playerCharacterId,
-      opening: await proposeOpening(world),
-    };
+  async useSample(target?: AuthoringTarget): Promise<{ playerCharacterId: string; opening: string }> {
+    const claim = this.claimAuthoring('sample', target);
+    try {
+      const world = await this.authoringWorld(claim, target, 'Saint Verrow');
+      await seedWorld(world);
+      await world.chronicle.setMeta('worldTitle', 'Saint Verrow');
+      return {
+        playerCharacterId: (await world.session.get()).playerCharacterId,
+        opening: await proposeOpening(world),
+      };
+    } finally {
+      claim.release();
+    }
   }
 
   /**
@@ -824,6 +942,7 @@ export class SetupService {
   async usePack(
     packId: string,
     scenarioId?: string,
+    target?: AuthoringTarget,
   ): Promise<{
     storyId: StoryId;
     scenarioId: string;
@@ -836,8 +955,15 @@ export class SetupService {
     const pack = packById(packId);
     if (!pack) throw new Error(`no such world pack: ${packId}`);
 
-    const world = await this.authoringWorld(pack.title);
-    const result = await installPack(this.db, world, pack);
+    const claim = this.claimAuthoring('pack', target);
+    let world: World;
+    let result: Awaited<ReturnType<typeof installPack>>;
+    try {
+      world = await this.authoringWorld(claim, target, pack.title);
+      result = await installPack(this.db, world, pack);
+    } finally {
+      claim.release();
+    }
     if (!result.scenarios.length) throw new Error(`${packId} installed no playable scenario`);
 
     const chosen = scenarioId ? result.scenarios.find((s) => s.id === scenarioId) : result.scenarios[0];
@@ -966,8 +1092,22 @@ export class SetupService {
   }
 
   /**
-   * The world to author into — this service's current one, bound to a canon
-   * world if it has none yet.
+   * A claim for canon-authoring work, taken on the target's story (and world,
+   * if already bound) immediately — synchronously, before the caller starts a
+   * job or spends anything — so a second request for the same story is refused
+   * at the door. With no target the world is not known yet; `authoringWorld`
+   * takes the claim once it has resolved one.
+   */
+  private claimAuthoring(kind: string, target: AuthoringTarget | undefined): AuthoringClaim {
+    const claim = new AuthoringClaim(this.authoring, kind);
+    if (target) claim.take(target.world);
+    return claim;
+  }
+
+  /**
+   * The world to author into — the request's own (`target`), else this
+   * service's current one — bound to a canon world if it has none yet, and
+   * claimed for `claim`'s lifetime.
    *
    * Every route below that *creates* canon goes through this rather than
    * `getWorld()` directly. A brand-new story has no `story_sources` row (see
@@ -983,15 +1123,22 @@ export class SetupService {
    * binding one behind the player's back would answer it wrongly. Writing canon
    * is the one act that genuinely needs somewhere to put it.
    *
-   * The returned `World` is re-resolved, not the one passed around before:
-   * `World` reads `story_sources` once, when it builds its stores, so the
-   * instance captured before the binding would still carry an empty source
-   * list.
+   * The returned `World` is re-resolved when the binding changed it: `World`
+   * reads `story_sources` once, when it builds its stores, so the instance
+   * captured before the binding would still carry an empty source list.
+   *
+   * Ownership is checked on every call, bound or not, inside
+   * `ensureCanonWorldFor` under the story's row lock — not only on the path that
+   * binds, since writing canon into another user's already-bound story is the
+   * same trespass with one step fewer.
    */
-  private async authoringWorld(title = ''): Promise<World> {
-    const world = await this.getWorld();
-    if (world.sources.length) return world;
-    await ensureCanonWorldFor(this.db, world.storyId, title);
-    return world.withStory(world.storyId);
+  private async authoringWorld(claim: AuthoringClaim, target: AuthoringTarget | undefined, title = ''): Promise<World> {
+    const world = target?.world ?? (await this.getWorld());
+    claim.take(world);
+    const worldId = await ensureCanonWorldFor(this.db, world.storyId, { title, user: target?.user ?? null });
+    const bound = world.worldId === worldId ? world : await world.withStory(world.storyId);
+    // The story was claimed above; this adds the world it was just bound to.
+    claim.take(bound);
+    return bound;
   }
 }
