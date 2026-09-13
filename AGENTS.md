@@ -20,3 +20,16 @@ feat(auth): add OAuth discovery
 fix(store): deduplicate batch upserts
 docs: explain provider configuration
 ```
+
+## Branches
+
+Use a category and concise subject for new worktree branches:
+
+```text
+feature/<feature-subject>
+bugfix/<bugfix-subject>
+chore/<maintenance-subject>
+docs/<documentation-subject>
+```
+
+Do not include an account name, username, or personal prefix in a branch name.
