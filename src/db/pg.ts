@@ -231,6 +231,16 @@ export async function applySchema(db: Queryable): Promise<void> {
   await db.query(readFileSync(join(here, 'schema-pg.sql'), 'utf8'));
 }
 
+async function ensureMigrationsTable(db: Queryable): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS migrations (
+      version    INTEGER PRIMARY KEY,
+      name       TEXT NOT NULL,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+}
+
 /**
  * Applies ordered PostgreSQL migrations exactly once.
  *
@@ -271,6 +281,23 @@ export async function applyMigrations(db: Db): Promise<void> {
       await client.query(`SELECT pg_advisory_unlock(hashtext('fabulist-schema-migrations'))`);
     }
   });
+}
+
+/**
+ * Brings a database to the current schema without letting a current-schema
+ * index block the migration that adds its referenced column.
+ */
+export async function applySchemaAndMigrations(db: Db): Promise<void> {
+  const { rows } = await db.query<{ has_turns: boolean }>(`SELECT to_regclass('turns') IS NOT NULL AS has_turns`);
+  if (!rows[0]?.has_turns) {
+    await applySchema(db);
+    await applyMigrations(db);
+    return;
+  }
+
+  await ensureMigrationsTable(db);
+  await applyMigrations(db);
+  await applySchema(db);
 }
 
 /**

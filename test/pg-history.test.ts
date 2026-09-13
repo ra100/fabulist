@@ -116,6 +116,26 @@ test('migrations restore history position after a recorded history migration dri
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('schema upgrades apply migrations before the current schema snapshot', async (t) => {
+  const ran = await withPg(async (db) => {
+    await db.query(`ALTER TABLE turns DROP COLUMN history_position`);
+    await db.query(`DELETE FROM migrations WHERE version = 8`);
+    const { applySchemaAndMigrations } = await import('../src/db/pg.ts');
+    await applySchemaAndMigrations(db);
+    const column = await db.one<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'turns'
+           AND column_name = 'history_position'
+       ) AS exists`,
+    );
+    assert.equal(column?.exists, true);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('history checkpoint captures allocate unique positions per story inside transactions', async (t) => {
   const ran = await withPg(async (db) => {
     const worldId = await makeWorld(db, 'history-concurrency');
