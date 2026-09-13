@@ -51,3 +51,4 @@ __pycache__/
 # Local run artefacts (server logs, detached-process scratch).
 .run/
 .worktrees/
+.serena/

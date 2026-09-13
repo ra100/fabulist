@@ -37,6 +37,7 @@ import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 import { HistoryRequestGate } from './history-request-gate.ts';
+import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
 import {
   privateStoragePresentation,
   type PrivateStorageSnapshot,
@@ -50,7 +51,7 @@ import {
   type EncryptionEnrollment,
 } from './crypto/keys.ts';
 
-type Tab = 'book' | 'timeline' | 'graph' | 'cast' | 'threads' | 'causality' | 'facts' | 'library' | 'settings';
+type Tab = AppTab;
 
 /** Scene numbers read as roman, the way a book numbers its parts. */
 function roman(n: number): string {
@@ -87,7 +88,7 @@ function ErrorNotice({ error }: { error: string | null }) {
 }
 
 export function App() {
-  const [tab, setTab] = useState<Tab>('book');
+  const [tab, setTab] = useState<Tab>(() => tabForPath(window.location.pathname));
   const [state, setState] = useState<State | null>(null);
   const [historyRevision, setHistoryRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -128,6 +129,18 @@ export function App() {
     setHistoryRevision((revision) => revision + 1);
     setSelectedStoryId(storyId);
   }, [invalidateRefreshRequests]);
+
+  const navigateToTab = useCallback((next: Tab) => {
+    const path = pathForTab(next);
+    if (window.location.pathname !== path) window.history.pushState(null, '', path);
+    setTab(next);
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => setTab(tabForPath(window.location.pathname));
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   // Most actions have their own local recovery. This is the last line of
   // defence for one that does not: React does not render rejected async event
@@ -211,7 +224,7 @@ export function App() {
   }, []);
 
   const refreshPrivateStorage = useCallback(async () => {
-    if (!currentUser?.encryptionPilot) {
+    if (!currentUser) {
       setPrivateStorage(null);
       setPrivateStorageError(null);
       return;
@@ -244,11 +257,11 @@ export function App() {
   }, [privateStorage, refreshPrivateStorage]);
 
   const openPrivateStorage = useCallback(() => {
-    setTab('settings');
+    navigateToTab('settings');
     window.requestAnimationFrame(() => {
       document.getElementById('private-storage')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
-  }, []);
+  }, [navigateToTab]);
 
   const refreshAfterPrivateStorageChange = useCallback(async () => {
     await refreshPrivateStorage();
@@ -330,13 +343,13 @@ export function App() {
           </div>
         ) : null}
         <nav className="tabs">
-          {(['book', 'timeline', 'graph', 'cast', 'threads', 'causality', 'facts', 'library', 'settings'] as Tab[]).map((t) => (
-            <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+          {appTabs.map((t) => (
+            <button key={t} className={tab === t ? 'active' : ''} onClick={() => navigateToTab(t)}>
               {t}
             </button>
           ))}
         </nav>
-        {currentUser?.encryptionPilot ? (
+        {currentUser ? (
           <PrivateStorageIndicator
             snapshot={privateStorage}
             error={privateStorageError}
@@ -377,7 +390,7 @@ export function App() {
 
       <ErrorNotice error={error} />
 
-      {currentUser?.encryptionPilot ? (
+      {currentUser ? (
         <PrivateStorageBanner
           snapshot={privateStorage}
           error={privateStorageError}
@@ -404,7 +417,7 @@ export function App() {
         <StoriesTab
           currentSceneTurn={state ? `${state.session.scene}·${state.session.turn}` : '?'}
           onSwitched={() => {
-            setTab('book');
+            navigateToTab('book');
             void refresh();
           }}
           onMutationStart={invalidateRefreshRequests}
@@ -641,12 +654,12 @@ function PrivateStoragePanel({
             <label className="field-row">
               <span>unlock with</span>
               <select value={unlockWithRecovery ? 'recovery' : 'passphrase'} onChange={(event) => setUnlockWithRecovery(event.target.value === 'recovery')} disabled={busy}>
-                <option value="passphrase">passphrase</option>
+                <option value="passphrase">passcode</option>
                 <option value="recovery">recovery code</option>
               </select>
             </label>
             <label className="field-row">
-              <span>{unlockWithRecovery ? 'recovery code' : 'passphrase'}</span>
+              <span>{unlockWithRecovery ? 'recovery code' : 'passcode'}</span>
               <input
                 type={unlockWithRecovery ? 'text' : 'password'}
                 autoComplete="off"
@@ -659,12 +672,12 @@ function PrivateStoragePanel({
               <button className="primary" onClick={() => void unlock()} disabled={busy || !unlockSecret}>
                 {busy ? 'unlocking…' : 'unlock private stories'}
               </button>
-              <span className="small dimmer">The passphrase and recovery code never leave this browser.</span>
+              <span className="small dimmer">The passcode and recovery code never leave this browser.</span>
             </div>
           </div>
         )}
         <p className="private-storage-footnote">
-          Migration requires an active grant for every story you own. It copies your shared blocklist into every story before removing legacy plaintext; no passphrase or recovery code is sent.
+          Migration requires an active grant for every story you own. It copies your shared blocklist into every story before removing legacy plaintext; no passcode or recovery code is sent.
           {migration ? ` Status: ${migration.status}${migration.error ? ` — ${migration.error}` : ''}.` : ''}
           {' '}Creating, claiming, forking, and resetting stories is temporarily disabled while private storage is enrolled, until browser-side key provisioning is added.
         </p>
@@ -677,17 +690,18 @@ function PrivateStoragePanel({
     <section id="private-storage" className="card private-storage">
       <div className="private-storage-heading">
         <h3>private storage</h3>
-        <span className="tag">pilot</span>
+        <span className="tag">optional</span>
       </div>
       {!draft ? (
         <>
           <p className="lede private-storage-intro">
-            Set a passphrase and keep a recovery code. Both are created in this browser; Fabulist receives only
-            encrypted key wraps, never either secret.
+            Private storage is optional. When you enable it, Fabulist stores only encrypted key wraps and can encrypt
+            your existing stories. Set a passcode you can use again whenever you unlock them in the future; Fabulist
+            cannot reset it. Keep the recovery code somewhere secure in case you forget it.
           </p>
           <div className="private-storage-form">
             <label className="field-row">
-              <span>passphrase</span>
+              <span>passcode</span>
               <input
                 type="password"
                 autoComplete="new-password"
@@ -2046,7 +2060,7 @@ function SettingsTab({
     <div className="main">
       <div className="pane">
         <div className="measure-tool">
-        {currentUser?.encryptionPilot ? (
+          {currentUser ? (
           <PrivateStoragePanel
             user={currentUser}
             snapshot={privateStorage}

@@ -21,7 +21,7 @@ export function privateStoragePresentation(
     return {
       state: 'setup',
       label: 'set up',
-      detail: 'Protect existing stories from readable database and filesystem storage.',
+      detail: 'Optional: protect existing stories with a passcode and encrypted storage.',
     };
   }
   if (snapshot.migration?.status === 'failed') {

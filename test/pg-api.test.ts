@@ -219,7 +219,8 @@ test('a locked private story is an actionable MCP state and leaves the transport
           assert.deepEqual(mcpPayload(locked), {
             status: 'locked',
             error: 'Private stories are locked.',
-            nextStep: 'Open Fabulist in your browser, unlock Private Storage, then retry this tool.',
+            settingsUrl: 'http://127.0.0.1/settings',
+            nextStep: 'Open Settings in Fabulist, unlock Private Storage with your passcode, then retry this tool.',
           });
 
           const worlds = mcpPayload(await client.callTool({ name: 'list_worlds', arguments: {} }));
