@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  isPrivateStoryLockedError,
   privateStoragePresentation,
   type PrivateStorageSnapshot,
 } from '../web/src/private-storage.ts';
@@ -45,4 +46,9 @@ test('private-storage presentation makes every required action explicit', () => 
     'retry me',
   );
   assert.equal(privateStoragePresentation(null, 'status unavailable').state, 'error');
+});
+
+test('private story lock responses open the private-storage recovery flow', () => {
+  assert.equal(isPrivateStoryLockedError('private story story:6571b2ef-1dcb-4860-988e-ad77c6c591c7 is locked'), true);
+  assert.equal(isPrivateStoryLockedError('database unavailable'), false);
 });
