@@ -183,13 +183,19 @@ export class ConfigService {
     }
 
     if (partial.providers !== undefined) {
-      const providers: Record<string, ProviderSpec> = {};
+      // Built from entries rather than assigned key by key: a provider may be
+      // named `__proto__`, and assigning that into `{}` swaps the prototype
+      // instead of saving the provider.
+      const kept: [string, ProviderSpec][] = [];
       for (const [key, spec] of Object.entries(partial.providers)) {
         const checked = validateSpec(key, spec);
         issues.push(...checked.issues);
-        if (checked.spec) providers[key] = checked.spec;
+        if (checked.spec) kept.push([key, checked.spec]);
       }
-      next.providers = providers;
+      const providers: Record<string, ProviderSpec> = Object.fromEntries(kept);
+      const stranded = this.strandsProfile(providers);
+      if (stranded) issues.push(stranded);
+      else next.providers = providers;
     }
 
     if (partial.imageProviders !== undefined) {
@@ -255,9 +261,31 @@ export class ConfigService {
   removeProvider(key: string): PatchResult {
     const providers = { ...this.cfg.providers };
     delete providers[key];
+    // Checked here as well as in `patch`, so a refused removal does not still
+    // prune the routes below.
+    const stranded = this.strandsProfile(providers);
+    if (stranded) return { config: this.get(), issues: [stranded], registryRebuilt: false };
     // Drop any route that pointed at it, or the registry would fail to build.
     const routes = Object.fromEntries(Object.entries(this.cfg.routes).filter(([, v]) => v !== key));
     return this.patch({ providers, routes });
+  }
+
+  /**
+   * A configured provider is also a profile of its own name, which exists only
+   * while the provider does. Dropping the one that is selected would leave
+   * `profile` naming nothing, and the rebuild would quietly put the mock in its
+   * place while every report still named the real model — so that change is
+   * refused until another profile is selected. A profile that was already
+   * unresolvable (a hand-edited file) does not block unrelated edits.
+   */
+  private strandsProfile(providers: Record<string, ProviderSpec>): ValidationIssue | null {
+    const { profile } = this.cfg;
+    const resolves = (p: Record<string, ProviderSpec>) => profile === 'mock' || Object.hasOwn(profilesFor(p), profile);
+    if (!resolves(this.cfg.providers) || resolves(providers)) return null;
+    return {
+      field: 'providers',
+      message: `"${profile}" is the active profile; select another profile before removing its provider`,
+    };
   }
 
   /** The spec behind a key, preset or configured, for the editor to prefill. */

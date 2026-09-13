@@ -15,6 +15,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SwappableImageRegistry } from '../src/providers/image.ts';
+import { profilesFor, type ProviderSpec } from '../src/providers/http.ts';
 
 /** In-memory config, so nothing touches a real file. */
 function service(initial: Partial<Config> = {}, registry?: SwappableRegistry) {
@@ -544,27 +545,7 @@ test('profile switches write the server\'s own config file, not the default path
  * shim, which is the tell: nothing was wrong with the provider.
  */
 test('a provider on a custom base url is selectable as a profile once it tests green', async () => {
-  // Stands in for an Ollama that is not on the preset's 127.0.0.1:11434.
-  const ollama = createServer((req, res) => {
-    res.writeHead(req.url === '/api/tags' ? 200 : 404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ models: [{ name: 'qwen2.5:14b' }] }));
-  });
-  await new Promise<void>((r) => ollama.listen(0, '127.0.0.1', r));
-  const baseUrl = `http://127.0.0.1:${(ollama.address() as AddressInfo).port}`;
-
-  const dir = mkdtempSync(join(tmpdir(), 'story-cfg-'));
-  const world = World.open(':memory:');
-  seedWorld(world);
-  // A real file, on a throwaway path: `switchProfile` reads and writes config
-  // through the module functions rather than the service, so the two have to be
-  // pointed at the same place for the switch below to mean anything.
-  const config = new ConfigService({ path: join(dir, 'cfg.json') });
-  const registry = new SwappableRegistry(new ProviderRegistry(new MockProvider()), 'mock');
-  const server = createApiServer({ world, engine: new Engine({ world, providers: registry }), registry, config });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-
-  try {
+  await withRemoteOllama(async ({ base, baseUrl, registry }) => {
     const spec = { kind: 'ollama', model: 'qwen2.5:14b', baseUrl };
 
     const tested = await send(base, 'POST', '/api/config/provider/test', { key: 'ollama:remote', spec });
@@ -584,10 +565,120 @@ test('a provider on a custom base url is selectable as a profile once it tests g
     assert.equal(switched.body.ok, true, 'selecting it is what lets the wizard advance');
     assert.equal(registry.profile(), 'ollama:remote');
     assert.equal(registry.get('narrate').id, 'ollama', 'and the world is written by that model, not the mock');
+  });
+});
+
+/**
+ * A provider's own profile only exists while the provider does. Deleting the
+ * one that is selected used to succeed, leave `profile` naming it, and have the
+ * rebuild quietly swap the mock in — a live server writing mock prose while
+ * every report still said the real model was active.
+ */
+test('the provider behind the active profile cannot be removed until another profile is selected', async () => {
+  await withRemoteOllama(async ({ base, baseUrl, registry, config }) => {
+    const spec = { kind: 'ollama', model: 'qwen2.5:14b', baseUrl };
+    await send(base, 'PUT', '/api/config/provider/ollama%3Aremote', spec);
+    const switched = await send(base, 'POST', '/api/providers/profile', { profile: 'ollama:remote' });
+    assert.equal(switched.body.ok, true);
+
+    const removed = await send(base, 'DELETE', '/api/config/provider/ollama%3Aremote');
+    assert.equal(removed.status, 200);
+    const issues = removed.body.issues as { field: string; message: string }[];
+    assert.ok(
+      issues.some((i) => i.field === 'providers' && i.message.includes('ollama:remote')),
+      'the refusal says why, on the providers field',
+    );
+    assert.ok((removed.body.config as unknown as Config).providers['ollama:remote'], 'the provider is still there');
+    assert.equal(config.get().profile, 'ollama:remote');
+    assert.equal(registry.profile(), 'ollama:remote');
+    assert.equal(registry.get('narrate').id, 'ollama', 'and the live registry never fell back to the mock');
+
+    // Replacing the whole map is the same removal by another route.
+    const replaced = await send(base, 'PUT', '/api/config', { providers: {} });
+    assert.ok((replaced.body.issues as { field: string }[]).some((i) => i.field === 'providers'));
+    assert.ok(config.get().providers['ollama:remote'], 'a wholesale replace cannot strand the profile either');
+    assert.equal(registry.get('narrate').id, 'ollama');
+
+    // Once something else is selected, the removal goes through.
+    assert.equal((await send(base, 'POST', '/api/providers/profile', { profile: 'mock' })).body.ok, true);
+    const retried = await send(base, 'DELETE', '/api/config/provider/ollama%3Aremote');
+    assert.deepEqual(retried.body.issues, []);
+    assert.equal(config.get().providers['ollama:remote'], undefined);
+  });
+});
+
+/**
+ * Provider names are free text, and a profile table that is a plain object
+ * answers `in` and `[]` for names it merely inherits. `constructor` was taken
+ * for a reserved built-in and never offered; `__proto__` was lost the moment it
+ * was assigned into an ordinary object. Both saved fine and were unselectable.
+ */
+test('a provider named after an Object.prototype member is still its own profile', async () => {
+  const spec: ProviderSpec = { kind: 'ollama', model: 'm' };
+  // JSON, not a literal: this is how a key like `__proto__` arrives from a file or a request body.
+  const json = JSON.stringify(spec);
+  const providers = JSON.parse(`{"constructor": ${json}, "__proto__": ${json}, "toString": ${json}}`) as Record<
+    string,
+    ProviderSpec
+  >;
+  const profiles = profilesFor(providers);
+  for (const key of ['constructor', '__proto__', 'toString']) {
+    assert.ok(Object.hasOwn(profiles, key), `${key} is offered`);
+    assert.deepEqual({ ...profiles[key] }, { narrate: key, mechanics: key, extract: key });
+  }
+  assert.ok(Object.hasOwn(profiles, 'local'), 'built-ins are still there');
+  assert.equal(profilesFor({ other: spec }).constructor, undefined, 'and nothing is inherited for a name nobody configured');
+  assert.equal(profilesFor({}).toString, undefined);
+
+  await withRemoteOllama(async ({ base, baseUrl, registry }) => {
+    for (const key of ['constructor', '__proto__']) {
+      const kept = await send(base, 'PUT', `/api/config/provider/${key}`, { kind: 'ollama', model: 'qwen2.5:14b', baseUrl });
+      assert.deepEqual(kept.body.issues, []);
+      assert.ok(Object.hasOwn((kept.body.config as unknown as Config).providers, key), `${key} survives being saved`);
+
+      const report = await send(base, 'GET', '/api/providers');
+      assert.ok((report.body.usableProfiles as string[]).includes(key), `${key} is usable once it probes ready`);
+
+      const switched = await send(base, 'POST', '/api/providers/profile', { profile: key });
+      assert.equal(switched.body.ok, true, `${key} can be selected`);
+      assert.equal(registry.profile(), key);
+      assert.equal(registry.get('narrate').id, 'ollama');
+    }
+  });
+});
+
+/**
+ * A live API server backed by a real throwaway config file, plus a stub Ollama
+ * that is not on the preset's 127.0.0.1:11434. A real file because
+ * `switchProfile` reads and writes config through the module functions rather
+ * than the service, so the two have to be pointed at the same place for a
+ * switch to mean anything.
+ */
+async function withRemoteOllama(
+  fn: (ctx: { base: string; baseUrl: string; registry: SwappableRegistry; config: ConfigService }) => Promise<void>,
+) {
+  const ollama = createServer((req, res) => {
+    res.writeHead(req.url === '/api/tags' ? 200 : 404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ models: [{ name: 'qwen2.5:14b' }] }));
+  });
+  await new Promise<void>((r) => ollama.listen(0, '127.0.0.1', r));
+  const baseUrl = `http://127.0.0.1:${(ollama.address() as AddressInfo).port}`;
+
+  const dir = mkdtempSync(join(tmpdir(), 'story-cfg-'));
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const config = new ConfigService({ path: join(dir, 'cfg.json') });
+  const registry = new SwappableRegistry(new ProviderRegistry(new MockProvider()), 'mock');
+  const server = createApiServer({ world, engine: new Engine({ world, providers: registry }), registry, config });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    await fn({ base, baseUrl, registry, config });
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
     await new Promise<void>((r) => ollama.close(() => r()));
     world.close();
     rmSync(dir, { recursive: true, force: true });
   }
-});
+}

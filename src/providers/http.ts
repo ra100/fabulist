@@ -746,16 +746,20 @@ export const PROFILES: Record<string, { narrate: string; mechanics: string; extr
  * Reserved names win a collision: `local` has to keep meaning the two-model
  * Ollama profile even if someone names a provider `local`, and `mock` stays the
  * offline one.
+ *
+ * Provider names are free text, so the table has no prototype: `constructor`
+ * must not read as a reserved built-in, `__proto__` must land as a key rather
+ * than a prototype swap, and looking up a name nobody configured must miss.
  */
 export function profilesFor(
   providers: Record<string, ProviderSpec> = {},
 ): Record<string, { narrate: string; mechanics: string; extract: string }> {
-  const derived: Record<string, { narrate: string; mechanics: string; extract: string }> = {};
+  const profiles: Record<string, { narrate: string; mechanics: string; extract: string }> = Object.create(null);
   for (const key of Object.keys(providers)) {
-    if (key === 'mock' || key in PROFILES) continue;
-    derived[key] = { narrate: key, mechanics: key, extract: key };
+    if (key === 'mock' || Object.hasOwn(PROFILES, key)) continue;
+    profiles[key] = { narrate: key, mechanics: key, extract: key };
   }
-  return { ...derived, ...PROFILES };
+  return Object.assign(profiles, PROFILES);
 }
 
 export const MECHANIC_ROLES = ['classify', 'integrity', 'referee', 'director', 'humanize', 'summarize', 'setup'] as const;
