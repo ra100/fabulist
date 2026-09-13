@@ -193,6 +193,21 @@ test('state, cast, threads and the book all serve from Postgres', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('state uses the selected world record title when metadata is absent', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(
+      db,
+      async (base) => {
+        const state = await get(base, '/api/state');
+        assert.equal(state.status, 200);
+        assert.equal(state.body.worldTitle, 'Saint Verrow');
+      },
+      { seed: false },
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('a locked private story is an actionable MCP state and leaves the transport usable', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(
