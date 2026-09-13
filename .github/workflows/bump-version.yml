@@ -33,25 +33,34 @@ jobs:
         with:
           node-version: 24
 
-      - name: Choose release increment
+      - name: Choose release increment from Conventional Commits
         id: increment
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
-          breaking_title_pattern='^[^:]+!:[[:space:]]'
-          feature_title_pattern='^feat(\([^)]+\))?:[[:space:]]'
-          if [[ "$PR_TITLE" =~ $breaking_title_pattern ]] || [[ "$PR_BODY" == *"BREAKING CHANGE:"* ]]; then
+          messages="$(mktemp)"
+          trap 'rm -f "$messages"' EXIT
+          git log --format=%B "$BASE_SHA..$MERGE_SHA" > "$messages"
+
+          # Conventional Commits maps BREAKING CHANGE to major, feat to minor,
+          # and fix/perf to patch. Other types intentionally do not release.
+          if grep -Eiq '^[a-z]+(\([^)]+\))?!:' "$messages" \
+            || grep -Eiq '^BREAKING[ -]CHANGE:' "$messages"; then
             echo "value=major" >> "$GITHUB_OUTPUT"
-          elif [[ "$PR_TITLE" =~ $feature_title_pattern ]]; then
+          elif grep -Eq '^feat(\([^)]+\))?:' "$messages"; then
             echo "value=minor" >> "$GITHUB_OUTPUT"
-          else
+          elif grep -Eq '^(fix|perf)(\([^)]+\))?:' "$messages"; then
             echo "value=patch" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=none" >> "$GITHUB_OUTPUT"
+            echo "No release: no release-relevant Conventional Commit in $BASE_SHA..$MERGE_SHA"
           fi
 
       - name: Update package version
         id: version
+        if: steps.increment.outputs.value != 'none'
         run: |
           set -euo pipefail
           pnpm version "${{ steps.increment.outputs.value }}" --no-git-tag-version
@@ -59,6 +68,7 @@ jobs:
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
       - name: Commit and tag release
+        if: steps.increment.outputs.value != 'none'
         env:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
@@ -71,6 +81,7 @@ jobs:
           git push origin main "v$VERSION"
 
       - name: Start deployment for the release tag
+        if: steps.increment.outputs.value != 'none'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.value }}
