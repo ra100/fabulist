@@ -18,7 +18,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WorkOS } from '@workos-inc/node';
-import { verifySession, readSessionCookie, SESSION_COOKIE, type AuthConfig } from '../src/auth/config.ts';
+import {
+  verifySession,
+  resolveAuthConfig,
+  parseRequireLoginEnv,
+  readSessionCookie,
+  SESSION_COOKIE,
+  type AuthConfig,
+} from '../src/auth/config.ts';
+import { defaultConfig } from '../src/config/config.ts';
 
 type FakeUser = { id: string; email: string };
 
@@ -156,4 +164,89 @@ test('verifySession still works with no res passed (skips the cookie rewrite rat
   );
   const user = await verifySession(auth, fakeReq('expired-but-refreshable'));
   assert.equal(user?.id, 'user_3');
+});
+
+/**
+ * `resolveAuthConfig`'s `AUTH_REQUIRE_LOGIN` parsing (issue #38): the old
+ * `envOverride === 'true'` comparison made `1`, `TRUE`, and padded variants
+ * silently fall through to "login off," exposing every route on a deployment
+ * whose operator clearly intended the opposite. Now the standard boolean
+ * env-var set is accepted case-insensitively, blank means "unset" (fall back
+ * to `config.requireLogin`), and anything unrecognized throws — fail closed,
+ * because a typo that disables login is the unsafe direction.
+ */
+
+/** A full WorkOS env so a test asserting "login required" gets past the missing-credential checks; construction makes no network calls. */
+const WORKOS_ENV = {
+  WORKOS_API_KEY: 'sk_test_fake',
+  WORKOS_CLIENT_ID: 'client_fake',
+  WORKOS_COOKIE_PASSWORD: 'x'.repeat(32),
+};
+
+test('parseRequireLoginEnv accepts the truthy set case-insensitively, with surrounding whitespace ignored', () => {
+  for (const raw of ['true', 'TRUE', 'True', ' true ', '1', 'YES', 'yes', 'ON', ' on ']) {
+    assert.equal(parseRequireLoginEnv(raw), true, `expected ${JSON.stringify(raw)} to parse as true`);
+  }
+});
+
+test('parseRequireLoginEnv accepts the falsy set case-insensitively, with surrounding whitespace ignored', () => {
+  for (const raw of ['false', 'FALSE', 'False', ' false ', '0', 'NO', 'no', 'OFF', ' off ']) {
+    assert.equal(parseRequireLoginEnv(raw), false, `expected ${JSON.stringify(raw)} to parse as false`);
+  }
+});
+
+test('parseRequireLoginEnv treats an empty or whitespace-only value as "unset"', () => {
+  assert.equal(parseRequireLoginEnv(''), undefined);
+  assert.equal(parseRequireLoginEnv('   '), undefined);
+});
+
+test('parseRequireLoginEnv throws on unrecognized values instead of guessing', () => {
+  for (const raw of ['ture', 'maybe', 'truely', '2', 'true false']) {
+    assert.throws(
+      () => parseRequireLoginEnv(raw),
+      (err: Error) => err.message.includes(JSON.stringify(raw)) && err.message.includes('case-insensitive'),
+      `expected ${JSON.stringify(raw)} to throw with an actionable message`,
+    );
+  }
+});
+
+test('resolveAuthConfig: AUTH_REQUIRE_LOGIN=1 requires login even when config says off (env wins)', () => {
+  const auth = resolveAuthConfig(
+    { ...defaultConfig(), requireLogin: false },
+    { AUTH_REQUIRE_LOGIN: '1', ...WORKOS_ENV },
+  );
+  assert.ok(auth);
+  assert.equal(auth.requireLogin, true);
+});
+
+test('resolveAuthConfig: padded/mixed-case AUTH_REQUIRE_LOGIN=TRUE requires login (the issue #38 regression)', () => {
+  const auth = resolveAuthConfig({ ...defaultConfig() }, { AUTH_REQUIRE_LOGIN: ' TRUE ', ...WORKOS_ENV });
+  assert.ok(auth);
+  assert.equal(auth.requireLogin, true);
+});
+
+test('resolveAuthConfig: explicit falsy env wins over config.requireLogin=true and needs no WorkOS credentials', () => {
+  const auth = resolveAuthConfig({ ...defaultConfig(), requireLogin: true }, { AUTH_REQUIRE_LOGIN: 'off' });
+  assert.equal(auth, null);
+});
+
+test('resolveAuthConfig: blank AUTH_REQUIRE_LOGIN falls back to config.requireLogin (treated as unset)', () => {
+  const on = resolveAuthConfig({ ...defaultConfig(), requireLogin: true }, { AUTH_REQUIRE_LOGIN: '', ...WORKOS_ENV });
+  assert.ok(on);
+  const off = resolveAuthConfig({ ...defaultConfig(), requireLogin: false }, { AUTH_REQUIRE_LOGIN: '   ' });
+  assert.equal(off, null);
+});
+
+test('resolveAuthConfig: env unset keeps the original config-fallback behavior', () => {
+  const on = resolveAuthConfig({ ...defaultConfig(), requireLogin: true }, { ...WORKOS_ENV });
+  assert.ok(on);
+  const offByDefault = resolveAuthConfig(defaultConfig(), {});
+  assert.equal(offByDefault, null);
+});
+
+test('resolveAuthConfig: unrecognized AUTH_REQUIRE_LOGIN value throws fail-closed even when WorkOS credentials are present', () => {
+  assert.throws(
+    () => resolveAuthConfig({ ...defaultConfig() }, { AUTH_REQUIRE_LOGIN: 'ture', ...WORKOS_ENV }),
+    /AUTH_REQUIRE_LOGIN="ture" is not a recognized boolean/,
+  );
 });
