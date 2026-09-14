@@ -1,6 +1,6 @@
 {
   "name": "@ra100/fabulist",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": false,
   "type": "module",
   "description": "A state-first fiction engine: the prose is a view, the world is the graph underneath",
