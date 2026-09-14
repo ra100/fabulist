@@ -47,8 +47,8 @@ function useImageProviderReady(): boolean | null {
   const [ready, setReady] = useState<boolean | null>(null);
   useEffect(() => {
     void api.images
-      .providers()
-      .then((r) => setReady(r.profile !== 'none'))
+      .status()
+      .then((r) => setReady(r.ready))
       .catch(() => setReady(false));
   }, []);
   return ready;
