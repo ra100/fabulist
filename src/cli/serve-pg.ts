@@ -288,7 +288,12 @@ async function boot(): Promise<void> {
     console.log('/mcp not mounted (set MCP_OAUTH_ISSUER or MCP_DEV_TOKEN to enable it)');
   }
 
-  const authConfig = resolveAuthConfig(cfg);
+  // The OAuth redirect URI's origin comes from `AUTH_PUBLIC_ORIGIN` (or this
+  // server's own loopback bind address in local dev) — see
+  // `AuthConfig.callbackOrigin`; login behind a proxy without it refuses to
+  // start rather than build the callback URL from an attacker-controllable
+  // Host header.
+  const authConfig = resolveAuthConfig(cfg, process.env, { host, port });
   console.log(
     authConfig
       ? 'login required (WorkOS AuthKit)'

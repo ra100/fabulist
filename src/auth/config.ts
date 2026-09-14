@@ -40,6 +40,61 @@ export interface AuthConfig {
    * server's LLM provider or spend its ingest budget.
    */
   adminEmails: Set<string>;
+  /**
+   * The canonical origin (scheme + host + port, no path) the OAuth
+   * `redirect_uri` is built from — `${callbackOrigin}/auth/callback`.
+   * Resolved once at startup by `resolveAuthConfig` from `AUTH_PUBLIC_ORIGIN`,
+   * falling back to the server's own loopback bind address in local dev.
+   * Deliberately never derived from an incoming request's `Host` or
+   * `X-Forwarded-*` headers: a redirect URI is where WorkOS will deliver the
+   * user's authorization code, so it is a security boundary — an attacker who
+   * can reach the server directly (bypassing the proxy that would otherwise
+   * fix those headers) could steer the code to their own host by sending
+   * `Host: evil.example`. A configured origin cannot be steered per-request;
+   * the cost is one env var in a real deployment, which such a deployment must
+   * set anyway so its WorkOS app's allowed callback URL matches.
+   */
+  callbackOrigin: string;
+}
+
+/** Loopback hosts whose plain-`http:` origin is safe as a callback URL without TLS — anything else must be `https`, mirroring `src/mcp/auth.ts`'s own rule for issuers. */
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
+/**
+ * Validates and normalizes `AUTH_PUBLIC_ORIGIN` into a bare origin
+ * (scheme + host + port, no path) for `AuthConfig.callbackOrigin`. Fails
+ * loudly rather than guessing — the same posture as `buildMcpAuth` refusing
+ * to invent an issuer URL: a subtly wrong callback origin does not crash, it
+ * just breaks login at WorkOS's own URL-match check, which is harder to
+ * diagnose than a startup error.
+ */
+function canonicalOrigin(raw: string): string {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`AUTH_PUBLIC_ORIGIN must be an absolute URL (e.g. https://fabulist.example.com), got ${raw}`);
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`AUTH_PUBLIC_ORIGIN must use http or https, got ${u.protocol}//`);
+  }
+  if (u.pathname !== '/' || u.search !== '' || u.hash !== '') {
+    throw new Error(
+      `AUTH_PUBLIC_ORIGIN must be a bare origin (scheme + host + port, no path), got ${raw} — the callback route is always /auth/callback at the server root.`,
+    );
+  }
+  if (u.protocol === 'http:' && !isLoopbackHost(u.hostname)) {
+    throw new Error(
+      `AUTH_PUBLIC_ORIGIN uses plain http for a non-loopback host (${u.hostname}): a redirect URI over plain http lets anyone on the path read the authorization code. Use https for public deployments, or http only on loopback (e.g. http://127.0.0.1:4317).`,
+    );
+  }
+  if (u.protocol === 'http:' && isLoopbackHost(u.hostname) && !u.port) {
+    throw new Error(`AUTH_PUBLIC_ORIGIN http://${u.hostname} has no port, and the dev server does not listen on 80. Include the port, e.g. http://127.0.0.1:4317.`);
+  }
+  const host = u.hostname.includes(':') ? `[${u.hostname}]` : u.hostname;
+  return `${u.protocol}//${host}${u.port ? `:${u.port}` : ''}`;
 }
 
 /**
@@ -57,8 +112,21 @@ export interface AuthConfig {
  * `fabulist.config.json`/its `.local` sibling) is the fallback for someone
  * who wants this behind a config toggle rather than an env var, per the
  * direct request that added this.
+ *
+ * `bind` is the address this server process actually listens on (`--host`/
+ * `--port`, or their env equivalents). It feeds only the callback-origin
+ * fallback below: with no `AUTH_PUBLIC_ORIGIN`, a loopback bind yields
+ * `http://<bind>/auth/callback` (the local-dev default, header-free), while a
+ * non-loopback bind throws — there is no safe default for where `/auth/callback`
+ * lives on a public interface, and the one obvious candidate (the request's
+ * own `Host` header) is attacker-controllable, which is exactly what the
+ * configured origin exists to replace. See `AuthConfig.callbackOrigin`.
  */
-export function resolveAuthConfig(config: Config, env: Record<string, string | undefined> = process.env): AuthConfig | null {
+export function resolveAuthConfig(
+  config: Config,
+  env: Record<string, string | undefined> = process.env,
+  bind: { host: string; port: number } = { host: '127.0.0.1', port: 4317 },
+): AuthConfig | null {
   const envOverride = env.AUTH_REQUIRE_LOGIN;
   const requireLogin = envOverride !== undefined ? envOverride === 'true' : (config.requireLogin ?? false);
   if (!requireLogin) return null;
@@ -94,12 +162,31 @@ export function resolveAuthConfig(config: Config, env: Record<string, string | u
       .filter(Boolean),
   );
 
+  // The OAuth redirect_uri's origin — see `AuthConfig.callbackOrigin` for why
+  // this is config, never request headers. `AUTH_PUBLIC_ORIGIN` wins when set
+  // (the real-deployment case: a domain behind a proxy); otherwise a loopback
+  // bind falls back to its own address (local dev, zero config), and anything
+  // else refuses to start rather than guess.
+  const publicOrigin = env.AUTH_PUBLIC_ORIGIN;
+  let callbackOrigin: string;
+  if (publicOrigin !== undefined && publicOrigin.trim() !== '') {
+    callbackOrigin = canonicalOrigin(publicOrigin.trim());
+  } else if (isLoopbackHost(bind.host)) {
+    const host = bind.host.includes(':') ? `[${bind.host}]` : bind.host;
+    callbackOrigin = `http://${host}:${bind.port}`;
+  } else {
+    throw new Error(
+      `AUTH_REQUIRE_LOGIN is on but AUTH_PUBLIC_ORIGIN is not set, and --host=${bind.host} is not a loopback address: there is no safe default for where /auth/callback lives. Building the redirect URI from the request's Host header would make it attacker-controllable (Host-header injection), which AUTH_PUBLIC_ORIGIN exists to prevent. Set it to the origin browsers actually reach, e.g. AUTH_PUBLIC_ORIGIN=https://fabulist.example.com.`,
+    );
+  }
+
   return {
     requireLogin: true,
     workos: new WorkOS(apiKey!, { clientId: clientId! }),
     clientId: clientId!,
     cookiePassword: cookiePassword!,
     adminEmails,
+    callbackOrigin,
   };
 }
 
