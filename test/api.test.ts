@@ -16,6 +16,8 @@ import { HistoryStore } from '../src/store/history.ts';
 import { createApiServer } from '../src/server/api.ts';
 import type { AuthConfig } from '../src/auth/config.ts';
 import { SESSION_COOKIE } from '../src/auth/config.ts';
+import { MockImageProvider } from '../src/providers/mockImage.ts';
+import { SwappableImageRegistry } from '../src/providers/image.ts';
 
 async function withServer(fn: (base: string, world: World) => Promise<void>) {
   const world = World.open(':memory:');
@@ -1170,6 +1172,28 @@ async function withLoginServer(
   }
 }
 
+async function withLoginImageServer(
+  usersByCookie: Record<string, { id: string; email: string }>,
+  fn: (base: string) => Promise<void>,
+  adminEmails: string[] = [],
+) {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const currentStory = new CurrentStory(world.db, world.storyId);
+  const engine = new Engine({ world: () => currentStory.world(), providers: new ProviderRegistry(new MockProvider()) });
+  const authConfig = fakeAuthConfig(usersByCookie, adminEmails);
+  const imageRegistry = new SwappableImageRegistry(new MockImageProvider(), 'mock');
+  const server = createApiServer({ world: () => currentStory.world(), engine, currentStory, authConfig, imageRegistry });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    world.close();
+  }
+}
+
 test('GET /api/stories with login on returns only the calling user\u2019s own stories, never another\u2019s', async () => {
   await withLoginServer(
     { 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' }, 'bob-cookie': { id: 'user_bob', email: 'bob@x.com' } },
@@ -1390,6 +1414,17 @@ test('every system-settings route 403s a signed-in non-admin', async () => {
       });
       assert.equal(res.status, 403, `${method} ${path} should 403 a non-admin, got ${res.status}`);
     }
+  });
+});
+
+test('image provider readiness is visible to a signed-in non-admin without exposing provider probes', async () => {
+  await withLoginImageServer({ 'alice-cookie': { id: 'user_alice', email: 'alice@x.com' } }, async (base) => {
+    const status = await fetch(`${base}/api/images/status`, { headers: cookieHeader('alice-cookie') });
+    assert.equal(status.status, 200);
+    assert.deepEqual(await status.json(), { profile: 'mock', ready: true });
+
+    const providers = await fetch(`${base}/api/images/providers`, { headers: cookieHeader('alice-cookie') });
+    assert.equal(providers.status, 403);
   });
 });
 

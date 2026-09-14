@@ -889,6 +889,12 @@ function parseVisualStyle(v: unknown): VisualStyle | undefined {
   return typeof v === 'string' && (VISUAL_STYLES as string[]).includes(v) ? (v as VisualStyle) : undefined;
 }
 
+/** User-visible illustration availability, separate from the admin-only provider probe below. */
+route('GET', '/api/images/status', async (_req, res, { imageRegistry }) => {
+  const profile = imageRegistry?.profile() ?? 'none';
+  send(res, 200, { profile, ready: profile !== 'none' });
+});
+
 /** Which image providers are usable here, mirroring `/api/providers` for text. Admin-only: this reports and lets a caller act on server-wide provider config, not anything scoped to a story. */
 route('GET', '/api/images/providers', async (_req, res, { imageRegistry, config, user, authConfig }) => {
   if (!requireAdmin(res, authConfig, user)) return;
