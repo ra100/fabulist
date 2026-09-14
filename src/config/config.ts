@@ -47,8 +47,9 @@ export interface Config {
    * reach it at all, which only matters once the server is reachable by
    * more than the one person running it.
    *
-   * `AUTH_REQUIRE_LOGIN=true`/`false` in the environment overrides this —
-   * see `src/auth/config.ts` — because a real deployment
+   * `AUTH_REQUIRE_LOGIN` in the environment overrides this (true/false,
+   * 1/0, yes/no, on/off — case-insensitive; see `parseRequireLoginEnv` in
+   * `src/auth/config.ts`) — because a real deployment
    * (fabulist.rast.io) should not depend on a JSON file nobody re-reads at
    * deploy time to stay correctly configured; env is what CI/the deploy
    * script actually sets.

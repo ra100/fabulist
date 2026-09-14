@@ -121,14 +121,21 @@ function canonicalOrigin(raw: string): string {
  * lives on a public interface, and the one obvious candidate (the request's
  * own `Host` header) is attacker-controllable, which is exactly what the
  * configured origin exists to replace. See `AuthConfig.callbackOrigin`.
+ *
+ * The env value is parsed by `parseRequireLoginEnv`: any of true/1/yes/on
+ * or false/0/no/off (case-insensitive, surrounding whitespace ignored) —
+ * so an operator who writes `AUTH_REQUIRE_LOGIN=1` or `TRUE` does not get a
+ * silently-open API. Empty means "unset" (fall back to config), and any
+ * other value throws rather than guessing, because the two wrong answers
+ * are asymmetric: a typo that disables login exposes every route.
  */
 export function resolveAuthConfig(
   config: Config,
   env: Record<string, string | undefined> = process.env,
   bind: { host: string; port: number } = { host: '127.0.0.1', port: 4317 },
 ): AuthConfig | null {
-  const envOverride = env.AUTH_REQUIRE_LOGIN;
-  const requireLogin = envOverride !== undefined ? envOverride === 'true' : (config.requireLogin ?? false);
+  const parsedEnv = env.AUTH_REQUIRE_LOGIN !== undefined ? parseRequireLoginEnv(env.AUTH_REQUIRE_LOGIN) : undefined;
+  const requireLogin = parsedEnv ?? config.requireLogin ?? false;
   if (!requireLogin) return null;
 
   const apiKey = env.WORKOS_API_KEY;
@@ -188,6 +195,37 @@ export function resolveAuthConfig(
     adminEmails,
     callbackOrigin,
   };
+}
+
+/**
+ * The boolean spellings `AUTH_REQUIRE_LOGIN` accepts, compared
+ * case-insensitively after trimming surrounding whitespace — the set every
+ * common env-var consumer (shell, docker, systemd) already treats as a
+ * boolean, so `1`, `TRUE`, and ` True ` all mean "yes" instead of silently
+ * falling through to "no."
+ */
+const REQUIRE_LOGIN_TRUTHY = new Set(['true', '1', 'yes', 'on']);
+const REQUIRE_LOGIN_FALSY = new Set(['false', '0', 'no', 'off']);
+
+/**
+ * Parses one `AUTH_REQUIRE_LOGIN` value. Returns `undefined` for an empty
+ * (or whitespace-only) string — the universal "set but blank" shape of an
+ * unfilled `.env` placeholder, which must fall back to
+ * `config.requireLogin` rather than overriding it — and throws for anything
+ * outside the accepted set. Throwing is deliberate fail-closed behavior: a
+ * typo like `ture` used to be indistinguishable from "login off," leaving
+ * every route open on a deployment whose operator clearly intended the
+ * opposite; refusing to start with an actionable message is the only
+ * reading that can't expose the API.
+ */
+export function parseRequireLoginEnv(raw: string): boolean | undefined {
+  const value = raw.trim().toLowerCase();
+  if (value === '') return undefined;
+  if (REQUIRE_LOGIN_TRUTHY.has(value)) return true;
+  if (REQUIRE_LOGIN_FALSY.has(value)) return false;
+  throw new Error(
+    `AUTH_REQUIRE_LOGIN=${JSON.stringify(raw)} is not a recognized boolean. Accepted: true/false, 1/0, yes/no, on/off (case-insensitive). Refusing to start rather than guess whether login should be required.`,
+  );
 }
 
 /** The sealed session cookie's name. `httpOnly`/`sameSite=lax`/`secure` (when the request looks like it arrived over TLS) — a plain server-set cookie, not a client-readable token. */
