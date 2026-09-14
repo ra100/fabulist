@@ -452,6 +452,11 @@ export interface ImageProvidersReport {
   results: ImageProbeResult[];
 }
 
+export interface ImageProviderStatus {
+  profile: string;
+  ready: boolean;
+}
+
 export interface ProvidersReport {
   profile: string;
   results: ProbeResult[];
@@ -634,6 +639,7 @@ export const REQUIRED_ROUTES = [
   'PUT /api/story/sources',
   'PUT /api/worlds/:slug/title',
   'DELETE /api/worlds/:slug',
+  'GET /api/images/status',
   'GET /api/images/providers',
   'POST /api/images/profile',
   'POST /api/rollback',
@@ -807,6 +813,7 @@ export const api = {
     imageUrl: (id: string) => withStoryId(`/api/illustration/${encodeURIComponent(id)}/image`),
   },
   images: {
+    status: () => req<ImageProviderStatus>('/images/status'),
     providers: () => req<ImageProvidersReport>('/images/providers'),
     setProfile: (profile: string | null) => post<{ profile: string; ok: boolean; notes: string[] }>('/images/profile', { profile }),
   },
