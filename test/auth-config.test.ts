@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WorkOS } from '@workos-inc/node';
-import { verifySession, SESSION_COOKIE, type AuthConfig } from '../src/auth/config.ts';
+import { verifySession, readSessionCookie, SESSION_COOKIE, type AuthConfig } from '../src/auth/config.ts';
 
 type FakeUser = { id: string; email: string };
 
@@ -82,6 +82,16 @@ test('verifySession returns null with no cookie at all — never calls WorkOS', 
   );
   const user = await verifySession(auth, fakeReq(undefined));
   assert.equal(user, null);
+});
+
+test('readSessionCookie ignores malformed cookie values instead of throwing', () => {
+  const req = { headers: { cookie: `broken=%; ${SESSION_COOKIE}=sealed-cookie` } } as unknown as IncomingMessage;
+  assert.equal(readSessionCookie(req), 'sealed-cookie');
+});
+
+test('readSessionCookie treats a malformed session cookie as absent', () => {
+  const req = { headers: { cookie: `${SESSION_COOKIE}=%` } } as unknown as IncomingMessage;
+  assert.equal(readSessionCookie(req), undefined);
 });
 
 test('verifySession returns the user on a still-valid session — no refresh attempted', async () => {
