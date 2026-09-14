@@ -827,19 +827,39 @@ test('/api/health answers 503 when the database is gone', async (t) => {
     });
     await listen(server);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // The full failure belongs in the server log, not the response body — this route
+    // answers before the session gate, so a raw driver message would reach anyone who
+    // can reach the port. Capture console.error to prove the detail still lands there.
+    const logged: unknown[][] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+      origError(...args);
+    };
     try {
       const res = await get(base, '/api/health');
       // 503, not 200 — this is the bit the old `/api/meta` check could not express.
       assert.equal(res.status, 503);
       assert.equal(res.body.ok, false);
       assert.equal(res.body.database, 'unreachable');
-      assert.ok(res.body.error.length > 0, 'the reason belongs in the response');
+      // Bounded and generic: a fixed reason, never the driver's own words.
+      assert.equal(res.body.error, 'database unreachable');
+      const body = JSON.stringify(res.body);
+      assert.ok(!body.includes('ECONNREFUSED'), 'raw errno text must not reach unauthenticated callers');
+      assert.ok(!body.includes('127.0.0.1:1'), 'connection detail must not reach unauthenticated callers');
       // And `/api/meta` still answers, which is exactly why it was the wrong probe.
       assert.equal((await get(base, '/api/meta')).status, 200);
     } finally {
+      console.error = origError;
       await new Promise<void>((r) => server.close(() => r()));
       await dead.close().catch(() => {});
     }
+    // ...and the operator still gets the real error in the log.
+    const flat = logged
+      .flat()
+      .map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a)))
+      .join(' ');
+    assert.ok(flat.includes('ECONNREFUSED') || flat.includes('127.0.0.1:1'), 'full error is logged server-side');
   });
   if (!ran) t.skip('no Postgres configured');
 });
