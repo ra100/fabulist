@@ -305,9 +305,13 @@ function route(method: string, path: string, handler: Handler): void {
  * Answered by the dispatcher *before* the session gate, so an unauthenticated
  * healthcheck gets a real answer rather than a 401 it would have to interpret as
  * success. Registered here too, so it appears in `/api/meta`'s route list and stays
- * discoverable; the dispatcher's copy is what actually runs. Returns 503 with the
- * reason when the database is unreachable, which is what makes a healthcheck, a
- * restart policy and a load balancer all behave correctly.
+ * discoverable; the dispatcher's copy is what actually runs. Returns 503 with a
+ * bounded, generic reason when the database is unreachable — which is what makes a
+ * healthcheck, a restart policy and a load balancer all behave correctly — because
+ * this route answers before the session gate, so anything in the body reaches anyone
+ * who can reach the port: a raw driver message would hand unauthenticated callers
+ * hostnames, ports and connection detail. The full error goes to the server log,
+ * where an operator is already looking when the healthcheck starts failing.
  */
 route('GET', '/api/health', async (_req, res, { db }) => {
   const started = Date.now();
@@ -315,10 +319,11 @@ route('GET', '/api/health', async (_req, res, { db }) => {
     await db.query('SELECT 1');
     send(res, 200, { ok: true, database: 'reachable', ms: Date.now() - started });
   } catch (err) {
+    console.error('[health] database unreachable:', err);
     send(res, 503, {
       ok: false,
       database: 'unreachable',
-      error: err instanceof Error ? err.message : String(err),
+      error: 'database unreachable',
     });
   }
 });
@@ -2558,17 +2563,20 @@ export function createApiServer(opts: ServerOptions) {
     // and a probe that has to treat 401 as success cannot distinguish "up" from
     // "unauthorised", which is exactly the ambiguity that made the previous
     // `/api/meta` healthcheck useless after this migration. It exposes one bit
-    // (is the database reachable) and no data, so it is safe to answer unauthenticated.
+    // (is the database reachable) and no data, so it is safe to answer unauthenticated:
+    // the failure reason is a fixed string, and the real error — which can carry
+    // hostnames, ports and connection detail — goes only to the server log.
     if (url.pathname === '/api/health' && req.method === 'GET') {
       const started = Date.now();
       try {
         await db.query('SELECT 1');
         return send(res, 200, { ok: true, database: 'reachable', ms: Date.now() - started });
       } catch (err) {
+        console.error('[health] database unreachable:', err);
         return send(res, 503, {
           ok: false,
           database: 'unreachable',
-          error: err instanceof Error ? err.message : String(err),
+          error: 'database unreachable',
         });
       }
     }
