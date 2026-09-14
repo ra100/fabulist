@@ -16,11 +16,25 @@ import { clearSessionCookie, setSessionCookie, SESSION_MAX_AGE_SECONDS } from '.
 
 const PKCE_COOKIE = 'fabulist_pkce';
 
-/** Where `getAuthorizationUrl`'s own `redirect_uri` needs to point — this server's own `/auth/callback`, at whatever host the request actually arrived on, not a hardcoded guess. Mirrors the reasoning in `src/mcp/auth.ts`/`serve.ts` about `mcpResourceUrl`: the URL a redirect names must be one the browser can actually follow back to, which depends on how this server is being reached (localhost in dev, a real domain behind a proxy in production) and cannot be inferred once and cached. */
-function callbackUrl(req: IncomingMessage): string {
-  const proto = (req.headers['x-forwarded-proto'] as string | undefined) ?? 'http';
-  const host = req.headers.host ?? '127.0.0.1';
-  return `${proto}://${host}/auth/callback`;
+/**
+ * Where `getAuthorizationUrl`'s own `redirect_uri` needs to point — this
+ * server's own `/auth/callback`, at the origin `resolveAuthConfig` resolved
+ * once at startup (`AUTH_PUBLIC_ORIGIN`, or a loopback bind fallback). The
+ * old version derived it from this request's `Host`/`X-Forwarded-Proto`
+ * headers, on the reasoning that "the URL a redirect names must be one the
+ * browser can actually follow back to." That reasoning is sound but the
+ * headers are not: a redirect URI is where WorkOS will deliver the user's
+ * authorization code, so it is a security boundary, and an attacker who can
+ * reach this server directly (bypassing the proxy that would otherwise fix
+ * `Host`/`X-Forwarded-*`) could have steered the code to their own host with
+ * `Host: evil.example`. The configured origin makes the same "reachable by
+ * the browser" guarantee without per-request input — how this server is
+ * reached (localhost in dev, a real domain behind a proxy in production) is
+ * now deployment configuration rather than something inferred from each
+ * request. See `AuthConfig.callbackOrigin` for the full rationale.
+ */
+function callbackUrl(auth: AuthConfig): string {
+  return `${auth.callbackOrigin}/auth/callback`;
 }
 
 function setPkceCookie(res: ServerResponse, codeVerifier: string, secure: boolean): void {
@@ -44,13 +58,18 @@ function clearPkceCookie(res: ServerResponse): void {
   res.setHeader('Set-Cookie', `${PKCE_COOKIE}=; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
-/** `GET /auth/login` — redirects to AuthKit's hosted sign-in. */
-export async function handleLogin(auth: AuthConfig, req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const secure = req.headers['x-forwarded-proto'] === 'https';
+/** `GET /auth/login` — redirects to AuthKit's hosted sign-in. Takes no request: everything it needs (client id, callback origin) is startup configuration, which is the point — nothing on this route may be derived from attacker-controllable request headers. */
+export async function handleLogin(auth: AuthConfig, res: ServerResponse): Promise<void> {
+  // `Secure` follows the configured origin rather than `X-Forwarded-Proto`:
+  // a header an attacker can set is not a basis for a cookie's security
+  // flags either (same reasoning as the redirect URI above). An https
+  // deployment marks the PKCE cookie Secure; a plain-http loopback dev
+  // server does not, since browsers drop Secure cookies over http.
+  const secure = auth.callbackOrigin.startsWith('https://');
   const { url, codeVerifier } = await auth.workos.userManagement.getAuthorizationUrlWithPKCE({
     clientId: auth.clientId,
     provider: 'authkit',
-    redirectUri: callbackUrl(req),
+    redirectUri: callbackUrl(auth),
   });
   setPkceCookie(res, codeVerifier, secure);
   res.writeHead(302, { location: url });

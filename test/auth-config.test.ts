@@ -55,6 +55,7 @@ function authConfigWith(session: ReturnType<typeof fakeSession>): AuthConfig {
     clientId: 'client_test',
     cookiePassword: 'x'.repeat(32),
     adminEmails: new Set(),
+    callbackOrigin: 'http://127.0.0.1:4317',
     workos: {
       userManagement: { loadSealedSession: () => session },
     } as unknown as WorkOS,

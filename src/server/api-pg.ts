@@ -2525,7 +2525,7 @@ export function createApiServer(opts: ServerOptions) {
     // attempt looped. Clearing that setting fixed it; this alias is only
     // still here because it is independently useful.
     if (authConfig && (url.pathname === '/auth/login' || url.pathname === '/login')) {
-      await handleLogin(authConfig, req, res);
+      await handleLogin(authConfig, res);
       return;
     }
     if (authConfig && url.pathname === '/auth/callback') {

@@ -180,9 +180,13 @@ if (mcpAuth && !mcpResourceUrl) {
  * nobody asked for. `resolveAuthConfig` throws rather than silently running
  * without login when it *was* requested but the WorkOS env vars are
  * missing — a deployment that meant to require login and quietly didn't is
- * a much worse failure than refusing to start.
+ * a much worse failure than refusing to start. The OAuth redirect URI's
+ * origin comes from `AUTH_PUBLIC_ORIGIN` (or this server's own loopback bind
+ * address in local dev) — see `AuthConfig.callbackOrigin`; login behind a
+ * proxy without it refuses to start rather than build the callback URL from
+ * an attacker-controllable Host header.
  */
-const authConfig = resolveAuthConfig(cfg);
+const authConfig = resolveAuthConfig(cfg, process.env, { host, port });
 console.log(
   authConfig ? 'login required (WorkOS AuthKit)' : 'login not required \u2014 every route is open (set AUTH_REQUIRE_LOGIN=true to change this)',
 );

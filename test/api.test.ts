@@ -1133,6 +1133,7 @@ function fakeAuthConfig(usersByCookie: Record<string, { id: string; email: strin
     clientId: 'client_test',
     cookiePassword: 'x'.repeat(32),
     adminEmails: new Set(adminEmails.map((e) => e.toLowerCase())),
+    callbackOrigin: 'http://127.0.0.1:4317',
     workos: {
       userManagement: {
         loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
