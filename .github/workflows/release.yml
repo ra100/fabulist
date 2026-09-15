@@ -96,6 +96,7 @@ jobs:
           MCP_OAUTH_AUDIENCE: ${{ vars.MCP_OAUTH_AUDIENCE }}
           MCP_RESOURCE_URL: ${{ vars.MCP_RESOURCE_URL }}
           AUTH_REQUIRE_LOGIN: ${{ vars.AUTH_REQUIRE_LOGIN }}
+          AUTH_PUBLIC_ORIGIN: ${{ vars.AUTH_PUBLIC_ORIGIN }}
           AUTH_ADMIN_EMAILS: ${{ vars.AUTH_ADMIN_EMAILS }}
           WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
           WORKOS_CLIENT_ID: ${{ vars.WORKOS_CLIENT_ID }}
@@ -143,7 +144,7 @@ jobs:
           # which is still the safe direction; it just becomes possible to set.
           render_env() {
             for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL \
-                        AUTH_REQUIRE_LOGIN AUTH_ADMIN_EMAILS \
+                        AUTH_REQUIRE_LOGIN AUTH_PUBLIC_ORIGIN AUTH_ADMIN_EMAILS \
                         WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD \
                         FABULIST_PG POSTGRES_PASSWORD COMPOSE_PROFILES; do
               value="${!name:-}"
