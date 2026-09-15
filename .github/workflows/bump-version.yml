@@ -58,27 +58,52 @@ jobs:
             echo "No release: no release-relevant Conventional Commit in $BASE_SHA..$MERGE_SHA"
           fi
 
-      - name: Update package version
+      - name: Bump, commit, tag, and push (retrying on a racing merge)
         id: version
         if: steps.increment.outputs.value != 'none'
-        run: |
-          set -euo pipefail
-          pnpm version "${{ steps.increment.outputs.value }}" --no-git-tag-version
-          version="$(node -p "require('./package.json').version")"
-          echo "value=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Commit and tag release
-        if: steps.increment.outputs.value != 'none'
         env:
-          VERSION: ${{ steps.version.outputs.value }}
+          INCREMENT: ${{ steps.increment.outputs.value }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json pnpm-lock.yaml
-          git commit -m "chore(release): bump version to $VERSION"
-          git tag -a "v$VERSION" -m "Release v$VERSION"
-          git push origin main "v$VERSION"
+
+          # The `concurrency` group above only serializes the common case.
+          # Two PRs merged within the same instant can still leave this job's
+          # checkout stale by the time it pushes (observed: both jobs bump
+          # from the same base version and race to push/tag `vX.Y.Z`, and the
+          # loser fails with "tag already exists" or a rejected push). So
+          # re-sync to the tip of `main` and recompute the version from *that*
+          # right before each attempt, instead of trusting the checkout made
+          # at job start.
+          attempt=1
+          max_attempts=5
+          while true; do
+            git fetch origin main
+            git reset --hard origin/main
+
+            pnpm version "$INCREMENT" --no-git-tag-version
+            version="$(node -p "require('./package.json').version")"
+
+            git add package.json pnpm-lock.yaml
+            git commit -m "chore(release): bump version to $version"
+            git tag -a "v$version" -m "Release v$version"
+
+            if git push origin main "v$version"; then
+              echo "value=$version" >> "$GITHUB_OUTPUT"
+              break
+            fi
+
+            git tag -d "v$version"
+            git reset --hard HEAD~1
+
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "Giving up after $attempt attempts racing another merge's version bump" >&2
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep "$(( (RANDOM % 5) + 1 ))"
+          done
 
       - name: Start deployment for the release tag
         if: steps.increment.outputs.value != 'none'
