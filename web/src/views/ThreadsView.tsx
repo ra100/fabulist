@@ -1,14 +1,36 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { api, type State, type Thread } from '../api.ts';
 
 function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(thread.title);
   const [tension, setTension] = useState(thread.tension);
+  // Drag ticks that land while a save is in flight; only the latest is kept.
+  const pendingTension = useRef<number | null>(null);
 
-  async function setStatus(status: Thread['status']) {
-    await api.updateThread(thread.id, { status });
-    onChanged();
+  function flushPending() {
+    const next = pendingTension.current;
+    if (next === null) return;
+    pendingTension.current = null;
+    void run(save({ tension: next }));
+  }
+
+  const { busy, error, run, inFlight } = useAction(flushPending);
+
+  function save(patch: Partial<Thread>) {
+    return async () => {
+      await api.updateThread(thread.id, patch);
+      onChanged();
+    };
+  }
+
+  function changeTension(value: number) {
+    setTension(value);
+    if (inFlight.current) {
+      pendingTension.current = value;
+      return;
+    }
+    void run(save({ tension: value }));
   }
 
   return (
@@ -20,12 +42,12 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
             value={title}
             autoFocus
             onChange={(event) => setTitle(event.target.value)}
-            onBlur={async () => {
+            onBlur={() => {
               setEditing(false);
-              if (title.trim() && title.trim() !== thread.title) {
-                await api.updateThread(thread.id, { title: title.trim() });
+              const next = title.trim();
+              if (next && next !== thread.title) {
+                void run(save({ title: next }));
               }
-              onChanged();
             }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') (event.target as HTMLInputElement).blur();
@@ -35,6 +57,7 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
           <button
             className="name sm grow as-h2"
             title="click to retitle"
+            disabled={busy}
             onClick={() => setEditing(true)}
             style={{ cursor: 'text', textAlign: 'left' }}
           >
@@ -44,19 +67,24 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
         <span className="tag">{thread.status}</span>
         {thread.status === 'open' ? (
           <>
-            <button title="mark resolved" onClick={() => setStatus('resolved')}>
+            <button title="mark resolved" disabled={busy} onClick={() => void run(save({ status: 'resolved' }))}>
               resolve
             </button>
-            <button title="mark abandoned" onClick={() => setStatus('abandoned')}>
+            <button title="mark abandoned" disabled={busy} onClick={() => void run(save({ status: 'abandoned' }))}>
               abandon
             </button>
           </>
         ) : (
-          <button title="reopen this thread" onClick={() => setStatus('open')}>
+          <button title="reopen this thread" disabled={busy} onClick={() => void run(save({ status: 'open' }))}>
             reopen
           </button>
         )}
       </div>
+      {error ? (
+        <div className="small warn" style={{ margin: '0 0 var(--s3)' }}>
+          {error}
+        </div>
+      ) : null}
       <div className="small dim" style={{ margin: '5px 0 var(--s4)', maxWidth: '44rem' }}>
         {thread.stakes}
       </div>
@@ -72,12 +100,7 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
             step="0.05"
             value={tension}
             aria-label={`tension for ${thread.title}`}
-            onChange={async (event) => {
-              const next = Number(event.target.value);
-              setTension(next);
-              await api.updateThread(thread.id, { tension: next });
-              onChanged();
-            }}
+            onChange={(event) => changeTension(Number(event.target.value))}
           />
         </div>
         <span className="mono" style={{ width: 34, textAlign: 'right' }}>
@@ -96,6 +119,33 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
   );
 }
 
+// Shared shape for mutations: a single-flight guard (ref, since state reads
+// inside async continuations would be stale), a busy flag to disable the
+// control while in flight, an error line for surfaced failures, and an
+// optional settled hook that runs once the guard is released.
+function useAction(onSettled?: () => void) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+
+  async function run(action: () => Promise<void>) {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    inFlight.current = false;
+    setBusy(false);
+    onSettled?.();
+  }
+
+  return { busy, error, run, inFlight };
+}
+
 export function ThreadsView({ state, onChanged }: { state: State | null; onChanged: () => void }) {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [text, setText] = useState('');
@@ -103,11 +153,54 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
   const [diff, setDiff] = useState<Array<[string, string]> | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [newStakes, setNewStakes] = useState('');
+  const create = useAction();
+  const direct = useAction();
+  const retire = useAction();
 
   const load = useCallback(async () => setThreads(await api.threads()), []);
   useEffect(() => {
     void load();
   }, [load]);
+
+  function openThread() {
+    return create.run(async () => {
+      await api.createThread(newTitle.trim(), newStakes.trim());
+      setNewTitle('');
+      setNewStakes('');
+      await load();
+      onChanged();
+    });
+  }
+
+  function applyDirective() {
+    return direct.run(async () => {
+      const response = await api.addDirective(text, strength);
+      const entries: Array<[string, string]> = [];
+      if (response.diff.raisedThreadTitles.length) {
+        entries.push(['raised', response.diff.raisedThreadTitles.join('; ')]);
+      }
+      if (response.diff.loweredThreads.length) {
+        entries.push(['lowered', `${response.diff.loweredThreads.length} thread(s)`]);
+      }
+      if (response.diff.supersededConsequences.length) {
+        entries.push(['superseded', `${response.diff.supersededConsequences.length} pending consequence(s)`]);
+      }
+      if (response.diff.retimedConsequences.length) {
+        entries.push(['retimed', `${response.diff.retimedConsequences.length} consequence(s)`]);
+      }
+      setDiff(entries.length ? entries : [['no change', 'nothing needed moving']]);
+      setText('');
+      await load();
+      onChanged();
+    });
+  }
+
+  function retireDirective(directiveId: string) {
+    return retire.run(async () => {
+      await api.retireDirective(directiveId);
+      onChanged();
+    });
+  }
 
   return (
     <div className="main">
@@ -153,17 +246,16 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
           <button
             className="primary"
             style={{ marginTop: 'var(--s2)' }}
-            disabled={!newTitle.trim()}
-            onClick={async () => {
-              await api.createThread(newTitle.trim(), newStakes.trim());
-              setNewTitle('');
-              setNewStakes('');
-              await load();
-              onChanged();
-            }}
+            disabled={create.busy || !newTitle.trim()}
+            onClick={() => void openThread()}
           >
-            open thread
+            {create.busy ? 'opening…' : 'open thread'}
           </button>
+          {create.error ? (
+            <div className="small warn" style={{ marginTop: 'var(--s2)' }}>
+              {create.error}
+            </div>
+          ) : null}
         </div>
 
         <div className="card">
@@ -180,33 +272,15 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
               <option value="push">push</option>
               <option value="mandate">mandate</option>
             </select>
-            <button
-              className="primary"
-              disabled={!text.trim()}
-              onClick={async () => {
-                const response = await api.addDirective(text, strength);
-                const entries: Array<[string, string]> = [];
-                if (response.diff.raisedThreadTitles.length) {
-                  entries.push(['raised', response.diff.raisedThreadTitles.join('; ')]);
-                }
-                if (response.diff.loweredThreads.length) {
-                  entries.push(['lowered', `${response.diff.loweredThreads.length} thread(s)`]);
-                }
-                if (response.diff.supersededConsequences.length) {
-                  entries.push(['superseded', `${response.diff.supersededConsequences.length} pending consequence(s)`]);
-                }
-                if (response.diff.retimedConsequences.length) {
-                  entries.push(['retimed', `${response.diff.retimedConsequences.length} consequence(s)`]);
-                }
-                setDiff(entries.length ? entries : [['no change', 'nothing needed moving']]);
-                setText('');
-                await load();
-                onChanged();
-              }}
-            >
-              apply
+            <button className="primary" disabled={direct.busy || !text.trim()} onClick={() => void applyDirective()}>
+              {direct.busy ? 'applying…' : 'apply'}
             </button>
           </div>
+          {direct.error ? (
+            <div className="small warn" style={{ marginTop: 'var(--s2)' }}>
+              {direct.error}
+            </div>
+          ) : null}
           {diff ? (
             <div style={{ marginTop: 'var(--s4)' }}>
               <h3 className="eyebrow rule">recalculated</h3>
@@ -233,15 +307,18 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
                 <button
                   aria-label={`retire directive: ${directive.text}`}
                   title="retire this directive"
-                  onClick={async () => {
-                    await api.retireDirective(directive.id);
-                    onChanged();
-                  }}
+                  disabled={retire.busy}
+                  onClick={() => void retireDirective(directive.id)}
                 >
                   ×
                 </button>
               </div>
             ))}
+            {retire.error ? (
+              <div className="small warn" style={{ marginTop: 'var(--s2)' }}>
+                {retire.error}
+              </div>
+            ) : null}
           </div>
         ) : null}
       </aside>
