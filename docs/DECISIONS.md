@@ -7,7 +7,7 @@ Detailed rationale and implementation evidence remain in the linked design notes
 | --- | --- | --- |
 | State is authoritative; prose is a rendering of it. | Active | Typed deltas make consistency, re-rendering, and rollback possible. [Design](../DESIGN.md) |
 | Keep the Referee, Director, and Narrator separate. | Active | Truth, intent, and prose are incompatible responsibilities in one prompt. [Design](../DESIGN.md) |
-| Use TypeScript on Node 24, SQLite/Postgres stores, `node:http`, and a small adapter layer. | Active | Minimal deployment surface and independently testable domain logic. [Plan](../PLAN.md) |
+| Use TypeScript on Node 26, SQLite/Postgres stores, `node:http`, and a small adapter layer. | Active | Minimal deployment surface and independently testable domain logic. [Plan](../PLAN.md) |
 | Canon is shared; chronicle state is story-scoped. | Active | Supports independent stories in one world without copying canon. [Schema rationale](../.design/GAPS.md) |
 | Prefer safe forks for rollback; destructive rollback is explicit. | Active | Authors can recover a prior state without silently losing the original story. Exact turn rollback retains the selected turn. [Design](../DESIGN.md) |
 | Do not implement in-place retcon. | Deliberate non-goal | Directives steer the future; changing history branches instead. [Gap review](../.design/GAPS.md) |

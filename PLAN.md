@@ -12,8 +12,8 @@ for the architectural baseline below, rather than an outdated sequence of slices
 
 | Choice | Decision | Why |
 |---|---|---|
-| Language | TypeScript, Node 24, ESM | One language for engine and UI; native SQLite in 24 |
-| Database | `node:sqlite` (built-in) | Zero native deps, no build step, ships with Node 24 |
+| Language | TypeScript, Node 26, ESM | One language for engine and UI; native SQLite in 26 |
+| Database | `node:sqlite` (built-in) | Zero native deps, no build step, ships with Node 26 |
 | Graph | SQLite node/edge tables | Per DESIGN §12; Cypher not needed at this scale |
 | Tests | `node:test` + `node:assert` | Built in, no framework |
 | Server | `node:http`, no framework | The API is ~15 routes |
