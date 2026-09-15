@@ -345,7 +345,7 @@ grows the file.
 
 ### C2 FTS5 over sections, trigram over names · M
 
-**Verified on this machine** (Node 24.10.0, SQLite 3.50.4): `CREATE VIRTUAL
+**Historical verification on Node 24.10.0** (SQLite 3.50.4): `CREATE VIRTUAL
 TABLE … USING fts5` succeeds, as does `rtree`; `loadExtension` and
 `enableLoadExtension` both exist. Measured: BM25 top-10 over 50k sections in
 0.69 ms.
@@ -358,9 +358,10 @@ Two indexes, two jobs:
   here, and it is far more debuggable.
 
 Version trap to pin: FTS5 landed in **Node 24.0.0**, was backported to
-**22.16.0**, and is in **no 23.x release**. `engines` already says `>=24`, so the
-floor is fine — but probe at startup rather than trusting it, since the failure
-is a confusing SQL error rather than a clear one.
+**22.16.0**, and is in **no 23.x release**. The current `engines` floor is
+**Node >=26**; the measurements above remain historical Node 24 research, not
+the runtime requirement. Probe at startup rather than trusting the floor, since
+the failure is a confusing SQL error rather than a clear one.
 
 Feed results into a discretionary slot at `Priority.vectorFlavour` (10), which is
 already the first thing evicted. A bad search hit must never displace a

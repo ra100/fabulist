@@ -1,6 +1,6 @@
 # SQLite Search / Vector / Graph Options for a Narrative Knowledge Graph
 
-**Verification basis:** all benchmarks below were **measured on this machine** (Node **v24.10.0**, bundled SQLite **3.50.4**, Apple Silicon, in-memory DBs). Repo/package status was verified via GitHub and npm registry APIs on **2026-09-05**. Items marked *estimate* were not measured.
+**Verification basis:** all benchmarks below were **measured on this machine** (Node **v24.10.0**, bundled SQLite **3.50.4**, Apple Silicon, in-memory DBs) — this was the test environment at the time of writing and is retained here as historical context; it is not the project's current minimum Node version (see the Decision table below for the active **Node ≥26** requirement). Repo/package status was verified via GitHub and npm registry APIs on **2026-09-05**. Items marked *estimate* were not measured.
 
 ---
 
@@ -8,7 +8,7 @@
 
 **FTS5 is compiled in — verified two ways.**
 
-`PRAGMA compile_options` on Node 24.10.0 reports: `ENABLE_FTS5`, `ENABLE_FTS3`, `ENABLE_FTS4`(via FTS3), `ENABLE_RTREE`, `ENABLE_GEOPOLY`, `ENABLE_MATH_FUNCTIONS`, `ENABLE_DBSTAT_VTAB`, `ENABLE_SESSION`, `ENABLE_RBU`, `ENABLE_COLUMN_METADATA`. Executing `CREATE VIRTUAL TABLE ... USING fts5(...)` succeeds, as do `bm25()`, `snippet()`, `fts5vocab`, `tokenize='trigram'`, `tokenize='porter unicode61'`, and `content=''` (contentless) tables.
+`PRAGMA compile_options` on the historical benchmark machine (Node 24.10.0) reports: `ENABLE_FTS5`, `ENABLE_FTS3`, `ENABLE_FTS4`(via FTS3), `ENABLE_RTREE`, `ENABLE_GEOPOLY`, `ENABLE_MATH_FUNCTIONS`, `ENABLE_DBSTAT_VTAB`, `ENABLE_SESSION`, `ENABLE_RBU`, `ENABLE_COLUMN_METADATA`. Executing `CREATE VIRTUAL TABLE ... USING fts5(...)` succeeds, as do `bm25()`, `snippet()`, `fts5vocab`, `tokenize='trigram'`, `tokenize='porter unicode61'`, and `content=''` (contentless) tables.
 
 **Version history — this is the important detail.** I bisected `deps/sqlite/sqlite.gyp` across release tags:
 
@@ -37,7 +37,7 @@ Stability as of the current docs: **Release candidate (1.2)** since v25.7.0; sti
 
 **Verified:** repo `asg017/sqlite-vec` is **not archived**, 8,075 stars, last push **2026-05-18**. npm `latest` = **0.1.9** (2026-03-31); `alpha` = 0.1.10-alpha.4 (2026-05-18) with real bug-fix commits (IVF shadow-table renames, statement finalization). A Mozilla Builders project, also sponsored by Fly.io/Turso/SQLite Cloud. Caveat straight from the README: **"pre-v1, so expect breaking changes."** Cadence has slowed — ~4 months since the last commit at time of writing — so treat it as maintained-but-not-fast-moving.
 
-**Verified working end-to-end** with `node:sqlite` on Node 24.10.0: `npm i sqlite-vec` → `new DatabaseSync(path, { allowExtension: true })` → `sqliteVec.load(db)` → `vec_version()` returns `v0.1.9`. **Dependency weight: 20 KB JS + a 162 KB `vec0.dylib`** (one small optional dep per platform: darwin-arm64/x64, linux-x64/arm64, windows-x64). This is the key advantage.
+**Verified working end-to-end** with `node:sqlite` on the historical benchmark machine (Node 24.10.0): `npm i sqlite-vec` → `new DatabaseSync(path, { allowExtension: true })` → `sqliteVec.load(db)` → `vec_version()` returns `v0.1.9`. **Dependency weight: 20 KB JS + a 162 KB `vec0.dylib`** (one small optional dep per platform: darwin-arm64/x64, linux-x64/arm64, windows-x64). This is the key advantage.
 
 **Gotcha worth writing down:** `node:sqlite` binds JS `number` as REAL, so a `vec0` `integer primary key` insert **fails** with *"Only integers are allows for primary key values"*. Pass **`BigInt(id)`**. Verified: `run(1, buf)` fails, `run(1n, buf)` succeeds.
 
@@ -160,4 +160,4 @@ Your retrieval is graph-first and deterministic; embeddings are garnish. That ar
 | **Neo4j embedded** | — | JVM in-process; long-deprecated usage pattern for non-JVM apps | **Reject** |
 | **Plain SQL recursive CTEs (status quo)** | 1–2 hop temporal traversal at **0.01–0.03 ms** on 200k edges | Needs `INDEX(src, valid_from, valid_to)`, `UNION` for cycles, depth cap | **Keep.** Genuinely sufficient — do not replace |
 
-**Minimal sensible addition, in order:** (1) require Node ≥24 (or ≥22.16.0) and add an **FTS5** index over section wiki text with `bm25()` + `snippet()`; (2) add a **trigram** FTS5 index over entity names/aliases for fuzzy resolution and dedupe candidate generation; (3) add a small `embedding` table (`entity_id`/`section_id`, `model`, `dim`, `vec BLOB`) covering only sections and aliases, scored brute-force in TS, fused with FTS5 via **RRF (k=60)** into discretionary budget slots only; (4) set `PRAGMA journal_size_limit` and checkpoint with `wal_checkpoint(TRUNCATE)` at scene boundaries. Defer sqlite-vec until the vector count crosses ~20k — at which point it is a 162 KB drop-in, not a migration.
+**Minimal sensible addition, in order:** (1) require Node ≥26 and add an **FTS5** index over section wiki text with `bm25()` + `snippet()`; (2) add a **trigram** FTS5 index over entity names/aliases for fuzzy resolution and dedupe candidate generation; (3) add a small `embedding` table (`entity_id`/`section_id`, `model`, `dim`, `vec BLOB`) covering only sections and aliases, scored brute-force in TS, fused with FTS5 via **RRF (k=60)** into discretionary budget slots only; (4) set `PRAGMA journal_size_limit` and checkpoint with `wal_checkpoint(TRUNCATE)` at scene boundaries. Defer sqlite-vec until the vector count crosses ~20k — at which point it is a 162 KB drop-in, not a migration.

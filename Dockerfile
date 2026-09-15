@@ -1,13 +1,13 @@
 # Fabulist — single-process Node app, SQLite files under /data.
 #
-# No native deps, no build step for the backend (Node 24 runs .ts directly —
+# No native deps, no build step for the backend (Node 26 runs .ts directly —
 # see PLAN.md's stack decisions), so the only real build work is the web UI.
 # Pinned to the exact Node major this project develops against (README's
-# Providers section and package.json's engines both assume 24) rather than
+# Providers section and package.json's engines both assume 26) rather than
 # `-alpine`, because `node:sqlite` and native TLS behaviour are exactly the
 # kind of thing worth not second-guessing against a smaller libc.
 
-FROM node:24-slim AS build
+FROM node:26-slim AS build
 WORKDIR /app
 
 # Install first, from the lockfile alone, so an app-code-only change doesn't
@@ -21,7 +21,7 @@ RUN pnpm build:web
 
 # ---------------------------------------------------------------------------
 
-FROM node:24-slim
+FROM node:26-slim
 WORKDIR /app
 ENV NODE_ENV=production
 
