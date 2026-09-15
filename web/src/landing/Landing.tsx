@@ -926,7 +926,7 @@ dropped: 18 unevidenced, 12 off-vocabulary, 11 unknown target`}
               are listed with the same care as the features.
             </p>
             <p className="lp-p sm">
-              Node 24 runs the TypeScript directly, so there is no backend build step. 736 tests, all
+              Node 26 runs the TypeScript directly, so there is no backend build step. 736 tests, all
               offline. Set in Hoefler Text and Seravek, on iron gall.
             </p>
           </div>

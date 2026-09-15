@@ -90,7 +90,7 @@ Configuration lives in \`config.json\`. Set \`"port"\` to change the listening p
 
 Run \`npm test\` to execute the suite. Two tests were added in this release to cover the new retry logic in the upload client. Both tests failed on the first attempt because the retry backoff was measured in seconds instead of milliseconds; that bug is fixed in commit a91f3c2.
 
-If a build fails, check the Node version first. The project requires Node 24 or later.
+If a build fails, check the Node version first. The project requires Node 26 or later.
 `.trim();
 
 /**
