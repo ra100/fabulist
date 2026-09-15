@@ -2,7 +2,7 @@
 /**
  * `pnpm dlx fabulist` / `npx fabulist` entrypoint.
  *
- * `serve.ts` already runs directly under Node 24 with no build step (see
+ * `serve.ts` already runs directly under Node 26 with no build step (see
  * PLAN.md's stack decisions) — this shim's only job is silencing
  * `node:sqlite`'s experimental-feature warning for a first-time user who has
  * no reason to know what that means, the same way package.json's own `serve`

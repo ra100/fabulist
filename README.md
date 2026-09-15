@@ -779,7 +779,7 @@ src/server/       http api
 web/              vite + react inspector
 ```
 
-Node 24 runs TypeScript directly, so there is no backend build step. That rules out
+Node 26 runs TypeScript directly, so there is no backend build step. That rules out
 `enum` and constructor parameter properties, which `tsconfig` enforces via
 `erasableSyntaxOnly`.
 
