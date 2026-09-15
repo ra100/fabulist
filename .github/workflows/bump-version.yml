@@ -71,25 +71,42 @@ jobs:
           # The `concurrency` group above only serializes the common case.
           # Two PRs merged within the same instant can still leave this job's
           # checkout stale by the time it pushes (observed: both jobs bump
-          # from the same base version and race to push/tag `vX.Y.Z`, and the
-          # loser fails with "tag already exists" or a rejected push). So
+          # from the same base version and race to push/tag `vX.Y.Z`). So
           # re-sync to the tip of `main` and recompute the version from *that*
           # right before each attempt, instead of trusting the checkout made
           # at job start.
+          #
+          # The push is `--atomic`: `main` and the tag update together or not
+          # at all. A plain `git push origin main "v$version"` updates each
+          # ref independently, so the earlier, non-atomic version of this
+          # step could push the tag while the `main` update was rejected as
+          # non-fast-forward (the other racer having already advanced it) —
+          # observed live as tag `v1.1.5` sitting on origin, unreachable from
+          # `main`, which had never actually moved past `1.1.4`. Every later
+          # run then recomputed that same "next" version and collided with
+          # the orphan. `--atomic` makes a losing race fail cleanly on both
+          # refs instead of leaving that half-applied state behind.
+          #
+          # `--prune --prune-tags` before each attempt drops any local tag
+          # ref carried over from the job's initial fetch-depth:0 checkout
+          # that origin no longer has (e.g. an orphan tag deleted by hand
+          # after an incident like the one above), so a stale local object
+          # can never masquerade as "this version is already taken".
           attempt=1
           max_attempts=5
           while true; do
-            git fetch origin main
+            git fetch origin main --prune --prune-tags
             git reset --hard origin/main
 
             pnpm version "$INCREMENT" --no-git-tag-version
             version="$(node -p "require('./package.json').version")"
+            git tag -d "v$version" >/dev/null 2>&1 || true
 
             git add package.json pnpm-lock.yaml
             git commit -m "chore(release): bump version to $version"
             git tag -a "v$version" -m "Release v$version"
 
-            if git push origin main "v$version"; then
+            if git push --atomic origin main "v$version"; then
               echo "value=$version" >> "$GITHUB_OUTPUT"
               break
             fi
