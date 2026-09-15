@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Edge, Entity } from '../api.ts';
+import { shouldSimulateGraph } from './graphLayout.ts';
 
 interface Node {
   id: string;
@@ -106,9 +107,10 @@ export function GraphView({
   }, [entities]);
 
   // Simulation: repulsion between all pairs, springs along edges, weak centring.
-  // Cheap enough at a few hundred nodes to run without quadtree bookkeeping.
+  // The size guard keeps quadratic repulsion off the main thread for large
+  // graphs; those graphs retain their deterministic seeded positions instead.
   useEffect(() => {
-    if (!nodes.length) return;
+    if (!shouldSimulateGraph(nodes.length)) return;
     let frame = 0;
     let alpha = 1;
 
