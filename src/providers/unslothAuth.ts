@@ -55,6 +55,26 @@ export function defaultAgentApiKeyPath(env: Record<string, string | undefined> =
 
 export type UnslothAuthSource = 'api-key' | 'desktop-secret' | 'agent-cache' | 'password' | 'none';
 
+/**
+ * Why no token could be produced. `no-credentials` is a stable configuration
+ * fact (nothing to try); `exchange-failed` means a credential was found but the
+ * round trip did not succeed — a timeout, a refusal, or a malformed reply — and
+ * therefore says something about the server, not the config. The two used to
+ * collapse into one `null`, which sent someone debugging a dead local server on
+ * a wild goose chase through Settings → API.
+ */
+export type UnslothTokenFailure = {
+  ok: false;
+  reason: 'no-credentials' | 'exchange-failed';
+  /** Short, secret-free diagnostic for the exchange-failed case. */
+  detail?: string;
+};
+
+export type UnslothTokenResolution = { ok: true; token: string; source: UnslothAuthSource } | UnslothTokenFailure;
+
+/** The one place an exchange failure is shaped, so the union's form lives in one spot. */
+const exchangeFailed = (detail?: string): UnslothTokenFailure => ({ ok: false, reason: 'exchange-failed', detail });
+
 export interface UnslothAuthOptions {
   baseUrl: string;
   /** Explicit key, when one was configured. Highest precedence. */
@@ -120,24 +140,30 @@ export class UnslothAuth {
   }
 
   /**
-   * The bearer value to send, or null when this instance cannot be authenticated
-   * at all. Null is a real outcome, not an error: a *remote* Unsloth with no key
-   * configured has no local secret to fall back on, and saying so plainly is more
-   * useful than a 401 at illustration time.
+   * The bearer value to send, or a failure that says why there is none. Both
+   * are real outcomes, not errors: a *remote* Unsloth with no key configured has
+   * no local secret to fall back on (`no-credentials`), while a dead or refusing
+   * server produces `exchange-failed` — and the two need different advice, so
+   * they are reported separately rather than collapsed into one null.
    */
-  async token(): Promise<{ token: string; source: UnslothAuthSource } | null> {
+  async token(): Promise<UnslothTokenResolution> {
     // An explicit key is used verbatim: it is already a bearer credential, so
     // there is nothing to exchange and nothing to cache.
-    if (this.apiKey) return { token: this.apiKey, source: 'api-key' };
+    if (this.apiKey) return { ok: true, token: this.apiKey, source: 'api-key' };
 
     if (this.cached && Date.now() < this.cached.expiresAt) {
-      return { token: this.cached.token, source: this.cached.source };
+      return { ok: true, token: this.cached.token, source: this.cached.source };
     }
+
+    // The last exchange failure wins as the reported reason: it is what a caller
+    // acting on the result would hit next.
+    let failure: UnslothTokenFailure | null = null;
 
     const secret = await this.readDesktopSecret();
     if (secret) {
-      const token = await this.exchange('/api/auth/desktop-login', { secret });
-      if (token) return this.cache(token, 'desktop-secret');
+      const token = await this.exchange('desktop login', '/api/auth/desktop-login', { secret });
+      if (token.ok) return this.cache(token.token, 'desktop-secret');
+      failure = token;
     }
 
     // Studio 2026+ mints an API key for its local coding-agent client and
@@ -148,26 +174,27 @@ export class UnslothAuth {
     }
 
     if (this.username && this.password) {
-      const token = await this.exchange('/api/auth/login', { username: this.username, password: this.password });
-      if (token) return this.cache(token, 'password');
+      const token = await this.exchange('login', '/api/auth/login', { username: this.username, password: this.password });
+      if (token.ok) return this.cache(token.token, 'password');
+      failure = token;
     }
 
-    return null;
+    return failure ?? { ok: false, reason: 'no-credentials' };
   }
 
   /** Header object, empty when unauthenticated — the shape call sites want. */
   async authHeader(): Promise<Record<string, string>> {
     const resolved = await this.token();
-    return resolved ? { authorization: `Bearer ${resolved.token}` } : {};
+    return resolved.ok ? { authorization: `Bearer ${resolved.token}` } : {};
   }
 
-  private cache(token: string, source: UnslothAuthSource): { token: string; source: UnslothAuthSource } {
+  private cache(token: string, source: UnslothAuthSource): { ok: true; token: string; source: UnslothAuthSource } {
     // The token's own lifetime is not reported by the endpoint, so this is a
     // conservative window rather than a claim: short enough that a rotated
     // secret is picked up quickly, long enough that a burst of illustrations
     // does not re-login for each one.
     this.cached = { token, source, expiresAt: Date.now() + 10 * 60_000 };
-    return { token, source };
+    return { ok: true, token, source };
   }
 
   private async readDesktopSecret(): Promise<string | null> {
@@ -204,7 +231,12 @@ export class UnslothAuth {
     }
   }
 
-  private async exchange(path: string, body: Record<string, string>): Promise<string | null> {
+  /**
+   * One credential exchange, with the failure kept descriptive. `label` is what
+   * the endpoint means to a human ("desktop login" vs "login"); it appears in
+   * `detail`, which never carries the secret or any request body.
+   */
+  private async exchange(label: string, path: string, body: Record<string, string>): Promise<{ ok: true; token: string } | UnslothTokenFailure> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -214,11 +246,20 @@ export class UnslothAuth {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      if (!res.ok) return null;
-      const json = (await res.json()) as TokenResponse;
-      return json.access_token?.trim() || null;
-    } catch {
-      return null;
+      if (!res.ok) return exchangeFailed(`${label} returned ${res.status}`);
+      const parsed = await res.json().catch((): undefined => undefined);
+      // `null` is valid JSON, so the guard must cover it as well as a parse failure.
+      if (parsed == null) return exchangeFailed(`${label} returned a malformed response`);
+      const token = (parsed as TokenResponse).access_token?.trim();
+      return token ? { ok: true, token } : exchangeFailed(`${label} response carried no access token`);
+    } catch (err) {
+      // An aborted controller is our own timeout; anything else is the network.
+      if (controller.signal.aborted) return exchangeFailed(`${label} timed out after ${this.timeoutMs}ms`);
+      // undici wraps socket errors: `fetch failed` is the message, and the
+      // actionable reason (ECONNREFUSED, EAI_AGAIN, …) rides in `cause`.
+      const cause = (err as { cause?: unknown } | null)?.cause;
+      const why = cause instanceof Error ? cause.message : err instanceof Error ? err.message : String(err);
+      return exchangeFailed(`${label} unreachable: ${why}`);
     } finally {
       clearTimeout(timer);
     }

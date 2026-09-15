@@ -296,29 +296,29 @@ export async function unslothImageStatus(
   // the configured key" is exactly what someone debugging wants to see.
   const resolver =
     auth ?? new UnslothAuth({ baseUrl: base, ...(apiKey ? { apiKey } : {}), fetcher, timeoutMs });
-  const resolved = await resolver.token().catch(() => null);
-  const source: UnslothAuthSource = resolved?.source ?? 'none';
+  const resolved = await resolver.token();
+  const source: UnslothAuthSource = resolved.ok ? resolved.source : 'none';
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetcher(`${base}/api/inference/images/status`, {
-      headers: resolved ? { authorization: `Bearer ${resolved.token}` } : {},
+      headers: resolved.ok ? { authorization: `Bearer ${resolved.token}` } : {},
       signal: controller.signal,
     });
     // A 401 still proves something is listening, which is a materially
     // different fix from nothing being there ("start it").
     if (res.status === 401 || res.status === 403) {
-      return {
-        up: true,
-        authed: false,
-        loaded: false,
-        source,
-        detail:
-          source === 'none'
-            ? 'running, but no usable credential: no API key set and no local desktop secret found'
-            : `running, but the ${source === 'api-key' ? 'API key' : 'desktop login'} was rejected`,
-      };
+      let detail: string;
+      if (!resolved.ok && resolved.reason === 'exchange-failed') {
+        // A credential was found and actively refused — different advice from "none exists".
+        detail = `running, but the local credential was not accepted${resolved.detail ? ` (${resolved.detail})` : ''}`;
+      } else if (source === 'none') {
+        detail = 'running, but no usable credential: no API key set and no local desktop secret found';
+      } else {
+        detail = `running, but the ${source === 'api-key' ? 'API key' : 'desktop login'} was rejected`;
+      }
+      return { up: true, authed: false, loaded: false, source, detail };
     }
     if (!res.ok) return { up: true, authed: true, loaded: false, source, detail: `status endpoint returned ${res.status}` };
     const json = (await res.json()) as StatusResponse;
