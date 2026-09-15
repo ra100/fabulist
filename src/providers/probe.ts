@@ -93,9 +93,19 @@ export async function probeProvider(key: string, spec: ProviderSpec, opts: Probe
       if (spec.localAuth === 'unsloth-desktop') {
         const { UnslothAuth } = await import('./unslothAuth.ts');
         const root = (spec.baseUrl ?? '').replace(/\/v1\/?$/, '');
-        const resolved = await new UnslothAuth({ baseUrl: root, fetcher, timeoutMs }).token().catch(() => null);
-        if (resolved) {
+        const resolved = await new UnslothAuth({ baseUrl: root, fetcher, timeoutMs }).token();
+        if (resolved.ok) {
           return { ...base, status: 'ready', detail: `no key needed: authenticated via this machine\u2019s ${resolved.source === 'desktop-secret' ? 'desktop login' : resolved.source}` };
+        }
+        if (resolved.reason === 'exchange-failed') {
+          // A credential was found but the server did not complete the exchange \u2014
+          // that points at the server, not at missing configuration.
+          return {
+            ...base,
+            status: 'unavailable',
+            detail: `${spec.apiKeyEnv} is not set and local login failed${resolved.detail ? ` (${resolved.detail})` : ''}`,
+            fix: `check that Unsloth Studio is running with current credentials, or export ${spec.apiKeyEnv}=\u2026 for a remote instance`,
+          };
         }
         return {
           ...base,
