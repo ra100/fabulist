@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import { World } from '../src/store/index.ts';
 import { DEFAULT_USER_AGENT, WikiClient, fixtureFetcher } from '../src/ingest/client.ts';
 import {
@@ -182,6 +181,16 @@ test('the client fetches pages and records revisions', async () => {
   assert.equal(page?.title, 'Duskhollow');
   assert.equal(page?.revision, '101', 'revision is stored so re-ingest can diff');
   assert.ok(page!.categories.includes('Locations'));
+});
+
+test('the client rejects private, non-Fandom, or URL-fragment inputs before it can fetch them', () => {
+  for (const baseUrl of ['http://127.0.0.1:8080', 'https://169.254.169.254', 'https://wiki.example.com', 'https://vale.fandom.com#fragment']) {
+    assert.throws(
+      () => new WikiClient({ baseUrl, delayMs: 0 }),
+      /HTTPS Fandom wiki URL/,
+      `${baseUrl} must not become a server-side request`,
+    );
+  }
 });
 
 test('the links query is scoped to the main namespace', async () => {
@@ -1179,29 +1188,27 @@ test('an ingested world is immediately playable', async () => {
  * only holds while we identify honestly, so the header is asserted on the wire
  * rather than trusted from the constructor.
  */
-test('the wiki client identifies itself, and never as a browser', async () => {
-  const seen: Array<string | undefined> = [];
-  const server = createServer((req, res) => {
-    seen.push(req.headers['user-agent']);
-    res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ query: { pages: [] } }));
-  });
-  await new Promise<void>((r) => server.listen(0, r));
-  const { port } = server.address() as { port: number };
+test('the wiki client identifies itself and disables redirects on requests', async () => {
+  const seen: RequestInit[] = [];
+  const fetcher = async (_url: string, init?: RequestInit) => {
+    seen.push(init ?? {});
+    return { ok: true, status: 200, json: async () => ({ query: { pages: [] } }) };
+  };
 
-  try {
-    await new WikiClient({ baseUrl: `http://127.0.0.1:${port}`, delayMs: 0 }).fetchPages(['Anything']);
-    assert.equal(seen[0], DEFAULT_USER_AGENT, 'the default identifies the tool');
-    assert.match(seen[0]!, /https?:\/\/|mailto:/, 'and carries a contact an operator can use');
-    assert.doesNotMatch(seen[0]!, /Mozilla|Chrome|Safari|Gecko/, 'never spoofs a browser — the ToU bars forged headers');
+  await new WikiClient({ baseUrl: 'https://vale.fandom.com', fetcher, delayMs: 0 }).fetchPages(['Anything']);
+  const first = seen[0]!;
+  const firstUserAgent = (first.headers as Record<string, string>)['User-Agent']!;
+  assert.equal(firstUserAgent, DEFAULT_USER_AGENT, 'the default identifies the tool');
+  assert.match(firstUserAgent, /https?:\/\/|mailto:/, 'and carries a contact an operator can use');
+  assert.doesNotMatch(firstUserAgent, /Mozilla|Chrome|Safari|Gecko/, 'never spoofs a browser');
+  assert.equal(first.redirect, 'error', 'a wiki cannot redirect a request to another host');
 
-    await new WikiClient({
-      baseUrl: `http://127.0.0.1:${port}`,
-      delayMs: 0,
-      userAgent: 'Custom/9 (+mailto:me@example.com)',
-    }).fetchPages(['Anything']);
-    assert.equal(seen[1], 'Custom/9 (+mailto:me@example.com)', 'a caller can substitute their own contact details');
-  } finally {
-    server.close();
-  }
+  await new WikiClient({
+    baseUrl: 'https://vale.fandom.com',
+    delayMs: 0,
+    fetcher,
+    userAgent: 'Custom/9 (+mailto:me@example.com)',
+  }).fetchPages(['Anything']);
+  const second = seen[1]!;
+  assert.equal((second.headers as Record<string, string>)['User-Agent'], 'Custom/9 (+mailto:me@example.com)', 'a caller can substitute their own contact details');
 });

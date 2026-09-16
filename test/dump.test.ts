@@ -52,6 +52,26 @@ test('resolveDumpUrl takes the guessed URL when it HEADs ok, without touching Sp
   assert.match(calls[0]!, /^HEAD /);
 });
 
+test('dump requests disable redirect following', async () => {
+  const fetcher = (async (_url: string, opts?: RequestInit) => {
+    assert.equal(opts?.redirect, 'error');
+    return { ok: true, status: 200, body: null, text: async () => '' } as unknown as Response;
+  }) as typeof fetch;
+
+  await resolveDumpUrl({ wikiUrl: 'https://masseffect.fandom.com', fetcher });
+});
+
+test('resolveDumpUrl rejects an unsafe wiki URL before issuing a request', async () => {
+  let requests = 0;
+  const fetcher = (async () => {
+    requests++;
+    throw new Error('must not fetch an unsafe URL');
+  }) as typeof fetch;
+
+  await assert.rejects(() => resolveDumpUrl({ wikiUrl: 'http://169.254.169.254', fetcher }), /HTTPS Fandom wiki URL/);
+  assert.equal(requests, 0);
+});
+
 test('resolveDumpUrl falls back to scraping Special:Statistics when the guess misses', async () => {
   const html = `<a href="https://s3.amazonaws.com/wikia_xml_dumps/x/xy/xyzwiki_pages_current.xml.7z" target="_blank">2026-01-01</a>`;
   const fetcher = (async (url: string, opts?: RequestInit) => {

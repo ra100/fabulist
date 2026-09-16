@@ -83,6 +83,20 @@ test('an explicit url is trusted and verified directly', async () => {
   assert.equal(candidates[0]?.via, 'explicit');
 });
 
+test('an unsafe explicit URL is rejected without probing it', async () => {
+  let requests = 0;
+  const dir = new WikiDirectory({
+    fetcher: async () => {
+      requests++;
+      throw new Error('must not fetch an unsafe URL');
+    },
+    delayMs: 0,
+  });
+
+  assert.deepEqual(await dir.resolve('http://127.0.0.1:8080'), []);
+  assert.equal(requests, 0, 'a setup URL is checked before any request is made');
+});
+
 test('an empty query resolves to nothing without making requests', async () => {
   const dir = directory();
   assert.deepEqual(await dir.resolve('   '), []);

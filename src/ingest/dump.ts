@@ -41,7 +41,7 @@ import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import sax from 'sax';
 import _7z from '7zip-min';
-import type { PageSource, WikiPage } from './client.ts';
+import { assertFandomWikiUrl, type PageSource, type WikiPage } from './client.ts';
 import { parseCategories, parseLinks } from './parse.ts';
 
 export type { PageSource };
@@ -86,20 +86,24 @@ export function guessDumpUrl(dbName: string): string {
  * one page load, not a crawl — when the guess misses.
  */
 export async function resolveDumpUrl(opts: DumpOptions): Promise<string> {
+  assertFandomWikiUrl(opts.wikiUrl);
   const fetcher = opts.fetcher ?? fetch;
   const userAgent = opts.userAgent ?? DEFAULT_USER_AGENT;
   const dbName = dbNameOf(opts.wikiUrl);
   const guess = guessDumpUrl(dbName);
 
   try {
-    const head = await fetcher(guess, { method: 'HEAD', headers: { 'User-Agent': userAgent } });
+    const head = await fetcher(guess, { method: 'HEAD', headers: { 'User-Agent': userAgent }, redirect: 'error' });
     if (head.ok) return guess;
   } catch {
     // fall through to the statistics-page scrape
   }
 
   const base = opts.wikiUrl.replace(/\/$/, '');
-  const res = await fetcher(`${base}/wiki/Special:Statistics`, { headers: { 'User-Agent': userAgent } });
+  const res = await fetcher(`${base}/wiki/Special:Statistics`, {
+    headers: { 'User-Agent': userAgent },
+    redirect: 'error',
+  });
   if (!res.ok) throw new Error(`could not reach ${base}/wiki/Special:Statistics (${res.status})`);
   const html = await res.text();
   // The "current pages" link is the one Fandom itself captions "best for bot
@@ -118,6 +122,7 @@ export async function resolveDumpUrl(opts: DumpOptions): Promise<string> {
  * wiki costs nothing extra — the whole point of moving off live crawling.
  */
 export async function ensureDumpXml(opts: DumpOptions): Promise<string> {
+  assertFandomWikiUrl(opts.wikiUrl);
   const dbName = dbNameOf(opts.wikiUrl);
   const cacheDir = opts.cacheDir ?? join('data', 'dumps', dbName);
   const xmlPath = join(cacheDir, `${dbName}_pages_current.xml`);
@@ -130,7 +135,7 @@ export async function ensureDumpXml(opts: DumpOptions): Promise<string> {
   const fetcher = opts.fetcher ?? fetch;
   const userAgent = opts.userAgent ?? DEFAULT_USER_AGENT;
 
-  const res = await fetcher(url, { headers: { 'User-Agent': userAgent } });
+  const res = await fetcher(url, { headers: { 'User-Agent': userAgent }, redirect: 'error' });
   if (!res.ok || !res.body) throw new Error(`dump download failed: ${url} (${res.status})`);
 
   await finished(Readable.fromWeb(res.body as never).pipe(createWriteStream(archivePath)));
