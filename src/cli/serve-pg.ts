@@ -297,7 +297,7 @@ async function boot(): Promise<void> {
   console.log(
     authConfig
       ? 'login required (WorkOS AuthKit)'
-      : 'login not required \u2014 every route is open (set AUTH_REQUIRE_LOGIN=true to change this)',
+      : 'login not required — loopback-only local mode (set AUTH_REQUIRE_LOGIN=true to change this)',
   );
 
   const server = createApiServer({

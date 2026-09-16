@@ -1,11 +1,11 @@
 # Deploying fabulist to the VPS
 
-Scope of this deployment (see the conversation that produced it): the app has
-**zero built-in request authentication** on its REST routes (`src/server/api.ts`'s
-~60 routes all trust whoever can reach them). `/mcp` is different — it has its
-own bearer-token check (`src/mcp/auth.ts`, OAuth via WorkOS AuthKit) and is not
-mounted at all unless that's configured. **Reverse proxy / TLS / access
-control on the VPS is configured directly by the operator, outside this repo**
+Scope of this deployment (see the conversation that produced it): network-exposed
+Postgres servers require built-in WorkOS web login by default, and login-disabled
+mode is limited to loopback binds. `/mcp` is separate — it has its own bearer-token
+check (`src/mcp/auth.ts`, OAuth via WorkOS AuthKit) and is not mounted at all
+unless that's configured. **Reverse proxy / TLS / extra access control on the VPS
+is configured directly by the operator, outside this repo**
 — `nginx/fabulist.conf` here is a reference copy, not necessarily what's
 currently live; nothing in this repo or its CI touches the VPS's nginx/openresty
 config.
@@ -41,10 +41,10 @@ mixing pip into the apt install breaks). Renews unattended via its own
       variables (`https://fastidious-attic-52.authkit.app`,
       `client_01M1YFPQ054SZ2DD5HFTB22MK1`, `https://fabulist.rast.io/mcp` —
       the same values verified end-to-end in `.design/MCP-CONNECTOR.md`).
-      `WORKOS_API_KEY` stays a secret and is **not** part of this pipeline —
-      the running server never needs it, only the three values above
-      (`src/mcp/auth.ts`'s OAuth mode verifies tokens against the issuer's
-      published JWKS; it never calls WorkOS's management API).
+- [x] Web login variables are set for public deployment:
+      `AUTH_REQUIRE_LOGIN=true`, `AUTH_PUBLIC_ORIGIN`, `WORKOS_CLIENT_ID`,
+      `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, and `AUTH_ADMIN_EMAILS`.
+      Login-disabled mode is only for loopback development.
 - [x] `release.yml`'s `deploy` job now renders those three as `app.env` and
       runs `upload-env` before `deploy` on every tag push — see
       "Continuous deployment" below.
@@ -423,9 +423,9 @@ which is what finally identified this.
   API key) for the REST/web-UI path — that's expected to come from whoever
   calls `/mcp` supplying their own model (`.design/MCP-CONNECTOR.md` §3). If
   someone drives the plain web UI/REST API against this deployment expecting
-  real prose, it will narrate only with the mock provider until someone SSHes
-  in and edits `/data/fabulist.config.json` by hand (or uses the Settings UI,
-  which persists to the same file).
+  real prose, they must sign in first; then it will narrate only with the mock
+  provider until an admin changes provider settings through the Settings UI
+  (or edits `/data/fabulist.config.json` by hand).
 - **`/mcp`'s own exposure**: `MCP_RESOURCE_URL` being set makes `/mcp` mount
   and enforce its own OAuth check, but whether that path is actually
   *reachable* from the public internet (as a remote MCP connector needs) is

@@ -244,6 +244,20 @@ test('resolveAuthConfig: env unset keeps the original config-fallback behavior',
   assert.equal(offByDefault, null);
 });
 
+test('resolveAuthConfig: a network bind requires login by default', () => {
+  assert.throws(
+    () => resolveAuthConfig(defaultConfig(), {}, { host: '0.0.0.0', port: 8080 }),
+    /AUTH_REQUIRE_LOGIN is on but missing: WORKOS_API_KEY, WORKOS_CLIENT_ID, WORKOS_COOKIE_PASSWORD/,
+  );
+});
+
+test('resolveAuthConfig: explicit login-off mode is loopback-only', () => {
+  assert.throws(
+    () => resolveAuthConfig(defaultConfig(), { AUTH_REQUIRE_LOGIN: 'false' }, { host: '0.0.0.0', port: 8080 }),
+    /Login-disabled mode is only allowed on loopback/,
+  );
+});
+
 test('resolveAuthConfig: unrecognized AUTH_REQUIRE_LOGIN value throws fail-closed even when WorkOS credentials are present', () => {
   assert.throws(
     () => resolveAuthConfig({ ...defaultConfig() }, { AUTH_REQUIRE_LOGIN: 'ture', ...WORKOS_ENV }),

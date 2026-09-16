@@ -39,13 +39,13 @@ export interface Config {
   imageProviders?: Record<string, ImageProviderSpec>;
   /**
    * Require a signed-in user before any route (other than the login flow
-   * itself) responds. Off by default — a bare `pnpm serve` on a laptop with
-   * no login screen in the way is the whole point of the local/offline
-   * story this app tells everywhere else (README's "everything runs offline
-   * on a deterministic mock provider by default"), and provider setup
-   * already gates what a local run can *do*; this gate is about who may
-   * reach it at all, which only matters once the server is reachable by
-   * more than the one person running it.
+   * itself) responds. Off by default only on loopback — a bare `pnpm serve`
+   * on a laptop with no login screen in the way is the whole point of the
+   * local/offline story this app tells everywhere else (README's
+   * "everything runs offline on a deterministic mock provider by default"),
+   * and provider setup already gates what a local run can *do*; this gate is
+   * about who may reach it at all. Network binds must either require login
+   * or refuse to start.
    *
    * `AUTH_REQUIRE_LOGIN` in the environment overrides this (true/false,
    * 1/0, yes/no, on/off — case-insensitive; see `parseRequireLoginEnv` in
