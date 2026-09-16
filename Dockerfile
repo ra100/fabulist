@@ -12,7 +12,9 @@ WORKDIR /app
 
 # Install first, from the lockfile alone, so an app-code-only change doesn't
 # invalidate this layer.
-RUN corepack enable
+# Node no longer ships corepack by default (removed from core as of Node 25),
+# so it has to be installed from npm before it can enable pnpm.
+RUN npm install -g corepack@latest && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
@@ -25,7 +27,7 @@ FROM node:26-slim
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN corepack enable
+RUN npm install -g corepack@latest && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # --prod: the web UI is already built to static files in the stage above, so
 # vite/react/the dev toolchain have no reason to exist in the shipped image.
