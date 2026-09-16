@@ -258,7 +258,15 @@ export const SESSION_COOKIE = 'fabulist_session';
  */
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 14;
 
-function parseCookies(header: string | undefined): Record<string, string> {
+/**
+ * Parses a raw `Cookie` header into a name→value map, decoding each value
+ * and treating a malformed percent-encoding as "skip this cookie" rather
+ * than throwing. This is the one safe-decode every cookie reader on this
+ * side goes through — `readSessionCookie` below and `readPkceCookie` in
+ * routes.ts both read from it, so a hand-crafted or tampered cookie can
+ * never surface as an unhandled `URIError`.
+ */
+export function parseCookies(header: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!header) return out;
   for (const part of header.split(';')) {
