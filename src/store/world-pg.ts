@@ -762,8 +762,9 @@ export async function listStoriesForUserWithPrivateValues(
  * they became *invisible* — 13 imported books present in the database and absent from
  * the library, which is how this was noticed.
  *
- * Listing them separately is the honest middle: the owner can see that unclaimed work
- * exists and adopt it deliberately, and nothing is attributed behind their back.
+ * Listing them separately is the honest middle: an administrator can see that
+ * unclaimed work exists and assign it deliberately, and nothing is attributed
+ * behind its owner's back.
  */
 export async function listUnownedStories(db: Queryable): Promise<Story[]> {
   const { rows } = await db.query<StoryRow>(

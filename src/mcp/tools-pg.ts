@@ -156,14 +156,18 @@ export async function listStoriesTool(ctx: McpToolContext) {
 /**
  * The one ownership rule, shared by every MCP tool that names a story
  * explicitly, and identical to `ownsStoryOrRespond` on the REST side: a story
- * is yours if you own it, or if it is unowned (`owner_user_id IS NULL` — a
- * legacy save, or one created while login was off). Never "owned by everyone".
+ * is yours only if you own it. An unowned import must be assigned through the
+ * administrator claim flow; it is never "owned by everyone".
  */
 async function assertOwned(db: Db, storyId: string, user: SessionUser | null | undefined, tool: string): Promise<void> {
   const story = await getStory(db, storyId);
   if (!story) throw new Error(`${tool}: no story ${storyId}`);
-  if (user && story.ownerUserId !== null && story.ownerUserId !== user.id) {
-    throw new Error(`${tool}: story ${storyId} belongs to another user`);
+  if (user && story.ownerUserId !== user.id) {
+    throw new Error(
+      story.ownerUserId === null
+        ? `${tool}: story ${storyId} is unowned and must be assigned by an administrator`
+        : `${tool}: story ${storyId} belongs to another user`,
+    );
   }
 }
 

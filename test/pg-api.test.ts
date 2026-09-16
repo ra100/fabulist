@@ -551,6 +551,13 @@ test('two users get their own stories from the same server, concurrently', async
       () => worldFor(db, bob, { storyIdOverride: aliceStory.id }),
       /does not belong to this user/,
     );
+
+    const unownedStory = await createStory(db, { title: 'Imported book', worldIds: [worldId] });
+    await assert.rejects(
+      () => worldFor(db, bob, { storyIdOverride: unownedStory.id }),
+      /is unowned/,
+      'an authenticated user cannot open an imported story without an assignment capability',
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });

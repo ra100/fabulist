@@ -1251,12 +1251,9 @@ route('POST', '/api/branch', async (_req, res, { world, db, body, user }) => {
 /**
  * True when `user` may act on `storyId` — either login is off (`user` is
  * `null`, the legacy no-ownership-concept mode, unchanged) or the story's
- * `owner_user_id` is either this user's own id or `null` (a story from
- * before ownership existed, or created during a login-off session; see
- * `db.ts`'s migration comment for why an unowned row is never silently
- * reassigned to whoever happens to ask first — it stays reachable, not
- * exclusively theirs, until a real claim mechanism exists). Sends the 403
- * itself and returns `false` so every call site is a one-line early return.
+ * `owner_user_id` is this user's own id. Unowned imports require the
+ * administrator claim flow before ordinary access. Sends the 403 itself and
+ * returns `false` so every call site is a one-line early return.
  */
 async function ownsStoryOrRespond(
   res: ServerResponse,
@@ -1270,8 +1267,12 @@ async function ownsStoryOrRespond(
     send(res, 404, { error: `no story ${storyId} in this world` });
     return false;
   }
-  if (story.ownerUserId !== null && story.ownerUserId !== user.id) {
-    send(res, 403, { error: 'this story belongs to another user' });
+  if (story.ownerUserId !== user.id) {
+    send(res, 403, {
+      error: story.ownerUserId === null
+        ? 'this story is unowned and must be assigned by an administrator'
+        : 'this story belongs to another user',
+    });
     return false;
   }
   return true;
@@ -1305,21 +1306,24 @@ route('GET', '/api/stories', async (_req, res, { world, db, user }) => {
  * Imported SQLite saves arrive unowned by design — attributing them automatically
  * would hand one person's writing to whoever signs in first. The consequence was that
  * on a logged-in instance they were invisible: present in the database, absent from the
- * library, because `owner_user_id = $1` never matches NULL. This is how the owner finds
- * out they exist.
+ * library, because `owner_user_id = $1` never matches NULL. Administrators can
+ * find and assign them without exposing their existence to ordinary users.
  */
-route('GET', '/api/stories/unowned', async (_req, res, { db }) => {
+route('GET', '/api/stories/unowned', async (_req, res, { db, user, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
   send(res, 200, await listUnownedStories(db));
 });
 
 /**
  * Claims unowned books: all of them, or one by `?storyId=`.
  *
- * Requires a signed-in user, because there is no one to claim *for* otherwise — with
- * login off every story is already visible and this flow has no purpose.
+ * Requires a signed-in administrator, because there is no one authorized to
+ * assign an imported story otherwise — with login off every story is already
+ * visible and this flow has no purpose.
  */
-route('POST', '/api/stories/claim', async (_req, res, { db, url, user }) => {
+route('POST', '/api/stories/claim', async (_req, res, { db, url, user, authConfig }) => {
   if (!user) return send(res, 400, { error: 'sign in first: there is no owner to claim these for' });
+  if (!requireAdmin(res, authConfig, user)) return;
   try {
     await assertPrivateStoryCreationReady(db, user.id);
     const storyId = url.searchParams.get('storyId') ?? undefined;

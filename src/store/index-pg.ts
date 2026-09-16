@@ -159,6 +159,7 @@ export class World {
  * - `user` absent (login off, a local single-user run): the most recently played
  *   story, or a fresh one. No ownership question to answer.
  * - `storyIdOverride`: a specific story, but only if it belongs to `user`.
+ *   Unowned imports must be assigned through the administrator claim flow first.
  */
 export async function resolveStoryFor(
   db: Queryable,
@@ -168,8 +169,12 @@ export async function resolveStoryFor(
   if (opts.storyIdOverride) {
     const story = await getStory(db, opts.storyIdOverride);
     if (!story) throw new Error(`no story ${opts.storyIdOverride}`);
-    if (user && story.ownerUserId && story.ownerUserId !== user.id) {
-      throw new Error(`story ${opts.storyIdOverride} does not belong to this user`);
+    if (user && story.ownerUserId !== user.id) {
+      throw new Error(
+        story.ownerUserId === null
+          ? `story ${opts.storyIdOverride} is unowned and must be assigned by an administrator`
+          : `story ${opts.storyIdOverride} does not belong to this user`,
+      );
     }
     return story.id;
   }
@@ -394,8 +399,8 @@ export async function renameWorld(db: Queryable, slug: string, title: string): P
  * story's canon in a world that is theirs.
  *
  * `user` is who is asking, checked against the story's owner under the same
- * lock, with the rule `resolveStoryFor` applies: login off (`null`) or an
- * unowned story passes, somebody else's story throws. Checked here rather than
+ * lock, with the rule `resolveStoryFor` applies: login off (`null`) passes;
+ * an unowned or somebody else's story throws. Checked here rather than
  * only by the caller because the binding is persistent — resolving the wrong
  * story once is a stale read, binding it is a write into another user's book.
  *
@@ -418,8 +423,12 @@ export async function ensureCanonWorldFor(
     );
     const story = storyRows[0];
     if (!story) throw new Error(`no story ${storyId}`);
-    if (opts.user && story.owner_user_id !== null && story.owner_user_id !== opts.user.id) {
-      throw new Error(`story ${storyId} does not belong to this user`);
+    if (opts.user && story.owner_user_id !== opts.user.id) {
+      throw new Error(
+        story.owner_user_id === null
+          ? `story ${storyId} is unowned and must be assigned by an administrator`
+          : `story ${storyId} does not belong to this user`,
+      );
     }
 
     const bound = await sourcesFor(tx, storyId);
