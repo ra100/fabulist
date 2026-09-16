@@ -707,7 +707,13 @@ function PrivateStoragePanel({
             your existing stories. Set a passcode you can use again whenever you unlock them in the future; Fabulist
             cannot reset it. Keep the recovery code somewhere secure in case you forget it.
           </p>
-          <div className="private-storage-form">
+          <form
+            className="private-storage-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void prepare();
+            }}
+          >
             <label className="field-row">
               <span>passcode</span>
               <input
@@ -728,13 +734,13 @@ function PrivateStoragePanel({
                 disabled={busy}
               />
             </label>
-          </div>
-          <div className="private-storage-actions">
-            <button className="primary" onClick={() => void prepare()} disabled={busy || !passphrase || !confirmation}>
-              {busy ? 'preparing…' : 'continue'}
-            </button>
-            <span className="small dimmer">Use 12 or more characters.</span>
-          </div>
+            <div className="private-storage-actions">
+              <button className="primary" type="submit" disabled={busy || !passphrase || !confirmation}>
+                {busy ? 'preparing…' : 'continue'}
+              </button>
+              <span className="small dimmer">Use 12 or more characters.</span>
+            </div>
+          </form>
         </>
       ) : (
         <div className="private-recovery">
