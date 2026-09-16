@@ -96,9 +96,11 @@ test('with no AUTH_PUBLIC_ORIGIN, a non-loopback bind refuses to start rather th
   assert.throws(() => resolveAuthConfig(cfg, baseEnv(), { host: '0.0.0.0', port: 8080 }), /AUTH_PUBLIC_ORIGIN/);
 });
 
-test('login off resolves nothing at all — no origin validation happens when there is no login to protect', () => {
-  const auth = resolveAuthConfig(cfg, baseEnv({ AUTH_REQUIRE_LOGIN: 'false' }), { host: '0.0.0.0', port: 8080 });
-  assert.equal(auth, null);
+test('login off is loopback-only — a public bind with login disabled refuses to start', () => {
+  assert.throws(
+    () => resolveAuthConfig(cfg, baseEnv({ AUTH_REQUIRE_LOGIN: 'false' }), { host: '0.0.0.0', port: 8080 }),
+    /Login-disabled mode is only allowed on loopback/,
+  );
 });
 
 // --- `handleLogin` end to end: Host-header injection ------------------------

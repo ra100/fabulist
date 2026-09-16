@@ -193,6 +193,79 @@ test('state, cast, threads and the book all serve from Postgres', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('CORS is allowlisted and cross-site browser requests fail closed', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'cors', 'CORS');
+    const story = await createStory(db, { title: 'CORS story', worldIds: [worldId] });
+    const world = await World.forStory(db, story.id);
+    const providers = new ProviderRegistry(new MockProvider());
+    const server = createApiServer({
+      world: () => world,
+      db,
+      engine: new Engine({ world: () => world, db, providers }),
+      authConfig: {
+        requireLogin: true,
+        clientId: 'client_test',
+        cookiePassword: 'x'.repeat(32),
+        adminEmails: new Set<string>(),
+        callbackOrigin: 'https://fabulist.example.com',
+        workos: {
+          userManagement: {
+            loadSealedSession: () => ({
+              authenticate: async () => ({ authenticated: false as const, reason: 'invalid_session_cookie' as const }),
+            }),
+          },
+        },
+      } as unknown as NonNullable<Parameters<typeof createApiServer>[0]['authConfig']>,
+    });
+    await listen(server);
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const allowedPreflight = await fetch(`${base}/api/state`, {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://fabulist.example.com',
+          'access-control-request-method': 'GET',
+        },
+      });
+      assert.equal(allowedPreflight.status, 204);
+      assert.equal(allowedPreflight.headers.get('access-control-allow-origin'), 'https://fabulist.example.com');
+      assert.equal(allowedPreflight.headers.get('access-control-allow-credentials'), 'true');
+
+      const deniedOrigin = await fetch(`${base}/api/health`, {
+        headers: { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' },
+      });
+      assert.equal(deniedOrigin.status, 403);
+      assert.equal(deniedOrigin.headers.get('access-control-allow-origin'), null);
+      assert.match(await deniedOrigin.text(), /cross-origin requests are not allowed/);
+
+      for (const origin of [
+        'null',
+        'not a url',
+        'https://fabulist.example.com/path',
+        'https://fabulist.example.com?x=1',
+        'https://fabulist.example.com#x',
+      ]) {
+        const deniedInvalidOrigin = await fetch(`${base}/api/health`, { headers: { origin } });
+        assert.equal(deniedInvalidOrigin.status, 403);
+        assert.equal(deniedInvalidOrigin.headers.get('access-control-allow-origin'), null);
+        assert.match(await deniedInvalidOrigin.text(), /cross-origin requests are not allowed/);
+      }
+
+      const deniedFetchSite = await fetch(`${base}/api/play`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' },
+        body: JSON.stringify({ input: 'look' }),
+      });
+      assert.equal(deniedFetchSite.status, 403);
+      assert.match(await deniedFetchSite.text(), /cross-site browser requests are not allowed/);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('state uses the selected world record title when metadata is absent', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(
