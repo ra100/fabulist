@@ -32,7 +32,7 @@ mixing pip into the apt install breaks). Renews unattended via its own
 ## Already done (as of this doc)
 
 - [x] `*.rast.io` wildcard cert, renewing unattended.
-- [x] SSH deploy key generated; `SSH_PRIVATE_KEY` secret and
+- [x] SSH deploy key generated; `SSH_PRIVATE_KEY` and `SSH_KNOWN_HOSTS` secrets and
       `SSH_DOMAIN`/`SSH_PORT`/`SSH_USER` repo variables set.
 - [ ] Install `ssh-command.sh` root-owned and restrict the existing deploy key
       as described below. This is a host-side privilege change and cannot be
@@ -433,6 +433,24 @@ which is what finally identified this.
   this repo does not manage.
 
 ## Continuous deployment from GitHub Actions
+
+The release workflow never discovers the VPS host key at deploy time. Create
+the protected GitHub `production` Environment and store the reviewed
+`known_hosts` line for the configured host in its `SSH_KNOWN_HOSTS` secret
+(include the port in the host token when
+`SSH_PORT` is not `22`, for example `[deploy.example.com]:2222 ssh-ed25519
+AAA...`). From a trusted network, obtain a candidate with
+`ssh-keyscan -p "$SSH_PORT" "$SSH_DOMAIN"`, verify its fingerprint against an
+independent VPS console or provider record, and only then save it as the
+secret. The workflow fails closed if the secret is empty or has no entry for
+the configured host and uses `StrictHostKeyChecking=yes` for every connection.
+
+For host-key rotation, add the new reviewed key to `SSH_KNOWN_HOSTS` before
+changing the VPS, deploy once to verify it, then remove the retired key after
+the server no longer offers it. Treat an unexpected key mismatch as an
+incident: stop releases, verify the VPS through an independent channel, and
+rotate the deploy key and relevant deployment secrets if compromise is
+possible.
 
 `release.yml`'s `deploy` job, after `docker` publishes a new image:
 
