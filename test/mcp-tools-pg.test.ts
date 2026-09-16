@@ -11,6 +11,7 @@ import { HistoryStore } from '../src/store/history-pg.ts';
 import {
   rollbackTool,
   splitSceneTool,
+  switchStoryTool,
   updateKnobsTool,
   updateSheetTool,
   updateStyleTool,
@@ -81,6 +82,31 @@ test('PostgreSQL MCP authoring mutation rolls back when checkpoint capture fails
       [world.storyId],
     );
     assert.equal(Number(count?.count), 0);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL MCP rejects an unowned story for an authenticated user', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'unowned-mcp', 'Unowned MCP World');
+    const unowned = await createStory(db, { title: 'Imported book', worldIds: [worldId] });
+    const owned = await createStory(db, { title: 'Alice book', worldIds: [worldId], ownerUserId: 'user:alice' });
+    const world = await World.forStory(db, owned.id);
+    const engine = new Engine({ world: () => world, db, providers: new ProviderRegistry(new MockProvider()) });
+    const ctx: McpToolContext = {
+      db,
+      world: async () => world,
+      engine,
+      dataRoot: 'data',
+      user: { id: 'user:alice', email: 'alice@example.com', firstName: 'Alice', lastName: null, isAdmin: false },
+      selectStory: () => {},
+    };
+
+    await assert.rejects(
+      () => switchStoryTool(ctx, { id: unowned.id }),
+      /is unowned/,
+      'an authenticated MCP caller cannot select an unassigned imported story',
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });
