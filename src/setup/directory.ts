@@ -10,6 +10,7 @@
  * offered. Suggesting a wiki that turns out not to exist is a worse experience
  * than offering fewer options.
  */
+import { assertFandomWikiUrl } from '../ingest/client.ts';
 
 export interface WikiCandidate {
   /** Human name, from siteinfo where available. */
@@ -25,7 +26,7 @@ export interface WikiCandidate {
 }
 
 export interface DirectoryOptions {
-  fetcher?: (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+  fetcher?: (url: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
   /** Politeness delay between probes, in ms. */
   delayMs?: number;
   limit?: number;
@@ -72,7 +73,7 @@ export class WikiDirectory {
   private async json(url: string): Promise<unknown | null> {
     this.requests++;
     try {
-      const res = await this.fetcher(url);
+      const res = await this.fetcher(url, { redirect: 'error' });
       if (!res.ok) return null;
       return await res.json();
     } catch {
@@ -85,6 +86,11 @@ export class WikiDirectory {
    * function that decides whether a candidate is offered at all.
    */
   async verify(baseUrl: string, via: WikiCandidate['via'], confidence: number): Promise<WikiCandidate | null> {
+    try {
+      assertFandomWikiUrl(baseUrl);
+    } catch {
+      return null;
+    }
     const base = baseUrl.replace(/\/$/, '').replace(/\/api\.php$/, '');
     const data = (await this.json(
       `${base}/api.php?action=query&meta=siteinfo&siprop=general|statistics&format=json&formatversion=2`,
@@ -191,6 +197,11 @@ export class WikiDirectory {
    * suggestions than a raw search would.
    */
   async suggestStartingPoints(baseUrl: string, hint = ''): Promise<Array<{ title: string; kind: 'category' | 'page'; members: number }>> {
+    try {
+      assertFandomWikiUrl(baseUrl);
+    } catch {
+      return [];
+    }
     const base = baseUrl.replace(/\/$/, '');
     const out: Array<{ title: string; kind: 'category' | 'page'; members: number }> = [];
 

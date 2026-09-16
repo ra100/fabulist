@@ -15,7 +15,39 @@ export interface WikiPage {
   links: string[];
 }
 
-export type FetchLike = (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+export type FetchLike = (
+  url: string,
+  init?: RequestInit,
+) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+/**
+ * Fabulist ingests Fandom wikis only. Keeping this boundary host-based makes a
+ * supplied URL unable to target loopback, private, metadata, or rebinding DNS.
+ */
+export function assertFandomWikiUrl(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`expected an HTTPS Fandom wiki URL, got ${value}`);
+  }
+
+  const host = url.hostname.toLowerCase();
+  const isFandom = host === 'fandom.com' || host.endsWith('.fandom.com');
+  if (
+    url.protocol !== 'https:' ||
+    !isFandom ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.search ||
+    url.hash ||
+    !/^\/?(?:api\.php)?\/?$/.test(url.pathname)
+  ) {
+    throw new Error(`expected an HTTPS Fandom wiki URL, got ${value}`);
+  }
+  return url;
+}
 
 /**
  * The narrow surface `crawl()` and the depth-upgrade paths in `depth.ts`
@@ -37,7 +69,6 @@ export interface PageSource {
    */
   size?(): number;
 }
-
 
 /**
  * Identifies the crawler honestly, which is load-bearing rather than polite.
@@ -94,14 +125,10 @@ export class WikiClient implements PageSource {
   requests = 0;
 
   constructor(opts: ClientOptions) {
+    if (!opts.fetcher) assertFandomWikiUrl(opts.baseUrl);
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');
     this.userAgent = opts.userAgent ?? DEFAULT_USER_AGENT;
-    // The header goes on the default fetcher rather than into `FetchLike`'s
-    // signature: an injected fetcher is a test fixture or a caller's own
-    // transport, and widening the interface would force every one of them to
-    // thread a header they do not use. A caller supplying real transport sets
-    // its own headers.
-    this.fetcher = opts.fetcher ?? ((url: string) => fetch(url, { headers: { 'User-Agent': this.userAgent } }));
+    this.fetcher = opts.fetcher ?? fetch;
     this.delayMs = opts.delayMs ?? 250;
     this.batchSize = Math.min(50, Math.max(1, opts.batchSize ?? 20));
   }
@@ -113,7 +140,10 @@ export class WikiClient implements PageSource {
 
   private async query(params: Record<string, string>): Promise<unknown> {
     this.requests++;
-    const res = await this.fetcher(this.url(params));
+    const res = await this.fetcher(this.url(params), {
+      headers: { 'User-Agent': this.userAgent },
+      redirect: 'error',
+    });
     if (!res.ok) throw new Error(`wiki api ${res.status}`);
     return res.json();
   }
