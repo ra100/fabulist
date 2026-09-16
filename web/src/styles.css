@@ -1173,7 +1173,7 @@ hr {
 /* Private storage is a setting, not an alarm. Its small-cap header matches the
    other instrument panels; the recovery code is the only deliberately emphatic
    object because it is the one thing a person must preserve. */
-.private-storage { max-width: 46rem; }
+.private-storage { width: 100%; max-width: none; }
 .private-storage-heading {
   display: flex;
   justify-content: space-between;
