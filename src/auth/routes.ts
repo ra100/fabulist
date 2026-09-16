@@ -12,7 +12,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AuthConfig } from './config.ts';
-import { clearSessionCookie, setSessionCookie, SESSION_MAX_AGE_SECONDS } from './config.ts';
+import { clearSessionCookie, setSessionCookie, SESSION_MAX_AGE_SECONDS, parseCookies } from './config.ts';
 
 const PKCE_COOKIE = 'fabulist_pkce';
 
@@ -43,15 +43,9 @@ function setPkceCookie(res: ServerResponse, codeVerifier: string, secure: boolea
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
+/** Reads the PKCE `codeVerifier` cookie, or `undefined` if absent. Delegates to `parseCookies`, whose safe-decode guarantees a malformed (tampered) value degrades to "no verifier" rather than throwing — so a bad cookie falls through to the login redirect instead of an unhandled `URIError`. */
 function readPkceCookie(req: IncomingMessage): string | undefined {
-  const header = req.headers.cookie;
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === PKCE_COOKIE) return decodeURIComponent(part.slice(eq + 1).trim());
-  }
-  return undefined;
+  return parseCookies(req.headers.cookie)[PKCE_COOKIE];
 }
 
 function clearPkceCookie(res: ServerResponse): void {
