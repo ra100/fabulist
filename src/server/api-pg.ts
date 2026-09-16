@@ -229,6 +229,72 @@ const MIME: Record<string, string> = {
 
 const routes: Array<{ method: string; path: string; pattern: RegExp; handler: Handler }> = [];
 
+const SAFE_FETCH_SITES = new Set(['same-origin', 'same-site', 'none']);
+
+function originOf(raw: string | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && raw === url.origin ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+function requestOrigin(req: IncomingMessage): { present: boolean; origin: string | null } {
+  const raw = req.headers.origin;
+  if (raw === undefined) return { present: false, origin: null };
+  return { present: true, origin: typeof raw === 'string' ? originOf(raw) : null };
+}
+
+function allowedOriginsFor(
+  req: IncomingMessage,
+  url: URL,
+  authConfig: AuthConfig | undefined,
+  mcpResourceUrl: string | undefined,
+): Set<string> {
+  const allowed = new Set<string>();
+  if (authConfig) allowed.add(authConfig.callbackOrigin);
+  const mcpOrigin = originOf(mcpResourceUrl);
+  if (mcpOrigin) allowed.add(mcpOrigin);
+  if (!authConfig) {
+    const hostOrigin = originOf(`${url.protocol}//${req.headers.host ?? ''}`);
+    if (hostOrigin) allowed.add(hostOrigin);
+  }
+  return allowed;
+}
+
+function applyCors(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  authConfig: AuthConfig | undefined,
+  mcpResourceUrl: string | undefined,
+): boolean {
+  const { present, origin } = requestOrigin(req);
+  if (present) {
+    if (!origin) return false;
+    if (!allowedOriginsFor(req, url, authConfig, mcpResourceUrl).has(origin)) return false;
+    res.setHeader('access-control-allow-origin', origin);
+    res.setHeader('vary', 'origin');
+    if (authConfig) res.setHeader('access-control-allow-credentials', 'true');
+  }
+  res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.setHeader(
+    'access-control-allow-headers',
+    'content-type,authorization,mcp-protocol-version,mcp-session-id,last-event-id',
+  );
+  res.setHeader('access-control-expose-headers', 'mcp-session-id');
+  return true;
+}
+
+function passesFetchSiteGuard(req: IncomingMessage, crossSiteHasAllowedOrigin: boolean): boolean {
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (typeof fetchSite !== 'string') return true;
+  const site = fetchSite.toLowerCase();
+  return SAFE_FETCH_SITES.has(site) || (site === 'cross-site' && crossSiteHasAllowedOrigin);
+}
+
 /**
  * Routes whose body must reach the handler as raw bytes (`ctx.rawBody`)
  * rather than JSON-parsed into `ctx.body` — currently just the world upload
@@ -2451,13 +2517,14 @@ export function createApiServer(opts: ServerOptions) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
-    res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader(
-      'access-control-allow-headers',
-      'content-type,authorization,mcp-protocol-version,mcp-session-id,last-event-id',
-    );
-    res.setHeader('access-control-expose-headers', 'mcp-session-id');
+    const origin = requestOrigin(req);
+    const originAllowed = applyCors(req, res, url, authConfig, mcpResourceUrl);
+    if (!originAllowed) {
+      return send(res, 403, { error: 'cross-origin requests are not allowed from this origin' });
+    }
+    if (!passesFetchSiteGuard(req, origin.origin !== null)) {
+      return send(res, 403, { error: 'cross-site browser requests are not allowed' });
+    }
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       return res.end();

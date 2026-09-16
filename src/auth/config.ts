@@ -16,7 +16,8 @@
  * budget. "Signed in" answers "is this a real person"; "admin" answers "may
  * this person touch things every user shares."
  *
- * Off by default, on for a real deployment: see `resolveAuthConfig` below.
+ * Off on loopback-only local runs, on for a real deployment: see
+ * `resolveAuthConfig` below.
  */
 import { WorkOS } from '@workos-inc/node';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -135,8 +136,15 @@ export function resolveAuthConfig(
   bind: { host: string; port: number } = { host: '127.0.0.1', port: 4317 },
 ): AuthConfig | null {
   const parsedEnv = env.AUTH_REQUIRE_LOGIN !== undefined ? parseRequireLoginEnv(env.AUTH_REQUIRE_LOGIN) : undefined;
-  const requireLogin = parsedEnv ?? config.requireLogin ?? false;
-  if (!requireLogin) return null;
+  const requireLogin = parsedEnv ?? config.requireLogin ?? !isLoopbackHost(bind.host);
+  if (!requireLogin) {
+    if (!isLoopbackHost(bind.host)) {
+      throw new Error(
+        `AUTH_REQUIRE_LOGIN is off but --host=${bind.host} is not a loopback address. Login-disabled mode is only allowed on loopback; set AUTH_REQUIRE_LOGIN=true for network-exposed deployments.`,
+      );
+    }
+    return null;
+  }
 
   const apiKey = env.WORKOS_API_KEY;
   const clientId = env.WORKOS_CLIENT_ID;
