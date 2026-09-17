@@ -3,18 +3,28 @@
  * the gate every other route passes through when login is required. See
  * `src/auth/config.ts` for what "required" means and where it's decided.
  *
- * PKCE without a stored `codeVerifier` server-side: `getAuthorizationUrlWithPKCE`
- * generates the verifier and hands it back alongside the URL, and this
- * stores it in a short-lived cookie of its own rather than a server-side
- * session store — there is nothing to clean up, and it survives exactly as
- * long as it needs to (one redirect round trip), which a server-side map
- * keyed by a `state` the browser could still lose would not simplify.
+ * PKCE plus one-time OAuth `state`: `getAuthorizationUrlWithPKCE` generates
+ * the verifier, this route generates a random state, and the login attempt
+ * cookie binds both values for one redirect round trip. A small in-memory
+ * pending-state set makes the callback one-use, so a copied callback cannot
+ * replay after the first exchange.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import type { AuthConfig } from './config.ts';
 import { clearSessionCookie, setSessionCookie, SESSION_MAX_AGE_SECONDS, parseCookies } from './config.ts';
 
 const PKCE_COOKIE = 'fabulist_pkce';
+const LOGIN_ATTEMPT_MAX_AGE_SECONDS = 600;
+const LOGIN_ATTEMPT_MAX_AGE_MS = LOGIN_ATTEMPT_MAX_AGE_SECONDS * 1000;
+const MAX_PENDING_OAUTH_STATES = 10_000;
+const pendingOAuthStates = new Map<string, { codeVerifier: string; expiresAt: number }>();
+
+interface LoginAttempt {
+  codeVerifier: string;
+  state: string;
+  expiresAt: number;
+}
 
 /**
  * Where `getAuthorizationUrl`'s own `redirect_uri` needs to point — this
@@ -37,19 +47,79 @@ function callbackUrl(auth: AuthConfig): string {
   return `${auth.callbackOrigin}/auth/callback`;
 }
 
-function setPkceCookie(res: ServerResponse, codeVerifier: string, secure: boolean): void {
-  const parts = [`${PKCE_COOKIE}=${encodeURIComponent(codeVerifier)}`, 'Path=/auth', 'HttpOnly', 'SameSite=Lax', 'Max-Age=600'];
-  if (secure) parts.push('Secure');
-  res.setHeader('Set-Cookie', parts.join('; '));
+function cleanupExpiredOAuthStates(now = Date.now()): void {
+  // Fixed TTL means insertion order is also expiry order, so stop at the
+  // first live state instead of sweeping the whole map on every login.
+  for (const [state, attempt] of pendingOAuthStates) {
+    if (attempt.expiresAt > now) break;
+    pendingOAuthStates.delete(state);
+  }
 }
 
-/** Reads the PKCE `codeVerifier` cookie, or `undefined` if absent. Delegates to `parseCookies`, whose safe-decode guarantees a malformed (tampered) value degrades to "no verifier" rather than throwing — so a bad cookie falls through to the login redirect instead of an unhandled `URIError`. */
-function readPkceCookie(req: IncomingMessage): string | undefined {
-  return parseCookies(req.headers.cookie)[PKCE_COOKIE];
+function evictOldestOAuthStates(): void {
+  while (pendingOAuthStates.size >= MAX_PENDING_OAUTH_STATES) {
+    const oldest = pendingOAuthStates.keys().next().value;
+    if (oldest === undefined) break;
+    pendingOAuthStates.delete(oldest);
+  }
+}
+
+function generateOAuthState(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+function createLoginAttempt(codeVerifier: string, state: string, now = Date.now()): LoginAttempt {
+  cleanupExpiredOAuthStates(now);
+  evictOldestOAuthStates();
+  const attempt = { codeVerifier, state, expiresAt: now + LOGIN_ATTEMPT_MAX_AGE_MS };
+  pendingOAuthStates.set(attempt.state, { codeVerifier, expiresAt: attempt.expiresAt });
+  return attempt;
+}
+
+function setPkceCookie(res: ServerResponse, attempt: LoginAttempt, secure: boolean): void {
+  const parts = [
+    `${PKCE_COOKIE}=${encodeURIComponent(JSON.stringify(attempt))}`,
+    'Path=/auth',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${LOGIN_ATTEMPT_MAX_AGE_SECONDS}`,
+  ];
+  if (secure) parts.push('Secure');
+  res.appendHeader('Set-Cookie', parts.join('; '));
+}
+
+/** Reads the short-lived PKCE/state login-attempt cookie, or `undefined` if absent, malformed, expired, or no longer pending. */
+function readLoginAttemptCookie(req: IncomingMessage, now = Date.now()): LoginAttempt | undefined {
+  const raw = parseCookies(req.headers.cookie)[PKCE_COOKIE];
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<LoginAttempt>;
+    if (typeof parsed.codeVerifier !== 'string' || parsed.codeVerifier.length === 0) return undefined;
+    if (typeof parsed.state !== 'string' || parsed.state.length === 0) return undefined;
+    if (typeof parsed.expiresAt !== 'number' || !Number.isFinite(parsed.expiresAt)) return undefined;
+    return { codeVerifier: parsed.codeVerifier, state: parsed.state, expiresAt: parsed.expiresAt };
+  } catch {
+    return undefined;
+  }
+}
+
+function consumeOAuthState(attempt: LoginAttempt, state: string, now = Date.now()): boolean {
+  const pending = pendingOAuthStates.get(attempt.state);
+  if (!pending) return false;
+  if (pending.expiresAt <= now) {
+    pendingOAuthStates.delete(attempt.state);
+    return false;
+  }
+  const valid =
+    state === attempt.state &&
+    pending.codeVerifier === attempt.codeVerifier &&
+    pending.expiresAt === attempt.expiresAt;
+  if (valid) pendingOAuthStates.delete(attempt.state);
+  return valid;
 }
 
 function clearPkceCookie(res: ServerResponse): void {
-  res.setHeader('Set-Cookie', `${PKCE_COOKIE}=; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.appendHeader('Set-Cookie', `${PKCE_COOKIE}=; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
 /** `GET /auth/login` — redirects to AuthKit's hosted sign-in. Takes no request: everything it needs (client id, callback origin) is startup configuration, which is the point — nothing on this route may be derived from attacker-controllable request headers. */
@@ -60,13 +130,17 @@ export async function handleLogin(auth: AuthConfig, res: ServerResponse): Promis
   // deployment marks the PKCE cookie Secure; a plain-http loopback dev
   // server does not, since browsers drop Secure cookies over http.
   const secure = auth.callbackOrigin.startsWith('https://');
+  const state = generateOAuthState();
   const { url, codeVerifier } = await auth.workos.userManagement.getAuthorizationUrlWithPKCE({
     clientId: auth.clientId,
     provider: 'authkit',
     redirectUri: callbackUrl(auth),
   });
-  setPkceCookie(res, codeVerifier, secure);
-  res.writeHead(302, { location: url });
+  const authorizationUrl = new URL(url);
+  authorizationUrl.searchParams.set('state', state);
+  const attempt = createLoginAttempt(codeVerifier, state);
+  setPkceCookie(res, attempt, secure);
+  res.writeHead(302, { location: authorizationUrl.toString() });
   res.end();
 }
 
@@ -80,10 +154,11 @@ export async function handleLogin(auth: AuthConfig, res: ServerResponse): Promis
  */
 export async function handleCallback(auth: AuthConfig, req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const code = url.searchParams.get('code');
-  const codeVerifier = readPkceCookie(req);
-  clearPkceCookie(res);
+  const state = url.searchParams.get('state');
+  const attempt = readLoginAttemptCookie(req);
 
-  if (!code || !codeVerifier) {
+  if (!code || !state || !attempt || !consumeOAuthState(attempt, state)) {
+    clearPkceCookie(res);
     res.writeHead(302, { location: '/auth/login' });
     res.end();
     return;
@@ -93,11 +168,12 @@ export async function handleCallback(auth: AuthConfig, req: IncomingMessage, res
     const result = await auth.workos.userManagement.authenticateWithCode({
       clientId: auth.clientId,
       code,
-      codeVerifier,
+      codeVerifier: attempt.codeVerifier,
       session: { sealSession: true, cookiePassword: auth.cookiePassword },
     });
     if (!result.sealedSession) throw new Error('WorkOS did not return a sealed session');
     setSessionCookie(req, res, result.sealedSession, SESSION_MAX_AGE_SECONDS);
+    clearPkceCookie(res);
     res.writeHead(302, { location: '/' });
     res.end();
   } catch {
@@ -105,6 +181,7 @@ export async function handleCallback(auth: AuthConfig, req: IncomingMessage, res
     // comment above. Logged server-side would be the next step; this app
     // has no logging layer beyond console.log at boot (see serve.ts), and
     // adding one is out of scope for the login flow itself.
+    clearPkceCookie(res);
     res.writeHead(302, { location: '/auth/login' });
     res.end();
   }
