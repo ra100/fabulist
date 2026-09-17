@@ -287,17 +287,26 @@ export function readSessionCookie(req: IncomingMessage): string | undefined {
 }
 
 /**
- * `secure` is inferred from `X-Forwarded-Proto` (what a reverse proxy sets;
- * see `deploy/nginx/fabulist.conf`'s own `proxy_set_header X-Forwarded-Proto`)
- * rather than hardcoded, because the same code path serves a plain-HTTP
- * local dev server and an HTTPS-terminated-at-the-proxy production one, and
- * a `secure` cookie set over plain HTTP is simply dropped by the browser —
- * silently, with no error, which is a much worse failure than a
- * slightly-too-permissive local cookie no attacker can reach anyway
- * (loopback-only in the local case per `serve.ts`'s own default).
+ * `secure` follows the configured, admin-set `callbackOrigin` rather than
+ * the per-request `X-Forwarded-Proto` header (issue #25): that header is
+ * only trustworthy when it is guaranteed to have been set by a reverse
+ * proxy fronting this process and stripped from anything a client could
+ * send directly — a guarantee this server has no way to check, and one a
+ * deployment that binds Node directly to a public interface (no proxy at
+ * all) does not have. An attacker who can reach the process directly could
+ * otherwise send `X-Forwarded-Proto: https` over a plain HTTP connection
+ * and get a `Secure` cookie the browser will still send in the clear.
+ * `callbackOrigin` has no such gap: it is startup configuration
+ * (`AUTH_PUBLIC_ORIGIN`, or the loopback dev default), never derived from
+ * any request, so its scheme is exactly what this deployment is actually
+ * reachable over — the same reasoning `handleLogin`'s PKCE cookie already
+ * follows for `Secure`. A `secure` cookie set over plain HTTP is simply
+ * dropped by the browser — silently, with no error, which is why a
+ * loopback dev server (`callbackOrigin` starts `http://`) must not mark it
+ * `Secure` either.
  */
-export function setSessionCookie(req: IncomingMessage, res: ServerResponse, sealed: string, maxAgeSeconds: number): void {
-  const secure = req.headers['x-forwarded-proto'] === 'https';
+export function setSessionCookie(auth: AuthConfig, res: ServerResponse, sealed: string, maxAgeSeconds: number): void {
+  const secure = auth.callbackOrigin.startsWith('https://');
   const parts = [
     `${SESSION_COOKIE}=${encodeURIComponent(sealed)}`,
     'Path=/',
@@ -385,7 +394,7 @@ export async function verifySession(auth: AuthConfig, req: IncomingMessage, res?
       return null;
     }
     if (!refreshed.authenticated) return null;
-    if (refreshed.sealedSession && res) setSessionCookie(req, res, refreshed.sealedSession, SESSION_MAX_AGE_SECONDS);
+    if (refreshed.sealedSession && res) setSessionCookie(auth, res, refreshed.sealedSession, SESSION_MAX_AGE_SECONDS);
     const { user } = refreshed;
     return {
       id: user.id,
