@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WorkOS } from '@workos-inc/node';
@@ -1868,4 +1868,63 @@ test('an empty upload body is a plain 400, not a 500 or a silent no-op', async (
       assert.equal(res.status, 400);
     },
   );
+});
+
+test('a handler that throws after headers are already sent does not crash the server', async () => {
+  // Regression test for the outer route-handler catch: it used to call
+  // `send()` unconditionally, which throws ERR_HTTP_HEADERS_SENT (and can
+  // take the whole process down) when a route has already replied and then
+  // fails. The image route is a genuine, non-mocked repro: it writes a 200
+  // header and *then* reads the file bytes as the argument to `res.end()`,
+  // so a file that exists but cannot be read as a regular file (here, a
+  // directory left behind where the image used to be) reproduces the exact
+  // "headers sent, then throw" ordering.
+  const imagesDir = mkdtempSync(join(tmpdir(), 'fabulist-illus-'));
+  try {
+    const world = World.open(':memory:', undefined, imagesDir);
+    seedWorld(world);
+    const engine = new Engine({ world, providers: new ProviderRegistry(new MockProvider()) });
+    const server = createApiServer({ world, engine });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      const illus = world.illustrations.complete(
+        world.illustrations.reserve({
+          subject: { kind: 'portrait', entityId: world.graph.list({ type: 'Character', limit: 1 })[0]!.id },
+          visualStyle: 'drawing',
+          prompt: 'a portrait',
+          negativePrompt: '',
+          seed: 1,
+          provider: 'mock',
+          createdScene: 1,
+        }).id,
+        new Uint8Array([0]),
+        'image/png',
+        1,
+      );
+      assert.ok(illus, 'precondition: illustration completed with a path');
+      const abs = world.illustrations.absolutePath(illus!);
+      assert.ok(abs, 'precondition: illustration has an absolute path');
+      // Replace the completed file with a directory so `existsSync` still
+      // says "yes" but `readFileSync` throws EISDIR — after the 200 header
+      // has already been written.
+      rmSync(abs!);
+      mkdirSync(abs!);
+
+      const broken = await fetch(`${base}/api/illustration/${illus!.id}/image`);
+      assert.equal(broken.status, 200, 'headers were already flushed before the read failed');
+      await broken.arrayBuffer().catch(() => undefined);
+
+      // The real assertion: the server is still alive and answers normally.
+      const { status, body } = await get(base, '/api/state');
+      assert.equal(status, 200);
+      assert.ok(body, 'server kept serving requests after the failed handler');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      world.close();
+    }
+  } finally {
+    rmSync(imagesDir, { recursive: true, force: true });
+  }
 });

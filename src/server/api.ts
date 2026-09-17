@@ -2076,7 +2076,19 @@ export function createApiServer(opts: ServerOptions) {
       } catch (err) {
         // Surface the message: this is a local single-user tool, and a silent
         // 500 during a session is worse than a leaked stack trace.
-        send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
+        //
+        // `headersSent` guard: a route that has already replied and *then* throws
+        // used to take the whole process down with ERR_HTTP_HEADERS_SENT, because
+        // this tried to send a second response. A streaming route or a bug like the
+        // unawaited export above is enough to get here, and one bad request should
+        // not stop the server for everyone else. The error is still reported —
+        // logged rather than sent, since the client already has its answer.
+        if (res.headersSent) {
+          console.error(`error after the response was sent for ${req.method} ${url.pathname}:`, err);
+          res.end();
+        } else {
+          send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
+        }
       }
       return;
     }
