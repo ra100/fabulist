@@ -1,5 +1,6 @@
 import { seedConsequences, tickConsequences, worldTick } from '../consequence/propagate.ts';
 import type { Engine, TakeTurnOptions } from '../loop/engine.ts';
+import { recordAuthoringCheckpointTx } from '../loop/history.ts';
 import type { World } from '../store/index.ts';
 import { runPlayTurn } from './play-workflow.ts';
 
@@ -27,6 +28,7 @@ export function playTurn(engine: Engine, world: World, input: string, options: P
         ).length,
       tickConsequences,
       worldTick,
+      recordAuthoringCheckpoint: recordAuthoringCheckpointTx,
     },
     world,
     input,

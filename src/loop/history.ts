@@ -1,5 +1,5 @@
 import type { SceneSplitResult, StoryLayout, StoryLayoutTurn } from '../domain/types.ts';
-import { tx } from '../db/db.ts';
+import { tx, txAsync } from '../db/db.ts';
 import type { World } from '../store/index.ts';
 
 const DEFAULT_CHAPTER_SIZE = 8;
@@ -76,4 +76,23 @@ export function reconcileContinuation(world: World): void {
 /** Records an immutable post-authoring snapshot without replacing a turn checkpoint. */
 export function recordAuthoringCheckpoint(world: World): void {
   world.history.capture();
+}
+
+/**
+ * The SQLite counterpart of Postgres `history-pg.ts`'s `recordAuthoringCheckpoint`:
+ * runs `mutate` and its post-mutation checkpoint capture inside one transaction,
+ * so a failure partway through (e.g. `tickConsequences` throwing after
+ * `seedConsequences` already wrote pending rows) leaves nothing half-applied.
+ * Named distinctly from the void-returning `recordAuthoringCheckpoint` above,
+ * which snapshots state that a caller has *already* committed on its own.
+ */
+export async function recordAuthoringCheckpointTx<T>(
+  world: World,
+  mutate: (world: World) => Promise<T>,
+): Promise<T> {
+  return txAsync(world.db, async () => {
+    const result = await mutate(world);
+    world.history.capture();
+    return result;
+  });
 }
