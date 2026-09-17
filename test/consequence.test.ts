@@ -154,6 +154,44 @@ test('firing a consequence writes a real event to the chronicle', () => {
   world.close();
 });
 
+test('a failure marking a consequence fired rolls back its just-committed event too', () => {
+  const world = setup();
+  const seedEvent = harm(world, 'char:novice-tem');
+  const before = world.chronicle.events().length;
+  world.consequences.enqueue({
+    causeEventId: seedEvent.id,
+    trigger: { kind: 'immediate' },
+    actorId: 'char:novice-tem',
+    action: 'reacts',
+    visibility: 'onscreen',
+    maturity: 'ripening',
+    depth: 0,
+    significance: 0.9,
+    createdScene: world.session.get().scene,
+  });
+
+  const original = world.consequences.setMaturity.bind(world.consequences);
+  let calls = 0;
+  world.consequences.setMaturity = ((id: string, maturity: string, scene?: number) => {
+    calls++;
+    if (maturity === 'fired') throw new Error('simulated crash between event commit and fired-marking');
+    return original(id, maturity as never, scene);
+  }) as typeof world.consequences.setMaturity;
+
+  assert.throws(() => tickConsequences(world), /simulated crash/);
+  assert.ok(calls > 0, 'the injected failure point was actually reached');
+
+  world.consequences.setMaturity = original;
+  assert.equal(
+    world.chronicle.events().length,
+    before,
+    'the offscreen event must not survive a rollback of its own fire transaction',
+  );
+  const stillRipening = world.consequences.all().find((c) => c.maturity === 'ripening');
+  assert.ok(stillRipening, 'the consequence stays ripening, not half-fired, so the next tick can retry cleanly');
+  world.close();
+});
+
 test('hidden consequences are still committed as true', () => {
   const world = setup();
   world.session.set({ knobs: { ...world.session.get().knobs, ignoranceBudget: 99 } });

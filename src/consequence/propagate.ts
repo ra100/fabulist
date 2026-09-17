@@ -19,6 +19,7 @@ import type {
 } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
 import { commitOffscreenEvent } from '../loop/commit.ts';
+import { tx } from '../db/db.ts';
 // The predicate vocabulary lives with the packs because that is where it is
 // authored against, but it is *enforced* here — an edge whose predicate has no
 // stance summons no reactor at all. See `packs/predicates.ts` for why that is
@@ -262,11 +263,17 @@ export function tickConsequences(world: World, opts: SeedOptions = defaultSeedOp
       continue;
     }
 
-    // Ripening and ready: fire it.
+    // Ripening and ready: fire it. Both writes must land together — a crash
+    // between them would leave the consequence still `ripening` even though
+    // its event is already in the chronicle, so the next tick would fire it
+    // again and duplicate history.
     const actorName = world.graph.get(c.actorId)?.name ?? c.actorId;
     const text = `${actorName} ${c.action}.`;
-    const event = commitOffscreenEvent(world, text, c.actorId, c.visibility, c.id, c.significance);
-    world.consequences.setMaturity(c.id, 'fired', scene);
+    const event = tx(world.db, () => {
+      const ev = commitOffscreenEvent(world, text, c.actorId, c.visibility, c.id, c.significance);
+      world.consequences.setMaturity(c.id, 'fired', scene);
+      return ev;
+    });
     result.fired.push({ consequence: c, event });
 
     // Chain onward at depth+1, decaying so chains terminate on their own.
