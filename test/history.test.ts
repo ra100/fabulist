@@ -4,7 +4,7 @@ import { World } from '../src/store/index.ts';
 import { emptyDelta, type Turn } from '../src/domain/types.ts';
 import { commitDelta, commitTurn } from '../src/loop/commit.ts';
 import { rollback } from '../src/loop/branch.ts';
-import { recordAuthoringCheckpoint, splitSceneAtTurn, storyLayout } from '../src/loop/history.ts';
+import { recordAuthoringCheckpoint, recordAuthoringCheckpointTx, splitSceneAtTurn, storyLayout } from '../src/loop/history.ts';
 import { Compactor } from '../src/loop/compact.ts';
 import { exportMarkdown } from '../src/loop/export.ts';
 import { buildNarratorFrame } from '../src/frame/builders.ts';
@@ -87,6 +87,57 @@ test('committed turn checkpoint is retained when authoring checkpoints are recor
     count: number;
   };
   assert.equal(Number(count.count), 2);
+  world.close();
+});
+
+test('recordAuthoringCheckpointTx rolls back a mutation that fails partway through', async () => {
+  const world = World.open(':memory:');
+  const turnCount = () => (world.db.prepare(`SELECT COUNT(*) AS count FROM turns`).get() as { count: number }).count;
+  const checkpointCount = () =>
+    (
+      world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
+        count: number;
+      }
+    ).count;
+
+  const before = { turns: turnCount(), checkpoints: checkpointCount() };
+
+  await assert.rejects(
+    recordAuthoringCheckpointTx(world, async (transactionWorld) => {
+      transactionWorld.chronicle.addTurn(turnInput(1));
+      throw new Error('downstream tick failed');
+    }),
+    /downstream tick failed/,
+  );
+
+  assert.deepEqual(
+    { turns: turnCount(), checkpoints: checkpointCount() },
+    before,
+    'a mid-mutation failure must not leave the earlier write or its checkpoint behind',
+  );
+  world.close();
+});
+
+test('recordAuthoringCheckpointTx commits the mutation and captures a checkpoint together', async () => {
+  const world = World.open(':memory:');
+  const turnCount = () => (world.db.prepare(`SELECT COUNT(*) AS count FROM turns`).get() as { count: number }).count;
+  const checkpointCount = () =>
+    (
+      world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
+        count: number;
+      }
+    ).count;
+
+  const before = { turns: turnCount(), checkpoints: checkpointCount() };
+
+  const result = await recordAuthoringCheckpointTx(world, async (transactionWorld) => {
+    transactionWorld.chronicle.addTurn(turnInput(1));
+    return 'seeded';
+  });
+
+  assert.equal(result, 'seeded');
+  assert.equal(turnCount(), before.turns + 1);
+  assert.equal(checkpointCount(), before.checkpoints + 1);
   world.close();
 });
 

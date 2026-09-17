@@ -213,3 +213,35 @@ export function tx<T>(db: Db, fn: () => T): T {
     else transactionDepth.set(db, depth);
   }
 }
+
+/**
+ * Same contract as {@link tx}, for a caller whose work is exposed through a
+ * `Promise`-returning interface even though `DatabaseSync` itself is
+ * synchronous (a transport-neutral adapter shared with the Postgres path,
+ * for instance). `fn` must not suspend on genuine async I/O — only on an
+ * `await` of an already-computed value — or a concurrent statement on this
+ * same connection could interleave between BEGIN and COMMIT/ROLLBACK.
+ */
+export async function txAsync<T>(db: Db, fn: () => Promise<T>): Promise<T> {
+  const depth = transactionDepth.get(db) ?? 0;
+  const savepoint = `fabulist_tx_${depth}`;
+  if (depth === 0) db.exec('BEGIN');
+  else db.exec(`SAVEPOINT ${savepoint}`);
+  transactionDepth.set(db, depth + 1);
+  try {
+    const out = await fn();
+    if (depth === 0) db.exec('COMMIT');
+    else db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+    return out;
+  } catch (err) {
+    if (depth === 0) db.exec('ROLLBACK');
+    else {
+      db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+    }
+    throw err;
+  } finally {
+    if (depth === 0) transactionDepth.delete(db);
+    else transactionDepth.set(db, depth);
+  }
+}
