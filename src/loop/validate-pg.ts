@@ -66,17 +66,16 @@ function mentionedIds(delta: Delta): EntityId[] {
  */
 export async function validateDelta(world: World, delta: Delta): Promise<ValidationResult> {
   const issues: ValidationIssue[] = [];
-  const session = await world.session.get();
-  const scene = session.scene;
 
-  // Entities created by this delta are legitimate references within it, so they
-  // are written before resolution rather than after — otherwise every edge
-  // pointing at a brand-new entity would be "unknown" and dropped.
+  // Entities this delta introduces are legitimate references within it, but
+  // validation must not persist them: the delta can still be rejected below,
+  // and writing here — outside the commit transaction — would leave orphaned
+  // `emergent:` entities in the database with no corresponding accepted delta.
+  // They are only recorded in the local `known` map so resolution below sees
+  // them as valid references.
   const known = await world.graph.getMany(mentionedIds(delta));
   for (const u of delta.entityUpserts) {
     if (!known.has(u.id)) {
-      await world.graph.upsert({ ...u, provenance: `emergent:${scene}`, createdScene: scene }, 'chronicle');
-      // Recorded locally too, so the synchronous resolution below sees it.
       known.set(u.id, { id: u.id, name: u.name } as Entity);
     }
   }

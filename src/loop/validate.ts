@@ -300,11 +300,16 @@ export function coerceDelta(raw: unknown): { delta: Delta; issues: ValidationIss
  */
 export function validateDelta(world: World, delta: Delta): ValidationResult {
   const issues: ValidationIssue[] = [];
-  const scene = world.session.get().scene;
+
+  // Entities this delta introduces are legitimate references within it, but
+  // validation must not persist them: a delta can still be rejected below, and
+  // writing here — outside the commit transaction — would leave orphaned
+  // `emergent:` entities in the graph with no corresponding accepted delta.
+  const introducedIds = new Set(delta.entityUpserts.map((u) => u.id));
 
   const resolve = (id: EntityId, path: string): EntityId | null => {
     if (!id) return null;
-    if (world.graph.has(id)) return id;
+    if (world.graph.has(id) || introducedIds.has(id)) return id;
     const byName = world.graph.resolveName(id);
     if (byName) {
       issues.push({ tier: 'referential', path, message: `resolved "${id}" to ${byName.id}`, repaired: true });
@@ -313,13 +318,6 @@ export function validateDelta(world: World, delta: Delta): ValidationResult {
     issues.push({ tier: 'referential', path, message: `unknown entity "${id}"`, repaired: true });
     return null;
   };
-
-  // Entities created by this delta are legitimate references within it.
-  for (const u of delta.entityUpserts) {
-    if (!world.graph.has(u.id)) {
-      world.graph.upsert({ ...u, provenance: `emergent:${scene}`, createdScene: scene }, 'chronicle');
-    }
-  }
 
   for (const ev of delta.events) {
     ev.participants = ev.participants.map((p) => resolve(p, 'events.participants')).filter((p): p is string => !!p);

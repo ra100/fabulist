@@ -460,6 +460,53 @@ test('unresolvable entity references are dropped rather than left dangling', () 
   world.close();
 });
 
+test('a new entity referenced within the same delta resolves without being persisted by validation', () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const { delta } = coerceDelta({
+    entityUpserts: [{ id: 'char:new-arrival', name: 'New Arrival', type: 'Character' }],
+    events: [{ text: 'they meet', participants: ['char:new-arrival', 'char:brother-anselm'], significance: 0.5 }],
+    sceneAdvance: false,
+  });
+  const res = validateDelta(world, delta);
+  assert.deepEqual(delta.events[0]?.participants, ['char:new-arrival', 'char:brother-anselm']);
+  assert.equal(
+    res.issues.filter((i) => !i.repaired).length,
+    0,
+    'a same-delta entity is a legitimate reference, not an unknown one',
+  );
+  assert.equal(
+    world.graph.has('char:new-arrival'),
+    false,
+    'validation only checks the delta — the commit step is what writes the graph',
+  );
+  world.close();
+});
+
+test('a blocked delta leaves no orphaned entity behind', () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  world.graph.upsert(
+    { id: 'char:sergeant-doff', type: 'Character', name: 'Sergeant Doff', props: { status: 'dead' } },
+    'chronicle',
+  );
+  const { delta } = coerceDelta({
+    entityUpserts: [{ id: 'char:emergent-witness', name: 'Emergent Witness', type: 'Character' }],
+    events: [
+      { text: 'Doff argues', participants: ['char:sergeant-doff', 'char:emergent-witness'], significance: 0.5 },
+    ],
+    sceneAdvance: false,
+  });
+  const res = validateDelta(world, delta);
+  assert.equal(res.ok, false, 'the dead-participant issue must still block this delta');
+  assert.equal(
+    world.graph.has('char:emergent-witness'),
+    false,
+    'a rejected delta must not leave its new entities stranded in the graph',
+  );
+  world.close();
+});
+
 test('retiring an edge that was never asserted is a semantic issue', () => {
   const world = World.open(':memory:');
   seedWorld(world);
