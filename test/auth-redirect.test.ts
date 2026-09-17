@@ -149,6 +149,33 @@ function pkceCookie(headers: http.IncomingHttpHeaders): string | undefined {
   return (Array.isArray(setCookies) ? setCookies : [setCookies]).find((c) => c.startsWith('fabulist_pkce='));
 }
 
+function stateFromLocation(headers: http.IncomingHttpHeaders): string {
+  const location = headers.location;
+  assert.equal(typeof location, 'string');
+  const state = new URL(location!).searchParams.get('state');
+  assert.equal(typeof state, 'string');
+  return state!;
+}
+
+function statefulWorkos(captured: { authenticateCalls?: number; codeVerifier?: string; code?: string }): WorkOS {
+  return {
+    userManagement: {
+      getAuthorizationUrlWithPKCE: async (params: { redirectUri: string }) => {
+        const url = new URL('https://auth.workos.com/authorize');
+        url.searchParams.set('client_id', 'client_test');
+        url.searchParams.set('redirect_uri', params.redirectUri);
+        return { url: url.toString(), codeVerifier: 'verifier_123' };
+      },
+      authenticateWithCode: async (params: { code: string; codeVerifier: string }) => {
+        captured.authenticateCalls = (captured.authenticateCalls ?? 0) + 1;
+        captured.code = params.code;
+        captured.codeVerifier = params.codeVerifier;
+        return { sealedSession: 'sealed_session' };
+      },
+    },
+  } as unknown as WorkOS;
+}
+
 async function withAuthServer(authConfig: AuthConfig, fn: (base: string) => Promise<void>) {
   const world = World.open(':memory:');
   seedWorld(world);
@@ -217,5 +244,125 @@ test('the PKCE cookie is not Secure for a plain-http loopback origin — browser
     const res = await getRaw(base, '/auth/login', {});
     assert.equal(res.status, 302);
     assert.doesNotMatch(pkceCookie(res.headers) ?? '', /Secure/);
+  });
+});
+
+test('OAuth login sends a cryptographically random state alongside PKCE and stores the login attempt cookie', async () => {
+  const captured: { authenticateCalls?: number } = {};
+  await withAuthServer(authWith('https://fabulist.example.com', statefulWorkos(captured)), async (base) => {
+    const first = await getRaw(base, '/auth/login', {});
+    assert.equal(first.status, 302);
+    const firstState = stateFromLocation(first.headers);
+    assert.match(firstState, /^[A-Za-z0-9_-]{32,}$/);
+    assert.match(pkceCookie(first.headers) ?? '', /HttpOnly/);
+
+    const second = await getRaw(base, '/auth/login', {});
+    assert.equal(second.status, 302);
+    const secondState = stateFromLocation(second.headers);
+    assert.notEqual(secondState, firstState);
+  });
+});
+
+test('OAuth callback rejects a missing state before exchanging the code', async () => {
+  const captured: { authenticateCalls?: number } = {};
+  await withAuthServer(authWith('https://fabulist.example.com', statefulWorkos(captured)), async (base) => {
+    const login = await getRaw(base, '/auth/login', {});
+    const cookie = pkceCookie(login.headers);
+    assert.ok(cookie);
+
+    const callback = await getRaw(base, '/auth/callback?code=auth_code', { cookie: cookie! });
+    assert.equal(callback.status, 302);
+    assert.equal(callback.headers.location, '/auth/login');
+    assert.equal(captured.authenticateCalls ?? 0, 0);
+  });
+});
+
+test('OAuth callback rejects a mismatched state before exchanging the code', async () => {
+  const captured: { authenticateCalls?: number; codeVerifier?: string } = {};
+  await withAuthServer(authWith('https://fabulist.example.com', statefulWorkos(captured)), async (base) => {
+    const login = await getRaw(base, '/auth/login', {});
+    const cookie = pkceCookie(login.headers);
+    assert.ok(cookie);
+    const state = stateFromLocation(login.headers);
+
+    const callback = await getRaw(base, '/auth/callback?code=auth_code&state=attacker_state', { cookie: cookie! });
+    assert.equal(callback.status, 302);
+    assert.equal(callback.headers.location, '/auth/login');
+    assert.equal(captured.authenticateCalls ?? 0, 0);
+
+    const validAfterMismatch = await getRaw(base, `/auth/callback?code=auth_code&state=${state}`, { cookie: cookie! });
+    assert.equal(validAfterMismatch.status, 302);
+    assert.equal(validAfterMismatch.headers.location, '/');
+    assert.equal(captured.authenticateCalls, 1);
+    assert.equal(captured.codeVerifier, 'verifier_123');
+  });
+});
+
+test('OAuth callback rejects expired state before exchanging the code', async (t) => {
+  const captured: { authenticateCalls?: number } = {};
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  await withAuthServer(authWith('https://fabulist.example.com', statefulWorkos(captured)), async (base) => {
+    const login = await getRaw(base, '/auth/login', {});
+    const cookie = pkceCookie(login.headers);
+    assert.ok(cookie);
+    const state = stateFromLocation(login.headers);
+
+    now += 601_000;
+    const callback = await getRaw(base, `/auth/callback?code=auth_code&state=${state}`, { cookie: cookie! });
+    assert.equal(callback.status, 302);
+    assert.equal(callback.headers.location, '/auth/login');
+    assert.equal(captured.authenticateCalls ?? 0, 0);
+  });
+});
+
+test('OAuth callback consumes state so a replayed callback is rejected', async () => {
+  const captured: { authenticateCalls?: number; code?: string; codeVerifier?: string } = {};
+  await withAuthServer(authWith('https://fabulist.example.com', statefulWorkos(captured)), async (base) => {
+    const login = await getRaw(base, '/auth/login', {});
+    const cookie = pkceCookie(login.headers);
+    assert.ok(cookie);
+    const state = stateFromLocation(login.headers);
+
+    const first = await getRaw(base, `/auth/callback?code=auth_code&state=${state}`, { cookie: cookie! });
+    assert.equal(first.status, 302);
+    assert.equal(first.headers.location, '/');
+    assert.equal(captured.authenticateCalls, 1);
+    assert.equal(captured.code, 'auth_code');
+    assert.equal(captured.codeVerifier, 'verifier_123');
+    const setCookies = first.headers['set-cookie'];
+    assert.ok((Array.isArray(setCookies) ? setCookies : [setCookies ?? '']).some((c) => c.startsWith('fabulist_session=sealed_session')));
+    assert.ok((Array.isArray(setCookies) ? setCookies : [setCookies ?? '']).some((c) => c.startsWith('fabulist_pkce=;')));
+
+    const replay = await getRaw(base, `/auth/callback?code=auth_code&state=${state}`, { cookie: cookie! });
+    assert.equal(replay.status, 302);
+    assert.equal(replay.headers.location, '/auth/login');
+    assert.equal(captured.authenticateCalls, 1);
+  });
+});
+
+test('OAuth callback binds the state to the matching login-attempt cookie', async () => {
+  const captured: { authenticateCalls?: number } = {};
+  await withAuthServer(authWith('https://fabulist.example.com', statefulWorkos(captured)), async (base) => {
+    const firstLogin = await getRaw(base, '/auth/login', {});
+    const firstCookie = pkceCookie(firstLogin.headers);
+    const firstState = stateFromLocation(firstLogin.headers);
+    assert.ok(firstCookie);
+
+    const secondLogin = await getRaw(base, '/auth/login', {});
+    const secondCookie = pkceCookie(secondLogin.headers);
+    const secondState = stateFromLocation(secondLogin.headers);
+    assert.ok(secondCookie);
+    assert.notEqual(secondState, firstState);
+
+    const mismatched = await getRaw(base, `/auth/callback?code=auth_code&state=${secondState}`, { cookie: firstCookie! });
+    assert.equal(mismatched.status, 302);
+    assert.equal(mismatched.headers.location, '/auth/login');
+    assert.equal(captured.authenticateCalls ?? 0, 0);
+
+    const matching = await getRaw(base, `/auth/callback?code=auth_code&state=${secondState}`, { cookie: secondCookie! });
+    assert.equal(matching.status, 302);
+    assert.equal(matching.headers.location, '/');
+    assert.equal(captured.authenticateCalls, 1);
   });
 });

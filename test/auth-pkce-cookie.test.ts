@@ -37,8 +37,21 @@ function makeReq(cookie: string | undefined): IncomingMessage {
 /** Minimal fake response that records the redirect `writeHead` issued. */
 function makeRes(): { res: ServerResponse; location: () => string | undefined } {
   let loc: string | undefined;
+  const headers = new Map<string, string | string[]>();
   const res = {
-    setHeader: () => {},
+    setHeader(name: string, value: string | string[]) {
+      headers.set(name.toLowerCase(), value);
+    },
+    getHeader(name: string) {
+      return headers.get(name.toLowerCase());
+    },
+    appendHeader(name: string, value: string) {
+      const key = name.toLowerCase();
+      const existing = headers.get(key);
+      if (existing === undefined) headers.set(key, value);
+      else if (Array.isArray(existing)) headers.set(key, [...existing, value]);
+      else headers.set(key, [existing, value]);
+    },
     writeHead(_status: number, headers?: Record<string, string>) {
       if (headers?.location) loc = headers.location;
     },
@@ -78,22 +91,22 @@ test('no PKCE cookie redirects to login without calling authenticateWithCode', a
   assert.equal(authenticateCalled, false);
 });
 
-test('valid PKCE cookie decodes and redirects to / on success', async () => {
-  let receivedVerifier: string | undefined;
+test('legacy verifier-only PKCE cookie redirects to login without calling authenticateWithCode', async () => {
+  let authenticateCalled = false;
   const auth = makeAuth(async (params) => {
-    receivedVerifier = (params as { codeVerifier?: string }).codeVerifier;
+    authenticateCalled = true;
     return { sealedSession: 'sealed', user: {} };
   });
-  // The verifier is URL-encoded when set (see setPkceCookie), so a value with
-  // special characters round-trips through encodeURIComponent/decodeURIComponent.
+  // State validation now requires the structured login-attempt cookie written
+  // by /auth/login; an old verifier-only cookie must fail closed.
   const encoded = encodeURIComponent('my-verifier-123!@#');
   const req = makeReq(`fabulist_pkce=${encoded}; other=thing`);
   const { res, location } = makeRes();
 
-  await handleCallback(auth, req, res, new URL('/auth/callback?code=abc123', 'http://localhost'));
+  await handleCallback(auth, req, res, new URL('/auth/callback?code=abc123&state=some-state', 'http://localhost'));
 
-  assert.strictEqual(location(), '/');
-  assert.strictEqual(receivedVerifier, 'my-verifier-123!@#');
+  assert.strictEqual(location(), '/auth/login');
+  assert.equal(authenticateCalled, false);
 });
 
 test('missing code param redirects to login even with a valid cookie', async () => {
