@@ -167,6 +167,42 @@ test('verifySession still works with no res passed (skips the cookie rewrite rat
 });
 
 /**
+ * Issue #24: `session.authenticate()`/`session.refresh()` used to be called
+ * with no try/catch. This function runs inside `api.ts`/`api-pg.ts`'s
+ * request-handler callback ahead of the route dispatch's own try/catch, so a
+ * WorkOS outage or network error thrown here escaped as an unhandled
+ * rejection — Node's default is to crash the whole process on one of those,
+ * taking every other in-flight request down over what should have been a
+ * single degraded session. Both call sites are now caught and treated the
+ * same as "not authenticated" rather than being allowed to propagate.
+ */
+test('verifySession does not throw when session.authenticate() throws — degrades to "not logged in"', async () => {
+  const auth = authConfigWith(
+    fakeSession({
+      authenticate: async () => {
+        throw new Error('WorkOS unreachable');
+      },
+    }),
+  );
+  const user = await verifySession(auth, fakeReq('sealed-cookie'));
+  assert.equal(user, null);
+});
+
+test('verifySession does not throw when session.refresh() throws — degrades to "not logged in"', async () => {
+  const auth = authConfigWith(
+    fakeSession({
+      authenticate: async () => ({ authenticated: false, reason: 'invalid_jwt' }),
+      refresh: async () => {
+        throw new Error('WorkOS unreachable');
+      },
+    }),
+  );
+  const { res } = fakeRes();
+  const user = await verifySession(auth, fakeReq('expired-but-refreshable'), res);
+  assert.equal(user, null);
+});
+
+/**
  * `resolveAuthConfig`'s `AUTH_REQUIRE_LOGIN` parsing (issue #38): the old
  * `envOverride === 'true'` comparison made `1`, `TRUE`, and padded variants
  * silently fall through to "login off," exposing every route on a deployment

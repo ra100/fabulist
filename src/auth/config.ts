@@ -346,12 +346,30 @@ export interface SessionUser {
  * still compiles — such a caller silently skips the refresh-cookie
  * rewrite and would re-hit the same `invalid_jwt` refresh path on its very
  * next call, which is correct, just less efficient.
+ *
+ * `session.authenticate()`/`session.refresh()` are wrapped in a try/catch
+ * rather than left to throw: this runs inside an `async` request-handler
+ * callback with no surrounding try/catch of its own (`api.ts`/`api-pg.ts`'s
+ * server-level catch only wraps matched-route dispatch, which happens
+ * *after* the session gate calls this), so an uncaught rejection here would
+ * escape as an unhandled promise rejection — Node's default is to crash the
+ * whole process on one of those, taking every other in-flight request down
+ * with it over what is, from a caller's perspective, just an expired or
+ * unreachable session. A WorkOS outage or network blip is treated the same
+ * as "not logged in" (logged, not thrown), which degrades every current
+ * session to a re-login rather than the server itself going down.
  */
 export async function verifySession(auth: AuthConfig, req: IncomingMessage, res?: ServerResponse): Promise<SessionUser | null> {
   const sealed = readSessionCookie(req);
   if (!sealed) return null;
   const session = auth.workos.userManagement.loadSealedSession({ sessionData: sealed, cookiePassword: auth.cookiePassword });
-  const result = await session.authenticate();
+  let result: Awaited<ReturnType<typeof session.authenticate>>;
+  try {
+    result = await session.authenticate();
+  } catch (err) {
+    console.error('verifySession: session.authenticate() threw:', err);
+    return null;
+  }
   // RefreshSessionSuccessResponse omits `accessToken` (it hands back a new
   // sealed cookie instead, per the SDK's own Omit<..., 'accessToken'> type),
   // so its `user` is read separately here rather than folding it into
@@ -359,7 +377,13 @@ export async function verifySession(auth: AuthConfig, req: IncomingMessage, res?
   // shapes are similar but not the same type.
   if (!result.authenticated) {
     if (result.reason !== 'invalid_jwt') return null;
-    const refreshed = await session.refresh();
+    let refreshed: Awaited<ReturnType<typeof session.refresh>>;
+    try {
+      refreshed = await session.refresh();
+    } catch (err) {
+      console.error('verifySession: session.refresh() threw:', err);
+      return null;
+    }
     if (!refreshed.authenticated) return null;
     if (refreshed.sealedSession && res) setSessionCookie(req, res, refreshed.sealedSession, SESSION_MAX_AGE_SECONDS);
     const { user } = refreshed;
