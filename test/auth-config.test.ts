@@ -57,13 +57,13 @@ function fakeSession(opts: {
   };
 }
 
-function authConfigWith(session: ReturnType<typeof fakeSession>): AuthConfig {
+function authConfigWith(session: ReturnType<typeof fakeSession>, callbackOrigin = 'http://127.0.0.1:4317'): AuthConfig {
   return {
     requireLogin: true,
     clientId: 'client_test',
     cookiePassword: 'x'.repeat(32),
     adminEmails: new Set(),
-    callbackOrigin: 'http://127.0.0.1:4317',
+    callbackOrigin,
     workos: {
       userManagement: { loadSealedSession: () => session },
     } as unknown as WorkOS,
@@ -72,6 +72,11 @@ function authConfigWith(session: ReturnType<typeof fakeSession>): AuthConfig {
 
 function fakeReq(cookieValue: string | undefined): IncomingMessage {
   return { headers: { cookie: cookieValue !== undefined ? `${SESSION_COOKIE}=${encodeURIComponent(cookieValue)}` : undefined } } as unknown as IncomingMessage;
+}
+
+/** Like `fakeReq`, but with extra headers a caller can spoof directly — used to prove the refreshed session cookie's `Secure` flag ignores them. */
+function fakeReqWithHeaders(cookieValue: string, extraHeaders: Record<string, string>): IncomingMessage {
+  return { headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(cookieValue)}`, ...extraHeaders } } as unknown as IncomingMessage;
 }
 
 /** Records every `Set-Cookie` header written, so a test can assert a refresh actually re-sealed the browser's cookie rather than only this one request's in-memory view of the session. */
@@ -141,6 +146,47 @@ test('verifySession refreshes and succeeds on an expired access token (invalid_j
   // The 14-day lifetime, not a shorter one — a refresh must not shrink how
   // long the browser's cookie is good for relative to a fresh login.
   assert.match(setCookieCalls[0]!, /Max-Age=1209600/);
+});
+
+/**
+ * Issue #25: the refreshed session cookie's `Secure` flag used to be
+ * inferred from the per-request `X-Forwarded-Proto` header, which is only
+ * trustworthy behind a reverse proxy configured to strip/overwrite it —
+ * a Node process bound directly to a public interface has no such
+ * guarantee, so a client sending that header itself could get a `Secure`
+ * flag stamped on a cookie sent back to it over plain HTTP (a cookie the
+ * browser then drops silently). `Secure` now follows only the configured
+ * `callbackOrigin`, the same startup-configuration seam `handleLogin`'s
+ * PKCE cookie already uses, never anything from the request itself.
+ */
+test('verifySession: a refreshed session cookie is Secure for an https callbackOrigin even when the request claims a plain-http proxy header', async () => {
+  const auth = authConfigWith(
+    fakeSession({
+      authenticate: async () => ({ authenticated: false, reason: 'invalid_jwt' }),
+      refresh: async () => ({ authenticated: true, user: { id: 'user_4', email: 'd@x.com' }, sealedSession: 'fresh' }),
+    }),
+    'https://fabulist.example.com',
+  );
+  const { res, setCookieCalls } = fakeRes();
+  const req = fakeReqWithHeaders('expired-but-refreshable', { 'x-forwarded-proto': 'http' });
+  const user = await verifySession(auth, req, res);
+  assert.equal(user?.id, 'user_4');
+  assert.match(setCookieCalls[0]!, /Secure/);
+});
+
+test('verifySession: a refreshed session cookie is not Secure for a plain-http callbackOrigin even when the request spoofs an https proxy header', async () => {
+  const auth = authConfigWith(
+    fakeSession({
+      authenticate: async () => ({ authenticated: false, reason: 'invalid_jwt' }),
+      refresh: async () => ({ authenticated: true, user: { id: 'user_5', email: 'e@x.com' }, sealedSession: 'fresh' }),
+    }),
+    'http://127.0.0.1:4317',
+  );
+  const { res, setCookieCalls } = fakeRes();
+  const req = fakeReqWithHeaders('expired-but-refreshable', { 'x-forwarded-proto': 'https' });
+  const user = await verifySession(auth, req, res);
+  assert.equal(user?.id, 'user_5');
+  assert.doesNotMatch(setCookieCalls[0]!, /Secure/);
 });
 
 test('verifySession returns null when the refresh token has also expired/been revoked', async () => {
