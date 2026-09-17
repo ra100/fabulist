@@ -354,6 +354,30 @@ test('an entity the delta creates is a legitimate reference within it', async (t
     // Would be dropped as dangling if upserts were not applied before resolution.
     assert.equal(res.delta.edgeAsserts.length, 1);
     assert.equal(res.ok, true);
+    // Validation resolves same-delta references without writing them: only the
+    // commit transaction may persist entities, or a rejected delta downstream
+    // would leave this one stranded.
+    const stored = await world.graph.getMany(['item:new']);
+    assert.equal(stored.has('item:new'), false);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('a blocked delta leaves no orphaned entity behind', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    await world.graph.upsert(
+      { id: 'char:dead', type: 'Character', name: 'Dead', props: { status: 'dead' } },
+      'canon',
+    );
+    const res = await validateDelta(world, {
+      ...emptyDelta(),
+      entityUpserts: [{ id: 'char:witness', type: 'Character', name: 'Witness', summary: '' }],
+      events: [{ text: 'x', participants: ['char:dead', 'char:witness'], locationId: null, significance: 0.5 }],
+    });
+    assert.equal(res.ok, false, 'the dead-participant issue must still block this delta');
+    const stored = await world.graph.getMany(['char:witness']);
+    assert.equal(stored.has('char:witness'), false, 'a rejected delta must not leave its new entities stranded');
   });
   if (!ran) t.skip('no Postgres configured');
 });
