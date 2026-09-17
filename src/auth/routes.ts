@@ -172,7 +172,7 @@ export async function handleCallback(auth: AuthConfig, req: IncomingMessage, res
       session: { sealSession: true, cookiePassword: auth.cookiePassword },
     });
     if (!result.sealedSession) throw new Error('WorkOS did not return a sealed session');
-    setSessionCookie(req, res, result.sealedSession, SESSION_MAX_AGE_SECONDS);
+    setSessionCookie(auth, res, result.sealedSession, SESSION_MAX_AGE_SECONDS);
     clearPkceCookie(res);
     res.writeHead(302, { location: '/' });
     res.end();
