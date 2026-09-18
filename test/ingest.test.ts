@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { World } from '../src/store/index.ts';
-import { DEFAULT_USER_AGENT, WikiClient, fixtureFetcher } from '../src/ingest/client.ts';
+import { DEFAULT_USER_AGENT, PartialFetchError, WikiClient, fixtureFetcher } from '../src/ingest/client.ts';
 import {
   fieldValues,
   firstParagraph,
@@ -215,6 +215,52 @@ test('a missing page is skipped, not thrown', async () => {
   const pages = await c.fetchPages(['Duskhollow', 'Does Not Exist']);
   assert.equal(pages.length, 1);
   assert.equal(pages[0]?.title, 'Duskhollow');
+});
+
+test('a failed batch is surfaced as a PartialFetchError, not silently dropped', async () => {
+  const failing = async () => {
+    throw new Error('network down');
+  };
+  const c = new WikiClient({ baseUrl: 'https://vale.fandom.com', fetcher: failing, delayMs: 0 });
+
+  await assert.rejects(
+    () => c.fetchPages(['Duskhollow', 'Emberfall']),
+    (err: unknown) => {
+      assert.ok(err instanceof PartialFetchError);
+      assert.deepEqual(err.pages, []);
+      assert.deepEqual(err.failedTitles, ['Duskhollow', 'Emberfall']);
+      return true;
+    },
+  );
+});
+
+test('a failed batch does not stop other batches, and the successes are attached to the error', async () => {
+  let calls = 0;
+  const mixed = async (url: string) => {
+    calls++;
+    if (calls === 1) throw new Error('transient failure');
+    return fixtureFetcher(WIKI)(url);
+  };
+  const c = new WikiClient({ baseUrl: 'https://vale.fandom.com', fetcher: mixed, delayMs: 0, batchSize: 1 });
+
+  await assert.rejects(
+    () => c.fetchPages(['Does Not Exist Either', 'Duskhollow']),
+    (err: unknown) => {
+      assert.ok(err instanceof PartialFetchError);
+      assert.deepEqual(err.failedTitles, ['Does Not Exist Either']);
+      assert.equal(err.pages.length, 1);
+      assert.equal(err.pages[0]?.title, 'Duskhollow');
+      return true;
+    },
+  );
+});
+
+test('fetchPage propagates a batch failure instead of reporting the page as missing', async () => {
+  const failing = async () => {
+    throw new Error('network down');
+  };
+  const c = new WikiClient({ baseUrl: 'https://vale.fandom.com', fetcher: failing, delayMs: 0 });
+  await assert.rejects(() => c.fetchPage('Duskhollow'), PartialFetchError);
 });
 
 test('pages are cached so re-fetching costs no requests', async () => {
