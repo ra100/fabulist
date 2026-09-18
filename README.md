@@ -755,6 +755,75 @@ What it did find on first run was real: six dead imports, a stale `let` with an 
 
 ---
 
+## Web login
+
+Off by default: a loopback `pnpm serve` on your own machine shows no login screen. A
+network-exposed server is the other way round — `resolveAuthConfig` requires login unless
+`--host` is a loopback address, and refuses to start rather than quietly serve every route
+open.
+
+Two providers, chosen with `AUTH_PROVIDER`:
+
+```bash
+AUTH_REQUIRE_LOGIN=true
+AUTH_PUBLIC_ORIGIN=https://fabulist.example.com   # the origin browsers reach; /auth/callback hangs off it
+AUTH_ADMIN_EMAILS=you@example.com                 # who may change provider config and run canon ingest
+
+# AUTH_PROVIDER=workos (the default) — WorkOS AuthKit
+WORKOS_CLIENT_ID=client_...
+WORKOS_API_KEY=sk_...
+WORKOS_COOKIE_PASSWORD=<32+ random chars>
+
+# AUTH_PROVIDER=oidc — any OpenID Connect issuer: Authelia, Keycloak, Authentik, Zitadel, Dex, …
+AUTH_OIDC_ISSUER=https://auth.example.com         # its base URL, as its own metadata names it
+AUTH_OIDC_CLIENT_ID=fabulist
+AUTH_OIDC_CLIENT_SECRET=<the client secret>       # omit for a public client; PKCE protects either way
+AUTH_OIDC_SCOPES='openid profile email'           # the default; add offline_access for refresh-backed sessions
+AUTH_COOKIE_PASSWORD=<32+ random chars>
+```
+
+`AUTH_PROVIDER` can be left out when `AUTH_OIDC_ISSUER` is set — that alone selects the OIDC
+path. `AUTH_COOKIE_PASSWORD` and `WORKOS_COOKIE_PASSWORD` are interchangeable (the value seals
+this server's own session cookie and has nothing to do with WorkOS), so switching an existing
+deployment over does not mean renaming a working variable.
+
+The OIDC path finds the issuer's endpoints by metadata discovery
+(`/.well-known/openid-configuration`, or RFC 8414's `oauth-authorization-server`), runs
+authorization-code with PKCE and a `nonce`, verifies the ID token against the issuer's published
+JWKS, and seals the session into an encrypted cookie. Every URL it trusts with credentials or
+keys must be `https` — plain `http` only on loopback.
+
+**Sessions and revocation.** The cookie is good for 14 days. If the issuer grants a refresh
+token, the session is re-checked against it whenever the access token expires, so a disabled
+account loses access within that window; ask for `offline_access` (in `AUTH_OIDC_SCOPES` *and*
+at the issuer) to get that. Without one, the cookie stands on its own until it expires — the
+usual app-session-after-SSO tradeoff, logged once at first login so it is not a surprise.
+
+**Two halves, one identity.** Point `AUTH_OIDC_ISSUER` and `MCP_OAUTH_ISSUER` at the same
+issuer and the browser session and the MCP connector agree on who you are by construction: a
+token's `sub` *is* the id a web session carries, and a story owned by one is owned by the other.
+Story ownership is filed under that id, so switching providers (or issuers) starts a fresh
+identity space rather than handing your stories to whoever holds the matching email.
+
+A worked Authelia client, for reference:
+
+```yaml
+identity_providers:
+  oidc:
+    clients:
+      - client_id: fabulist
+        client_name: Fabulist
+        client_secret: '$pbkdf2-sha512$...'        # Authelia stores the hash; give the plaintext to AUTH_OIDC_CLIENT_SECRET
+        public: false
+        authorization_policy: two_factor
+        redirect_uris:
+          - https://fabulist.example.com/auth/callback
+        scopes: [openid, profile, email]           # add offline_access to enable refresh
+        userinfo_signed_response_alg: none
+```
+
+---
+
 ## Layout
 
 ```
