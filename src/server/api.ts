@@ -13,7 +13,12 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Engine } from '../loop/engine.ts';
-import { recordAuthoringCheckpoint, splitSceneAtTurn, storyLayout } from '../loop/history.ts';
+import {
+  recordAuthoringCheckpoint,
+  recordAuthoringCheckpointTx,
+  splitSceneAtTurn,
+  storyLayout,
+} from '../loop/history.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { forkStory, rollback } from '../loop/branch.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export.ts';
@@ -614,8 +619,9 @@ route('GET', '/api/directives', (_req, res, { world }) => {
  */
 route('POST', '/api/directive', async (_req, res, { world, body }) => {
   const b = parseBody(directiveBodySchema, body);
-  const directive = await createDirective(sqliteDirectiveRepository(world), b);
-  recordAuthoringCheckpoint(world);
+  const directive = await recordAuthoringCheckpointTx(world, (transactionWorld) =>
+    createDirective(sqliteDirectiveRepository(transactionWorld), b),
+  );
   send(res, 200, directive);
 });
 
