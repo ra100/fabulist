@@ -158,3 +158,38 @@ test('browser streaming play reports response drift instead of calling onDone', 
   assert.equal(completed, false);
   assert.match(errors[0] ?? '', /malformed play completion/);
 });
+
+test('browser streaming play aborts in-flight fetches without stale callbacks', async () => {
+  const originalFetch = globalThis.fetch;
+  const abort = new AbortController();
+  let sawSignal = false;
+  let releaseFetch!: () => void;
+  const fetchReady = new Promise<void>((resolve) => {
+    releaseFetch = resolve;
+  });
+  globalThis.fetch = async (_url, init) => {
+    sawSignal = init?.signal === abort.signal;
+    releaseFetch();
+    return await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    });
+  };
+  const callbacks: string[] = [];
+  try {
+    const streaming = api.playStream('wait', false, {
+      onStage: () => callbacks.push('stage'),
+      onToken: () => callbacks.push('token'),
+      onDone: () => callbacks.push('done'),
+      onError: () => callbacks.push('error'),
+      signal: abort.signal,
+    });
+    await fetchReady;
+    abort.abort();
+    await streaming;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(sawSignal, true);
+  assert.deepEqual(callbacks, []);
+});
