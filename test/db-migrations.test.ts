@@ -50,3 +50,58 @@ test('Postgres fresh-install schema creation is inside the migration lock', asyn
   assert.ok(lock >= 0);
   assert.ok(schema > lock, 'fresh-install schema must not run before the advisory lock');
 });
+
+test('failed ingest_pages rebuild rolls back the staging table and preserves the legacy table', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fabulist-legacy-ingest-pages-'));
+  try {
+    const path = join(dir, 'world.db');
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE ingest_pages (
+        page_id TEXT PRIMARY KEY,
+        wiki TEXT,
+        title TEXT NOT NULL,
+        revision TEXT NOT NULL DEFAULT '',
+        depth INTEGER NOT NULL DEFAULT 0,
+        hops INTEGER NOT NULL DEFAULT 0,
+        score REAL NOT NULL DEFAULT 0,
+        fetched_at TEXT NOT NULL DEFAULT '',
+        passb_status TEXT NOT NULL DEFAULT ''
+      );
+      INSERT INTO ingest_pages (page_id, wiki, title) VALUES ('1', NULL, 'Duskhollow');
+    `);
+    legacy.close();
+
+    assert.throws(
+      () => openDb(path),
+      /NOT NULL constraint failed/,
+      'the invalid legacy row should fail the rebuild',
+    );
+
+    const db = new DatabaseSync(path);
+    try {
+      const table = rows<{ name: string; pk: number }>(db.prepare(`SELECT name, pk FROM pragma_table_info('ingest_pages')`).all());
+      assert.deepEqual(
+        table.filter((column) => column.pk > 0).map((column) => column.name),
+        ['page_id'],
+        'the legacy primary key remains after rollback',
+      );
+      assert.deepEqual(
+        rows<{ page_id: string; wiki: string | null; title: string }>(
+          db.prepare(`SELECT page_id, wiki, title FROM ingest_pages`).all(),
+        ),
+        [{ page_id: '1', wiki: null, title: 'Duskhollow' }],
+        'the legacy row remains intact after rollback',
+      );
+      assert.equal(
+        db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ingest_pages_new'`).get(),
+        undefined,
+        'the staging table is rolled back',
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
