@@ -103,6 +103,31 @@ export interface ClientOptions {
   userAgent?: string;
 }
 
+/**
+ * Thrown by `fetchPages` when at least one batch request failed outright
+ * (network error or non-2xx status) — as opposed to a title that is simply
+ * absent from the wiki, which is not an error (see `fetchPages`'s doc
+ * comment). Carries the pages that *did* fetch successfully and the titles
+ * whose batch failed, so a caller that wants to proceed with partial results
+ * can `catch` and inspect them explicitly, instead of an ingest silently
+ * treating "some batches errored" the same as "everything fetched fine".
+ */
+export class PartialFetchError extends Error {
+  readonly pages: WikiPage[];
+  readonly failedTitles: string[];
+
+  constructor(pages: WikiPage[], failedTitles: string[]) {
+    super(
+      `fetchPages: ${failedTitles.length} of ${pages.length + failedTitles.length} requested title(s) ` +
+        `could not be fetched (batch request failed): ${failedTitles.slice(0, 10).join(', ')}` +
+        (failedTitles.length > 10 ? ', …' : ''),
+    );
+    this.name = 'PartialFetchError';
+    this.pages = pages;
+    this.failedTitles = failedTitles;
+  }
+}
+
 interface QueryPage {
   pageid?: number;
   title?: string;
@@ -149,9 +174,18 @@ export class WikiClient implements PageSource {
   }
 
   /**
-   * Fetches pages in batches. A single bad or missing page is skipped rather
-   * than failing the batch: on a real wiki, redirects and deletions are normal
-   * and an ingest that aborts on one of them is useless.
+   * Fetches pages in batches. A title the API reports as missing (a redirect
+   * target, a deletion) is skipped rather than failing the batch: on a real
+   * wiki that is normal, and an ingest that aborts on one is useless.
+   *
+   * A whole batch *request* failing (network error, non-2xx status) is a
+   * different case: the titles in it were never actually answered, so the
+   * returned array would otherwise look like a complete, honest result while
+   * quietly missing some of what was asked for. Other batches still run —
+   * one bad batch shouldn't sink titles that would have fetched fine — but
+   * if any batch failed, this throws `PartialFetchError` afterwards instead
+   * of returning the truncated set as if it were whole. Callers that can live
+   * with partial results should catch it and use its `.pages`/`.failedTitles`.
    */
   async fetchPages(titles: string[]): Promise<WikiPage[]> {
     const wanted = [...new Set(titles.map((t) => t.trim()).filter(Boolean))];
@@ -163,6 +197,8 @@ export class WikiClient implements PageSource {
       if (hit) out.push(hit);
       else missing.push(title);
     }
+
+    const failedTitles: string[] = [];
 
     for (let i = 0; i < missing.length; i += this.batchSize) {
       const batch = missing.slice(i, i + this.batchSize);
@@ -188,7 +224,8 @@ export class WikiClient implements PageSource {
           titles: batch.join('|'),
         });
       } catch {
-        continue; // whole batch unavailable; the crawl carries on
+        failedTitles.push(...batch); // batch unavailable; surfaced below, not silently dropped
+        continue;
       }
 
       const pages = (json as { query?: { pages?: QueryPage[] } })?.query?.pages ?? [];
@@ -199,6 +236,7 @@ export class WikiClient implements PageSource {
         out.push(page);
       }
     }
+    if (failedTitles.length) throw new PartialFetchError(out, failedTitles);
     return out;
   }
 
