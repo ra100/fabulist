@@ -363,6 +363,55 @@ test('private story blocklist prose is enveloped and only matches while unlocked
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('unblocking a private phrase rolls back both rows when the projection delete fails', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'private-blocklist-rollback');
+    const story = await createStory(db, { ownerUserId: alice.id, worldIds: [worldId] });
+    await db.query(`UPDATE stories SET encryption_version = 1 WHERE id = $1`, [story.id]);
+    const key = randomBytes(32);
+    const opts = { storyId: story.id, crypto: { keyForStory: () => key } };
+    const phrase = 'violet lanterns over the river';
+    await blockPhrase(db, alice, phrase, '', opts);
+
+    // Force the second table operation in the combined statement to fail.
+    // The temporary trigger is session-local, so run the operation on the
+    // checked-out client and verify the pool sees both rows unchanged.
+    await assert.rejects(
+      () =>
+        db.withClient(async (client) => {
+          await client.query(`
+            CREATE FUNCTION pg_temp.reject_blocklist_delete() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+              RAISE EXCEPTION 'forced blocklist projection failure';
+            END
+            $$;
+            CREATE TRIGGER reject_blocklist_delete
+            BEFORE DELETE ON prose_blocklist
+            FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_blocklist_delete()
+          `);
+          await unblockPhrase(client, alice, phrase, opts);
+        }),
+      /forced blocklist projection failure/,
+    );
+
+    assert.deepEqual(await blocklistFor(db, alice, opts), [{ pattern: phrase, note: '' }]);
+    assert.equal(
+      Number(
+        (
+          await db.one<{ n: string }>(
+            `SELECT count(*) n FROM encrypted_story_values
+              WHERE story_id = $1 AND table_name = 'prose_blocklist'`,
+            [story.id],
+          )
+        )!.n,
+      ),
+      2,
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('the blocklist routes round-trip', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(db, null, async (base) => {

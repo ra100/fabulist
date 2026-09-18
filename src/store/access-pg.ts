@@ -402,12 +402,17 @@ export async function unblockPhrase(
         (candidate) => candidate.pattern === pattern.trim(),
       );
       if (!entry) return;
+      // Keep the envelope and its queryable placeholder in one statement. A
+      // caller may pass a pool rather than a transaction, so two statements
+      // here could commit the first delete and leave the other row orphaned.
       await db.query(
-        `DELETE FROM encrypted_story_values
-          WHERE story_id = $1 AND table_name = 'prose_blocklist' AND record_id = $2`,
-        [opts.storyId, entry.id],
+        `WITH deleted_envelope AS (
+           DELETE FROM encrypted_story_values
+            WHERE story_id = $1 AND table_name = 'prose_blocklist' AND record_id = $2
+         )
+         DELETE FROM prose_blocklist WHERE user_id = $3 AND pattern = $2`,
+        [opts.storyId, entry.id, idOf(user)],
       );
-      await db.query(`DELETE FROM prose_blocklist WHERE user_id = $1 AND pattern = $2`, [idOf(user), entry.id]);
       return;
     }
   }
