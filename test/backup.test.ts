@@ -124,6 +124,31 @@ test('images travel with the database, since the rows point at files outside it'
   }
 });
 
+test('a failed image publish leaves no half-done database and can be retried', () => {
+  const { dir, cleanup } = tmp();
+  try {
+    const src = join(dir, 'live.db');
+    const world = World.open(src, undefined, imagesDirFor(src));
+    seedWorld(world);
+    mkdirSync(imagesDirFor(src), { recursive: true });
+    writeFileSync(join(imagesDirFor(src), 'a.png'), 'not-really-a-png');
+
+    const prefix = join(dir, 'out');
+    writeFileSync(`${prefix}-images`, 'blocks image directory publish');
+    assert.throws(() => backupSave(src, prefix), /out-images already exists/);
+    assert.ok(!existsSync(`${prefix}.db`), 'the db half was not published');
+
+    rmSync(`${prefix}-images`);
+    const result = backupSave(src, prefix);
+    world.close();
+
+    assert.ok(existsSync(result.dbPath));
+    assert.deepEqual(readdirSync(result.imagesPath!).sort(), ['a.png']);
+  } finally {
+    cleanup();
+  }
+});
+
 test('a save with no images backs up cleanly rather than failing', () => {
   const { dir, cleanup } = tmp();
   try {
