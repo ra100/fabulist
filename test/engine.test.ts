@@ -9,6 +9,7 @@ import { Engine } from '../src/loop/engine.ts';
 import { fingerprintFrameInput } from '../src/loop/frame-fingerprint.ts';
 import { coerceDelta, validateDelta } from '../src/loop/validate.ts';
 import { extractJson } from '../src/providers/provider.ts';
+import type { PageSource, WikiPage } from '../src/ingest/client.ts';
 
 function setup(providerOpts = {}) {
   const world = World.open(':memory:');
@@ -50,12 +51,52 @@ class BlockingNarratorProvider extends MockProvider {
   }
 }
 
+const DEEPENED_SCRIPTORIUM: WikiPage = {
+  pageId: 'page:scriptorium',
+  title: 'The Scriptorium',
+  revision: 'rev:deep',
+  categories: ['Locations'],
+  links: [],
+  wikitext: `
+{{Infobox location|region=Saint Verrow}}
+The Scriptorium is a candlelit location whose deep record names the Lantern Stair and the locked index.
+`,
+};
+
+function pageSource(page: WikiPage = DEEPENED_SCRIPTORIUM): PageSource {
+  return {
+    async fetchPage(title: string) {
+      return title.toLowerCase() === page.title.toLowerCase() ? page : null;
+    },
+    async fetchPages(titles: string[]) {
+      return titles
+        .map((title) => (title.toLowerCase() === page.title.toLowerCase() ? page : null))
+        .filter((p): p is WikiPage => !!p);
+    },
+  };
+}
+
 // ------------------------------------------------------------------ plumbing
 
 test('frame fingerprints ignore Map insertion order and retain value changes', () => {
-  const first = fingerprintFrameInput({ state: new Map([['b', { value: 2 }], ['a', { value: 1 }]]) });
-  const reordered = fingerprintFrameInput({ state: new Map([['a', { value: 1 }], ['b', { value: 2 }]]) });
-  const changed = fingerprintFrameInput({ state: new Map([['a', { value: 1 }], ['b', { value: 3 }]]) });
+  const first = fingerprintFrameInput({
+    state: new Map([
+      ['b', { value: 2 }],
+      ['a', { value: 1 }],
+    ]),
+  });
+  const reordered = fingerprintFrameInput({
+    state: new Map([
+      ['a', { value: 1 }],
+      ['b', { value: 2 }],
+    ]),
+  });
+  const changed = fingerprintFrameInput({
+    state: new Map([
+      ['a', { value: 1 }],
+      ['b', { value: 3 }],
+    ]),
+  });
 
   assert.equal(first, reordered);
   assert.notEqual(first, changed);
@@ -84,6 +125,60 @@ test('a plain turn narrates, extracts a delta, and commits an event', async () =
   world.close();
 });
 
+test('play-time JIT deepening updates the resolved location before role frames are built', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  world.db.prepare(`UPDATE entities SET depth_level = 1 WHERE id = 'loc:the-scriptorium'`).run();
+
+  let refereeSawDeepRecord = false;
+  class InspectingProvider extends MockProvider {
+    override async complete(req: CompletionRequest): Promise<CompletionResult> {
+      if (req.role === 'referee') {
+        const prompt = req.messages.map((m) => m.content).join('\n');
+        refereeSawDeepRecord = /Lantern Stair/.test(prompt);
+      }
+      return super.complete(req);
+    }
+  }
+
+  const engine = new Engine({
+    world,
+    providers: new ProviderRegistry(new InspectingProvider()),
+    deepening: { client: pageSource(), target: 'deep', wiki: 'vale' },
+  });
+
+  const out = await engine.takeTurn('i warm the ink and keep copying');
+  assert.equal(out.kind, 'narrated');
+  assert.equal(world.graph.get('loc:the-scriptorium')?.depthLevel, 3);
+  assert.equal(refereeSawDeepRecord, true, 'Referee used the deepened location frame, not the stale skim frame');
+  world.close();
+});
+
+test('play-time JIT deepening failures are explicit and leave the turn uncommitted', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  world.db.prepare(`UPDATE entities SET depth_level = 1 WHERE id = 'loc:the-scriptorium'`).run();
+  const client: PageSource = {
+    async fetchPage() {
+      throw new Error('wiki unavailable');
+    },
+    async fetchPages() {
+      throw new Error('wiki unavailable');
+    },
+  };
+  const mock = new MockProvider();
+  const engine = new Engine({
+    world,
+    providers: new ProviderRegistry(mock),
+    deepening: { client, target: 'deep', wiki: 'vale' },
+  });
+
+  await assert.rejects(() => engine.takeTurn('i warm the ink'), /could not deepen The Scriptorium .*wiki unavailable/);
+  assert.equal(world.chronicle.turns().length, 0, 'the failed pre-turn read did not commit prose');
+  assert.equal(mock.calls.length, 0, 'no role call ran against stale skim context');
+  world.close();
+});
+
 // ----------------------------------------------------- external narration
 
 test('narrateExternally stops before the narrator role and commits nothing yet', async () => {
@@ -107,7 +202,10 @@ test('commitExternalNarration finishes the turn with prose written elsewhere', a
   assert.equal(proposal.kind, 'awaiting-narration');
   if (proposal.kind !== 'awaiting-narration') return;
 
-  const out = await engine.commitExternalNarration(proposal.resumeToken, 'Anselm dips the quill and keeps to his letters.');
+  const out = await engine.commitExternalNarration(
+    proposal.resumeToken,
+    'Anselm dips the quill and keeps to his letters.',
+  );
   assert.equal(out.kind, 'narrated');
   if (out.kind !== 'narrated') return;
 
@@ -156,11 +254,18 @@ test('overrideIntegrity carries through an external-narration resume, same as th
   assert.equal(proposal.kind, 'awaiting-narration');
   if (proposal.kind !== 'awaiting-narration') return;
 
-  const out = await engine.commitExternalNarration(proposal.resumeToken, 'Anselm drives the blade home, and something in him breaks with it.');
+  const out = await engine.commitExternalNarration(
+    proposal.resumeToken,
+    'Anselm drives the blade home, and something in him breaks with it.',
+  );
   assert.equal(out.kind, 'narrated');
   if (out.kind !== 'narrated') return;
 
-  assert.equal(out.commit.brokenVows.length, 1, 'the vow break was recorded on resume, exactly as the in-process path records it');
+  assert.equal(
+    out.commit.brokenVows.length,
+    1,
+    'the vow break was recorded on resume, exactly as the in-process path records it',
+  );
   world.close();
 });
 
@@ -341,7 +446,11 @@ test('regenerateProse rewrites bookProse and leaves the committed delta untouche
 
   assert.ok(after.bookProse.length > 0, 'produced new prose');
   assert.equal(world.chronicle.events().length, eventCountBefore, 'no new event was committed');
-  assert.deepEqual(world.chronicle.getTurn(out.turn.id)!.delta, before.delta, 'the beat that already happened is untouched');
+  assert.deepEqual(
+    world.chronicle.getTurn(out.turn.id)!.delta,
+    before.delta,
+    'the beat that already happened is untouched',
+  );
   world.close();
 });
 
@@ -402,14 +511,20 @@ test('regenerateProse rejects a stale narrator frame after a cast edit', async (
   const sheet = world.cast.get(playerId)!;
   world.cast.put({ ...sheet, condition: { ...sheet.condition, mood: 'watchful' } });
   const checkpointCount = (
-    world.db.prepare('SELECT count(*) AS count FROM history_checkpoints WHERE story_id = ?').get(world.storyId) as { count: number }
+    world.db.prepare('SELECT count(*) AS count FROM history_checkpoints WHERE story_id = ?').get(world.storyId) as {
+      count: number;
+    }
   ).count;
 
   provider.release();
   await assert.rejects(() => reroll, /changed while prose was being rendered/);
   assert.equal(world.chronicle.getTurn(out.turn.id)?.bookProse, originalProse);
   assert.equal(
-    (world.db.prepare('SELECT count(*) AS count FROM history_checkpoints WHERE story_id = ?').get(world.storyId) as { count: number }).count,
+    (
+      world.db.prepare('SELECT count(*) AS count FROM history_checkpoints WHERE story_id = ?').get(world.storyId) as {
+        count: number;
+      }
+    ).count,
     checkpointCount,
     'the stale reroll records no checkpoint',
   );
@@ -492,9 +607,7 @@ test('a blocked delta leaves no orphaned entity behind', () => {
   );
   const { delta } = coerceDelta({
     entityUpserts: [{ id: 'char:emergent-witness', name: 'Emergent Witness', type: 'Character' }],
-    events: [
-      { text: 'Doff argues', participants: ['char:sergeant-doff', 'char:emergent-witness'], significance: 0.5 },
-    ],
+    events: [{ text: 'Doff argues', participants: ['char:sergeant-doff', 'char:emergent-witness'], significance: 0.5 }],
     sceneAdvance: false,
   });
   const res = validateDelta(world, delta);
@@ -618,15 +731,26 @@ test('entities touched this turn end hotter than untouched ones', async () => {
 test('a twenty-turn session stays consistent and records every turn', async () => {
   const { world, engine } = setup();
   const inputs = [
-    'i warm the ink', 'i check the door', 'i tell tem to fetch water',
-    'i hide the psalter under the loose flag', 'i go down to the lower cells',
-    'i listen at the stair', 'i return to the desk', 'i keep copying',
-    'i greet the captain politely', 'i offer him the ledger instead',
-    'i ask about his sister', 'i mention the winter stores',
-    'i walk him to the yard', 'i speak with oria about the herbs',
-    'i send tem away for the afternoon', 'i meet hela at the mill',
-    'i pay her in silver', 'i come back before vespers',
-    'i write nothing down', 'i sleep badly',
+    'i warm the ink',
+    'i check the door',
+    'i tell tem to fetch water',
+    'i hide the psalter under the loose flag',
+    'i go down to the lower cells',
+    'i listen at the stair',
+    'i return to the desk',
+    'i keep copying',
+    'i greet the captain politely',
+    'i offer him the ledger instead',
+    'i ask about his sister',
+    'i mention the winter stores',
+    'i walk him to the yard',
+    'i speak with oria about the herbs',
+    'i send tem away for the afternoon',
+    'i meet hela at the mill',
+    'i pay her in silver',
+    'i come back before vespers',
+    'i write nothing down',
+    'i sleep badly',
   ];
   for (const input of inputs) {
     const out = await engine.takeTurn(input);
@@ -706,7 +830,11 @@ test('compaction follows the same live story switch as the engine it belongs to'
   seedWorld(world);
   const storyB = createStory(world.db, { title: 'B' }).id;
   let current = world;
-  const engine = new Engine({ world: () => current, providers: new ProviderRegistry(new MockProvider()), autoCompact: false });
+  const engine = new Engine({
+    world: () => current,
+    providers: new ProviderRegistry(new MockProvider()),
+    autoCompact: false,
+  });
 
   await engine.takeTurn('i warm the ink');
   await engine.takeTurn('i check the door');

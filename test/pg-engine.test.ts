@@ -23,6 +23,8 @@ import { Engine } from '../src/loop/engine-pg.ts';
 import { exportMarkdown, exportPlainText } from '../src/loop/export-pg.ts';
 import type { Db, Queryable } from '../src/db/pg.ts';
 import type { CharacterSheet } from '../src/domain/types.ts';
+import type { PageSource, WikiPage } from '../src/ingest/client.ts';
+import type { DeepeningConfig } from '../src/loop/engine-pg.ts';
 
 /**
  * A small playable world: a scriptorium, a monk who is the player, a novice
@@ -39,11 +41,23 @@ async function seed(db: Db): Promise<World> {
   const world = await World.forStory(db, story.id);
 
   await world.graph.upsert(
-    { id: 'loc:scriptorium', type: 'Location', name: 'The Scriptorium', summary: 'Twelve desks, north light.', salience: 1 },
+    {
+      id: 'loc:scriptorium',
+      type: 'Location',
+      name: 'The Scriptorium',
+      summary: 'Twelve desks, north light.',
+      salience: 1,
+    },
     'canon',
   );
   await world.graph.upsert(
-    { id: 'char:anselm', type: 'Character', name: 'Brother Anselm', summary: 'Thirty years in the Order.', salience: 1 },
+    {
+      id: 'char:anselm',
+      type: 'Character',
+      name: 'Brother Anselm',
+      summary: 'Thirty years in the Order.',
+      salience: 1,
+    },
     'canon',
   );
   await world.graph.upsert(
@@ -58,7 +72,15 @@ async function seed(db: Db): Promise<World> {
 
   const sheet = (entityId: string, isPlayer: boolean): CharacterSheet => ({
     entityId,
-    identity: { goals: ['finish the codex'], wounds: [], fears: [], allegiances: ['The Order'], competencies: ['copying'], secrets: [], arc: '' },
+    identity: {
+      goals: ['finish the codex'],
+      wounds: [],
+      fears: [],
+      allegiances: ['The Order'],
+      competencies: ['copying'],
+      secrets: [],
+      arc: '',
+    },
     contract: {
       vows: [{ id: 'vow:silence', text: 'Keep the night silence', rank: 1, broken: false, brokenScene: null }],
       drives: ['duty'],
@@ -66,7 +88,14 @@ async function seed(db: Db): Promise<World> {
       costOfBreak: '',
     },
     voice: { diction: 'plain', tics: [], samples: [], never: [] },
-    condition: { locationId: 'loc:scriptorium', mood: 'tired', injuries: [], inventory: ['a quill'], intent: 'work', presentWith: isPlayer ? ['char:tem'] : [] },
+    condition: {
+      locationId: 'loc:scriptorium',
+      mood: 'tired',
+      injuries: [],
+      inventory: ['a quill'],
+      intent: 'work',
+      presentWith: isPlayer ? ['char:tem'] : [],
+    },
     appearance: { description: '', attire: '', markers: [], referenceImagePath: null, seed: null },
     locks: [],
     isPlayer,
@@ -84,13 +113,23 @@ async function seed(db: Db): Promise<World> {
     createdScene: 1,
   });
 
-  await world.session.set({ scene: 1, turn: 0, playerCharacterId: 'char:anselm', currentLocationId: 'loc:scriptorium' });
+  await world.session.set({
+    scene: 1,
+    turn: 0,
+    playerCharacterId: 'char:anselm',
+    currentLocationId: 'loc:scriptorium',
+  });
   await world.chronicle.upsertScene(1, { title: 'Night work', chapter: 1 });
   return world;
 }
 
-function engineFor(db: Db, world: World, providerOpts = {}): Engine {
-  return new Engine({ world, db, providers: new ProviderRegistry(new MockProvider(providerOpts)) });
+function engineFor(db: Db, world: World, providerOpts = {}, deepening?: DeepeningConfig): Engine {
+  return new Engine({
+    world,
+    db,
+    providers: new ProviderRegistry(new MockProvider(providerOpts)),
+    ...(deepening ? { deepening } : {}),
+  });
 }
 
 test('a plain turn narrates, extracts a delta, and commits it', async (t) => {
@@ -115,6 +154,38 @@ test('a plain turn narrates, extracts a delta, and commits it', async (t) => {
     assert.ok(turns[0]!.meta.frames?.extract, 'each role keeps its own frame budget');
     assert.equal((await world.session.get()).turn, 1, 'the turn counter advanced');
     assert.ok((await world.chronicle.events()).length > 0);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('play-time JIT deepening updates the resolved location on Postgres before the turn', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await seed(db);
+    await world.graph.setDepth('loc:scriptorium', 1);
+    let fetched = false;
+    const page: WikiPage = {
+      pageId: 'page:scriptorium',
+      title: 'Scriptorium',
+      revision: 'rev:deep',
+      categories: ['Locations'],
+      links: [],
+      wikitext: 'The Scriptorium is a location whose deeper notes mention the Lantern Stair and the locked index.',
+    };
+    const client: PageSource = {
+      async fetchPage(title: string) {
+        fetched = true;
+        return title === 'The Scriptorium' ? page : null;
+      },
+      async fetchPages() {
+        return [page];
+      },
+    };
+    const engine = engineFor(db, world, {}, { client, target: 'deep', wiki: 'vale' });
+
+    const out = await engine.takeTurn('i warm the ink and keep copying');
+    assert.equal(out.kind, 'narrated');
+    assert.equal(fetched, true, 'play fetched source data for the resolved location');
+    assert.equal((await world.graph.get('loc:scriptorium'))?.depthLevel, 3);
   });
   if (!ran) t.skip('no Postgres configured');
 });

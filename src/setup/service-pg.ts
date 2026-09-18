@@ -13,13 +13,44 @@ import { createStory, defaultWorldIds } from '../store/world-pg.ts';
 import type { StoryId } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
 import { WikiClient } from '../ingest/client.ts';
-import { crawl, discover, prune, type CrawlProgress, type CrawlResult, type DiscoveryPreview } from '../ingest/scope.ts';
+import {
+  INGEST_CONTEXT_META_KEY,
+  parseIngestContext,
+  serializeIngestContext,
+  type IngestContext,
+} from '../ingest/context.ts';
+import {
+  crawl,
+  discover,
+  prune,
+  type CrawlProgress,
+  type CrawlResult,
+  type DiscoveryPreview,
+} from '../ingest/scope.ts';
 import { runPassA } from '../ingest/passA-pg.ts';
 import { LlmPassBExtractor } from '../ingest/passB-pg.ts';
-import { applyPassB, depthByHops, emptyPassBCounters, specFor, parseBudget, budgetToWire, budgetLabel, UNLIMITED, type DepthMode, type DepthSpec, type IngestLimits } from '../ingest/depth-pg.ts';
+import {
+  applyPassB,
+  depthByHops,
+  emptyPassBCounters,
+  specFor,
+  parseBudget,
+  budgetToWire,
+  budgetLabel,
+  UNLIMITED,
+  type DepthMode,
+  type DepthSpec,
+  type IngestLimits,
+} from '../ingest/depth-pg.ts';
 import { WikiDirectory, type DirectoryOptions, type WikiCandidate } from './directory.ts';
 import { SetupPlanner, type IngestPlan, type CharacterSketch } from './planner.ts';
-import { applyCustomWorld, applyStyle, assignPlayerCharacter, proposeOpening, type ApplyCustomResult } from './apply-pg.ts';
+import {
+  applyCustomWorld,
+  applyStyle,
+  assignPlayerCharacter,
+  proposeOpening,
+  type ApplyCustomResult,
+} from './apply-pg.ts';
 import { JobRegistry, type Job, type JobHandle } from './jobs.ts';
 import { seedWorld } from '../seed/verrow-pg.ts';
 import { packById, packSummaries, type PackSummary } from '../packs/index.ts';
@@ -101,33 +132,6 @@ export interface IngestJobResult {
 }
 
 /**
- * What a later session needs to continue reading a wiki without asking the
- * player to re-enter the universe, seeds and mode. Stored as one JSON blob
- * under a single `meta` key rather than its own table: this is world-level
- * bookkeeping in the same spirit as `worldTitle` (`ChronicleStore.setMeta`),
- * not canon, and a table would be one column read/written as a unit anyway.
- */
-export interface IngestContext {
-  baseUrl: string;
-  mode: DepthMode;
-  seeds: string[];
-  excludeCategories: string[];
-  title: string;
-  wikiName: string;
-  /**
-   * Budget overrides this world was built with, so "continue reading this
-   * wiki" resumes at the same breadth instead of silently falling back to the
-   * mode preset. Stored in wire form (`'all'`, never `Infinity`) because this
-   * blob is JSON in a `meta` row. Absent on every world ingested before
-   * budgets were overridable, which reads as "use the preset" — the behaviour
-   * those worlds already had.
-   */
-  budgets?: { maxPages?: number | 'all'; hops?: number | 'all'; passBMaxPages?: number | 'all' };
-}
-
-const INGEST_CONTEXT_META_KEY = 'ingestContext';
-
-/**
  * Refuses an unlimited budget on the server-side ingest path.
  *
  * This service crawls live `api.php` (see `SetupService.client`) — it has no
@@ -170,17 +174,11 @@ export function progressDetail(done: number, total: number | null, noun = 'pages
 }
 
 async function saveIngestContext(world: World, ctx: IngestContext): Promise<void> {
-  await world.chronicle.setMeta(INGEST_CONTEXT_META_KEY, JSON.stringify(ctx));
+  await world.chronicle.setMeta(INGEST_CONTEXT_META_KEY, serializeIngestContext(ctx));
 }
 
 async function loadIngestContext(world: World): Promise<IngestContext | null> {
-  const raw = await world.chronicle.getMeta(INGEST_CONTEXT_META_KEY, '');
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as IngestContext;
-  } catch {
-    return null;
-  }
+  return parseIngestContext(await world.chronicle.getMeta(INGEST_CONTEXT_META_KEY, ''));
 }
 
 /**
@@ -212,11 +210,7 @@ export function budgetsToLimits(budgets: IngestContext['budgets']): IngestLimits
  * on what `"all"` or a bad value means — `parseBudget` throws on anything that
  * is neither a positive integer nor `"all"`.
  */
-export function limitsFromWire(input: {
-  maxPages?: unknown;
-  hops?: unknown;
-  passBMaxPages?: unknown;
-}): IngestLimits {
+export function limitsFromWire(input: { maxPages?: unknown; hops?: unknown; passBMaxPages?: unknown }): IngestLimits {
   const maxPages = parseBudget(input.maxPages, 'maxPages');
   const hops = parseBudget(input.hops, 'hops');
   const passBMaxPages = parseBudget(input.passBMaxPages, 'passBMaxPages');
@@ -321,7 +315,15 @@ export class SetupService {
   /** Cached crawl per preview, so committing does not re-fetch every page. */
   private crawls = new Map<
     string,
-    { crawl: CrawlResult; baseUrl: string; mode: DepthMode; limits: IngestLimits; title: string; seeds: string[]; excludeCategories: string[] }
+    {
+      crawl: CrawlResult;
+      baseUrl: string;
+      mode: DepthMode;
+      limits: IngestLimits;
+      title: string;
+      seeds: string[];
+      excludeCategories: string[];
+    }
   >();
   /**
    * Canon writes in flight, keyed `story:<id>` and `world:<id>`, valued by the
@@ -375,7 +377,10 @@ export class SetupService {
   }
 
   /** Free text plus a resolved wiki becomes an editable plan. */
-  async plan(wish: string, wiki: WikiCandidate): Promise<IngestPlan & { startingPoints: Array<{ title: string; kind: string; members: number }> }> {
+  async plan(
+    wish: string,
+    wiki: WikiCandidate,
+  ): Promise<IngestPlan & { startingPoints: Array<{ title: string; kind: string; members: number }> }> {
     const startingPoints = await this.startingPoints(wiki.baseUrl, wish);
     const plan = await this.planner.plan({ wish, wiki, startingPoints });
     return { ...plan, startingPoints };
@@ -519,91 +524,94 @@ export class SetupService {
     const wikiName = new URL(baseUrl).hostname.split('.')[0] ?? 'wiki';
     const claim = this.claimAuthoring('ingest', target);
 
-    return this.jobs.start<IngestJobResult>('ingest', claim.around(async (handle) => {
-      // Resolved once, when the job actually starts running, not when it was
-      // scheduled — and held for the job's whole lifetime rather than
-      // re-resolved per step: an ingest is one continuous act of writing canon,
-      // and letting the target world change mid-write would split the ingest
-      // across two stories/worlds, which is a real corruption, not a stale-read.
-      const world = await this.authoringWorld(claim, target, title || wikiName);
-      await world.chronicle.setMeta('worldTitle', title || wikiName);
-      // Persisted so a later session can offer "continue reading this wiki"
-      // without asking the player to re-enter the universe, seeds and mode —
-      // the whole reason a resume needs no return trip through the wizard.
-      await saveIngestContext(world, {
-        baseUrl,
-        mode,
-        seeds,
-        excludeCategories,
-        title,
-        wikiName,
-        budgets: {
-          maxPages: budgetToWire(spec.maxPages),
-          hops: budgetToWire(spec.hops),
-          passBMaxPages: budgetToWire(spec.passBMaxPages),
-        },
-      });
-      const warnings: string[] = [];
-      const pages = [...scoped.pages.values()];
+    return this.jobs.start<IngestJobResult>(
+      'ingest',
+      claim.around(async (handle) => {
+        // Resolved once, when the job actually starts running, not when it was
+        // scheduled — and held for the job's whole lifetime rather than
+        // re-resolved per step: an ingest is one continuous act of writing canon,
+        // and letting the target world change mid-write would split the ingest
+        // across two stories/worlds, which is a real corruption, not a stale-read.
+        const world = await this.authoringWorld(claim, target, title || wikiName);
+        await world.chronicle.setMeta('worldTitle', title || wikiName);
+        // Persisted so a later session can offer "continue reading this wiki"
+        // without asking the player to re-enter the universe, seeds and mode —
+        // the whole reason a resume needs no return trip through the wizard.
+        await saveIngestContext(world, {
+          baseUrl,
+          mode,
+          seeds,
+          excludeCategories,
+          title,
+          wikiName,
+          budgets: {
+            maxPages: budgetToWire(spec.maxPages),
+            hops: budgetToWire(spec.hops),
+            passBMaxPages: budgetToWire(spec.passBMaxPages),
+          },
+        });
+        const warnings: string[] = [];
+        const pages = [...scoped.pages.values()];
 
-      handle.stage('building the graph', 'infoboxes, categories, links');
-      const passA = await runPassA(this.db, world, pages, {
-        depth: spec.level,
-        // Crawl distance becomes depth, so the corner the player is in is
-        // recorded as deeper than the rim — see `depthByHops`.
-        depthByTitle: depthByHops(scoped, spec.level),
-        wiki: wikiName,
-        voiceCards: spec.voiceCards !== 'none',
-        // Pass A knows its total from the first line, so this is the one phase
-        // that can show a true percentage throughout. Over tens of thousands of
-        // pages it is also long enough that silence reads as a hang.
-        onProgress: (done, total, phase) => {
-          handle.stage(phase === 'parsing' ? 'reading pages' : 'building the graph', progressDetail(done, total));
-          handle.count(done, total);
-        },
-      });
-      handle.log(`${passA.entities} entities, ${passA.edges} typed edges, ${passA.sheets} sheets`);
-      if (passA.unmatchedRelationFields.length) {
-        // Visible rather than silent: this is how you find out that a wiki
-        // files its relations under names `RELATION_FIELDS` has never seen.
-        handle.log(
-          `infobox fields that look relational but matched no rule: ${passA.unmatchedRelationFields
-            .slice(0, 8)
-            .map((f) => `${f.field} (${f.count})`)
-            .join(', ')}`,
-        );
-      }
-      if (passA.skipped.length) handle.log(`skipped ${passA.skipped.length} thin or malformed page(s)`);
+        handle.stage('building the graph', 'infoboxes, categories, links');
+        const passA = await runPassA(this.db, world, pages, {
+          depth: spec.level,
+          // Crawl distance becomes depth, so the corner the player is in is
+          // recorded as deeper than the rim — see `depthByHops`.
+          depthByTitle: depthByHops(scoped, spec.level),
+          wiki: wikiName,
+          voiceCards: spec.voiceCards !== 'none',
+          // Pass A knows its total from the first line, so this is the one phase
+          // that can show a true percentage throughout. Over tens of thousands of
+          // pages it is also long enough that silence reads as a hang.
+          onProgress: (done, total, phase) => {
+            handle.stage(phase === 'parsing' ? 'reading pages' : 'building the graph', progressDetail(done, total));
+            handle.count(done, total);
+          },
+        });
+        handle.log(`${passA.entities} entities, ${passA.edges} typed edges, ${passA.sheets} sheets`);
+        if (passA.unmatchedRelationFields.length) {
+          // Visible rather than silent: this is how you find out that a wiki
+          // files its relations under names `RELATION_FIELDS` has never seen.
+          handle.log(
+            `infobox fields that look relational but matched no rule: ${passA.unmatchedRelationFields
+              .slice(0, 8)
+              .map((f) => `${f.field} (${f.count})`)
+              .join(', ')}`,
+          );
+        }
+        if (passA.skipped.length) handle.log(`skipped ${passA.skipped.length} thin or malformed page(s)`);
 
-      const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
-      warnings.push(...passBWarnings);
+        const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
+        warnings.push(...passBWarnings);
 
-      handle.stage('placing your character');
-      const assigned = await assignPlayerCharacter(world, plan.character);
-      warnings.push(...assigned.warnings);
+        handle.stage('placing your character');
+        const assigned = await assignPlayerCharacter(world, plan.character);
+        warnings.push(...assigned.warnings);
 
-      await applyStyle(world, plan.style);
+        await applyStyle(world, plan.style);
 
-      // Threads come from Pass B events and canon tension; if nothing emerged the
-      // world is technically playable but has no pressure, which is worth saying.
-      if ((await world.threads.open()).length === 0) {
-        warnings.push('no open threads yet — the Director will have to invent the first pressure');
-      }
+        // Threads come from Pass B events and canon tension; if nothing emerged the
+        // world is technically playable but has no pressure, which is worth saying.
+        if ((await world.threads.open()).length === 0) {
+          warnings.push('no open threads yet — the Director will have to invent the first pressure');
+        }
 
-      const opening = plan.opening || (await proposeOpening(world));
-      await world.chronicle.upsertScene(1, { summary: '', chapter: 1 });
+        const opening = plan.opening || (await proposeOpening(world));
+        await world.chronicle.upsertScene(1, { summary: '', chapter: 1 });
 
-      handle.stage('done');
-      return {
-        entities: passA.entities,
-        edges: passA.edges,
-        sheets: passA.sheets,
-        passB,
-        playerCharacterId: assigned.playerCharacterId,
-        opening,
-        warnings,
-      };
-    }));
+        handle.stage('done');
+        return {
+          entities: passA.entities,
+          edges: passA.edges,
+          sheets: passA.sheets,
+          passB,
+          playerCharacterId: assigned.playerCharacterId,
+          opening,
+          warnings,
+        };
+      }),
+    );
   }
 
   /**
@@ -633,7 +641,8 @@ export class SetupService {
     const extractor = new LlmPassBExtractor({
       provider: this.providers.get('passb'),
       world,
-      onError: (title, err) => handle.log(`pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
+      onError: (title, err) =>
+        handle.log(`pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
     });
 
     const selected =
@@ -648,7 +657,9 @@ export class SetupService {
     // Candidates are score-sorted, so this keeps the best pages.
     const targets = Number.isFinite(spec.passBMaxPages) ? selected.slice(0, spec.passBMaxPages) : selected;
     if (targets.length < selected.length) {
-      handle.log(`relation extraction capped at ${targets.length.toLocaleString()} of ${selected.length.toLocaleString()} pages, highest-scoring first`);
+      handle.log(
+        `relation extraction capped at ${targets.length.toLocaleString()} of ${selected.length.toLocaleString()} pages, highest-scoring first`,
+      );
     }
 
     const already = new Set(
@@ -719,12 +730,17 @@ export class SetupService {
       voiceCards: counters.voiceCards,
       dropped,
     };
-    handle.log(`kept ${counters.edges} relations, dropped ${dropped} unevidenced or unresolvable${failed ? `, ${failed} page(s) failed and can be resumed later` : ''}`);
+    handle.log(
+      `kept ${counters.edges} relations, dropped ${dropped} unevidenced or unresolvable${failed ? `, ${failed} page(s) failed and can be resumed later` : ''}`,
+    );
     handle.log(
       `${counters.events} event(s) with ${counters.eventParticipants} participant link(s); ` +
         `${counters.eventsSkipped} undated single-subject statement(s) kept on their entity instead of becoming nodes`,
     );
-    if (failed) warnings.push(`${failed} page(s) could not be read (a dead token or rate limit, most likely) — this ingest can be continued later from Settings without re-reading what already succeeded`);
+    if (failed)
+      warnings.push(
+        `${failed} page(s) could not be read (a dead token or rate limit, most likely) — this ingest can be continued later from Settings without re-reading what already succeeded`,
+      );
 
     return { passB, warnings };
   }
@@ -784,7 +800,10 @@ export class SetupService {
   ): Promise<Job<IngestJobResult>> {
     const world = await this.getWorld();
     const context = await loadIngestContext(world);
-    if (!context) throw new Error('this world has no wiki ingest to continue — it was not built from a wiki, or predates this feature');
+    if (!context)
+      throw new Error(
+        'this world has no wiki ingest to continue — it was not built from a wiki, or predates this feature',
+      );
 
     const baseUrl = context.baseUrl;
     const mode = overrides.mode ?? context.mode;
@@ -799,79 +818,88 @@ export class SetupService {
     // Writes canon into the same world an ingest does, so it takes the same claim.
     const claim = this.claimAuthoring('continue-ingest', { world, user: null });
 
-    return this.jobs.start<IngestJobResult>('continue-ingest', claim.around(async (handle) => {
-      handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
-      const client = this.client(baseUrl);
-      const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages, onProgress: (info) => {
-        const detail = info.pageTotal
-          ? progressDetail(info.pagesFetched, info.pageTotal)
-          : `${info.pagesFetched.toLocaleString()} pages, ${info.queued.toLocaleString()} queued`;
-        handle.stage('crawling', detail);
-        handle.count(info.pagesFetched, info.pageTotal);
-      } });
-      const scoped = prune(crawled, { maxPages: spec.maxPages, excludeCategories });
+    return this.jobs.start<IngestJobResult>(
+      'continue-ingest',
+      claim.around(async (handle) => {
+        handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
+        const client = this.client(baseUrl);
+        const crawled = await crawl({
+          client,
+          seeds,
+          hops: spec.hops,
+          maxPages: spec.maxPages,
+          onProgress: (info) => {
+            const detail = info.pageTotal
+              ? progressDetail(info.pagesFetched, info.pageTotal)
+              : `${info.pagesFetched.toLocaleString()} pages, ${info.queued.toLocaleString()} queued`;
+            handle.stage('crawling', detail);
+            handle.count(info.pagesFetched, info.pageTotal);
+          },
+        });
+        const scoped = prune(crawled, { maxPages: spec.maxPages, excludeCategories });
 
-      // Re-persist: a "read more" call may have widened seeds/mode/exclusions,
-      // and the next resume should pick those up rather than the narrower
-      // scope the very first ingest started from.
-      saveIngestContext(world, {
-        baseUrl,
-        mode,
-        seeds,
-        excludeCategories,
-        title: context.title,
-        wikiName,
-        budgets: {
-          maxPages: budgetToWire(spec.maxPages),
-          hops: budgetToWire(spec.hops),
-          passBMaxPages: budgetToWire(spec.passBMaxPages),
-        },
-      });
+        // Re-persist: a "read more" call may have widened seeds/mode/exclusions,
+        // and the next resume should pick those up rather than the narrower
+        // scope the very first ingest started from.
+        saveIngestContext(world, {
+          baseUrl,
+          mode,
+          seeds,
+          excludeCategories,
+          title: context.title,
+          wikiName,
+          budgets: {
+            maxPages: budgetToWire(spec.maxPages),
+            hops: budgetToWire(spec.hops),
+            passBMaxPages: budgetToWire(spec.passBMaxPages),
+          },
+        });
 
-      const warnings: string[] = [];
-      const pages = [...scoped.pages.values()];
-      handle.stage('building the graph', 'infoboxes, categories, links');
-      // Idempotent by construction (`passA.ts`'s doc comment): entity ids are
-      // deterministic slugs, so re-running over pages already ingested
-      // updates in place rather than duplicating.
-      const passA = await runPassA(this.db, world, pages, {
-        depth: spec.level,
-        // Crawl distance becomes depth, so the corner the player is in is
-        // recorded as deeper than the rim — see `depthByHops`.
-        depthByTitle: depthByHops(scoped, spec.level),
-        wiki: wikiName,
-        voiceCards: spec.voiceCards !== 'none',
-        onProgress: (done, total, phase) => {
-          handle.stage(phase === 'parsing' ? 'reading pages' : 'building the graph', progressDetail(done, total));
-          handle.count(done, total);
-        },
-      });
-      handle.log(`${passA.entities} entities, ${passA.edges} typed edges, ${passA.sheets} sheets`);
-      if (passA.unmatchedRelationFields.length) {
-        // Visible rather than silent: this is how you find out that a wiki
-        // files its relations under names `RELATION_FIELDS` has never seen.
-        handle.log(
-          `infobox fields that look relational but matched no rule: ${passA.unmatchedRelationFields
-            .slice(0, 8)
-            .map((f) => `${f.field} (${f.count})`)
-            .join(', ')}`,
-        );
-      }
+        const warnings: string[] = [];
+        const pages = [...scoped.pages.values()];
+        handle.stage('building the graph', 'infoboxes, categories, links');
+        // Idempotent by construction (`passA.ts`'s doc comment): entity ids are
+        // deterministic slugs, so re-running over pages already ingested
+        // updates in place rather than duplicating.
+        const passA = await runPassA(this.db, world, pages, {
+          depth: spec.level,
+          // Crawl distance becomes depth, so the corner the player is in is
+          // recorded as deeper than the rim — see `depthByHops`.
+          depthByTitle: depthByHops(scoped, spec.level),
+          wiki: wikiName,
+          voiceCards: spec.voiceCards !== 'none',
+          onProgress: (done, total, phase) => {
+            handle.stage(phase === 'parsing' ? 'reading pages' : 'building the graph', progressDetail(done, total));
+            handle.count(done, total);
+          },
+        });
+        handle.log(`${passA.entities} entities, ${passA.edges} typed edges, ${passA.sheets} sheets`);
+        if (passA.unmatchedRelationFields.length) {
+          // Visible rather than silent: this is how you find out that a wiki
+          // files its relations under names `RELATION_FIELDS` has never seen.
+          handle.log(
+            `infobox fields that look relational but matched no rule: ${passA.unmatchedRelationFields
+              .slice(0, 8)
+              .map((f) => `${f.field} (${f.count})`)
+              .join(', ')}`,
+          );
+        }
 
-      const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
-      warnings.push(...passBWarnings);
+        const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
+        warnings.push(...passBWarnings);
 
-      handle.stage('done');
-      return {
-        entities: passA.entities,
-        edges: passA.edges,
-        sheets: passA.sheets,
-        passB,
-        playerCharacterId: (await world.session.get()).playerCharacterId,
-        opening: '',
-        warnings,
-      };
-    }));
+        handle.stage('done');
+        return {
+          entities: passA.entities,
+          edges: passA.edges,
+          sheets: passA.sheets,
+          passB,
+          playerCharacterId: (await world.session.get()).playerCharacterId,
+          opening: '',
+          warnings,
+        };
+      }),
+    );
   }
 
   /** Builds an authored world from a description. No wiki involved. */
@@ -886,25 +914,28 @@ export class SetupService {
     // could never have written down.
     const claim = this.claimAuthoring('custom-world', target);
 
-    return this.jobs.start<ApplyCustomResult>('custom-world', claim.around(async (handle) => {
-      handle.stage('inventing the world', 'locations, factions, cast');
-      const raw = await planner.customWorld(description);
+    return this.jobs.start<ApplyCustomResult>(
+      'custom-world',
+      claim.around(async (handle) => {
+        handle.stage('inventing the world', 'locations, factions, cast');
+        const raw = await planner.customWorld(description);
 
-      // Resolved after the (only) await in this job, same reasoning as
-      // startIngest: one continuous act of authoring canon, held for its
-      // whole lifetime rather than re-resolved mid-write.
-      const world = await this.authoringWorld(claim, target, String(raw.title ?? ''));
-      handle.stage('writing it down');
-      const result = await applyCustomWorld(world, raw);
-      handle.log(`${result.entities} entities, ${result.edges} relations, ${result.threads} threads`);
-      for (const w of result.warnings) handle.log(w);
+        // Resolved after the (only) await in this job, same reasoning as
+        // startIngest: one continuous act of authoring canon, held for its
+        // whole lifetime rather than re-resolved mid-write.
+        const world = await this.authoringWorld(claim, target, String(raw.title ?? ''));
+        handle.stage('writing it down');
+        const result = await applyCustomWorld(world, raw);
+        handle.log(`${result.entities} entities, ${result.edges} relations, ${result.threads} threads`);
+        for (const w of result.warnings) handle.log(w);
 
-      if (style) await applyStyle(world, style);
-      if (!result.opening) result.opening = await proposeOpening(world);
+        if (style) await applyStyle(world, style);
+        if (!result.opening) result.opening = await proposeOpening(world);
 
-      handle.stage('done');
-      return result;
-    }));
+        handle.stage('done');
+        return result;
+      }),
+    );
   }
 
   /** The built-in example, for trying the engine without any setup at all. */
