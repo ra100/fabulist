@@ -169,6 +169,7 @@ export async function seedConsequences(
   const ctx = await contextFor(world);
   const maxDepth = Math.min(opts.maxDepth, ctx.propagationDepth);
   const seeded: Consequence[] = [];
+  if (maxDepth < 1) return seeded;
 
   for (const event of events) {
     if (seeded.length >= 12) break; // hard cap: consequence spam kills stories
@@ -210,7 +211,7 @@ export async function seedConsequences(
     }
   }
 
-  return seeded.filter((c) => c.depth <= maxDepth);
+  return seeded;
 }
 
 /**
