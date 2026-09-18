@@ -9,6 +9,7 @@
  * consequence engine dense social edges to travel along.
  */
 import type { EntityType } from '../domain/types.ts';
+import { tx } from '../db/db.ts';
 import type { World } from '../store/index.ts';
 import { emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
 
@@ -101,6 +102,10 @@ export interface SeedOptions {
 }
 
 export function seedWorld(world: World, opts: SeedOptions = {}): void {
+  tx(world.db, () => seedWorldIn(world, opts));
+}
+
+function seedWorldIn(world: World, opts: SeedOptions): void {
   // The header reads this. Without it the app opens on "Untitled world".
   world.chronicle.setMeta('worldTitle', 'Saint Verrow');
   for (const e of ENTITIES) {

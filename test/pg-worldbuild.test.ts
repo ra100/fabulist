@@ -156,6 +156,29 @@ test('the sample seed produces a playable Saint Verrow', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('the sample seed rolls back all Postgres writes when a later write fails', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await emptyWorld(db, 'atomic-verrow');
+    await db.query(`
+      CREATE FUNCTION reject_seed_edge() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        RAISE EXCEPTION 'injected seed failure';
+      END;
+      $$;
+      CREATE TRIGGER reject_seed_edge
+      BEFORE INSERT ON canon_edges
+      FOR EACH ROW EXECUTE FUNCTION reject_seed_edge();
+    `);
+
+    await assert.rejects(() => seedWorld(world), /injected seed failure/);
+    const entities = await db.one<{ n: string }>(`SELECT count(*) AS n FROM canon_entities WHERE world_id = $1`, [world.worldId]);
+    const meta = await db.one<{ n: string }>(`SELECT count(*) AS n FROM world_meta WHERE world_id = $1`, [world.worldId]);
+    assert.equal(Number(entities?.n), 0);
+    assert.equal(Number(meta?.n), 0);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 // ------------------------------------------------------------- custom world
 
 test('a described world becomes canon, a cast, and an opening scene', async (t) => {

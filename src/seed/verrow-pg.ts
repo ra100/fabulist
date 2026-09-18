@@ -9,7 +9,8 @@
  * consequence engine dense social edges to travel along.
  */
 import type { EntityType } from '../domain/types.ts';
-import type { World } from '../store/index-pg.ts';
+import { Db } from '../db/pg.ts';
+import { World } from '../store/index-pg.ts';
 import { emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
 
 interface SeedEntity {
@@ -101,6 +102,25 @@ export interface SeedOptions {
 }
 
 export async function seedWorld(world: World, opts: SeedOptions = {}): Promise<void> {
+  if (!(world.db instanceof Db)) {
+    // A transaction-bound World cannot start another transaction; its caller
+    // already owns the atomic boundary.
+    return seedWorldIn(world, opts);
+  }
+
+  await world.db.tx(async (client) => {
+    const transactionalWorld = new World({
+      db: client,
+      storyId: world.storyId,
+      sources: world.sources,
+      imagesDir: world.illustrations.imagesDir,
+      crypto: world.crypto,
+    });
+    await seedWorldIn(transactionalWorld, opts);
+  });
+}
+
+async function seedWorldIn(world: World, opts: SeedOptions): Promise<void> {
   // The header reads this. Without it the app opens on "Untitled world".
   await world.chronicle.setMeta('worldTitle', 'Saint Verrow');
   for (const e of ENTITIES) {
