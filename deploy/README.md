@@ -1,8 +1,9 @@
 # Deploying fabulist to the VPS
 
 Scope of this deployment (see the conversation that produced it): network-exposed
-Postgres servers require built-in WorkOS web login by default, and login-disabled
-mode is limited to loopback binds. `/mcp` is separate — it has its own bearer-token
+Postgres servers require built-in web login by default — WorkOS AuthKit, or any
+OpenID Connect issuer via `AUTH_PROVIDER=oidc` (see "Web login" in the root
+README) — and login-disabled mode is limited to loopback binds. `/mcp` is separate — it has its own bearer-token
 check (`src/mcp/auth.ts`, OAuth via WorkOS AuthKit) and is not mounted at all
 unless that's configured. **Reverse proxy / TLS / extra access control on the VPS
 is configured directly by the operator, outside this repo**
