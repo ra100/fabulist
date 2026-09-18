@@ -80,7 +80,15 @@ test('a hostile reactor moves against, a loyal one protects', () => {
 
 test('consequence count is capped so the story does not drown in reaction', () => {
   const world = setup();
-  const events = ['char:brother-anselm', 'char:captain-sered', 'char:novice-tem'].map((t) => harm(world, t));
+  const events = [
+    'char:brother-anselm',
+    'char:captain-sered',
+    'char:novice-tem',
+    'char:sister-oria',
+    'char:prior-galt',
+    'char:hela-vask',
+    'char:sergeant-doff',
+  ].map((t) => harm(world, t));
   const seeded = seedConsequences(world, { events: [] } as never, events);
   assert.ok(seeded.length <= 12, `capped, got ${seeded.length}`);
   world.close();
