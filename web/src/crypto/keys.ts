@@ -69,6 +69,23 @@ function fromBase64(value: string): Uint8Array {
   }
 }
 
+function decodeEnvelope(envelope: EncryptedKeyEnvelope): { nonce: Uint8Array; ciphertext: Uint8Array } {
+  if (
+    typeof envelope !== 'object' ||
+    envelope === null ||
+    typeof envelope.nonce !== 'string' ||
+    typeof envelope.ciphertext !== 'string'
+  ) {
+    throw new Error('invalid encrypted-key envelope');
+  }
+  const nonce = fromBase64(envelope.nonce);
+  const ciphertext = fromBase64(envelope.ciphertext);
+  if (nonce.length !== 12 || ciphertext.length < 16) {
+    throw new Error('invalid encrypted-key envelope');
+  }
+  return { nonce, ciphertext };
+}
+
 function toBase64Url(bytes: Uint8Array): string {
   return toBase64(bytes).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
@@ -126,11 +143,12 @@ async function encrypt(key: CryptoKey, plaintext: Uint8Array, associatedData: st
 }
 
 async function decrypt(key: CryptoKey, envelope: EncryptedKeyEnvelope, associatedData: string): Promise<Uint8Array> {
+  const decoded = decodeEnvelope(envelope);
   try {
     const plaintext = await requireCrypto().subtle.decrypt(
-      { name: 'AES-GCM', iv: bufferSource(fromBase64(envelope.nonce)), additionalData: aad(associatedData), tagLength: 128 },
+      { name: 'AES-GCM', iv: bufferSource(decoded.nonce), additionalData: aad(associatedData), tagLength: 128 },
       key,
-      bufferSource(fromBase64(envelope.ciphertext)),
+      bufferSource(decoded.ciphertext),
     );
     return new Uint8Array(plaintext);
   } catch {
