@@ -24,6 +24,8 @@ import {
 } from '../api.ts';
 import { ProvidersEditor } from './ConfigPanels.tsx';
 import { Mark } from '../Mark.tsx';
+import { createJobPoller, type JobPoller } from '../setup-job-poller.ts';
+import { resetSetupWizardState } from './setupWizardReset.ts';
 
 type Step =
   | 'source'
@@ -77,6 +79,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   const [providers, setProviders] = useState<ProvidersReport | null>(null);
   const [switchingProfile, setSwitchingProfile] = useState(false);
   const [dismissedOffer, setDismissedOffer] = useState(false);
+  const resetEpoch = useRef(0);
 
   useEffect(() => {
     void api.providers().then(setProviders).catch(() => {});
@@ -85,14 +88,15 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   const betterProfiles = (providers?.usableProfiles ?? []).filter((p) => p !== 'mock' && p !== providers?.profile);
 
   const guard = async (fn: () => Promise<void>) => {
+    const epoch = resetEpoch.current;
     setBusy(true);
     setError(null);
     try {
       await fn();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (resetEpoch.current === epoch) setError(e instanceof Error ? e.message : String(e));
     }
-    setBusy(false);
+    if (resetEpoch.current === epoch) setBusy(false);
   };
 
   // Poll a running job. Progress is stages plus counts, never a fake percentage.
@@ -100,12 +104,42 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   // the still-editable plan) and `ingest`/`custom-world` (the actual write).
   // They resolve to different steps, so the branch is on `job.kind` rather than
   // a single fixed "done → cast" path.
-  const pollRef = useRef<number | null>(null);
+  const pollRef = useRef<JobPoller | null>(null);
+  const reset = () => {
+    resetEpoch.current += 1;
+    pollRef.current?.stop();
+    pollRef.current = null;
+    resetSetupWizardState({
+      setStep,
+      setBusy,
+      setError,
+      setUniverse,
+      setCandidates,
+      setWiki,
+      setWish,
+      setPlan,
+      setPreview,
+      setRefined,
+      setPageBudget,
+      setPassBBudget,
+      setJob,
+      setCustomDesc,
+      setCast,
+      setCastSketch,
+      setOpening,
+      setPacks,
+      setPack,
+      setDismissedOffer,
+    });
+  };
+
   useEffect(() => {
     if (job?.status !== 'running') return;
-    const tick = async () => {
-      try {
-        const next = await api.setup.job(job.id);
+    const epoch = resetEpoch.current;
+    const poller = createJobPoller({
+      poll: () => api.setup.job(job.id),
+      onJob: (next) => {
+        if (resetEpoch.current !== epoch) return;
         setJob(next);
         if (next.status === 'done') {
           if (next.kind === 'discover') {
@@ -117,19 +151,26 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
           } else {
             const result = next.result as { opening?: string } | null;
             setOpening(result?.opening ?? '');
-            setCast(await api.setup.characters());
+            void api.setup.characters().then((nextCast) => {
+              if (resetEpoch.current === epoch) setCast(nextCast);
+            }).catch((error: unknown) => {
+              if (resetEpoch.current === epoch) setError(error instanceof Error ? error.message : String(error));
+            });
             setStep('cast');
           }
         } else if (next.status === 'failed') {
           setError(next.error ?? 'the job failed');
         }
-      } catch {
-        // A dropped poll is not fatal; the next tick retries.
-      }
-    };
-    pollRef.current = window.setInterval(tick, 700);
+      },
+      onError: (error) => {
+        if (resetEpoch.current === epoch) setError(error instanceof Error ? error.message : String(error));
+      },
+    });
+    pollRef.current = poller;
+    poller.start();
     return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
+      poller.stop();
+      if (pollRef.current === poller) pollRef.current = null;
     };
   }, [job]);
 
@@ -148,7 +189,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
             */}
             <h2>{step === 'models' ? 'Which model writes?' : 'Where are we playing?'}</h2>
             {step !== 'source' && step !== 'running' && step !== 'discovering' ? (
-              <button className="link" onClick={() => setStep('source')}>
+              <button className="link" onClick={reset}>
                 {step === 'models' ? 'back' : 'start over'}
               </button>
             ) : null}
