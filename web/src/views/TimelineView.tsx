@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, type Timeline } from '../api.ts';
 import { HistoryRequestGate } from '../history-request-gate.ts';
+import { clearTimelineRefreshState } from '../timeline-refresh-state.ts';
 
 export function TimelineView({ refreshKey }: { refreshKey: number }) {
   const [timeline, setTimeline] = useState<Timeline | null>(null);
@@ -11,6 +12,9 @@ export function TimelineView({ refreshKey }: { refreshKey: number }) {
   useEffect(() => {
     const revision = requestGate.current.beginRequest();
     let disposed = false;
+    const cleared = clearTimelineRefreshState();
+    setTimeline(cleared.timeline);
+    setReveal(cleared.reveal);
     setError(null);
     void api.timeline()
       .then((nextTimeline) => {
