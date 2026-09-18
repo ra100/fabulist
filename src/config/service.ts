@@ -225,6 +225,10 @@ export class ConfigService {
     // save and then keep calling the old one until a restart.
     const touchesImageRegistry = partial.imageProviders !== undefined || partial.imageProfile !== undefined;
 
+    if (issues.some((issue) => issue.severity !== 'warning')) {
+      return { config: this.get(), issues, registryRebuilt: false };
+    }
+
     this.cfg = next;
     this.saveFn(this.cfg, this.path);
 
