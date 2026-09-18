@@ -257,30 +257,39 @@ export async function applyMigrations(db: Db): Promise<void> {
     .sort();
 
   await db.withClient(async (client) => {
-    await client.query(`SELECT pg_advisory_lock(hashtext('fabulist-schema-migrations'))`);
-    try {
-      for (const file of files) {
-        const version = Number(file.slice(0, 3));
-        const applied = await client.query<{ version: number }>(
-          'SELECT version FROM migrations WHERE version = $1',
-          [version],
-        );
-        if (applied.rowCount) continue;
-
-        await client.query('BEGIN');
-        try {
-          await client.query(readFileSync(join(dir, file), 'utf8'));
-          await client.query('INSERT INTO migrations (version, name) VALUES ($1, $2)', [version, file]);
-          await client.query('COMMIT');
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw new Error(`PostgreSQL migration ${file} failed`, { cause: err });
-        }
-      }
-    } finally {
-      await client.query(`SELECT pg_advisory_unlock(hashtext('fabulist-schema-migrations'))`);
-    }
+    await withMigrationLock(client, () => applyMigrationsOnClient(client, dir, files));
   });
+}
+
+const MIGRATION_LOCK = `hashtext('fabulist-schema-migrations')`;
+
+async function withMigrationLock<T>(client: Queryable, fn: () => Promise<T>): Promise<T> {
+  await client.query(`SELECT pg_advisory_lock(${MIGRATION_LOCK})`);
+  try {
+    return await fn();
+  } finally {
+    await client.query(`SELECT pg_advisory_unlock(${MIGRATION_LOCK})`);
+  }
+}
+
+async function applyMigrationsOnClient(client: Queryable, dir: string, files: string[]): Promise<void> {
+  for (const file of files) {
+    const version = Number(file.slice(0, 3));
+    const applied = await client.query<{ version: number }>('SELECT version FROM migrations WHERE version = $1', [
+      version,
+    ]);
+    if (applied.rowCount) continue;
+
+    await client.query('BEGIN');
+    try {
+      await client.query(readFileSync(join(dir, file), 'utf8'));
+      await client.query('INSERT INTO migrations (version, name) VALUES ($1, $2)', [version, file]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw new Error(`PostgreSQL migration ${file} failed`, { cause: err });
+    }
+  }
 }
 
 /**
@@ -289,15 +298,26 @@ export async function applyMigrations(db: Db): Promise<void> {
  */
 export async function applySchemaAndMigrations(db: Db): Promise<void> {
   const { rows } = await db.query<{ has_turns: boolean }>(`SELECT to_regclass('turns') IS NOT NULL AS has_turns`);
-  if (!rows[0]?.has_turns) {
-    await applySchema(db);
-    await applyMigrations(db);
-    return;
-  }
+  const dir = join(here, 'migrations-pg');
+  const files = readdirSync(dir)
+    .filter((name) => /^\d{3}-.+\.sql$/.test(name))
+    .sort();
 
-  await ensureMigrationsTable(db);
-  await applyMigrations(db);
-  await applySchema(db);
+  await db.withClient(async (client) => {
+    // The lock must cover the first schema creation too: schema-pg.sql creates
+    // `migrations`, and two fresh installers otherwise race before locking.
+    await withMigrationLock(client, async () => {
+      if (!rows[0]?.has_turns) {
+        await applySchema(client);
+        await applyMigrationsOnClient(client, dir, files);
+        return;
+      }
+
+      await ensureMigrationsTable(client);
+      await applyMigrationsOnClient(client, dir, files);
+      await applySchema(client);
+    });
+  });
 }
 
 /**
