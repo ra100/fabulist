@@ -21,6 +21,7 @@
 import type { EntityId, StoryId } from '../domain/types.ts';
 import { defaultKnobs, defaultStyleContract } from '../domain/types.ts';
 import type { World } from '../store/index.ts';
+import { tx } from '../db/db.ts';
 import { createStory } from '../store/world.ts';
 import { emptyAppearance, emptyCondition, emptyContract, emptyIdentity, emptyVoice } from '../store/cast.ts';
 import { isKnownPredicate } from './predicates.ts';
@@ -58,113 +59,121 @@ export interface InstallResult {
  * current" is a UI choice, not a property of the content.
  */
 export function installPack(world: World, pack: WorldPack): InstallResult {
-  const warnings: string[] = [];
-  const result: InstallResult = { entities: 0, edges: 0, sheets: 0, scenarios: [], warnings };
+  // The canon writes above and the per-scenario writes below share one `Db`
+  // connection (`withStory` only changes which `story_id` is bound, not the
+  // handle) so one transaction covers both halves. Without it, a throw partway
+  // through — a malformed scenario, a transient I/O error — left pack metadata
+  // and a partial set of canon rows committed with no scenario ever installed
+  // over them, and no way to retry the pack cleanly.
+  return tx(world.db, () => {
+    const warnings: string[] = [];
+    const result: InstallResult = { entities: 0, edges: 0, sheets: 0, scenarios: [], warnings };
 
-  world.chronicle.setMeta('worldTitle', pack.title);
-  world.chronicle.setMeta('packId', pack.id);
-  world.chronicle.setMeta('packGenre', pack.genre);
-  world.chronicle.setMeta('packPremise', pack.premise);
-  world.chronicle.setMeta('packLicense', pack.license);
+    world.chronicle.setMeta('worldTitle', pack.title);
+    world.chronicle.setMeta('packId', pack.id);
+    world.chronicle.setMeta('packGenre', pack.genre);
+    world.chronicle.setMeta('packPremise', pack.premise);
+    world.chronicle.setMeta('packLicense', pack.license);
 
-  // ------------------------------------------------------------------ canon
+    // ------------------------------------------------------------------ canon
 
-  const ids = new Set<string>();
-  for (const e of pack.entities) {
-    if (!ENTITY_ID_RE.test(e.id)) {
-      warnings.push(`entity id not well formed, skipped: ${e.id}`);
-      continue;
+    const ids = new Set<string>();
+    for (const e of pack.entities) {
+      if (!ENTITY_ID_RE.test(e.id)) {
+        warnings.push(`entity id not well formed, skipped: ${e.id}`);
+        continue;
+      }
+      const wantPrefix = TYPE_PREFIX[e.type];
+      if (!e.id.startsWith(`${wantPrefix}:`)) {
+        // Not fatal — the id is the identity and the type is the truth — but it
+        // is almost always a copy-paste error, and a `Character` behind a `loc:`
+        // id makes every later id-shaped guess in the pack wrong.
+        warnings.push(`${e.id} is a ${e.type}, expected prefix "${wantPrefix}:"`);
+      }
+      if (ids.has(e.id)) {
+        warnings.push(`duplicate entity id, later one ignored: ${e.id}`);
+        continue;
+      }
+      world.graph.upsert(
+        {
+          id: e.id,
+          type: e.type,
+          name: e.name,
+          summary: e.summary,
+          provenance: `pack:${pack.id}`,
+          confidence: 1,
+          // Baseline only. Scenarios promote what they need through `focus`,
+          // which lands in chronicle and overlays this.
+          salience: SALIENCE[e.tier ?? 'supporting'],
+          depthLevel: 3,
+          props: e.props ?? {},
+          createdScene: 0,
+        },
+        'canon',
+      );
+      ids.add(e.id);
+      result.entities++;
     }
-    const wantPrefix = TYPE_PREFIX[e.type];
-    if (!e.id.startsWith(`${wantPrefix}:`)) {
-      // Not fatal — the id is the identity and the type is the truth — but it
-      // is almost always a copy-paste error, and a `Character` behind a `loc:`
-      // id makes every later id-shaped guess in the pack wrong.
-      warnings.push(`${e.id} is a ${e.type}, expected prefix "${wantPrefix}:"`);
-    }
-    if (ids.has(e.id)) {
-      warnings.push(`duplicate entity id, later one ignored: ${e.id}`);
-      continue;
-    }
-    world.graph.upsert(
-      {
-        id: e.id,
-        type: e.type,
-        name: e.name,
-        summary: e.summary,
-        provenance: `pack:${pack.id}`,
-        confidence: 1,
-        // Baseline only. Scenarios promote what they need through `focus`,
-        // which lands in chronicle and overlays this.
-        salience: SALIENCE[e.tier ?? 'supporting'],
-        depthLevel: 3,
-        props: e.props ?? {},
-        createdScene: 0,
-      },
-      'canon',
-    );
-    ids.add(e.id);
-    result.entities++;
-  }
 
-  for (const edge of pack.edges) {
-    const predicate = edge.predicate.toUpperCase().replace(/\s+/g, '_');
-    if (!ids.has(edge.subject) || !ids.has(edge.object)) {
-      warnings.push(`edge references unknown entity, dropped: ${edge.subject} -[${predicate}]-> ${edge.object}`);
-      continue;
+    for (const edge of pack.edges) {
+      const predicate = edge.predicate.toUpperCase().replace(/\s+/g, '_');
+      if (!ids.has(edge.subject) || !ids.has(edge.object)) {
+        warnings.push(`edge references unknown entity, dropped: ${edge.subject} -[${predicate}]-> ${edge.object}`);
+        continue;
+      }
+      if (edge.subject === edge.object) {
+        warnings.push(`self-edge dropped: ${edge.subject} -[${predicate}]->`);
+        continue;
+      }
+      // The whole reason `predicates.ts` exists. An unknown predicate is not a
+      // weak edge, it is an edge the consequence engine cannot see.
+      if (!isKnownPredicate(predicate)) {
+        warnings.push(`predicate outside the vocabulary, no consequence will travel it: ${predicate}`);
+      }
+      world.graph.assertEdge(
+        { subject: edge.subject, predicate, object: edge.object, weight: edge.weight ?? 0.6 },
+        0,
+        'canon',
+        `pack:${pack.id}`,
+      );
+      result.edges++;
     }
-    if (edge.subject === edge.object) {
-      warnings.push(`self-edge dropped: ${edge.subject} -[${predicate}]->`);
-      continue;
+
+    // Slow half of every sheet, in canon. Condition is deliberately left blank
+    // here: where someone stands is a scenario's business, and a canon condition
+    // would be inherited by scenarios that wanted them somewhere else.
+    for (const s of pack.sheets) {
+      if (!ids.has(s.entityId)) {
+        warnings.push(`sheet for unknown entity, skipped: ${s.entityId}`);
+        continue;
+      }
+      world.cast.put(
+        {
+          entityId: s.entityId,
+          identity: { ...emptyIdentity(), ...s.identity },
+          contract: { ...emptyContract(), ...s.contract },
+          voice: { ...emptyVoice(), ...s.voice },
+          condition: emptyCondition(),
+          appearance: { ...emptyAppearance(), ...s.appearance },
+          locks: [],
+          isPlayer: false,
+        },
+        'canon',
+      );
+      result.sheets++;
     }
-    // The whole reason `predicates.ts` exists. An unknown predicate is not a
-    // weak edge, it is an edge the consequence engine cannot see.
-    if (!isKnownPredicate(predicate)) {
-      warnings.push(`predicate outside the vocabulary, no consequence will travel it: ${predicate}`);
+
+    // -------------------------------------------------------------- scenarios
+
+    if (!pack.scenarios.length) warnings.push('pack has no scenarios; nothing is playable');
+
+    for (const scenario of pack.scenarios) {
+      const installed = installScenario(world, pack, scenario, ids, warnings);
+      if (installed) result.scenarios.push(installed);
     }
-    world.graph.assertEdge(
-      { subject: edge.subject, predicate, object: edge.object, weight: edge.weight ?? 0.6 },
-      0,
-      'canon',
-      `pack:${pack.id}`,
-    );
-    result.edges++;
-  }
 
-  // Slow half of every sheet, in canon. Condition is deliberately left blank
-  // here: where someone stands is a scenario's business, and a canon condition
-  // would be inherited by scenarios that wanted them somewhere else.
-  for (const s of pack.sheets) {
-    if (!ids.has(s.entityId)) {
-      warnings.push(`sheet for unknown entity, skipped: ${s.entityId}`);
-      continue;
-    }
-    world.cast.put(
-      {
-        entityId: s.entityId,
-        identity: { ...emptyIdentity(), ...s.identity },
-        contract: { ...emptyContract(), ...s.contract },
-        voice: { ...emptyVoice(), ...s.voice },
-        condition: emptyCondition(),
-        appearance: { ...emptyAppearance(), ...s.appearance },
-        locks: [],
-        isPlayer: false,
-      },
-      'canon',
-    );
-    result.sheets++;
-  }
-
-  // -------------------------------------------------------------- scenarios
-
-  if (!pack.scenarios.length) warnings.push('pack has no scenarios; nothing is playable');
-
-  for (const scenario of pack.scenarios) {
-    const installed = installScenario(world, pack, scenario, ids, warnings);
-    if (installed) result.scenarios.push(installed);
-  }
-
-  return result;
+    return result;
+  });
 }
 
 /**

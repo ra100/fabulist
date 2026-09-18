@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { CurrentStory, World } from '../src/store/index.ts';
 import { PACKS, danglingIds, installPack, lintPack, packSummaries } from '../src/packs/index.ts';
+import { listStories } from '../src/store/world.ts';
 import { SALIENCE } from '../src/packs/types.ts';
 import { isKnownPredicate, PREDICATES, stanceForPredicate } from '../src/packs/predicates.ts';
 import { buildNarratorFrame } from '../src/frame/builders.ts';
@@ -47,6 +48,32 @@ for (const pack of PACKS) {
     assert.deepEqual(result.warnings, [], `\n  - ${result.warnings.join('\n  - ')}`);
     assert.equal(result.entities, pack.entities.length);
     assert.equal(result.scenarios.length, pack.scenarios.length);
+  });
+
+  test(`${pack.id}: installPack rolls back every write when it throws partway through`, () => {
+    // Regression for #32: a throw partway through `installPack` (bad pack
+    // content, a transient store error) must not leave pack metadata
+    // registered over a partial set of canon entities/edges/sheets. The whole
+    // install runs in one transaction, so a mid-install throw should roll
+    // canon, chronicle metadata, and any story already created back to
+    // exactly the pre-install state.
+    const world = World.open(':memory:');
+    const storiesBefore = listStories(world.db).length;
+
+    let calls = 0;
+    const originalUpsert = world.graph.upsert.bind(world.graph);
+    world.graph.upsert = ((...args: Parameters<typeof originalUpsert>) => {
+      calls++;
+      if (calls === 2) throw new Error('simulated failure partway through install');
+      return originalUpsert(...args);
+    }) as typeof world.graph.upsert;
+
+    assert.throws(() => installPack(world, pack), /simulated failure partway through install/);
+
+    assert.equal(world.chronicle.getMeta('packId'), '', 'pack metadata was committed despite the rollback');
+    assert.deepEqual(world.graph.list({ limit: 1000 }), [], 'entities survived the rollback');
+    assert.equal(listStories(world.db).length, storiesBefore, 'a scenario story survived the rollback');
+    world.close();
   });
 
   test(`${pack.id}: salience is tiered, not flat`, () => {
