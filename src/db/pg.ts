@@ -273,8 +273,17 @@ export async function applyMigrations(db: Db): Promise<void> {
           await client.query('INSERT INTO migrations (version, name) VALUES ($1, $2)', [version, file]);
           await client.query('COMMIT');
         } catch (err) {
-          await client.query('ROLLBACK');
-          throw new Error(`PostgreSQL migration ${file} failed`, { cause: err });
+          const migrationError = new Error(`PostgreSQL migration ${file} failed`, { cause: err });
+          try {
+            await client.query('ROLLBACK');
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [migrationError, rollbackError],
+              `PostgreSQL migration ${file} failed and its rollback also failed`,
+              { cause: err },
+            );
+          }
+          throw migrationError;
         }
       }
     } finally {
