@@ -11,7 +11,7 @@ test('setup wizard reset clears every transient selection and result', () => {
     'setStep', 'setBusy', 'setError', 'setUniverse', 'setCandidates', 'setWiki', 'setWish',
     'setPlan', 'setPreview', 'setRefined', 'setPageBudget', 'setPassBBudget', 'setJob',
     'setCustomDesc', 'setCast', 'setCastSketch', 'setOpening', 'setPacks', 'setPack',
-    'setDismissedOffer',
+    'setSwitchingProfile', 'setDismissedOffer',
   ].map((name) => [name, setter(name)])) as unknown as SetupWizardResetters;
 
   resetSetupWizardState(state);
@@ -36,6 +36,7 @@ test('setup wizard reset clears every transient selection and result', () => {
     setOpening: [''],
     setPacks: [null],
     setPack: [null],
+    setSwitchingProfile: [false],
     setDismissedOffer: [false],
   });
 });
