@@ -575,6 +575,9 @@ function PrivateStoragePanel({
       if (!result.grants.length) throw new Error('no private stories were unlocked');
       setUnlockSecret('');
       await onChanged();
+      if (unlocked.failedStoryKeys.length) {
+        setError(`Skipped corrupt private-story key(s): ${unlocked.failedStoryKeys.map((item) => item.storyId).join(', ')}`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
