@@ -446,10 +446,10 @@ export async function transmitRumours(
   for (const fact of await world.chronicle.facts(40)) {
     if (moved.length >= maxPerTick) break;
     const allKnowers = await world.chronicle.knowersOf(fact.id);
-    const knowers = allKnowers.filter((k) => k.level === 'knows');
+    const knowers = allKnowers;
     if (!knowers.length) continue;
     // Everyone who already has any opinion about this fact, maintained locally.
-    const reached = new Set(allKnowers.map((k) => k.entityId));
+    const reached = new Map(allKnowers.map((k) => [k.entityId, k]));
 
     // Hub status and neighbourhoods for every knower, in two batches rather than
     // per knower inside the loop.
@@ -467,16 +467,19 @@ export async function transmitRumours(
 
       for (const { edge, otherId } of neighbourhoods.get(knower.entityId) ?? []) {
         if (moved.length >= maxPerTick) break;
-        if (reached.has(otherId)) continue;
 
         const chance = edge.weight * 0.5 + hubBonus;
         if (chance < 0.45) continue;
 
         const distortion = Math.min(1, knower.distortion + 0.25);
+        const existing = reached.get(otherId);
+        if (existing?.level === 'knows') continue;
+        if (existing && existing.distortion <= distortion) continue;
+
         // Past a threshold the recipient believes a version that is simply wrong.
         const level = distortion >= 0.6 ? 'wrong' : 'suspects';
         await world.chronicle.setKnowledge(fact.id, otherId, level, scene, distortion);
-        reached.add(otherId);
+        reached.set(otherId, { factId: fact.id, entityId: otherId, level, sinceScene: scene, distortion });
         moved.push({ factId: fact.id, toId: otherId, distortion });
       }
     }
