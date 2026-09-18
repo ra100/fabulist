@@ -1,9 +1,13 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, type Consequence } from '../api.ts';
+import { createSingleFlightController } from './singleFlight.ts';
 
 export function CausalityView() {
   const [consequences, setConsequences] = useState<Consequence[]>([]);
   const [reveal, setReveal] = useState(false);
+  const [tickBusy, setTickBusy] = useState(false);
+  const [tickError, setTickError] = useState<string | null>(null);
+  const tickController = useRef(createSingleFlightController());
 
   useEffect(() => {
     void api.consequences().then(setConsequences);
@@ -36,6 +40,21 @@ export function CausalityView() {
 
   const scenes = [...new Set(collapsed.map((consequence) => consequence.createdScene))].sort((a, b) => a - b);
 
+  function tickWorld() {
+    if (tickController.current.isRunning()) return;
+    setTickBusy(true);
+    setTickError(null);
+    void tickController.current
+      .start(async () => {
+        await api.tick();
+        setConsequences(await api.consequences());
+      })
+      .catch((error: unknown) => {
+        setTickError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setTickBusy(false));
+  }
+
   return (
     <div className="main">
       <div className="pane">
@@ -48,14 +67,13 @@ export function CausalityView() {
               {reveal ? 'hide spoilers' : 'reveal hidden'}
             </button>
             <button
-              onClick={async () => {
-                await api.tick();
-                setConsequences(await api.consequences());
-              }}
+              disabled={tickBusy}
+              onClick={tickWorld}
             >
-              tick world
+              {tickBusy ? 'ticking…' : 'tick world'}
             </button>
           </div>
+          {tickError ? <div className="small warn">{tickError}</div> : null}
 
           <div className="chain">
             {byDepth.length === 0 ? <p className="empty">Nothing in motion yet.</p> : null}
