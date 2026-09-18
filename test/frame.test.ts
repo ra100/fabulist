@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HeuristicTokenizer, tokenizerFor } from '../src/frame/tokenizer.ts';
-import { assembleFrame, inputBudget, Priority } from '../src/frame/budget.ts';
+import { assembleFrame, FrameBudgetExceededError, inputBudget, Priority } from '../src/frame/budget.ts';
 import { renderProps, renderSheet, thumbnail } from '../src/frame/builders.ts';
 import type { CharacterSheet, Entity } from '../src/domain/types.ts';
 
@@ -52,7 +52,7 @@ test('vector flavour is evicted before anything else', () => {
       { name: 'present-cast', priority: Priority.presentCast, content: big, evictable: false, compressible: false },
       { name: 'vector-flavour', priority: Priority.vectorFlavour, content: big, compressible: false },
     ],
-    { budget: 300, tokenizer: tk },
+    { budget: 1200, tokenizer: tk },
   );
   assert.ok(frame.log.evicted.includes('vector-flavour'), 'garnish goes first');
   assert.ok(!frame.log.evicted.includes('style-contract'), 'style is protected');
@@ -72,15 +72,20 @@ test('compression is attempted before eviction', () => {
   assert.ok(frame.slots.some((s) => s.name === 'summaries'), 'slot survives in reduced form');
 });
 
-test('protected slots survive even when that overruns the budget', () => {
-  // Better to overrun visibly than to silently drop the agreed beat.
+test('protected-only overrun fails instead of returning an oversized frame', () => {
   const huge = 'x'.repeat(20_000);
-  const frame = assembleFrame(
-    [{ name: 'agreed-beat', priority: Priority.agreedBeat, content: huge, evictable: false, compressible: false }],
-    { budget: 100, tokenizer: tk },
+  assert.throws(
+    () =>
+      assembleFrame(
+        [{ name: 'agreed-beat', priority: Priority.agreedBeat, content: huge, evictable: false, compressible: false }],
+        { budget: 100, tokenizer: tk },
+      ),
+    (err: unknown) =>
+      err instanceof FrameBudgetExceededError &&
+      err.budget === 100 &&
+      err.used > 100 &&
+      err.slots.some((slot) => slot.name === 'agreed-beat'),
   );
-  assert.equal(frame.log.evicted.length, 0);
-  assert.ok(frame.log.used > 100, 'overrun is recorded in the log, not hidden');
 });
 
 test('per-slot cap applies regardless of remaining budget', () => {
