@@ -253,6 +253,32 @@ test('propose_turn on a vow-breaching action surfaces status interrupted, resolv
   });
 });
 
+test('update_knobs MCP schema bounds propagationDepth like the REST API', async () => {
+  await withServer(async (baseUrl) => {
+    const { client, transport } = connect(baseUrl);
+    await client.connect(transport);
+    try {
+      const { tools } = await client.listTools();
+      const updateKnobs = tools.find((t) => t.name === 'update_knobs');
+      assert.ok(updateKnobs, 'update_knobs is registered');
+      const propagationDepth = (updateKnobs!.inputSchema.properties?.propagationDepth ?? {}) as Record<string, unknown>;
+
+      assert.equal(propagationDepth.type, 'integer');
+      assert.equal(propagationDepth.minimum, 1);
+      assert.equal(propagationDepth.maximum, 5);
+      for (const value of [0, 6, 1.5]) {
+        const invalid = await client.callTool({ name: 'update_knobs', arguments: { propagationDepth: value } });
+        assert.equal(invalid.isError, true);
+        const content = (invalid as { content: Array<{ type: string; text?: string }> }).content;
+        const text = content.map((item) => (item.type === 'text' ? item.text : '')).join('\n');
+        assert.match(text, /propagationDepth|invalid/i);
+      }
+    } finally {
+      await transport.close();
+    }
+  });
+});
+
 test('the server tells a client how to use it before any tool is called', async () => {
   await withServer(async (baseUrl) => {
     const { client, transport } = connect(baseUrl);

@@ -25,6 +25,8 @@ import type { CharacterSketch, IngestPlan } from '../setup/planner.ts';
 import type { WikiCandidate } from '../setup/directory.ts';
 import type { DepthMode } from '../ingest/depth.ts';
 import { slugId } from '../ingest/parse.ts';
+import { knobsBodySchema } from '../server/contracts.ts';
+import { parseBody } from '../server/http.ts';
 import type { Job } from '../setup/jobs.ts';
 import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { createStory, getStory, listStories, listStoriesForUser } from '../store/world.ts';
@@ -853,7 +855,7 @@ export function updateStyleTool(ctx: McpToolContext, args: Partial<StyleContract
 export function updateKnobsTool(ctx: McpToolContext, args: Partial<Knobs>) {
   const world = ctx.world();
   const cur = world.session.get();
-  const next = { ...cur.knobs, ...args };
+  const next = { ...cur.knobs, ...parseBody(knobsBodySchema, args) };
   world.session.set({ knobs: next });
   recordAuthoringCheckpoint(world);
   return next;

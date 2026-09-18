@@ -26,6 +26,8 @@ import type { CharacterSketch, IngestPlan } from '../setup/planner.ts';
 import type { WikiCandidate } from '../setup/directory.ts';
 import type { DepthMode } from '../ingest/depth-pg.ts';
 import { slugId } from '../ingest/parse.ts';
+import { knobsBodySchema } from '../server/contracts.ts';
+import { parseBody } from '../server/http.ts';
 import type { Job } from '../setup/jobs.ts';
 import { World, getWorldBySlug, listWorlds, setStorySources } from '../store/index-pg.ts';
 import { assertWorldAccess, worldsVisibleTo } from '../store/access-pg.ts';
@@ -895,9 +897,10 @@ export async function updateStyleTool(ctx: McpToolContext, args: Partial<StyleCo
 /** `update_knobs`. The MCP-side counterpart of `PUT /api/knobs` \u2014 merges a partial patch over the current story's dials (canon fidelity, danger, pacing, ...). */
 export async function updateKnobsTool(ctx: McpToolContext, args: Partial<Knobs>) {
   const world = await ctx.world();
+  const patch = parseBody(knobsBodySchema, args);
   return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
     const cur = await transactionWorld.session.get();
-    const next = { ...cur.knobs, ...args };
+    const next = { ...cur.knobs, ...patch };
     await transactionWorld.session.set({ knobs: next });
     return next;
   });
