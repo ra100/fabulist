@@ -11,8 +11,9 @@
  * are the exception — add/remove/toggle-broken write immediately since
  * there is no natural "blur" for a button.
  */
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { api, type Sheet, type Vow } from '../api.ts';
+import { createSheetSaveQueue, type SheetPatchBuilder } from './sheetSaveQueue.ts';
 
 const list = (s: string) => s.split(';').map((x) => x.trim()).filter(Boolean);
 
@@ -100,13 +101,23 @@ function VowRow({
 }
 
 export function SheetEditor({ sheet, currentScene, onSaved }: { sheet: Sheet; currentScene: number; onSaved: (s: Sheet) => void }) {
-  async function save(patch: Partial<Sheet>) {
-    onSaved(await api.saveSheet(sheet.entityId, patch));
+  const [error, setError] = useState<string | null>(null);
+  const saver = useRef<ReturnType<typeof createSheetSaveQueue> | null>(null);
+  if (!saver.current) {
+    saver.current = createSheetSaveQueue(sheet, api.saveSheet, onSaved);
+  }
+  saver.current.updateBase(sheet);
+
+  function save(buildPatch: SheetPatchBuilder) {
+    setError(null);
+    void saver.current?.save(buildPatch).catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
   }
 
   const vows = sheet.contract.vows;
-  function saveVows(next: Vow[]) {
-    return save({ contract: { ...sheet.contract, vows: next } });
+  function saveVows(buildNext: (vows: Vow[]) => Vow[]) {
+    return save((current) => ({ contract: { ...current.contract, vows: buildNext(current.contract.vows) } }));
   }
 
   return (
@@ -115,15 +126,16 @@ export function SheetEditor({ sheet, currentScene, onSaved }: { sheet: Sheet; cu
       <div className="small dimmer" style={{ marginBottom: 'var(--s2)' }}>
         Ranked hard lines — 1 is most inviolable. This is what the integrity gate defends.
       </div>
+      {error ? <p className="hint warn" role="alert">{error}</p> : null}
       <div className="vows">
         {[...vows].sort((a, b) => a.rank - b.rank).map((v) => (
-          <VowRow key={v.id} vow={v} currentScene={currentScene} onSave={(next) => saveVows(vows.map((x) => (x.id === v.id ? next : x)))} onRemove={() => saveVows(vows.filter((x) => x.id !== v.id))} />
+          <VowRow key={v.id} vow={v} currentScene={currentScene} onSave={(next) => saveVows((current) => current.map((x) => (x.id === v.id ? next : x)))} onRemove={() => saveVows((current) => current.filter((x) => x.id !== v.id))} />
         ))}
         <button
           onClick={() =>
-            saveVows([
-              ...vows,
-              { id: `vow:${Date.now().toString(36)}`, text: '', rank: vows.length + 1, broken: false, brokenScene: null },
+            saveVows((current) => [
+              ...current,
+              { id: `vow:${Date.now().toString(36)}`, text: '', rank: current.length + 1, broken: false, brokenScene: null },
             ])
           }
         >
@@ -135,29 +147,29 @@ export function SheetEditor({ sheet, currentScene, onSaved }: { sheet: Sheet; cu
       </div>
 
       <TextField label="breaking point" value={sheet.contract.breakingPoint} placeholder="what would actually break them"
-        onSave={(v) => save({ contract: { ...sheet.contract, breakingPoint: v } })} />
+        onSave={(v) => save((current) => ({ contract: { ...current.contract, breakingPoint: v } }))} />
       <TextField label="cost of break" value={sheet.contract.costOfBreak} placeholder="what it costs them to cross a vow"
-        onSave={(v) => save({ contract: { ...sheet.contract, costOfBreak: v } })} />
+        onSave={(v) => save((current) => ({ contract: { ...current.contract, costOfBreak: v } }))} />
       <ListField label="drives" value={sheet.contract.drives} placeholder="what pushes them forward — separated by ;"
-        onSave={(v) => save({ contract: { ...sheet.contract, drives: v } })} />
+        onSave={(v) => save((current) => ({ contract: { ...current.contract, drives: v } }))} />
 
       <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>identity</h3>
-      <ListField label="goals" value={sheet.identity.goals} placeholder="separated by ;" onSave={(v) => save({ identity: { ...sheet.identity, goals: v } })} />
-      <ListField label="wounds" value={sheet.identity.wounds} placeholder="separated by ;" onSave={(v) => save({ identity: { ...sheet.identity, wounds: v } })} />
-      <ListField label="fears" value={sheet.identity.fears} placeholder="separated by ;" onSave={(v) => save({ identity: { ...sheet.identity, fears: v } })} />
-      <ListField label="secrets" value={sheet.identity.secrets} placeholder="separated by ;" onSave={(v) => save({ identity: { ...sheet.identity, secrets: v } })} />
-      <ListField label="allegiances" value={sheet.identity.allegiances} placeholder="separated by ;" onSave={(v) => save({ identity: { ...sheet.identity, allegiances: v } })} />
-      <ListField label="competencies" value={sheet.identity.competencies} placeholder="separated by ;" onSave={(v) => save({ identity: { ...sheet.identity, competencies: v } })} />
+      <ListField label="goals" value={sheet.identity.goals} placeholder="separated by ;" onSave={(v) => save((current) => ({ identity: { ...current.identity, goals: v } }))} />
+      <ListField label="wounds" value={sheet.identity.wounds} placeholder="separated by ;" onSave={(v) => save((current) => ({ identity: { ...current.identity, wounds: v } }))} />
+      <ListField label="fears" value={sheet.identity.fears} placeholder="separated by ;" onSave={(v) => save((current) => ({ identity: { ...current.identity, fears: v } }))} />
+      <ListField label="secrets" value={sheet.identity.secrets} placeholder="separated by ;" onSave={(v) => save((current) => ({ identity: { ...current.identity, secrets: v } }))} />
+      <ListField label="allegiances" value={sheet.identity.allegiances} placeholder="separated by ;" onSave={(v) => save((current) => ({ identity: { ...current.identity, allegiances: v } }))} />
+      <ListField label="competencies" value={sheet.identity.competencies} placeholder="separated by ;" onSave={(v) => save((current) => ({ identity: { ...current.identity, competencies: v } }))} />
       <TextField label="arc" value={sheet.identity.arc} placeholder="where this character is headed" multiline
-        onSave={(v) => save({ identity: { ...sheet.identity, arc: v } })} />
+        onSave={(v) => save((current) => ({ identity: { ...current.identity, arc: v } }))} />
 
       <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>voice</h3>
       <TextField label="diction" value={sheet.voice.diction} placeholder="how they speak" multiline
-        onSave={(v) => save({ voice: { ...sheet.voice, diction: v } })} />
+        onSave={(v) => save((current) => ({ voice: { ...current.voice, diction: v } }))} />
       <LinesField label="samples" value={sheet.voice.samples} placeholder="one line of theirs per row"
-        onSave={(v) => save({ voice: { ...sheet.voice, samples: v } })} />
-      <ListField label="tics" value={sheet.voice.tics} placeholder="verbal habits — separated by ;" onSave={(v) => save({ voice: { ...sheet.voice, tics: v } })} />
-      <ListField label="never" value={sheet.voice.never} placeholder="what they would never say — separated by ;" onSave={(v) => save({ voice: { ...sheet.voice, never: v } })} />
+        onSave={(v) => save((current) => ({ voice: { ...current.voice, samples: v } }))} />
+      <ListField label="tics" value={sheet.voice.tics} placeholder="verbal habits — separated by ;" onSave={(v) => save((current) => ({ voice: { ...current.voice, tics: v } }))} />
+      <ListField label="never" value={sheet.voice.never} placeholder="what they would never say — separated by ;" onSave={(v) => save((current) => ({ voice: { ...current.voice, never: v } }))} />
     </div>
   );
 }
