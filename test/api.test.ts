@@ -16,6 +16,7 @@ import { HistoryStore } from '../src/store/history.ts';
 import { createApiServer } from '../src/server/api.ts';
 import type { AuthConfig } from '../src/auth/config.ts';
 import { SESSION_COOKIE } from '../src/auth/config.ts';
+import { createWorkosProvider } from '../src/auth/workos-provider.ts';
 import { MockImageProvider } from '../src/providers/mockImage.ts';
 import { SwappableImageRegistry } from '../src/providers/image.ts';
 
@@ -1117,8 +1118,8 @@ test('DELETE /api/stories/:id refuses to delete the last story in a world', asyn
 // ------------------------------------------------------ per-user stories
 
 /**
- * A minimal fake shaped exactly like the one seam `verifySession`
- * (`src/auth/config.ts`) calls through — `workos.userManagement
+ * A minimal fake shaped exactly like the one seam the WorkOS provider
+ * (`src/auth/workos-provider.ts`) calls through — `workos.userManagement
  * .loadSealedSession(...).authenticate()` — mapping a request's raw
  * session-cookie *value* directly to a `SessionUser`, keyed by a plain
  * lookup table rather than any real cryptography. This tests the ownership
@@ -1130,21 +1131,23 @@ test('DELETE /api/stories/:id refuses to delete the last story in a world', asyn
 function fakeAuthConfig(usersByCookie: Record<string, { id: string; email: string }>, adminEmails: string[] = []): AuthConfig {
   return {
     requireLogin: true,
-    clientId: 'client_test',
-    cookiePassword: 'x'.repeat(32),
     adminEmails: new Set(adminEmails.map((e) => e.toLowerCase())),
     callbackOrigin: 'http://127.0.0.1:4317',
-    workos: {
-      userManagement: {
-        loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
-          authenticate: async () => {
-            const found = usersByCookie[sessionData];
-            if (!found) return { authenticated: false as const, reason: 'invalid_session_cookie' as const };
-            return { authenticated: true as const, user: { ...found, firstName: null, lastName: null } };
-          },
-        }),
-      },
-    } as unknown as WorkOS,
+    provider: createWorkosProvider({
+      clientId: 'client_test',
+      cookiePassword: 'x'.repeat(32),
+      workos: {
+        userManagement: {
+          loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
+            authenticate: async () => {
+              const found = usersByCookie[sessionData];
+              if (!found) return { authenticated: false as const, reason: 'invalid_session_cookie' as const };
+              return { authenticated: true as const, user: { ...found, firstName: null, lastName: null } };
+            },
+          }),
+        },
+      } as unknown as WorkOS,
+    }),
   };
 }
 

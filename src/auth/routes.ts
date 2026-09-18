@@ -1,13 +1,18 @@
 /**
  * Web login routes: `/auth/login`, `/auth/callback`, `/auth/logout`, plus
  * the gate every other route passes through when login is required. See
- * `src/auth/config.ts` for what "required" means and where it's decided.
+ * `src/auth/config.ts` for what "required" means and where it's decided, and
+ * `src/auth/provider.ts` for the seam that keeps this file the same whether the
+ * identity provider is WorkOS AuthKit or a generic OIDC issuer.
  *
- * PKCE plus one-time OAuth `state`: `getAuthorizationUrlWithPKCE` generates
- * the verifier, this route generates a random state, and the login attempt
- * cookie binds both values for one redirect round trip. A small in-memory
- * pending-state set makes the callback one-use, so a copied callback cannot
- * replay after the first exchange.
+ * PKCE, a one-time OAuth `state`, and an OIDC `nonce`: the provider generates
+ * the PKCE verifier, this route generates the state and nonce, and the
+ * login-attempt cookie binds all three for one redirect round trip. A small
+ * in-memory pending-state set makes the callback one-use, so a copied callback
+ * cannot replay after the first exchange. The nonce is carried through to the
+ * exchange because an OIDC provider must check the ID token echoes it (OIDC
+ * Core §3.1.2.1); the WorkOS SDK has no nonce parameter and verifies the
+ * exchange itself, so its provider ignores the value.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -18,11 +23,13 @@ const PKCE_COOKIE = 'fabulist_pkce';
 const LOGIN_ATTEMPT_MAX_AGE_SECONDS = 600;
 const LOGIN_ATTEMPT_MAX_AGE_MS = LOGIN_ATTEMPT_MAX_AGE_SECONDS * 1000;
 const MAX_PENDING_OAUTH_STATES = 10_000;
-const pendingOAuthStates = new Map<string, { codeVerifier: string; expiresAt: number }>();
+const pendingOAuthStates = new Map<string, { codeVerifier: string; nonce: string; expiresAt: number }>();
 
 interface LoginAttempt {
   codeVerifier: string;
   state: string;
+  /** Optional only for backwards compatibility with an attempt cookie set by a build that predates it — such a cookie is one redirect old at most, and an OIDC exchange with no nonce to check is refused by the provider rather than accepted. */
+  nonce?: string;
   expiresAt: number;
 }
 
@@ -64,15 +71,16 @@ function evictOldestOAuthStates(): void {
   }
 }
 
+/** One 32-byte random value, base64url — used for both the OAuth `state` and the OIDC `nonce`, which need the same property (unguessable, unique per attempt) and nothing more. */
 function generateOAuthState(): string {
   return randomBytes(32).toString('base64url');
 }
 
-function createLoginAttempt(codeVerifier: string, state: string, now = Date.now()): LoginAttempt {
+function createLoginAttempt(codeVerifier: string, state: string, nonce: string, now = Date.now()): LoginAttempt {
   cleanupExpiredOAuthStates(now);
   evictOldestOAuthStates();
-  const attempt = { codeVerifier, state, expiresAt: now + LOGIN_ATTEMPT_MAX_AGE_MS };
-  pendingOAuthStates.set(attempt.state, { codeVerifier, expiresAt: attempt.expiresAt });
+  const attempt = { codeVerifier, state, nonce, expiresAt: now + LOGIN_ATTEMPT_MAX_AGE_MS };
+  pendingOAuthStates.set(attempt.state, { codeVerifier, nonce, expiresAt: attempt.expiresAt });
   return attempt;
 }
 
@@ -96,8 +104,9 @@ function readLoginAttemptCookie(req: IncomingMessage, now = Date.now()): LoginAt
     const parsed = JSON.parse(raw) as Partial<LoginAttempt>;
     if (typeof parsed.codeVerifier !== 'string' || parsed.codeVerifier.length === 0) return undefined;
     if (typeof parsed.state !== 'string' || parsed.state.length === 0) return undefined;
+    if (parsed.nonce !== undefined && (typeof parsed.nonce !== 'string' || parsed.nonce.length === 0)) return undefined;
     if (typeof parsed.expiresAt !== 'number' || !Number.isFinite(parsed.expiresAt)) return undefined;
-    return { codeVerifier: parsed.codeVerifier, state: parsed.state, expiresAt: parsed.expiresAt };
+    return { codeVerifier: parsed.codeVerifier, state: parsed.state, nonce: parsed.nonce, expiresAt: parsed.expiresAt };
   } catch {
     return undefined;
   }
@@ -113,6 +122,7 @@ function consumeOAuthState(attempt: LoginAttempt, state: string, now = Date.now(
   const valid =
     state === attempt.state &&
     pending.codeVerifier === attempt.codeVerifier &&
+    pending.nonce === attempt.nonce &&
     pending.expiresAt === attempt.expiresAt;
   if (valid) pendingOAuthStates.delete(attempt.state);
   return valid;
@@ -122,7 +132,7 @@ function clearPkceCookie(res: ServerResponse): void {
   res.appendHeader('Set-Cookie', `${PKCE_COOKIE}=; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
-/** `GET /auth/login` — redirects to AuthKit's hosted sign-in. Takes no request: everything it needs (client id, callback origin) is startup configuration, which is the point — nothing on this route may be derived from attacker-controllable request headers. */
+/** `GET /auth/login` — redirects to the identity provider's hosted sign-in. Takes no request: everything it needs (the provider, the callback origin) is startup configuration, which is the point — nothing on this route may be derived from attacker-controllable request headers. */
 export async function handleLogin(auth: AuthConfig, res: ServerResponse): Promise<void> {
   // `Secure` follows the configured origin rather than `X-Forwarded-Proto`:
   // a header an attacker can set is not a basis for a cookie's security
@@ -131,16 +141,11 @@ export async function handleLogin(auth: AuthConfig, res: ServerResponse): Promis
   // server does not, since browsers drop Secure cookies over http.
   const secure = auth.callbackOrigin.startsWith('https://');
   const state = generateOAuthState();
-  const { url, codeVerifier } = await auth.workos.userManagement.getAuthorizationUrlWithPKCE({
-    clientId: auth.clientId,
-    provider: 'authkit',
-    redirectUri: callbackUrl(auth),
-  });
-  const authorizationUrl = new URL(url);
-  authorizationUrl.searchParams.set('state', state);
-  const attempt = createLoginAttempt(codeVerifier, state);
+  const nonce = generateOAuthState();
+  const { url, codeVerifier } = await auth.provider.authorize({ redirectUri: callbackUrl(auth), state, nonce });
+  const attempt = createLoginAttempt(codeVerifier, state, nonce);
   setPkceCookie(res, attempt, secure);
-  res.writeHead(302, { location: authorizationUrl.toString() });
+  res.writeHead(302, { location: url });
   res.end();
 }
 
@@ -165,29 +170,31 @@ export async function handleCallback(auth: AuthConfig, req: IncomingMessage, res
   }
 
   try {
-    const result = await auth.workos.userManagement.authenticateWithCode({
-      clientId: auth.clientId,
+    const { sealedSession } = await auth.provider.exchangeCode({
       code,
       codeVerifier: attempt.codeVerifier,
-      session: { sealSession: true, cookiePassword: auth.cookiePassword },
+      redirectUri: callbackUrl(auth),
+      nonce: attempt.nonce ?? '',
     });
-    if (!result.sealedSession) throw new Error('WorkOS did not return a sealed session');
-    setSessionCookie(auth, res, result.sealedSession, SESSION_MAX_AGE_SECONDS);
+    setSessionCookie(auth, res, sealedSession, SESSION_MAX_AGE_SECONDS);
     clearPkceCookie(res);
     res.writeHead(302, { location: '/' });
     res.end();
-  } catch {
+  } catch (err) {
     // Deliberately no error detail forwarded to the client — see the doc
-    // comment above. Logged server-side would be the next step; this app
-    // has no logging layer beyond console.log at boot (see serve.ts), and
-    // adding one is out of scope for the login flow itself.
+    // comment above. It *is* logged, though: unlike the failures above (a lost
+    // cookie, a replayed callback), a failed exchange is usually a
+    // misconfiguration at the identity provider — a redirect URI the issuer
+    // does not allow, a wrong client secret, a scope the client may not
+    // request — and none of that is diagnosable from a 302 to /auth/login.
+    console.error('auth callback: code exchange failed:', err);
     clearPkceCookie(res);
     res.writeHead(302, { location: '/auth/login' });
     res.end();
   }
 }
 
-/** `POST /auth/logout` — clears the session cookie. Does not call WorkOS's own session-revocation endpoint (`getLogoutUrl`/session `sid`), since a cleared cookie is sufficient for "this browser is signed out" and there is no server-side session store whose entry would otherwise linger. */
+/** `POST /auth/logout` — clears the session cookie. Does not call the provider's own session-revocation endpoint (WorkOS's `getLogoutUrl`, OIDC's `end_session_endpoint`), since a cleared cookie is sufficient for "this browser is signed out" and there is no server-side session store whose entry would otherwise linger. Note what that means with an SSO provider: the *provider's* session survives, so signing in again may not prompt for credentials. */
 export function handleLogout(res: ServerResponse): void {
   clearSessionCookie(res);
   res.writeHead(302, { location: '/' });
