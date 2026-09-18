@@ -129,6 +129,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
       setOpening,
       setPacks,
       setPack,
+      setSwitchingProfile,
       setDismissedOffer,
     });
   };
