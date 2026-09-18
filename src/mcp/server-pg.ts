@@ -708,7 +708,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         pacing: z.number().optional(),
         danger: z.number().optional(),
         npcAgency: z.number().optional(),
-        propagationDepth: z.number().optional(),
+        propagationDepth: z.number().int().min(1).max(5).optional(),
         ignoranceBudget: z.number().optional(),
         proseDensity: z.number().optional(),
       },
