@@ -31,6 +31,7 @@ import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine.ts';
 import { createApiServer } from '../src/server/api.ts';
 import { resolveAuthConfig, type AuthConfig } from '../src/auth/config.ts';
+import { createWorkosProvider } from '../src/auth/workos-provider.ts';
 import type { Config } from '../src/config/config.ts';
 
 /** `resolveAuthConfig` only reads `config.requireLogin` when the env override is absent, and every test below sets the override — so a bare cast is honest here. */
@@ -123,11 +124,9 @@ function recordingWorkos(captured: { redirectUri?: string }): WorkOS {
 function authWith(origin: string, workos: WorkOS): AuthConfig {
   return {
     requireLogin: true,
-    clientId: 'client_test',
-    cookiePassword: 'x'.repeat(32),
     adminEmails: new Set(),
     callbackOrigin: origin,
-    workos,
+    provider: createWorkosProvider({ workos, clientId: 'client_test', cookiePassword: 'x'.repeat(32) }),
   };
 }
 

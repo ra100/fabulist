@@ -36,6 +36,8 @@ import { createApiServer } from '../src/server/api-pg.ts';
 import { buildMcpAuth } from '../src/mcp/auth.ts';
 import type { Db } from '../src/db/pg.ts';
 import { SESSION_COOKIE, type SessionUser } from '../src/auth/config.ts';
+import { createWorkosProvider } from '../src/auth/workos-provider.ts';
+import type { WorkOS } from '@workos-inc/node';
 import { HistoryStore } from '../src/store/history-pg.ts';
 import { recordAuthoringCheckpoint } from '../src/loop/history-pg.ts';
 
@@ -205,18 +207,20 @@ test('CORS is allowlisted and cross-site browser requests fail closed', async (t
       engine: new Engine({ world: () => world, db, providers }),
       authConfig: {
         requireLogin: true,
-        clientId: 'client_test',
-        cookiePassword: 'x'.repeat(32),
         adminEmails: new Set<string>(),
         callbackOrigin: 'https://fabulist.example.com',
-        workos: {
-          userManagement: {
-            loadSealedSession: () => ({
-              authenticate: async () => ({ authenticated: false as const, reason: 'invalid_session_cookie' as const }),
-            }),
-          },
-        },
-      } as unknown as NonNullable<Parameters<typeof createApiServer>[0]['authConfig']>,
+        provider: createWorkosProvider({
+          clientId: 'client_test',
+          cookiePassword: 'x'.repeat(32),
+          workos: {
+            userManagement: {
+              loadSealedSession: () => ({
+                authenticate: async () => ({ authenticated: false as const, reason: 'invalid_session_cookie' as const }),
+              }),
+            },
+          } as unknown as WorkOS,
+        }),
+      },
     });
     await listen(server);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -1134,26 +1138,28 @@ test('signed-in setup authors into the requester’s story, one job at a time', 
     };
     const providers = new ProviderRegistry(model);
     const setup = new SetupService({ world: bootWorld, db, providers });
-    const authConfig = {
+    const authConfig: NonNullable<Parameters<typeof createApiServer>[0]['authConfig']> = {
       requireLogin: true,
-      clientId: 'client_test',
-      cookiePassword: 'x'.repeat(32),
       adminEmails: new Set<string>(),
       callbackOrigin: 'http://127.0.0.1:4317',
-      workos: {
-        userManagement: {
-          loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
-            authenticate: async () =>
-              sessionData === 'alice'
-                ? {
-                    authenticated: true as const,
-                    user: { id: 'user:alice', email: 'alice@example.com', firstName: null, lastName: null },
-                  }
-                : { authenticated: false as const, reason: 'invalid_session_cookie' as const },
-          }),
-        },
-      },
-    } as unknown as NonNullable<Parameters<typeof createApiServer>[0]['authConfig']>;
+      provider: createWorkosProvider({
+        clientId: 'client_test',
+        cookiePassword: 'x'.repeat(32),
+        workos: {
+          userManagement: {
+            loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
+              authenticate: async () =>
+                sessionData === 'alice'
+                  ? {
+                      authenticated: true as const,
+                      user: { id: 'user:alice', email: 'alice@example.com', firstName: null, lastName: null },
+                    }
+                  : { authenticated: false as const, reason: 'invalid_session_cookie' as const },
+            }),
+          },
+        } as unknown as WorkOS,
+      }),
+    };
     const server = createApiServer({
       world: bootWorld,
       db,

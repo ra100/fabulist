@@ -10,22 +10,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { WorkOS } from '@workos-inc/node';
 import type { AuthConfig } from '../src/auth/config.ts';
+import { createWorkosProvider } from '../src/auth/workos-provider.ts';
 import { handleCallback } from '../src/auth/routes.ts';
 
 function makeAuth(authenticateWithCode: (params: unknown) => Promise<{ sealedSession?: string; user: unknown }>): AuthConfig {
   return {
     requireLogin: true,
-    workos: {
-      userManagement: {
-        authenticateWithCode,
-      },
-    },
-    clientId: 'client_test',
-    cookiePassword: 'x'.repeat(32),
     adminEmails: new Set(),
     callbackOrigin: 'http://127.0.0.1:4317',
-  } as unknown as AuthConfig;
+    provider: createWorkosProvider({
+      clientId: 'client_test',
+      cookiePassword: 'x'.repeat(32),
+      workos: { userManagement: { authenticateWithCode } } as unknown as WorkOS,
+    }),
+  };
 }
 
 function makeReq(cookie: string | undefined): IncomingMessage {

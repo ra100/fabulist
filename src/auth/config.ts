@@ -1,11 +1,19 @@
 /**
- * Web login: AuthKit-hosted sign-in for the browser UI. Distinct from
- * `src/mcp/auth.ts`, which is the MCP connector's own bearer-token check —
- * that one verifies tokens Claude/ChatGPT present on every tool call; this
- * one is a session cookie for a human sitting at a browser, set once at
- * login and read on every request after.
+ * Web login: hosted sign-in for the browser UI, against either WorkOS
+ * AuthKit or any OpenID Connect issuer (Authelia, Keycloak, Authentik,
+ * Zitadel — whatever a self-hoster already runs). Which one is a single
+ * environment variable, `AUTH_PROVIDER`; everything below this line is the
+ * same either way, because the provider-specific half lives behind
+ * `AuthProvider` (`src/auth/provider.ts`).
  *
- * Two-tier access, not one: any WorkOS-verified identity may sign in and
+ * Distinct from `src/mcp/auth.ts`, which is the MCP connector's own
+ * bearer-token check — that one verifies tokens Claude/ChatGPT present on
+ * every tool call; this one is a session cookie for a human sitting at a
+ * browser, set once at login and read on every request after. Point both at
+ * the same issuer and the two line up by construction: a token's `sub` is the
+ * `SessionUser.id` a browser session for the same person carries.
+ *
+ * Two-tier access, not one: any verified identity may sign in and
  * gets their own stories, fully isolated from every other user's (per-story
  * data — `stories`, chronicle, `style_anchors` — is scoped by
  * `owner_user_id`/`story_id`; see `CurrentStory.worldFor` in
@@ -22,13 +30,18 @@
 import { WorkOS } from '@workos-inc/node';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Config } from '../config/config.ts';
+import { createOidcProvider } from './oidc-provider.ts';
+import type { AuthIdentity, AuthProvider, ResolvedSession } from './provider.ts';
+import { createWorkosProvider } from './workos-provider.ts';
 
 export interface AuthConfig {
   requireLogin: boolean;
-  workos: WorkOS;
-  clientId: string;
-  /** 32+ chars, required by the SDK's own session-sealing (`sealData`/`unsealData`) — this is the AES key the session cookie is encrypted with, not a login password anyone types. */
-  cookiePassword: string;
+  /**
+   * Who authenticates the user, and how — WorkOS AuthKit or a generic OIDC
+   * issuer. Everything else on this interface is policy that holds whichever
+   * it is; see `src/auth/provider.ts` for where the line falls and why.
+   */
+  provider: AuthProvider;
   /**
    * Lowercased emails allowed to see and change system-wide settings — LLM
    * provider config, image provider config, and canon ingest — none of
@@ -99,8 +112,9 @@ function canonicalOrigin(raw: string): string {
 }
 
 /**
- * Resolves whether login is required and, if so, builds the WorkOS client.
- * Returns `null` when login is off — every call site reads that as "mount
+ * Resolves whether login is required and, if so, builds the provider that
+ * will do the authenticating (`AUTH_PROVIDER`: `workos`, the default, or
+ * `oidc`). Returns `null` when login is off — every call site reads that as "mount
  * no auth routes, gate nothing," the same "absent means disabled, not
  * disabled-and-unsafe" shape `src/mcp/auth.ts`'s `buildMcpAuth` already
  * uses for the MCP connector.
@@ -146,22 +160,11 @@ export function resolveAuthConfig(
     return null;
   }
 
-  const apiKey = env.WORKOS_API_KEY;
-  const clientId = env.WORKOS_CLIENT_ID;
-  const cookiePassword = env.WORKOS_COOKIE_PASSWORD;
-  const missing = [
-    !apiKey && 'WORKOS_API_KEY',
-    !clientId && 'WORKOS_CLIENT_ID',
-    !cookiePassword && 'WORKOS_COOKIE_PASSWORD',
-  ].filter(Boolean);
-  if (missing.length) {
-    throw new Error(
-      `AUTH_REQUIRE_LOGIN is on but missing: ${missing.join(', ')}. Login cannot start with no way to reach WorkOS or seal a session.`,
-    );
-  }
-  if (cookiePassword!.length < 32) {
-    throw new Error(`WORKOS_COOKIE_PASSWORD must be at least 32 characters (WorkOS's own session-sealing minimum); got ${cookiePassword!.length}.`);
-  }
+  // Built before the callback origin is resolved, deliberately: a deployment
+  // missing both its credentials and its public origin should be told about the
+  // credentials first, since that is the error an operator hits on the very
+  // first boot of a new install.
+  const provider = buildProvider(env);
 
   // Comma-separated, matching the shape every other multi-value env var in
   // this codebase already uses (e.g. `.dockerignore`-adjacent conventions
@@ -195,14 +198,138 @@ export function resolveAuthConfig(
     );
   }
 
-  return {
-    requireLogin: true,
+  return { requireLogin: true, provider, adminEmails, callbackOrigin };
+}
+
+/** Which login mechanism a deployment runs. `workos` stays the default so an existing AuthKit deployment needs no new variable. */
+export type AuthProviderKind = 'workos' | 'oidc';
+
+/**
+ * Which provider to build, from `AUTH_PROVIDER`.
+ *
+ * Unset is inferred rather than defaulted blindly: if `AUTH_OIDC_ISSUER` is
+ * there, the operator has plainly configured an OIDC issuer and does not also
+ * need to say so twice; otherwise it is WorkOS, which is what every deployment
+ * predating this option already was. An unrecognized value throws rather than
+ * silently falling back — the same fail-loud posture `parseRequireLoginEnv`
+ * takes, and for the same reason: quietly picking the other provider would
+ * either break login outright or (worse) start a second, separate identity
+ * space in which nobody owns any of the existing stories.
+ */
+export function resolveProviderKind(env: Record<string, string | undefined>): AuthProviderKind {
+  const raw = env.AUTH_PROVIDER?.trim().toLowerCase();
+  if (raw) {
+    if (raw === 'workos' || raw === 'authkit') return 'workos';
+    if (raw === 'oidc' || raw === 'openid' || raw === 'openid-connect') return 'oidc';
+    throw new Error(
+      `AUTH_PROVIDER=${JSON.stringify(env.AUTH_PROVIDER)} is not recognized. Accepted: "workos" (WorkOS AuthKit, the default) or "oidc" (any OpenID Connect issuer — Authelia, Keycloak, Authentik, Zitadel, Dex, …).`,
+    );
+  }
+  return env.AUTH_OIDC_ISSUER?.trim() ? 'oidc' : 'workos';
+}
+
+/**
+ * The session cookie's encryption key, from `AUTH_COOKIE_PASSWORD` or the
+ * WorkOS-named `WORKOS_COOKIE_PASSWORD` it used to be spelled as.
+ *
+ * Both names are accepted for either provider: the value is a symmetric key
+ * this server uses to seal its own cookie, nothing about it is WorkOS-specific,
+ * and an existing deployment must not have to rename a working variable to
+ * switch providers. 32 characters is WorkOS's own documented minimum and a
+ * sensible floor for the HKDF input the OIDC path derives an AES-256 key from.
+ *
+ * `missingAs` is the name reported when it is absent, so each provider's error
+ * message names the variable that provider's documentation tells you to set.
+ */
+function readCookiePassword(env: Record<string, string | undefined>): string | undefined {
+  return env.AUTH_COOKIE_PASSWORD?.trim() || env.WORKOS_COOKIE_PASSWORD?.trim() || undefined;
+}
+
+function assertCookiePasswordLength(cookiePassword: string, name: string): void {
+  if (cookiePassword.length < 32) {
+    throw new Error(
+      `${name} must be at least 32 characters (WorkOS's own session-sealing minimum, and the floor for the key the OIDC session cookie is encrypted with); got ${cookiePassword.length}.`,
+    );
+  }
+}
+
+function buildProvider(env: Record<string, string | undefined>): AuthProvider {
+  return resolveProviderKind(env) === 'oidc' ? buildOidcProviderFromEnv(env) : buildWorkosProviderFromEnv(env);
+}
+
+function buildWorkosProviderFromEnv(env: Record<string, string | undefined>): AuthProvider {
+  const apiKey = env.WORKOS_API_KEY;
+  const clientId = env.WORKOS_CLIENT_ID;
+  const cookiePassword = readCookiePassword(env);
+  const missing = [
+    !apiKey && 'WORKOS_API_KEY',
+    !clientId && 'WORKOS_CLIENT_ID',
+    !cookiePassword && 'WORKOS_COOKIE_PASSWORD',
+  ].filter(Boolean);
+  if (missing.length) {
+    throw new Error(
+      `AUTH_REQUIRE_LOGIN is on but missing: ${missing.join(', ')}. Login cannot start with no way to reach WorkOS or seal a session. If you do not use WorkOS, point this server at your own identity provider instead: AUTH_PROVIDER=oidc with AUTH_OIDC_ISSUER, AUTH_OIDC_CLIENT_ID, AUTH_OIDC_CLIENT_SECRET and AUTH_COOKIE_PASSWORD.`,
+    );
+  }
+  assertCookiePasswordLength(cookiePassword!, 'WORKOS_COOKIE_PASSWORD');
+  return createWorkosProvider({
     workos: new WorkOS(apiKey!, { clientId: clientId! }),
     clientId: clientId!,
     cookiePassword: cookiePassword!,
-    adminEmails,
-    callbackOrigin,
-  };
+  });
+}
+
+/**
+ * Scopes for the OIDC path. `openid` is what makes it an OIDC request at all
+ * and is added back if an operator's list omits it; `profile` and `email` are
+ * what fill in a display name and the address `AUTH_ADMIN_EMAILS` is checked
+ * against. `offline_access` is deliberately *not* default: an issuer that has
+ * not granted that scope to this client rejects the whole authorization request
+ * when it is asked for, so defaulting it on would break first-time logins on
+ * exactly the self-hosted setups this path exists for. Add it (both here and at
+ * the issuer) to get refresh-backed sessions — see `createOidcProvider`.
+ */
+function parseScopes(raw: string | undefined): string[] {
+  const requested = (raw ?? 'openid profile email')
+    .split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+  return requested.includes('openid') ? requested : ['openid', ...requested];
+}
+
+function buildOidcProviderFromEnv(env: Record<string, string | undefined>): AuthProvider {
+  const issuer = env.AUTH_OIDC_ISSUER?.trim();
+  const clientId = env.AUTH_OIDC_CLIENT_ID?.trim();
+  const clientSecret = env.AUTH_OIDC_CLIENT_SECRET?.trim() || undefined;
+  const cookiePassword = readCookiePassword(env);
+  const missing = [
+    !issuer && 'AUTH_OIDC_ISSUER',
+    !clientId && 'AUTH_OIDC_CLIENT_ID',
+    !cookiePassword && 'AUTH_COOKIE_PASSWORD',
+  ].filter(Boolean);
+  if (missing.length) {
+    throw new Error(
+      `AUTH_PROVIDER=oidc but missing: ${missing.join(', ')}. AUTH_OIDC_ISSUER is your identity provider's base URL (the one its own /.well-known/openid-configuration names as "issuer"), AUTH_OIDC_CLIENT_ID is the client you registered there for this server, and AUTH_COOKIE_PASSWORD (32+ chars) is the key its session cookie is sealed with.`,
+    );
+  }
+  assertCookiePasswordLength(cookiePassword!, 'AUTH_COOKIE_PASSWORD');
+  // No client secret is a public client, which is legitimate — PKCE is what
+  // protects the exchange either way — but it is worth one line in the log,
+  // since the far more common cause is a secret that failed to reach the
+  // process (an unexported variable, a .env that was not read).
+  if (!clientSecret) {
+    console.warn(
+      `OIDC login: no AUTH_OIDC_CLIENT_SECRET set — treating ${clientId} as a public client authenticated by PKCE alone. Set it if you registered a confidential client at ${issuer}.`,
+    );
+  }
+  return createOidcProvider({
+    issuer: issuer!,
+    clientId: clientId!,
+    clientSecret,
+    scopes: parseScopes(env.AUTH_OIDC_SCOPES),
+    cookiePassword: cookiePassword!,
+    sessionMaxAgeSeconds: SESSION_MAX_AGE_SECONDS,
+  });
 }
 
 /**
@@ -334,82 +461,67 @@ export interface SessionUser {
 /**
  * Verifies the session cookie on an incoming request. Returns `null` on
  * anything short of a fully valid, still-live session — a tampered cookie,
- * no cookie at all, or a refresh that itself fails (refresh token also
- * expired/revoked) are all just "not logged in" to a caller, which mirrors
- * `authenticateWithSessionCookie`'s own three-reason failure enum
- * collapsing to one boolean here, since nothing on this side needs to
- * distinguish *why* a caller should be shown the login page.
+ * no cookie at all, or a renewal that itself fails (refresh token also
+ * expired/revoked) are all just "not logged in" to a caller, since nothing on
+ * this side needs to distinguish *why* a caller should be shown the login
+ * page.
  *
- * One case is *not* collapsed to "not logged in": an `invalid_jwt` failure
- * from `session.authenticate()` means the sealed cookie's *access* token
- * has expired, which WorkOS does on the order of an hour — routine, not a
- * sign the user should be asked to log in again, since the cookie also
- * carries a refresh token good for the cookie's own much longer lifetime
- * (`SESSION_MAX_AGE_SECONDS`, 14 days). That case calls `session.refresh()`
- * and, on success, writes a freshly sealed cookie via `res` before
- * returning the user — so the *browser's* stored cookie also advances
- * past its old access token, not just this one request's view of it. Pass
- * `res` whenever one is available (every real HTTP request has one); it is
- * optional only so a caller with no response to write to (none exist in
- * this codebase today, but the type would otherwise force one everywhere)
- * still compiles — such a caller silently skips the refresh-cookie
- * rewrite and would re-hit the same `invalid_jwt` refresh path on its very
- * next call, which is correct, just less efficient.
+ * The provider does the provider-specific part (unseal, and renew when the
+ * short-lived token inside has expired but the session as a whole has not);
+ * this function does the two things that are the same for every provider.
  *
- * `session.authenticate()`/`session.refresh()` are wrapped in a try/catch
- * rather than left to throw: this runs inside an `async` request-handler
- * callback with no surrounding try/catch of its own (`api.ts`/`api-pg.ts`'s
- * server-level catch only wraps matched-route dispatch, which happens
- * *after* the session gate calls this), so an uncaught rejection here would
- * escape as an unhandled promise rejection — Node's default is to crash the
- * whole process on one of those, taking every other in-flight request down
- * with it over what is, from a caller's perspective, just an expired or
- * unreachable session. A WorkOS outage or network blip is treated the same
- * as "not logged in" (logged, not thrown), which degrades every current
- * session to a re-login rather than the server itself going down.
+ * First, it writes a renewed cookie back to the browser when the provider
+ * hands one back, so the *browser's* stored cookie advances past its old
+ * access token rather than re-running the renewal on every subsequent
+ * request. Access tokens are short-lived by design — on the order of an hour —
+ * while the cookie is good for `SESSION_MAX_AGE_SECONDS` (14 days), and this
+ * write-back is the whole reason the cookie's stated lifetime is what a user
+ * actually experiences. It re-seals with the full lifetime, not the remainder:
+ * a session renewed on day 3 should not be good for less time than one created
+ * today. Pass `res` whenever one is available (every real HTTP request has
+ * one); it is optional only so a caller with no response to write to still
+ * compiles — such a caller silently skips the rewrite and re-renews on its
+ * very next call, which is correct, just less efficient.
+ *
+ * Second, it catches. This runs inside an `async` request-handler callback
+ * with no surrounding try/catch of its own (`api.ts`/`api-pg.ts`'s
+ * server-level catch only wraps matched-route dispatch, which happens *after*
+ * the session gate calls this), so an uncaught rejection here would escape as
+ * an unhandled promise rejection — Node's default is to crash the whole
+ * process on one of those, taking every other in-flight request down with it
+ * over what is, from a caller's perspective, just an expired or unreachable
+ * session. An identity-provider outage or network blip is therefore treated
+ * the same as "not logged in" (logged, not thrown), which degrades every
+ * current session to a re-login rather than the server itself going down.
  */
 export async function verifySession(auth: AuthConfig, req: IncomingMessage, res?: ServerResponse): Promise<SessionUser | null> {
   const sealed = readSessionCookie(req);
   if (!sealed) return null;
-  const session = auth.workos.userManagement.loadSealedSession({ sessionData: sealed, cookiePassword: auth.cookiePassword });
-  let result: Awaited<ReturnType<typeof session.authenticate>>;
+  let resolved: ResolvedSession | null;
   try {
-    result = await session.authenticate();
+    resolved = await auth.provider.resolveSession(sealed);
   } catch (err) {
-    console.error('verifySession: session.authenticate() threw:', err);
+    console.error('verifySession: provider.resolveSession() threw:', err);
     return null;
   }
-  // RefreshSessionSuccessResponse omits `accessToken` (it hands back a new
-  // sealed cookie instead, per the SDK's own Omit<..., 'accessToken'> type),
-  // so its `user` is read separately here rather than folding it into
-  // `result` above and sharing one destructure below — the two success
-  // shapes are similar but not the same type.
-  if (!result.authenticated) {
-    if (result.reason !== 'invalid_jwt') return null;
-    let refreshed: Awaited<ReturnType<typeof session.refresh>>;
-    try {
-      refreshed = await session.refresh();
-    } catch (err) {
-      console.error('verifySession: session.refresh() threw:', err);
-      return null;
-    }
-    if (!refreshed.authenticated) return null;
-    if (refreshed.sealedSession && res) setSessionCookie(auth, res, refreshed.sealedSession, SESSION_MAX_AGE_SECONDS);
-    const { user } = refreshed;
-    return {
-      id: user.id,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      isAdmin: auth.adminEmails.has(user.email.toLowerCase()),
-    };
-  }
-  const { user } = result;
+  if (!resolved) return null;
+  if (resolved.resealed && res) setSessionCookie(auth, res, resolved.resealed, SESSION_MAX_AGE_SECONDS);
+  return toSessionUser(auth, resolved.identity);
+}
+
+/**
+ * Adds the one thing no provider gets to decide: whether this person may
+ * touch system-wide settings. Resolved against `AuthConfig.adminEmails` (see
+ * its own doc comment), by email, case-insensitively — and `false` for an
+ * identity carrying no email at all, which is the fail-closed direction and
+ * the shape `mcpSessionUser` already uses on the connector side.
+ */
+export function toSessionUser(auth: Pick<AuthConfig, 'adminEmails'>, identity: AuthIdentity): SessionUser {
   return {
-    id: user.id,
-    email: user.email,
-    firstName: user.firstName,
-    lastName: user.lastName,
-    isAdmin: auth.adminEmails.has(user.email.toLowerCase()),
+    id: identity.id,
+    email: identity.email,
+    firstName: identity.firstName,
+    lastName: identity.lastName,
+    isAdmin: identity.email !== '' && auth.adminEmails.has(identity.email.toLowerCase()),
   };
 }
