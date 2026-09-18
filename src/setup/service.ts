@@ -11,13 +11,44 @@ import { createStory } from '../store/world.ts';
 import type { StoryId } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
 import { WikiClient } from '../ingest/client.ts';
-import { crawl, discover, prune, type CrawlProgress, type CrawlResult, type DiscoveryPreview } from '../ingest/scope.ts';
+import {
+  INGEST_CONTEXT_META_KEY,
+  parseIngestContext,
+  serializeIngestContext,
+  type IngestContext,
+} from '../ingest/context.ts';
+import {
+  crawl,
+  discover,
+  prune,
+  type CrawlProgress,
+  type CrawlResult,
+  type DiscoveryPreview,
+} from '../ingest/scope.ts';
 import { runPassA } from '../ingest/passA.ts';
 import { LlmPassBExtractor } from '../ingest/passB.ts';
-import { applyPassB, depthByHops, emptyPassBCounters, specFor, parseBudget, budgetToWire, budgetLabel, UNLIMITED, type DepthMode, type DepthSpec, type IngestLimits } from '../ingest/depth.ts';
+import {
+  applyPassB,
+  depthByHops,
+  emptyPassBCounters,
+  specFor,
+  parseBudget,
+  budgetToWire,
+  budgetLabel,
+  UNLIMITED,
+  type DepthMode,
+  type DepthSpec,
+  type IngestLimits,
+} from '../ingest/depth.ts';
 import { WikiDirectory, type DirectoryOptions, type WikiCandidate } from './directory.ts';
 import { SetupPlanner, type IngestPlan, type CharacterSketch } from './planner.ts';
-import { applyCustomWorld, applyStyle, assignPlayerCharacter, proposeOpening, type ApplyCustomResult } from './apply.ts';
+import {
+  applyCustomWorld,
+  applyStyle,
+  assignPlayerCharacter,
+  proposeOpening,
+  type ApplyCustomResult,
+} from './apply.ts';
 import { JobRegistry, type Job, type JobHandle } from './jobs.ts';
 import { seedWorld } from '../seed/verrow.ts';
 import { installPack, packById, packSummaries, type PackSummary } from '../packs/index.ts';
@@ -58,33 +89,6 @@ export interface IngestJobResult {
   opening: string;
   warnings: string[];
 }
-
-/**
- * What a later session needs to continue reading a wiki without asking the
- * player to re-enter the universe, seeds and mode. Stored as one JSON blob
- * under a single `meta` key rather than its own table: this is world-level
- * bookkeeping in the same spirit as `worldTitle` (`ChronicleStore.setMeta`),
- * not canon, and a table would be one column read/written as a unit anyway.
- */
-export interface IngestContext {
-  baseUrl: string;
-  mode: DepthMode;
-  seeds: string[];
-  excludeCategories: string[];
-  title: string;
-  wikiName: string;
-  /**
-   * Budget overrides this world was built with, so "continue reading this
-   * wiki" resumes at the same breadth instead of silently falling back to the
-   * mode preset. Stored in wire form (`'all'`, never `Infinity`) because this
-   * blob is JSON in a `meta` row. Absent on every world ingested before
-   * budgets were overridable, which reads as "use the preset" — the behaviour
-   * those worlds already had.
-   */
-  budgets?: { maxPages?: number | 'all'; hops?: number | 'all'; passBMaxPages?: number | 'all' };
-}
-
-const INGEST_CONTEXT_META_KEY = 'ingestContext';
 
 /**
  * Refuses an unlimited budget on the server-side ingest path.
@@ -129,17 +133,11 @@ export function progressDetail(done: number, total: number | null, noun = 'pages
 }
 
 function saveIngestContext(world: World, ctx: IngestContext): void {
-  world.chronicle.setMeta(INGEST_CONTEXT_META_KEY, JSON.stringify(ctx));
+  world.chronicle.setMeta(INGEST_CONTEXT_META_KEY, serializeIngestContext(ctx));
 }
 
 function loadIngestContext(world: World): IngestContext | null {
-  const raw = world.chronicle.getMeta(INGEST_CONTEXT_META_KEY, '');
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as IngestContext;
-  } catch {
-    return null;
-  }
+  return parseIngestContext(world.chronicle.getMeta(INGEST_CONTEXT_META_KEY, ''));
 }
 
 /**
@@ -171,11 +169,7 @@ export function budgetsToLimits(budgets: IngestContext['budgets']): IngestLimits
  * on what `"all"` or a bad value means — `parseBudget` throws on anything that
  * is neither a positive integer nor `"all"`.
  */
-export function limitsFromWire(input: {
-  maxPages?: unknown;
-  hops?: unknown;
-  passBMaxPages?: unknown;
-}): IngestLimits {
+export function limitsFromWire(input: { maxPages?: unknown; hops?: unknown; passBMaxPages?: unknown }): IngestLimits {
   const maxPages = parseBudget(input.maxPages, 'maxPages');
   const hops = parseBudget(input.hops, 'hops');
   const passBMaxPages = parseBudget(input.passBMaxPages, 'passBMaxPages');
@@ -216,7 +210,15 @@ export class SetupService {
   /** Cached crawl per preview, so committing does not re-fetch every page. */
   private crawls = new Map<
     string,
-    { crawl: CrawlResult; baseUrl: string; mode: DepthMode; limits: IngestLimits; title: string; seeds: string[]; excludeCategories: string[] }
+    {
+      crawl: CrawlResult;
+      baseUrl: string;
+      mode: DepthMode;
+      limits: IngestLimits;
+      title: string;
+      seeds: string[];
+      excludeCategories: string[];
+    }
   >();
 
   constructor(opts: SetupServiceOptions) {
@@ -249,7 +251,10 @@ export class SetupService {
   }
 
   /** Free text plus a resolved wiki becomes an editable plan. */
-  async plan(wish: string, wiki: WikiCandidate): Promise<IngestPlan & { startingPoints: Array<{ title: string; kind: string; members: number }> }> {
+  async plan(
+    wish: string,
+    wiki: WikiCandidate,
+  ): Promise<IngestPlan & { startingPoints: Array<{ title: string; kind: string; members: number }> }> {
     const startingPoints = await this.startingPoints(wiki.baseUrl, wish);
     const plan = await this.planner.plan({ wish, wiki, startingPoints });
     return { ...plan, startingPoints };
@@ -505,7 +510,8 @@ export class SetupService {
     const extractor = new LlmPassBExtractor({
       provider: this.providers.get('passb'),
       world,
-      onError: (title, err) => handle.log(`pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
+      onError: (title, err) =>
+        handle.log(`pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
     });
 
     const selected =
@@ -520,13 +526,19 @@ export class SetupService {
     // Candidates are score-sorted, so this keeps the best pages.
     const targets = Number.isFinite(spec.passBMaxPages) ? selected.slice(0, spec.passBMaxPages) : selected;
     if (targets.length < selected.length) {
-      handle.log(`relation extraction capped at ${targets.length.toLocaleString()} of ${selected.length.toLocaleString()} pages, highest-scoring first`);
+      handle.log(
+        `relation extraction capped at ${targets.length.toLocaleString()} of ${selected.length.toLocaleString()} pages, highest-scoring first`,
+      );
     }
 
     const already = new Set(
-      (world.db.prepare(`SELECT page_id FROM ingest_pages WHERE wiki = ? AND passb_status = 'done'`).all(wikiName) as Array<{
-        page_id: string;
-      }>).map((r) => r.page_id),
+      (
+        world.db
+          .prepare(`SELECT page_id FROM ingest_pages WHERE wiki = ? AND passb_status = 'done'`)
+          .all(wikiName) as Array<{
+          page_id: string;
+        }>
+      ).map((r) => r.page_id),
     );
     const pending = targets.filter((c) => {
       const page = scoped.pages.get(c.title);
@@ -553,7 +565,9 @@ export class SetupService {
         // Recorded so a later resume retries exactly this page, not silently
         // treated as "read and found nothing" — which is the failure mode
         // that made a dead token unresumable before this status existed.
-        world.db.prepare(`UPDATE ingest_pages SET passb_status = 'failed' WHERE page_id = ? AND wiki = ?`).run(page.pageId, wikiName);
+        world.db
+          .prepare(`UPDATE ingest_pages SET passb_status = 'failed' WHERE page_id = ? AND wiki = ?`)
+          .run(page.pageId, wikiName);
         failed++;
         handle.count(done + failed, pending.length);
         handle.stage('reading the prose', progressDetail(done + failed, pending.length));
@@ -565,7 +579,9 @@ export class SetupService {
       // same pages produced a different graph depending on whether the ingest
       // came through the wizard or the CLI. See `applyPassB`.
       applyPassB(world, spec, candidate.title, entity, out, counters);
-      world.db.prepare(`UPDATE ingest_pages SET passb_status = 'done' WHERE page_id = ? AND wiki = ?`).run(page.pageId, wikiName);
+      world.db
+        .prepare(`UPDATE ingest_pages SET passb_status = 'done' WHERE page_id = ? AND wiki = ?`)
+        .run(page.pageId, wikiName);
       done++;
       handle.count(done + failed, pending.length);
       // Re-stated per page: this is the phase that runs for hours, so the
@@ -582,12 +598,17 @@ export class SetupService {
       voiceCards: counters.voiceCards,
       dropped,
     };
-    handle.log(`kept ${counters.edges} relations, dropped ${dropped} unevidenced or unresolvable${failed ? `, ${failed} page(s) failed and can be resumed later` : ''}`);
+    handle.log(
+      `kept ${counters.edges} relations, dropped ${dropped} unevidenced or unresolvable${failed ? `, ${failed} page(s) failed and can be resumed later` : ''}`,
+    );
     handle.log(
       `${counters.events} event(s) with ${counters.eventParticipants} participant link(s); ` +
         `${counters.eventsSkipped} undated single-subject statement(s) kept on their entity instead of becoming nodes`,
     );
-    if (failed) warnings.push(`${failed} page(s) could not be read (a dead token or rate limit, most likely) — this ingest can be continued later from Settings without re-reading what already succeeded`);
+    if (failed)
+      warnings.push(
+        `${failed} page(s) could not be read (a dead token or rate limit, most likely) — this ingest can be continued later from Settings without re-reading what already succeeded`,
+      );
 
     return { passB, warnings };
   }
@@ -643,7 +664,10 @@ export class SetupService {
   ): Job<IngestJobResult> {
     const world = this.getWorld();
     const context = loadIngestContext(world);
-    if (!context) throw new Error('this world has no wiki ingest to continue — it was not built from a wiki, or predates this feature');
+    if (!context)
+      throw new Error(
+        'this world has no wiki ingest to continue — it was not built from a wiki, or predates this feature',
+      );
 
     const baseUrl = context.baseUrl;
     const mode = overrides.mode ?? context.mode;
@@ -659,13 +683,19 @@ export class SetupService {
     return this.jobs.start<IngestJobResult>('continue-ingest', async (handle) => {
       handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
       const client = this.client(baseUrl);
-      const crawled = await crawl({ client, seeds, hops: spec.hops, maxPages: spec.maxPages, onProgress: (info) => {
-        const detail = info.pageTotal
-          ? progressDetail(info.pagesFetched, info.pageTotal)
-          : `${info.pagesFetched.toLocaleString()} pages, ${info.queued.toLocaleString()} queued`;
-        handle.stage('crawling', detail);
-        handle.count(info.pagesFetched, info.pageTotal);
-      } });
+      const crawled = await crawl({
+        client,
+        seeds,
+        hops: spec.hops,
+        maxPages: spec.maxPages,
+        onProgress: (info) => {
+          const detail = info.pageTotal
+            ? progressDetail(info.pagesFetched, info.pageTotal)
+            : `${info.pagesFetched.toLocaleString()} pages, ${info.queued.toLocaleString()} queued`;
+          handle.stage('crawling', detail);
+          handle.count(info.pagesFetched, info.pageTotal);
+        },
+      });
       const scoped = prune(crawled, { maxPages: spec.maxPages, excludeCategories });
 
       // Re-persist: a "read more" call may have widened seeds/mode/exclusions,
@@ -783,7 +813,10 @@ export class SetupService {
    * anything here means a pack regressed, and the player is better served by a
    * playable world plus a note than by a failed setup.
    */
-  usePack(packId: string, scenarioId?: string): {
+  usePack(
+    packId: string,
+    scenarioId?: string,
+  ): {
     storyId: StoryId;
     scenarioId: string;
     title: string;
@@ -846,9 +879,23 @@ export class SetupService {
     // deliberately: they live outside the database, and orphaned files cost
     // disk rather than correctness.
     const tables = [
-      'turns', 'events', 'consequences', 'fact_knowledge', 'facts', 'threads',
-      'directives', 'divergences', 'style_anchors', 'relationships', 'sheets',
-      'edges', 'entities', 'scenes', 'chapters', 'ingest_pages', 'illustrations',
+      'turns',
+      'events',
+      'consequences',
+      'fact_knowledge',
+      'facts',
+      'threads',
+      'directives',
+      'divergences',
+      'style_anchors',
+      'relationships',
+      'sheets',
+      'edges',
+      'entities',
+      'scenes',
+      'chapters',
+      'ingest_pages',
+      'illustrations',
     ];
     for (const t of tables) world.db.prepare(`DELETE FROM ${t}`).run();
 

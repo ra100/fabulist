@@ -14,6 +14,7 @@ import { Engine } from '../loop/engine.ts';
 import { buildRegistry, loadConfig } from '../config/config.ts';
 import { makeProseGate } from '../lint/gate.ts';
 import { seedConsequences, tickConsequences, worldTick } from '../consequence/propagate.ts';
+import { sqlitePlayDeepeningResolver } from '../ingest/play-deepening.ts';
 
 export interface ScriptResult {
   turns: number;
@@ -46,11 +47,16 @@ export async function runScript(
   const engine = new Engine({
     world,
     providers: registry,
+    deepening: sqlitePlayDeepeningResolver(),
     proseGate: makeProseGate({ threshold: cfg.proseLintThreshold, blocklist: cfg.blocklist }),
   });
 
   const result: ScriptResult = {
-    turns: 0, narrated: 0, interrupted: 0, blocked: 0, answered: 0,
+    turns: 0,
+    narrated: 0,
+    interrupted: 0,
+    blocked: 0,
+    answered: 0,
     fingerprint: { entities: 0, edges: 0, events: 0, facts: 0, threads: 0, brokenVows: [], scene: 1 },
     transcript: [],
   };
