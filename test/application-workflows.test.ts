@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createDirective, type DirectiveRepository } from '../src/application/directives.ts';
+import { sqliteDirectiveRepository } from '../src/application/directives-sqlite.ts';
 import { runPlayTurn } from '../src/application/play-workflow.ts';
+import { recordAuthoringCheckpointTx } from '../src/loop/history.ts';
+import { World } from '../src/store/index.ts';
 
 test('play workflow runs post-commit effects only for narrated outcomes', async () => {
   const calls: string[] = [];
@@ -50,4 +53,23 @@ test('directive workflow applies defaults and resolves affected thread titles', 
   assert.equal(result.directive.strength, 'push');
   assert.deepEqual(result.diff.raisedThreadTitles, ['The debt comes due']);
   assert.deepEqual(result.diff.loweredThreadTitles, ['thread:missing']);
+});
+
+test('directive workflow rolls back its write when title lookup fails', async () => {
+  const world = World.open(':memory:');
+  const repository = sqliteDirectiveRepository(world);
+  const failingRepository: DirectiveRepository = {
+    ...repository,
+    recalculate: () => ({ raisedThreads: [], loweredThreads: [] }),
+    threadTitles: () => {
+      throw new Error('title lookup failed');
+    },
+  };
+
+  await assert.rejects(
+    recordAuthoringCheckpointTx(world, () => createDirective(failingRepository, { text: 'A directive' })),
+    /title lookup failed/,
+  );
+  assert.deepEqual(world.directives.active(), []);
+  world.close();
 });
