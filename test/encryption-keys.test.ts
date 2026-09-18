@@ -61,3 +61,24 @@ test('a wrong passphrase, recovery code, or authenticated context cannot decrypt
     /incorrect passphrase or recovery code/,
   );
 });
+
+test('a corrupt story key is skipped without blocking healthy private stories', async () => {
+  const enrollment = await createEncryptionEnrollment(userId, passphrase, storyIds);
+  const corruptStoryKeys = enrollment.storyKeys.map((storyKey) =>
+    storyKey.storyId === 'story-two'
+      ? {
+          ...storyKey,
+          wrap: {
+            ...storyKey.wrap,
+            ciphertext: `${storyKey.wrap.ciphertext.slice(0, -1)}${storyKey.wrap.ciphertext.endsWith('A') ? 'B' : 'A'}`,
+          },
+        }
+      : storyKey,
+  );
+
+  const unlocked = await unlockWithPassphrase(userId, enrollment.userKey, corruptStoryKeys, passphrase);
+
+  assert.deepEqual([...unlocked.storyKeys.keys()], ['story-one']);
+  assert.deepEqual(unlocked.failedStoryKeys.map((item) => item.storyId), ['story-two']);
+  assert.match(unlocked.failedStoryKeys[0]?.error ?? '', /incorrect passphrase or recovery code/);
+});

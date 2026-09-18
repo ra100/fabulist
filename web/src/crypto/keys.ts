@@ -33,6 +33,7 @@ export interface EncryptionEnrollment {
 export interface UnlockedStoryKeys {
   masterKey: Uint8Array;
   storyKeys: Map<string, Uint8Array>;
+  failedStoryKeys: Array<{ storyId: string; error: string }>;
 }
 
 export interface StoryKeyHandoff {
@@ -201,10 +202,26 @@ async function unlock(
   );
   const masterCryptoKey = await importAesKey(masterKey);
   const unlocked = await Promise.all(storyKeys.map(async (storyKey) => {
-    if (storyKey.version !== VERSION) throw new Error('unsupported private-storage story key version');
-    return [storyKey.storyId, await decrypt(masterCryptoKey, storyKey.wrap, storyAad(userId, storyKey.storyId))] as const;
+    try {
+      if (storyKey.version !== VERSION) throw new Error('unsupported private-storage story key version');
+      return {
+        ok: true,
+        storyId: storyKey.storyId,
+        key: await decrypt(masterCryptoKey, storyKey.wrap, storyAad(userId, storyKey.storyId)),
+      } as const;
+    } catch (err) {
+      return {
+        ok: false,
+        storyId: storyKey.storyId,
+        error: err instanceof Error ? err.message : String(err),
+      } as const;
+    }
   }));
-  return { masterKey, storyKeys: new Map(unlocked) };
+  return {
+    masterKey,
+    storyKeys: new Map(unlocked.filter((item) => item.ok).map((item) => [item.storyId, item.key])),
+    failedStoryKeys: unlocked.filter((item) => !item.ok).map(({ storyId, error }) => ({ storyId, error })),
+  };
 }
 
 export async function unlockWithPassphrase(
