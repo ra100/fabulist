@@ -21,8 +21,8 @@
  * directory can move as a unit, which also means a database-only backup restores
  * to rows pointing at files that are not there.
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { checkpoint, openDb, type Db } from '../db/db.ts';
 
 export interface BackupResult {
@@ -69,28 +69,53 @@ export function backupSave(fromDbPath: string, toPrefix: string): BackupResult {
   if (!existsSync(fromDbPath)) throw new Error(`no save at ${fromDbPath}`);
 
   const dbOut = `${toPrefix}.db`;
-  const db = openDb(fromDbPath);
-  let bytes: number;
-  try {
-    bytes = vacuumInto(db, dbOut);
-  } finally {
-    db.close();
-  }
-
   const imagesIn = imagesDirFor(fromDbPath);
-  let imagesPath: string | null = null;
-  let imageCount = 0;
-  if (existsSync(imagesIn)) {
-    const entries = readdirSync(imagesIn).filter((f) => statSync(join(imagesIn, f)).isFile());
-    if (entries.length) {
-      imagesPath = `${toPrefix}-images`;
-      mkdirSync(imagesPath, { recursive: true });
-      for (const f of entries) copyFileSync(join(imagesIn, f), join(imagesPath, f));
+  const entries = existsSync(imagesIn)
+    ? readdirSync(imagesIn).filter((f) => statSync(join(imagesIn, f)).isFile())
+    : [];
+  const imagesPath = entries.length ? `${toPrefix}-images` : null;
+
+  if (existsSync(dbOut)) throw new Error(`${dbOut} already exists`);
+  if (imagesPath && existsSync(imagesPath)) throw new Error(`${imagesPath} already exists`);
+
+  mkdirSync(dirname(resolve(dbOut)), { recursive: true });
+  const stageDir = mkdtempSync(join(dirname(resolve(dbOut)), `.${basename(toPrefix)}-backup-`));
+  const stagedDb = join(stageDir, 'world.db');
+  const stagedImages = join(stageDir, 'images');
+  let committedDb = false;
+  let committedImages = false;
+
+  try {
+    const db = openDb(fromDbPath);
+    let bytes: number;
+    try {
+      bytes = vacuumInto(db, stagedDb);
+    } finally {
+      db.close();
+    }
+
+    let imageCount = 0;
+    if (imagesPath) {
+      mkdirSync(stagedImages, { recursive: true });
+      for (const f of entries) copyFileSync(join(imagesIn, f), join(stagedImages, f));
       imageCount = entries.length;
     }
-  }
 
-  return { dbPath: dbOut, imagesPath, bytes, imageCount };
+    if (imagesPath) {
+      renameSync(stagedImages, imagesPath);
+      committedImages = true;
+    }
+    renameSync(stagedDb, dbOut);
+    committedDb = true;
+
+    return { dbPath: dbOut, imagesPath, bytes, imageCount };
+  } catch (err) {
+    if (committedDb) rmSync(dbOut, { force: true });
+    if (committedImages && imagesPath) rmSync(imagesPath, { recursive: true, force: true });
+    throw err;
+  } finally {
+    rmSync(stageDir, { recursive: true, force: true });
+  }
 }
 
 /** A sortable, filename-safe stamp: `20260905-230017`. */
