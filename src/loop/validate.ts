@@ -107,17 +107,29 @@ export const deltaSchema: JsonSchema = {
         type: 'array',
         items: {
           type: 'object',
-          required: ['text'],
           properties: {
             text: { type: 'string' },
             participants: { type: 'array', items: { type: 'string' } },
             locationId: { type: ['string', 'null'] },
             significance: { type: 'number' },
           },
+          required: ['text', 'significance'],
         },
       },
       entityUpserts: { type: 'array' },
-      edgeAsserts: { type: 'array' },
+      edgeAsserts: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['subject', 'predicate', 'object', 'weight'],
+          properties: {
+            subject: { type: 'string' },
+            predicate: { type: 'string' },
+            object: { type: 'string' },
+            weight: { type: 'number' },
+          },
+        },
+      },
       edgeRetires: { type: 'array' },
       conditionUpdates: { type: 'array' },
       relationshipUpdates: { type: 'array' },
@@ -156,8 +168,8 @@ function asString(v: unknown, fallback = ''): string {
   return typeof v === 'string' ? v : fallback;
 }
 
-function asNumber(v: unknown, fallback = 0.5): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+function asNumber(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
 
 /**
@@ -191,11 +203,21 @@ export function coerceDelta(raw: unknown): { delta: Delta; issues: ValidationIss
       issues.push({ tier: 'schema', path: `events[${i}].text`, message: 'missing text', repaired: true });
       continue;
     }
+    const significance = asNumber(ev.significance);
+    if (significance === undefined) {
+      issues.push({
+        tier: 'schema',
+        path: `events[${i}].significance`,
+        message: 'missing or invalid significance',
+        repaired: false,
+      });
+      continue;
+    }
     delta.events.push({
       text,
       participants: asArray(ev.participants).map((p) => asString(p)).filter(Boolean),
       locationId: typeof ev.locationId === 'string' ? ev.locationId : null,
-      significance: Math.max(0, Math.min(1, asNumber(ev.significance))),
+      significance: Math.max(0, Math.min(1, significance)),
     });
   }
 
@@ -216,7 +238,7 @@ export function coerceDelta(raw: unknown): { delta: Delta; issues: ValidationIss
     });
   }
 
-  for (const a of asArray(o.edgeAsserts)) {
+  for (const [i, a] of asArray(o.edgeAsserts).entries()) {
     const e = a as Record<string, unknown>;
     const subject = asString(e.subject);
     const predicate = asString(e.predicate);
@@ -225,7 +247,17 @@ export function coerceDelta(raw: unknown): { delta: Delta; issues: ValidationIss
       issues.push({ tier: 'schema', path: 'edgeAsserts', message: 'incomplete edge', repaired: true });
       continue;
     }
-    delta.edgeAsserts.push({ subject, predicate, object, weight: asNumber(e.weight) });
+    const weight = asNumber(e.weight);
+    if (weight === undefined) {
+      issues.push({
+        tier: 'schema',
+        path: `edgeAsserts[${i}].weight`,
+        message: 'missing or invalid weight',
+        repaired: false,
+      });
+      continue;
+    }
+    delta.edgeAsserts.push({ subject, predicate, object, weight });
   }
 
   for (const r of asArray(o.edgeRetires)) {
@@ -251,9 +283,9 @@ export function coerceDelta(raw: unknown): { delta: Delta; issues: ValidationIss
     delta.relationshipUpdates.push({
       fromId,
       toId,
-      trustDelta: asNumber(e.trustDelta, 0),
-      affectionDelta: asNumber(e.affectionDelta, 0),
-      respectDelta: asNumber(e.respectDelta, 0),
+      trustDelta: asNumber(e.trustDelta) ?? 0,
+      affectionDelta: asNumber(e.affectionDelta) ?? 0,
+      respectDelta: asNumber(e.respectDelta) ?? 0,
       note: asString(e.note),
     });
   }
@@ -275,7 +307,7 @@ export function coerceDelta(raw: unknown): { delta: Delta; issues: ValidationIss
       id: e.id ? asString(e.id) : undefined,
       title: e.title ? asString(e.title) : undefined,
       stakes: e.stakes ? asString(e.stakes) : undefined,
-      tensionDelta: e.tensionDelta !== undefined ? asNumber(e.tensionDelta, 0) : undefined,
+      tensionDelta: e.tensionDelta !== undefined ? (asNumber(e.tensionDelta) ?? 0) : undefined,
       parties: e.parties ? asArray(e.parties).map((x) => asString(x)) : undefined,
       resolutions: e.resolutions ? asArray(e.resolutions).map((x) => asString(x)) : undefined,
       status: e.status ? (asString(e.status) as 'open' | 'resolved' | 'abandoned') : undefined,
