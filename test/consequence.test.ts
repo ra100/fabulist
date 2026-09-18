@@ -305,6 +305,66 @@ test('distortion compounds until people believe something simply wrong', () => {
   world.close();
 });
 
+test('suspected rumours keep propagating and compounding across ticks', () => {
+  const world = World.open(':memory:');
+  for (const id of ['char:a', 'char:b', 'char:c']) {
+    world.graph.upsert({ id, type: 'Character', name: id }, 'canon');
+  }
+  world.graph.assertEdge({ subject: 'char:a', predicate: 'TRUSTS', object: 'char:b', weight: 1 }, 1, 'canon');
+  world.graph.assertEdge({ subject: 'char:b', predicate: 'TRUSTS', object: 'char:c', weight: 1 }, 1, 'canon');
+  const fact = world.chronicle.addFact('the ledger is hidden', 1);
+  world.chronicle.setKnowledge(fact.id, 'char:a', 'knows', 1, 0.1);
+
+  assert.deepEqual(
+    transmitRumours(world, 8).map((m) => m.toId),
+    ['char:b'],
+  );
+  assert.deepEqual(
+    transmitRumours(world, 8).map((m) => m.toId),
+    ['char:c'],
+    'second-hand suspicion should transmit onward instead of dead-ending at one hop',
+  );
+  assert.equal(world.chronicle.knowersOf(fact.id).find((k) => k.entityId === 'char:c')?.level, 'wrong');
+  world.close();
+});
+
+test('a later less distorted rumour corrects an existing wrong belief', () => {
+  const world = World.open(':memory:');
+  for (const id of ['char:a', 'char:b']) {
+    world.graph.upsert({ id, type: 'Character', name: id }, 'canon');
+  }
+  world.graph.assertEdge({ subject: 'char:a', predicate: 'TRUSTS', object: 'char:b', weight: 1 }, 1, 'canon');
+  const fact = world.chronicle.addFact('the ledger is hidden', 1);
+  world.chronicle.setKnowledge(fact.id, 'char:a', 'knows', 1, 0);
+  world.chronicle.setKnowledge(fact.id, 'char:b', 'wrong', 1, 0.9);
+
+  assert.deepEqual(
+    transmitRumours(world, 8).map((m) => m.toId),
+    ['char:b'],
+  );
+  const corrected = world.chronicle.knowersOf(fact.id).find((k) => k.entityId === 'char:b');
+  assert.equal(corrected?.level, 'suspects');
+  assert.equal(corrected?.distortion, 0.25);
+  world.close();
+});
+
+test('a less distorted rumour does not downgrade existing knowledge', () => {
+  const world = World.open(':memory:');
+  for (const id of ['char:a', 'char:b']) {
+    world.graph.upsert({ id, type: 'Character', name: id }, 'canon');
+  }
+  world.graph.assertEdge({ subject: 'char:a', predicate: 'TRUSTS', object: 'char:b', weight: 1 }, 1, 'canon');
+  const fact = world.chronicle.addFact('the ledger is hidden', 1);
+  world.chronicle.setKnowledge(fact.id, 'char:a', 'knows', 1, 0);
+  world.chronicle.setKnowledge(fact.id, 'char:b', 'knows', 1, 0.9);
+
+  assert.deepEqual(transmitRumours(world, 8), []);
+  const retained = world.chronicle.knowersOf(fact.id).find((k) => k.entityId === 'char:b');
+  assert.equal(retained?.level, 'knows');
+  assert.equal(retained?.distortion, 0.9);
+  world.close();
+});
+
 test('a rumour never travels to someone who already holds it', () => {
   const world = setup();
   const fact = world.chronicle.addFact('a shared secret', 1);

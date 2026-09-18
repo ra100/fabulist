@@ -337,8 +337,9 @@ export function transmitRumours(world: World, maxPerTick = 4): Array<{ factId: s
 
   for (const fact of world.chronicle.facts(40)) {
     if (moved.length >= maxPerTick) break;
-    const knowers = world.chronicle.knowersOf(fact.id).filter((k) => k.level === 'knows');
+    const knowers = world.chronicle.knowersOf(fact.id);
     if (!knowers.length) continue;
+    const reached = new Map(knowers.map((k) => [k.entityId, k]));
 
     for (const knower of knowers) {
       // Some nodes are hubs: innkeepers, couriers, spies accelerate everything.
@@ -346,15 +347,19 @@ export function transmitRumours(world: World, maxPerTick = 4): Array<{ factId: s
 
       for (const { edge, otherId } of world.graph.neighbours(knower.entityId, scene)) {
         if (moved.length >= maxPerTick) break;
-        if (world.chronicle.knowersOf(fact.id).some((k) => k.entityId === otherId)) continue;
 
         const chance = edge.weight * 0.5 + hubBonus;
         if (chance < 0.45) continue;
 
         const distortion = Math.min(1, knower.distortion + 0.25);
+        const existing = reached.get(otherId);
+        if (existing?.level === 'knows') continue;
+        if (existing && existing.distortion <= distortion) continue;
+
         // Past a threshold the recipient believes a version that is simply wrong.
         const level = distortion >= 0.6 ? 'wrong' : 'suspects';
         world.chronicle.setKnowledge(fact.id, otherId, level, scene, distortion);
+        reached.set(otherId, { factId: fact.id, entityId: otherId, level, sinceScene: scene, distortion });
         moved.push({ factId: fact.id, toId: otherId, distortion });
       }
     }

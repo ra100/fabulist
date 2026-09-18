@@ -530,6 +530,72 @@ test('rumours transmit once per recipient per tick, with a bounded query count',
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('Postgres rumours keep propagating from suspected tellers across ticks', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    for (const id of ['char:a', 'char:b', 'char:c']) {
+      await world.graph.upsert({ id, type: 'Character', name: id }, 'canon');
+    }
+    await world.graph.assertEdge({ subject: 'char:a', predicate: 'TRUSTS', object: 'char:b', weight: 1 }, 1, 'canon');
+    await world.graph.assertEdge({ subject: 'char:b', predicate: 'TRUSTS', object: 'char:c', weight: 1 }, 1, 'canon');
+    const fact = await world.chronicle.addFact('the ledger is hidden', 1);
+    await world.chronicle.setKnowledge(fact.id, 'char:a', 'knows', 1, 0.1);
+
+    assert.deepEqual(
+      (await transmitRumours(world, 8)).map((m) => m.toId),
+      ['char:b'],
+    );
+    assert.deepEqual(
+      (await transmitRumours(world, 8)).map((m) => m.toId),
+      ['char:c'],
+      'second-hand suspicion should transmit onward instead of dead-ending at one hop',
+    );
+    assert.equal((await world.chronicle.knowersOf(fact.id)).find((k) => k.entityId === 'char:c')?.level, 'wrong');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('Postgres rumours correct an existing wrong belief with a less distorted source', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    for (const id of ['char:a', 'char:b']) {
+      await world.graph.upsert({ id, type: 'Character', name: id }, 'canon');
+    }
+    await world.graph.assertEdge({ subject: 'char:a', predicate: 'TRUSTS', object: 'char:b', weight: 1 }, 1, 'canon');
+    const fact = await world.chronicle.addFact('the ledger is hidden', 1);
+    await world.chronicle.setKnowledge(fact.id, 'char:a', 'knows', 1, 0);
+    await world.chronicle.setKnowledge(fact.id, 'char:b', 'wrong', 1, 0.9);
+
+    assert.deepEqual(
+      (await transmitRumours(world, 8)).map((m) => m.toId),
+      ['char:b'],
+    );
+    const corrected = (await world.chronicle.knowersOf(fact.id)).find((k) => k.entityId === 'char:b');
+    assert.equal(corrected?.level, 'suspects');
+    assert.equal(corrected?.distortion, 0.25);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('Postgres rumours do not downgrade existing knowledge', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    for (const id of ['char:a', 'char:b']) {
+      await world.graph.upsert({ id, type: 'Character', name: id }, 'canon');
+    }
+    await world.graph.assertEdge({ subject: 'char:a', predicate: 'TRUSTS', object: 'char:b', weight: 1 }, 1, 'canon');
+    const fact = await world.chronicle.addFact('the ledger is hidden', 1);
+    await world.chronicle.setKnowledge(fact.id, 'char:a', 'knows', 1, 0);
+    await world.chronicle.setKnowledge(fact.id, 'char:b', 'knows', 1, 0.9);
+
+    assert.deepEqual(await transmitRumours(world, 8), []);
+    const retained = (await world.chronicle.knowersOf(fact.id)).find((k) => k.entityId === 'char:b');
+    assert.equal(retained?.level, 'knows');
+    assert.equal(retained?.distortion, 0.9);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('worldTick drifts thread tension, and respects npcAgency', async (t) => {
   const ran = await withPg(async (db) => {
     const { world } = await setup(db);
