@@ -830,15 +830,25 @@ export const api = {
       onToken?: (chunk: string) => void;
       onDone?: (res: PlayResponse) => void;
       onError?: (message: string) => void;
+      signal?: AbortSignal;
     },
   ): Promise<void> => {
-    const res = await fetch(`/api${withStoryId('/play/stream')}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ input, overrideIntegrity }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`/api${withStoryId('/play/stream')}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ input, overrideIntegrity }),
+        signal: handlers.signal,
+      });
+    } catch (err) {
+      if (handlers.signal?.aborted) return;
+      throw err;
+    }
+    if (handlers.signal?.aborted) return;
     if (!res.ok || !res.body) {
       const body = await res.json().catch(() => ({}));
+      if (handlers.signal?.aborted) return;
       handlers.onError?.((body as { error?: string }).error ?? `stream failed (${res.status})`);
       return;
     }
@@ -849,7 +859,15 @@ export const api = {
     let event = '';
 
     for (;;) {
-      const { done, value } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (err) {
+        if (handlers.signal?.aborted) return;
+        throw err;
+      }
+      if (handlers.signal?.aborted) return;
+      const { done, value } = chunk;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
@@ -865,9 +883,11 @@ export const api = {
           try {
             data = JSON.parse(payload) as Record<string, unknown>;
           } catch {
+            if (handlers.signal?.aborted) return;
             handlers.onError?.(`malformed ${event || 'unnamed'} stream event: invalid JSON`);
             return;
           }
+          if (handlers.signal?.aborted) return;
           if (event === 'stage') handlers.onStage?.(String(data.stage));
           else if (event === 'token') handlers.onToken?.(String(data.chunk));
           else if (event === 'done') {
@@ -875,6 +895,7 @@ export const api = {
             if (!parsed.success) {
               const issue = parsed.error.issues[0];
               const location = issue?.path.length ? ` at ${issue.path.join('.')}` : '';
+              if (handlers.signal?.aborted) return;
               handlers.onError?.(`malformed play completion${location}: ${issue?.message ?? 'schema mismatch'}`);
               return;
             } else {
