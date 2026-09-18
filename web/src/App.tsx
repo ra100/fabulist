@@ -415,7 +415,14 @@ export function App() {
           onStorySelected={selectStory}
         />
       ) : null}
-      {tab === 'timeline' ? <TimelineView refreshKey={historyRevision} /> : null}
+      {tab === 'timeline' ? (
+        <TimelineView
+          refreshKey={historyRevision}
+          onStorySelected={selectStory}
+          onChanged={refreshHistory}
+          onOpenBook={() => navigateToTab('book')}
+        />
+      ) : null}
       {tab === 'graph' ? <GraphTab /> : null}
       {tab === 'cast' ? <CastTab state={state} /> : null}
       {tab === 'threads' ? <ThreadsView state={state} onChanged={refresh} /> : null}

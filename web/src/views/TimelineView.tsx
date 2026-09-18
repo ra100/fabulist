@@ -1,11 +1,23 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, type Timeline } from '../api.ts';
 import { HistoryRequestGate } from '../history-request-gate.ts';
+import { canBranchFromTimelineScene } from '../timeline-branching.ts';
 
-export function TimelineView({ refreshKey }: { refreshKey: number }) {
+export function TimelineView({
+  refreshKey,
+  onStorySelected,
+  onChanged,
+  onOpenBook,
+}: {
+  refreshKey: number;
+  onStorySelected: (storyId: string) => void;
+  onChanged: () => void | Promise<void>;
+  onOpenBook: () => void;
+}) {
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reveal, setReveal] = useState<Set<number>>(new Set());
+  const [branchingScene, setBranchingScene] = useState<number | null>(null);
   const requestGate = useRef(new HistoryRequestGate());
 
   useEffect(() => {
@@ -35,6 +47,24 @@ export function TimelineView({ refreshKey }: { refreshKey: number }) {
     byChapter.set(scene.chapter, list);
   }
   const chapterNumbers = [...byChapter.keys()].sort((a, b) => a - b);
+
+  async function branchFromScene(scene: number) {
+    if (branchingScene !== null) return;
+    setBranchingScene(scene);
+    setError(null);
+    try {
+      const result = await api.rollback({ scene, mode: 'fork' });
+      if (!result.forkedStory) throw new Error('branch did not return a forked book');
+      onStorySelected(result.forkedStory.id);
+      await onChanged();
+      setBranchingScene(null);
+      onOpenBook();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setBranchingScene(null);
+    }
+  }
+
   return (
     <div className="main">
       <div className="pane">
@@ -66,6 +96,16 @@ export function TimelineView({ refreshKey }: { refreshKey: number }) {
                             {scene.turnCount} turn{scene.turnCount === 1 ? '' : 's'}
                           </span>
                           {scene.scene === timeline.currentScene ? <span className="tag locked">current</span> : null}
+                          {canBranchFromTimelineScene(timeline, scene) ? (
+                            <button
+                              className="link"
+                              disabled={branchingScene !== null}
+                              title={`create a safe fork that resumes at scene ${scene.scene}`}
+                              onClick={() => void branchFromScene(scene.scene)}
+                            >
+                              {branchingScene === scene.scene ? 'branching…' : 'branch from here'}
+                            </button>
+                          ) : null}
                         </div>
                         {scene.boundary ? (
                           <div className="timeline-boundary">
