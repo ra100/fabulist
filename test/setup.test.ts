@@ -83,6 +83,26 @@ test('an explicit url is trusted and verified directly', async () => {
   assert.equal(candidates[0]?.via, 'explicit');
 });
 
+test('wiki verification aborts and times out instead of hanging setup', async () => {
+  let sawSignal = false;
+  let aborted = false;
+  const dir = new WikiDirectory({
+    fetcher: async (_url, init) => {
+      sawSignal = !!init?.signal;
+      init?.signal?.addEventListener('abort', () => {
+        aborted = true;
+      });
+      return await new Promise<never>(() => {});
+    },
+    delayMs: 0,
+    timeoutMs: 10,
+  });
+
+  assert.deepEqual(await dir.resolve('https://vale.fandom.com'), []);
+  assert.equal(sawSignal, true);
+  assert.equal(aborted, true);
+});
+
 test('an unsafe explicit URL is rejected without probing it', async () => {
   let requests = 0;
   const dir = new WikiDirectory({
