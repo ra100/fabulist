@@ -171,10 +171,12 @@ export async function seedConsequences(
   const seeded: Consequence[] = [];
 
   for (const event of events) {
+    if (seeded.length >= 12) break; // hard cap: consequence spam kills stories
     // Only consequential acts ripple. Most turns should produce nothing.
     if (event.significance < opts.minSignificance) continue;
 
     for (const subjectId of event.participants) {
+      if (seeded.length >= 12) break;
       const reactors = await findReactors(world, ctx, subjectId);
       // Every candidate's sheet in one query, rather than two per reactor across
       // pickVisibility and pickTrigger.
