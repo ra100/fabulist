@@ -30,6 +30,7 @@ export interface SetupWizardResetters {
   setOpening: Setter<string>;
   setPacks: Setter<PackSummary[] | null>;
   setPack: Setter<PackSummary | null>;
+  setSwitchingProfile: Setter<boolean>;
   setDismissedOffer: Setter<boolean>;
 }
 
@@ -54,5 +55,6 @@ export function resetSetupWizardState(state: SetupWizardResetters): void {
   state.setOpening('');
   state.setPacks(null);
   state.setPack(null);
+  state.setSwitchingProfile(false);
   state.setDismissedOffer(false);
 }
