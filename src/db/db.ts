@@ -158,24 +158,26 @@ function widenIngestPagesKey(db: Db): void {
   const pkCols = cols.filter((c) => c.pk > 0).map((c) => c.name);
   if (pkCols.length !== 1 || pkCols[0] !== 'page_id') return;
 
-  db.exec(`
-    CREATE TABLE ingest_pages_new (
-      page_id      TEXT NOT NULL,
-      wiki         TEXT NOT NULL,
-      title        TEXT NOT NULL,
-      revision     TEXT NOT NULL DEFAULT '',
-      depth        INTEGER NOT NULL DEFAULT 0,
-      hops         INTEGER NOT NULL DEFAULT 0,
-      score        REAL NOT NULL DEFAULT 0,
-      fetched_at   TEXT NOT NULL DEFAULT '',
-      passb_status TEXT NOT NULL DEFAULT '',
-      PRIMARY KEY (wiki, page_id)
-    );
-    INSERT INTO ingest_pages_new (page_id, wiki, title, revision, depth, hops, score, fetched_at, passb_status)
-      SELECT page_id, wiki, title, revision, depth, hops, score, fetched_at, passb_status FROM ingest_pages;
-    DROP TABLE ingest_pages;
-    ALTER TABLE ingest_pages_new RENAME TO ingest_pages;
-  `);
+  tx(db, () => {
+    db.exec(`
+      CREATE TABLE ingest_pages_new (
+        page_id      TEXT NOT NULL,
+        wiki         TEXT NOT NULL,
+        title        TEXT NOT NULL,
+        revision     TEXT NOT NULL DEFAULT '',
+        depth        INTEGER NOT NULL DEFAULT 0,
+        hops         INTEGER NOT NULL DEFAULT 0,
+        score        REAL NOT NULL DEFAULT 0,
+        fetched_at   TEXT NOT NULL DEFAULT '',
+        passb_status TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (wiki, page_id)
+      );
+      INSERT INTO ingest_pages_new (page_id, wiki, title, revision, depth, hops, score, fetched_at, passb_status)
+        SELECT page_id, wiki, title, revision, depth, hops, score, fetched_at, passb_status FROM ingest_pages;
+      DROP TABLE ingest_pages;
+      ALTER TABLE ingest_pages_new RENAME TO ingest_pages;
+    `);
+  });
 }
 
 export function jsonGet<T>(raw: unknown, fallback: T): T {
