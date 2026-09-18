@@ -6,5 +6,5 @@
 export const MAX_SIMULATION_NODES = 250;
 
 export function shouldSimulateGraph(nodeCount: number): boolean {
-  return nodeCount > 0 && nodeCount <= MAX_SIMULATION_NODES;
+  return Number.isInteger(nodeCount) && nodeCount > 0 && nodeCount <= MAX_SIMULATION_NODES;
 }
