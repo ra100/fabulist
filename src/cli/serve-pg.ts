@@ -39,6 +39,7 @@ import { ConfigService } from '../config/service.ts';
 import { IllustrationService } from '../illustration/service-pg.ts';
 import { buildMcpAuth } from '../mcp/auth.ts';
 import { resolveAuthConfig } from '../auth/config.ts';
+import { pgPlayDeepeningResolver } from '../ingest/play-deepening.ts';
 
 const args = process.argv.slice(2);
 const portArg = args.find((a) => a.startsWith('--port='));
@@ -148,7 +149,7 @@ async function boot(): Promise<void> {
       console.error(
         'if this is the bundled Postgres: POSTGRES_PASSWORD only takes effect when the data directory is first ' +
           'created, so changing it later does not change the database. Either set it back, or change it in the ' +
-          "database itself:  docker compose exec postgres psql -U fabulist -c \"ALTER USER fabulist PASSWORD '…'\"",
+          'database itself:  docker compose exec postgres psql -U fabulist -c "ALTER USER fabulist PASSWORD \'…\'"',
       );
     }
     console.error('set FABULIST_PG (or DATABASE_URL), and see deploy/pg-dev.sh for a local server');
@@ -254,7 +255,9 @@ async function boot(): Promise<void> {
   const engine = new Engine({
     world: resolveWorld,
     db: play,
+    ingestDb: ingest,
     providers: registry,
+    deepening: pgPlayDeepeningResolver({ predeepenBetweenScenes: true }),
     // Live settings, so editing the blocklist affects the very next turn.
     proseGate: makeProseGate({ live: () => configService.lintOptions() }),
   });
@@ -319,7 +322,6 @@ async function boot(): Promise<void> {
   server.listen(port, host, () => {
     console.log(`fabulist on http://${host}:${port}`);
   });
-
 
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.on(sig, () => {

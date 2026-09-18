@@ -14,6 +14,7 @@ import { ConfigService } from '../config/service.ts';
 import { IllustrationService } from '../illustration/service.ts';
 import { buildMcpAuth } from '../mcp/auth.ts';
 import { resolveAuthConfig } from '../auth/config.ts';
+import { sqlitePlayDeepeningResolver } from '../ingest/play-deepening.ts';
 
 const args = process.argv.slice(2);
 const portArg = args.find((a) => a.startsWith('--port='));
@@ -91,10 +92,7 @@ if (!inMemory) {
 // A fresh install gets an empty world so the wizard has somewhere to ingest into
 // — the same role `World.open` on a nonexistent path used to play.
 const existing = listWorlds(dataRoot);
-const bootSlug =
-  worldArg ??
-  existing[0]?.slug ??
-  createWorldFile(inMemory ? 'scratch world' : '', dataRoot).slug;
+const bootSlug = worldArg ?? existing[0]?.slug ?? createWorldFile(inMemory ? 'scratch world' : '', dataRoot).slug;
 
 const currentWorld = CurrentWorld.open(bootSlug, dataRoot);
 if (args.includes('--sample')) {
@@ -126,6 +124,7 @@ const illustrations = new IllustrationService({ world: getWorld, providers: imag
 const engine = new Engine({
   world: getWorld,
   providers: registry,
+  deepening: sqlitePlayDeepeningResolver({ predeepenBetweenScenes: true }),
   // Live settings, so editing the blocklist affects the very next turn.
   proseGate: makeProseGate({ live: () => configService.lintOptions() }),
 });
@@ -157,7 +156,8 @@ if (setup.isFresh()) console.log('no world yet - the UI will open the setup wiza
  * localhost dev loop.
  */
 const mcpAuth = buildMcpAuth();
-const mcpResourceUrl = process.env.MCP_RESOURCE_URL ?? (host === '127.0.0.1' ? `http://127.0.0.1:${port}/mcp` : undefined);
+const mcpResourceUrl =
+  process.env.MCP_RESOURCE_URL ?? (host === '127.0.0.1' ? `http://127.0.0.1:${port}/mcp` : undefined);
 if (mcpAuth && !mcpResourceUrl) {
   console.error(
     `MCP auth is configured (${mcpAuth.describe()}) but MCP_RESOURCE_URL is not set, and --host=${host} means there is no ` +

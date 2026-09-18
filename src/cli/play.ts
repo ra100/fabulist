@@ -13,6 +13,7 @@ import { Engine, type TurnOutcome } from '../loop/engine.ts';
 import { loadConfig, buildRegistry } from '../config/config.ts';
 import { seedConsequences, tickConsequences, worldTick } from '../consequence/propagate.ts';
 import { makeProseGate } from '../lint/gate.ts';
+import { sqlitePlayDeepeningResolver } from '../ingest/play-deepening.ts';
 
 const DIM = '\x1b[2m';
 const BOLD = '\x1b[1m';
@@ -66,6 +67,7 @@ async function main(): Promise<void> {
   const engine = new Engine({
     world,
     providers: registry,
+    deepening: sqlitePlayDeepeningResolver(),
     proseGate: makeProseGate({ threshold: cfg.proseLintThreshold, blocklist: cfg.blocklist }),
   });
 
@@ -241,10 +243,13 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
       console.log(`  move: ${m.move ?? 'none'}`);
       console.log(`  integrity: ${m.integrity?.distance ?? 'skipped'} ${DIM}${m.integrity?.reasoning ?? ''}${RESET}`);
       console.log(`  referee: ${m.referee?.ruling ?? 'none'} ${DIM}${m.referee?.reasoning ?? ''}${RESET}`);
-      if (m.lint) console.log(`  lint: score ${m.lint.score.toFixed(1)} ${m.lint.findings.map((f) => f.rule).join(', ')}`);
+      if (m.lint)
+        console.log(`  lint: score ${m.lint.score.toFixed(1)} ${m.lint.findings.map((f) => f.rule).join(', ')}`);
       for (const [role, frame] of Object.entries(engine.lastFrames)) {
         const l = frame.log;
-        console.log(`  frame:${role} ${l.used}/${l.budget} tokens${l.evicted.length ? ` evicted ${l.evicted.join(',')}` : ''}`);
+        console.log(
+          `  frame:${role} ${l.used}/${l.budget} tokens${l.evicted.length ? ` evicted ${l.evicted.join(',')}` : ''}`,
+        );
       }
       console.log(`  calls: ${m.providerCalls.map((c) => `${c.role}=${c.tokensIn}in/${c.tokensOut}out`).join(' ')}`);
       return true;
@@ -262,7 +267,9 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
       });
       const diff = applyDirectiveRecalc(world, d.id, d.text);
       console.log(`\n${DIM}recalculated:${RESET}`);
-      console.log(`  raised: ${diff.raisedThreads.map((id) => world.threads.get(id)?.title ?? id).join('; ') || 'none'}`);
+      console.log(
+        `  raised: ${diff.raisedThreads.map((id) => world.threads.get(id)?.title ?? id).join('; ') || 'none'}`,
+      );
       console.log(`  lowered: ${diff.loweredThreads.length}`);
       console.log(`  superseded: ${diff.supersededConsequences.length}, retimed: ${diff.retimedConsequences.length}`);
       return true;
@@ -310,14 +317,18 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
       const res = await engine.compaction().onSceneClosed(s.scene);
       world.session.set({ scene: s.scene + 1, turn: 0 });
       world.chronicle.upsertScene(s.scene + 1, { chapter: engine.compaction().chapterOf(s.scene + 1) });
-      console.log(`${DIM}scene ${s.scene} closed${res.scenesSummarised.length ? ' and summarised' : ''}${res.chaptersSummarised.length ? `, chapter ${res.chaptersSummarised[0]} rolled up` : ''}. now scene ${s.scene + 1}.${RESET}`);
+      console.log(
+        `${DIM}scene ${s.scene} closed${res.scenesSummarised.length ? ' and summarised' : ''}${res.chaptersSummarised.length ? `, chapter ${res.chaptersSummarised[0]} rolled up` : ''}. now scene ${s.scene + 1}.${RESET}`,
+      );
       const summary = world.chronicle.scenes().find((x) => x.scene === s.scene)?.summary;
       if (summary) console.log(`  ${DIM}${summary}${RESET}`);
       return true;
     }
     case 'compact': {
       const res = await engine.compaction().backfill(world.session.get().scene);
-      console.log(`${DIM}summarised ${res.scenesSummarised.length} scene(s), ${res.chaptersSummarised.length} chapter(s)${RESET}`);
+      console.log(
+        `${DIM}summarised ${res.scenesSummarised.length} scene(s), ${res.chaptersSummarised.length} chapter(s)${RESET}`,
+      );
       return true;
     }
     case 'branch': {
@@ -337,7 +348,9 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
       try {
         const res = branchSave({ fromPath: row.file, toPath, atScene });
         console.log(`${DIM}branched at scene ${atScene} -> ${res.path}${RESET}`);
-        console.log(`  ${DIM}discarded ${res.removed.turns} turn(s), ${res.removed.events} event(s), ${res.removed.consequences} consequence(s); restored ${res.removed.retiredEdgesRestored} relation(s)${RESET}`);
+        console.log(
+          `  ${DIM}discarded ${res.removed.turns} turn(s), ${res.removed.events} event(s), ${res.removed.consequences} consequence(s); restored ${res.removed.retiredEdgesRestored} relation(s)${RESET}`,
+        );
         console.log(`  ${DIM}this session is untouched${RESET}`);
       } catch (err) {
         console.log(`${YELLOW}${err instanceof Error ? err.message : String(err)}${RESET}`);
@@ -354,7 +367,9 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
         const result = rollback(world, { turnId: arg });
         console.log(`${DIM}retained turn ${result.toTurnId} at scene ${result.toScene}.${RESET}`);
         if (result.forkedStory) {
-          console.log(`  ${DIM}created safe fork "${result.forkedStory.title}" (${result.forkedStory.id}); this session remains on the original story.${RESET}`);
+          console.log(
+            `  ${DIM}created safe fork "${result.forkedStory.title}" (${result.forkedStory.id}); this session remains on the original story.${RESET}`,
+          );
         }
       } catch (err) {
         console.log(`${YELLOW}${err instanceof Error ? err.message : String(err)}${RESET}`);
@@ -370,7 +385,9 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
         const { splitSceneAtTurn } = await import('../loop/history.ts');
         const split = splitSceneAtTurn(world, arg);
         const { target } = split;
-        console.log(`${DIM}scene ${target.scene} now begins at retained turn ${split.turnId} (chapter ${target.chapter}, turn ${target.turn}).${RESET}`);
+        console.log(
+          `${DIM}scene ${target.scene} now begins at retained turn ${split.turnId} (chapter ${target.chapter}, turn ${target.turn}).${RESET}`,
+        );
       } catch (err) {
         console.log(`${YELLOW}${err instanceof Error ? err.message : String(err)}${RESET}`);
       }
@@ -379,7 +396,9 @@ async function command(cmd: string, arg: string, world: World, engine: Engine): 
     case 'tick': {
       const tick = tickConsequences(world);
       const notes = worldTick(world);
-      console.log(`${DIM}fired ${tick.fired.length}, ripened ${tick.ripened.length}, rumours ${tick.transmissions.length}${RESET}`);
+      console.log(
+        `${DIM}fired ${tick.fired.length}, ripened ${tick.ripened.length}, rumours ${tick.transmissions.length}${RESET}`,
+      );
       for (const n of notes) console.log(`  ${DIM}${n}${RESET}`);
       return true;
     }

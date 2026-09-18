@@ -26,8 +26,10 @@ import type {
 import { inputBudget } from '../frame/budget.ts';
 import type { FrameContext } from '../frame/builders-pg.ts';
 import { tokenizerFor } from '../frame/tokenizer.ts';
+import { deepenOnDemand, deepenTargets, type DepthMode, type PassBExtractor } from '../ingest/depth-pg.ts';
+import type { PageSource } from '../ingest/client.ts';
 import type { Provider, Registry } from '../providers/provider.ts';
-import type { World } from '../store/index-pg.ts';
+import { World } from '../store/index-pg.ts';
 import type { Db } from '../db/pg.ts';
 import { loadFrameData, type FrameData } from '../frame/builders-pg.ts';
 import { commitTurn, type CommitResult } from './commit-pg.ts';
@@ -62,6 +64,20 @@ export interface ProseGate {
   rewrite?: (text: string, report: LintReport) => Promise<string>;
 }
 
+export interface DeepeningConfig {
+  client: PageSource;
+  target: DepthMode;
+  wiki?: string;
+  extractor?: PassBExtractor;
+  /** Use the existing scene-advance boundary to warm a few likely next nodes. */
+  predeepenBetweenScenes?: boolean;
+  predeepenLimit?: number;
+}
+
+export type DeepeningResolver =
+  | DeepeningConfig
+  | ((world: World) => DeepeningConfig | null | undefined | Promise<DeepeningConfig | null | undefined>);
+
 export interface EngineOptions {
   world: World | (() => World | Promise<World>);
   /**
@@ -73,7 +89,15 @@ export interface EngineOptions {
    * to ride one checked-out client.
    */
   db: Db;
+  /** Ingest-capable pool for JIT source-data writes. Defaults to `db` in tests. */
+  ingestDb?: Db;
   providers: Registry;
+  /**
+   * Optional source-data access for play-time JIT deepening. Omitted for sample
+   * or custom worlds; wiki-ingested worlds wire it from their stored ingest
+   * context at serve time.
+   */
+  deepening?: DeepeningResolver;
   proseGate?: ProseGate;
   /** Called when the integrity gate stops the turn, before anything is committed. */
   onInterrupt?: (interrupt: Interrupt) => void;
@@ -189,7 +213,9 @@ export class Engine {
    */
   private getWorld: () => World | Promise<World>;
   private db: Db;
+  private ingestDb: Db;
   private providers: Registry;
+  private deepening: DeepeningResolver | undefined;
   private proseGate: ProseGate | undefined;
   private onInterrupt: ((i: Interrupt) => void) | undefined;
   private compactor: Compactor;
@@ -198,11 +224,12 @@ export class Engine {
   private pending = new Map<string, PendingNarration>();
   readonly activity = new StoryActivity();
 
-
   constructor(opts: EngineOptions) {
     this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
     this.db = opts.db;
+    this.ingestDb = opts.ingestDb ?? opts.db;
     this.providers = opts.providers;
+    this.deepening = opts.deepening;
     this.proseGate = opts.proseGate;
     this.onInterrupt = opts.onInterrupt;
     this.autoCompact = opts.autoCompact !== false;
@@ -270,6 +297,60 @@ export class Engine {
     };
   }
 
+  private async deepeningConfig(world: World): Promise<DeepeningConfig | null> {
+    if (!this.deepening) return null;
+    return typeof this.deepening === 'function' ? ((await this.deepening(world)) ?? null) : this.deepening;
+  }
+
+  private async deepeningWorldFor(world: World): Promise<World> {
+    return this.ingestDb === this.db ? world : await World.forStory(this.ingestDb, world.storyId);
+  }
+
+  private async deepenLocationIfNeeded(
+    world: World,
+    locationId: EntityId | null | undefined,
+    onStage?: (stage: string) => void,
+  ): Promise<void> {
+    if (!locationId) return;
+    const config = await this.deepeningConfig(world);
+    if (!config) return;
+    const before = await world.graph.get(locationId);
+    try {
+      onStage?.('reading location details');
+      const depthWorld = await this.deepeningWorldFor(world);
+      await deepenOnDemand(this.ingestDb, depthWorld, locationId, config.target, config);
+    } catch (err) {
+      const label = before ? `${before.name} (${before.id})` : locationId;
+      throw new Error(
+        `could not deepen ${label} before the turn: ${err instanceof Error ? err.message : String(err)}`,
+        {
+          cause: err,
+        },
+      );
+    }
+  }
+
+  private async predeepenForSceneAdvance(world: World, onStage?: (stage: string) => void): Promise<void> {
+    const config = await this.deepeningConfig(world);
+    if (!config?.predeepenBetweenScenes) return;
+    const targets = await deepenTargets(world, config.target, config.predeepenLimit ?? 3);
+    if (!targets.length) return;
+    onStage?.('reading ahead');
+    for (const target of targets) {
+      try {
+        const depthWorld = await this.deepeningWorldFor(world);
+        await deepenOnDemand(this.ingestDb, depthWorld, target.id, config.target, config);
+      } catch (err) {
+        throw new Error(
+          `could not pre-deepen ${target.name} (${target.id}) before the scene advance: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { cause: err },
+        );
+      }
+    }
+  }
+
   async session(): Promise<SessionState> {
     return (await this.getWorld()).session.get();
   }
@@ -287,7 +368,7 @@ export class Engine {
   async takeTurn(rawInput: string, opts: TakeTurnOptions = {}): Promise<TurnOutcome> {
     const activity = this.activity.begin();
     try {
-      const world = opts.world ?? await this.getWorld();
+      const world = opts.world ?? (await this.getWorld());
       activity.scope(world.storyId);
       return await this.takeTurnOn(world, rawInput, opts);
     } finally {
@@ -302,6 +383,7 @@ export class Engine {
     // turn. Every role and every frame below is built from these, so five frames
     // cost one fetch rather than five — see `frame/builders-pg.ts`.
     const session = await world.session.get();
+    await this.deepenLocationIfNeeded(world, session.currentLocationId, opts.onStage);
     const data = await loadFrameData(world, session);
     const deps = this.deps(world, session, data, calls, frames);
     const actorId = opts.actorId ?? session.playerCharacterId;
@@ -372,7 +454,9 @@ export class Engine {
       integrityVerdict && integrityVerdict.distance === 'off-key'
         ? `This sits badly with who they are. Give the world or their own body some resistance, in fiction.`
         : '',
-      opts.overrideIntegrity ? `The author has deliberately broken this character's vow. Play the fallout straight.` : '',
+      opts.overrideIntegrity
+        ? `The author has deliberately broken this character's vow. Play the fallout straight.`
+        : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -445,8 +529,18 @@ export class Engine {
     deps: RoleDeps;
     onStage?: (stage: string) => void;
   }): Promise<TurnOutcome> {
-    const { world, session, rawInput, actorId, intent, integrityVerdict, refereeVerdict, plan, overrideIntegrity, deps } =
-      args;
+    const {
+      world,
+      session,
+      rawInput,
+      actorId,
+      intent,
+      integrityVerdict,
+      refereeVerdict,
+      plan,
+      overrideIntegrity,
+      deps,
+    } = args;
     let prose = args.prose;
 
     // 6b. PROSE GATE. Deterministic lint first; the model only runs if it trips.
@@ -476,6 +570,9 @@ export class Engine {
           delta.vowBreaks.push({ entityId: actorId, vowId });
         }
       }
+    }
+    if (delta.sceneAdvance) {
+      await this.predeepenForSceneAdvance(world, args.onStage);
     }
 
     const meta: TurnMeta = {
@@ -547,7 +644,7 @@ export class Engine {
 
     const activity = this.activity.begin();
     try {
-      const world = worldOverride ?? await this.getWorld();
+      const world = worldOverride ?? (await this.getWorld());
       activity.scope(world.storyId);
       if (world.storyId !== pending.storyId) {
         // The story switched under this pending turn (a save switch mid-
@@ -581,7 +678,6 @@ export class Engine {
     }
   }
 
-
   /**
    * Re-renders a stored turn's prose through the *current* style contract,
    * without touching what happened (DESIGN §7.2). The delta already committed
@@ -601,7 +697,7 @@ export class Engine {
     turnId: string,
     opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
   ): Promise<RenderedProseRegeneration> {
-    const world = opts.world ?? await this.getWorld();
+    const world = opts.world ?? (await this.getWorld());
     const { turn, session, data, fingerprint } = await this.proseRegenerationFrame(world, turnId);
 
     const calls: TurnMeta['providerCalls'] = [];
@@ -612,7 +708,9 @@ export class Engine {
     const deps = this.deps(world, session, data, calls, frames);
 
     const agreedBeat = [
-      turn.meta.referee ? `ruling: ${turn.meta.referee.ruling}${turn.meta.referee.cost ? ` (cost: ${turn.meta.referee.cost})` : ''}` : '',
+      turn.meta.referee
+        ? `ruling: ${turn.meta.referee.ruling}${turn.meta.referee.cost ? ` (cost: ${turn.meta.referee.cost})` : ''}`
+        : '',
       turn.meta.referee?.reasoning ? `referee: ${turn.meta.referee.reasoning}` : '',
       turn.meta.move ? `gm move: ${turn.meta.move}` : '',
       turn.delta?.events.length ? `beat: ${turn.delta.events.map((e) => e.text).join(' ')}` : 'beat: continue',
@@ -659,7 +757,7 @@ export class Engine {
     turnId: string,
     opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
   ): Promise<Turn> {
-    const world = opts.world ?? await this.getWorld();
+    const world = opts.world ?? (await this.getWorld());
     const rendered = await this.renderProseRegeneration(turnId, { ...opts, world });
     return this.persistProseRegeneration(rendered, world);
   }
@@ -675,7 +773,11 @@ export class Engine {
 
   /** Answers a world question from state without advancing the story. */
   private async answerMetaQuery(world: World, session: SessionState, q: string): Promise<string> {
-    const words = q.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter((w) => w.length > 3);
+    const words = q
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 3);
     // Searches run together: they are independent and go through the pool, so the
     // whole set costs about one round trip rather than one each.
     const hits = (await Promise.all(words.map((w) => world.graph.search(w, 3)))).flat();
@@ -695,7 +797,10 @@ export class Engine {
     }
     // Neighbourhoods and the names they mention, in two batched queries instead of
     // one edge read plus one name lookup per hit.
-    const neighbourhoods = await world.graph.neighboursMany(unique.map((e) => e.id), session.scene);
+    const neighbourhoods = await world.graph.neighboursMany(
+      unique.map((e) => e.id),
+      session.scene,
+    );
     const objectIds = [...neighbourhoods.values()].flat().map((n) => n.edge.object);
     const names = await world.graph.getMany(objectIds);
 
@@ -703,7 +808,10 @@ export class Engine {
       const rel = (neighbourhoods.get(e.id) ?? [])
         .filter((n) => n.edge.subject === e.id)
         .slice(0, 4)
-        .map((n) => `${n.edge.predicate.toLowerCase().replace(/_/g, ' ')} ${names.get(n.edge.object)?.name ?? n.edge.object}`)
+        .map(
+          (n) =>
+            `${n.edge.predicate.toLowerCase().replace(/_/g, ' ')} ${names.get(n.edge.object)?.name ?? n.edge.object}`,
+        )
         .join(', ');
       return `${e.name} (${e.type}): ${e.summary || 'no summary'}${rel ? `. ${rel}.` : ''}`;
     });

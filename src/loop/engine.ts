@@ -27,6 +27,8 @@ import type {
 import { inputBudget } from '../frame/budget.ts';
 import type { FrameContext } from '../frame/builders.ts';
 import { tokenizerFor } from '../frame/tokenizer.ts';
+import { deepenOnDemand, deepenTargets, type DepthMode, type PassBExtractor } from '../ingest/depth.ts';
+import type { PageSource } from '../ingest/client.ts';
 import type { Provider, Registry } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
 import { commitTurn, type CommitResult } from './commit.ts';
@@ -61,9 +63,29 @@ export interface ProseGate {
   rewrite?: (text: string, report: LintReport) => Promise<string>;
 }
 
+export interface DeepeningConfig {
+  client: PageSource;
+  target: DepthMode;
+  wiki?: string;
+  extractor?: PassBExtractor;
+  /** Use the existing scene-advance boundary to warm a few likely next nodes. */
+  predeepenBetweenScenes?: boolean;
+  predeepenLimit?: number;
+}
+
+export type DeepeningResolver =
+  | DeepeningConfig
+  | ((world: World) => DeepeningConfig | null | undefined | Promise<DeepeningConfig | null | undefined>);
+
 export interface EngineOptions {
   world: World | (() => World);
   providers: Registry;
+  /**
+   * Optional source-data access for play-time JIT deepening. Omitted for sample
+   * or custom worlds; wiki-ingested worlds wire it from their stored ingest
+   * context at serve time.
+   */
+  deepening?: DeepeningResolver;
   proseGate?: ProseGate;
   /** Called when the integrity gate stops the turn, before anything is committed. */
   onInterrupt?: (interrupt: Interrupt) => void;
@@ -162,6 +184,7 @@ export class Engine {
    */
   private getWorld: () => World;
   private providers: Registry;
+  private deepening: DeepeningResolver | undefined;
   private proseGate: ProseGate | undefined;
   private onInterrupt: ((i: Interrupt) => void) | undefined;
   private compactor: Compactor;
@@ -172,10 +195,10 @@ export class Engine {
   private pending = new Map<string, PendingNarration>();
   readonly activity = new StoryActivity();
 
-
   constructor(opts: EngineOptions) {
     this.getWorld = typeof opts.world === 'function' ? opts.world : () => opts.world as World;
     this.providers = opts.providers;
+    this.deepening = opts.deepening;
     this.proseGate = opts.proseGate;
     this.onInterrupt = opts.onInterrupt;
     this.autoCompact = opts.autoCompact !== false;
@@ -220,6 +243,54 @@ export class Engine {
     };
   }
 
+  private async deepeningConfig(world: World): Promise<DeepeningConfig | null> {
+    if (!this.deepening) return null;
+    return typeof this.deepening === 'function' ? ((await this.deepening(world)) ?? null) : this.deepening;
+  }
+
+  private async deepenLocationIfNeeded(
+    world: World,
+    locationId: EntityId | null | undefined,
+    onStage?: (stage: string) => void,
+  ): Promise<void> {
+    if (!locationId) return;
+    const config = await this.deepeningConfig(world);
+    if (!config) return;
+    const before = world.graph.get(locationId);
+    try {
+      onStage?.('reading location details');
+      await deepenOnDemand(world, locationId, config.target, config);
+    } catch (err) {
+      const label = before ? `${before.name} (${before.id})` : locationId;
+      throw new Error(
+        `could not deepen ${label} before the turn: ${err instanceof Error ? err.message : String(err)}`,
+        {
+          cause: err,
+        },
+      );
+    }
+  }
+
+  private async predeepenForSceneAdvance(world: World, onStage?: (stage: string) => void): Promise<void> {
+    const config = await this.deepeningConfig(world);
+    if (!config?.predeepenBetweenScenes) return;
+    const targets = deepenTargets(world, config.target, config.predeepenLimit ?? 3);
+    if (!targets.length) return;
+    onStage?.('reading ahead');
+    for (const target of targets) {
+      try {
+        await deepenOnDemand(world, target.id, config.target, config);
+      } catch (err) {
+        throw new Error(
+          `could not pre-deepen ${target.name} (${target.id}) before the scene advance: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { cause: err },
+        );
+      }
+    }
+  }
+
   session(): SessionState {
     return this.getWorld().session.get();
   }
@@ -250,6 +321,7 @@ export class Engine {
     const deps = this.deps(world, calls);
     const session = world.session.get();
     const actorId = opts.actorId ?? session.playerCharacterId;
+    await this.deepenLocationIfNeeded(world, session.currentLocationId, opts.onStage);
 
     // 1. CLASSIFY
     opts.onStage?.('reading your input');
@@ -314,7 +386,9 @@ export class Engine {
       integrityVerdict && integrityVerdict.distance === 'off-key'
         ? `This sits badly with who they are. Give the world or their own body some resistance, in fiction.`
         : '',
-      opts.overrideIntegrity ? `The author has deliberately broken this character's vow. Play the fallout straight.` : '',
+      opts.overrideIntegrity
+        ? `The author has deliberately broken this character's vow. Play the fallout straight.`
+        : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -384,8 +458,18 @@ export class Engine {
     deps: RoleDeps;
     onStage?: (stage: string) => void;
   }): Promise<TurnOutcome> {
-    const { world, session, rawInput, actorId, intent, integrityVerdict, refereeVerdict, plan, overrideIntegrity, deps } =
-      args;
+    const {
+      world,
+      session,
+      rawInput,
+      actorId,
+      intent,
+      integrityVerdict,
+      refereeVerdict,
+      plan,
+      overrideIntegrity,
+      deps,
+    } = args;
     let prose = args.prose;
 
     // 6b. PROSE GATE. Deterministic lint first; the model only runs if it trips.
@@ -415,6 +499,9 @@ export class Engine {
           delta.vowBreaks.push({ entityId: actorId, vowId });
         }
       }
+    }
+    if (delta.sceneAdvance) {
+      await this.predeepenForSceneAdvance(world, args.onStage);
     }
 
     const meta: TurnMeta = {
@@ -511,7 +598,6 @@ export class Engine {
     }
   }
 
-
   /**
    * Re-renders a stored turn's prose through the *current* style contract,
    * without touching what happened (DESIGN §7.2). The delta already committed
@@ -579,7 +665,9 @@ export class Engine {
 
   private proseRegenerationBeat(turn: Turn, note?: string): string {
     return [
-      turn.meta.referee ? `ruling: ${turn.meta.referee.ruling}${turn.meta.referee.cost ? ` (cost: ${turn.meta.referee.cost})` : ''}` : '',
+      turn.meta.referee
+        ? `ruling: ${turn.meta.referee.ruling}${turn.meta.referee.cost ? ` (cost: ${turn.meta.referee.cost})` : ''}`
+        : '',
       turn.meta.referee?.reasoning ? `referee: ${turn.meta.referee.reasoning}` : '',
       turn.meta.move ? `gm move: ${turn.meta.move}` : '',
       turn.delta?.events.length ? `beat: ${turn.delta.events.map((e) => e.text).join(' ')}` : 'beat: continue',
@@ -598,7 +686,11 @@ export class Engine {
   /** Answers a world question from state without advancing the story. */
   private answerMetaQuery(world: World, q: string): string {
     const session = world.session.get();
-    const words = q.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter((w) => w.length > 3);
+    const words = q
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 3);
     const hits = words.flatMap((w) => world.graph.search(w, 3));
     if (!hits.length) return 'Nothing in the record speaks to that yet.';
     const seen = new Set<string>();
