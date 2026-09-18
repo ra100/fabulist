@@ -30,6 +30,8 @@ export interface DirectoryOptions {
   /** Politeness delay between probes, in ms. */
   delayMs?: number;
   limit?: number;
+  /** Per-request timeout for wiki verification and discovery probes, in ms. */
+  timeoutMs?: number;
 }
 
 const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, ms)) : Promise.resolve());
@@ -62,22 +64,39 @@ export class WikiDirectory {
   private fetcher: NonNullable<DirectoryOptions['fetcher']>;
   private delayMs: number;
   private limit: number;
+  private timeoutMs: number;
   requests = 0;
 
   constructor(opts: DirectoryOptions = {}) {
     this.fetcher = opts.fetcher ?? ((url: string) => fetch(url));
     this.delayMs = opts.delayMs ?? 150;
     this.limit = opts.limit ?? 6;
+    this.timeoutMs = opts.timeoutMs ?? 5_000;
   }
 
   private async json(url: string): Promise<unknown | null> {
     this.requests++;
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      const res = await this.fetcher(url, { redirect: 'error' });
-      if (!res.ok) return null;
-      return await res.json();
+      const fetchJson = this.fetcher(url, { redirect: 'error', signal: controller.signal })
+        .then((res) => (res.ok ? res.json() : null))
+        .catch(() => null);
+
+      if (this.timeoutMs <= 0) return await fetchJson;
+
+      const timedOut = new Promise<null>((resolve) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          resolve(null);
+        }, this.timeoutMs);
+      });
+
+      return await Promise.race([fetchJson, timedOut]);
     } catch {
       return null;
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 
