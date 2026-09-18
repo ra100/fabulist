@@ -103,6 +103,17 @@ test('propagation depth respects the knob', () => {
   world.close();
 });
 
+test('consequences beyond the depth knob are not persisted before filtering', () => {
+  const world = setup();
+  world.session.set({ knobs: { ...world.session.get().knobs, propagationDepth: 0 } });
+  const event = harm(world, 'char:novice-tem');
+  const seeded = seedConsequences(world, { events: [] } as never, [event]);
+
+  assert.deepEqual(seeded, []);
+  assert.equal(world.consequences.all().length, 0, 'out-of-depth consequences must not be hidden in storage');
+  world.close();
+});
+
 test('a same-room reactor is onscreen and immediate', () => {
   const world = setup();
   // Oria shares the scriptorium with the player in seed state, so her reaction

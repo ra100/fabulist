@@ -410,6 +410,37 @@ test('consequences seed from relationships, typed edges and factions', async (t)
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('out-of-depth consequences are not persisted on Postgres', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    for (const id of ['char:pc', 'char:kin']) {
+      await world.graph.upsert({ id, type: 'Character', name: id }, 'canon');
+    }
+    await world.graph.assertEdge({ subject: 'char:kin', predicate: 'SIBLING_OF', object: 'char:pc', weight: 0.9 }, 1, 'canon');
+    const session = await world.session.get();
+    await world.session.set({ knobs: { ...session.knobs, propagationDepth: 0 } });
+
+    const events = [
+      {
+        id: 'ev:1',
+        scene: 1,
+        turn: 1,
+        text: 'The player is struck.',
+        participants: ['char:pc'],
+        locationId: null,
+        significance: 0.9,
+        visibility: 'onscreen' as const,
+        fromConsequenceId: null,
+      },
+    ];
+    const seeded = await seedConsequences(world, emptyDelta(), events);
+
+    assert.deepEqual(seeded, []);
+    assert.equal((await world.consequences.all()).length, 0, 'out-of-depth consequences must not be hidden in storage');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('the tick ripens, then fires, then chains, then expires', async (t) => {
   const ran = await withPg(async (db) => {
     const { world } = await setup(db);
