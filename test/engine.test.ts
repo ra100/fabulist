@@ -433,6 +433,64 @@ test('coerceDelta survives entirely malformed input', () => {
   }
 });
 
+test('coerceDelta rejects missing or malformed consequence scores', () => {
+  const { delta, issues } = coerceDelta({
+    events: [
+      { text: 'missing significance' },
+      { text: 'malformed significance', significance: 'high' },
+    ],
+    edgeAsserts: [
+      { subject: 'char:a', predicate: 'KNOWS', object: 'char:b' },
+      { subject: 'char:a', predicate: 'FEARS', object: 'char:b', weight: 'strong' },
+    ],
+    sceneAdvance: false,
+  });
+
+  assert.deepEqual(delta.events, []);
+  assert.deepEqual(delta.edgeAsserts, []);
+  assert.deepEqual(
+    issues.filter((issue) => issue.path.includes('significance') || issue.path.includes('edgeAsserts')),
+    [
+      {
+        tier: 'schema',
+        path: 'events[0].significance',
+        message: 'missing or invalid significance',
+        repaired: false,
+      },
+      {
+        tier: 'schema',
+        path: 'events[1].significance',
+        message: 'missing or invalid significance',
+        repaired: false,
+      },
+      {
+        tier: 'schema',
+        path: 'edgeAsserts[0].weight',
+        message: 'missing or invalid weight',
+        repaired: false,
+      },
+      {
+        tier: 'schema',
+        path: 'edgeAsserts[1].weight',
+        message: 'missing or invalid weight',
+        repaired: false,
+      },
+    ],
+  );
+});
+
+test('coerceDelta preserves valid significance and edge weight', () => {
+  const { delta, issues } = coerceDelta({
+    events: [{ text: 'a consequential event', significance: 0.83 }],
+    edgeAsserts: [{ subject: 'char:a', predicate: 'KNOWS', object: 'char:b', weight: 0.27 }],
+    sceneAdvance: false,
+  });
+
+  assert.equal(delta.events[0]?.significance, 0.83);
+  assert.equal(delta.edgeAsserts[0]?.weight, 0.27);
+  assert.equal(issues.filter((issue) => !issue.repaired).length, 0);
+});
+
 test('unknown entity references are resolved by name where possible', () => {
   const world = World.open(':memory:');
   seedWorld(world);
