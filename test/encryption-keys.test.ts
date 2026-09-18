@@ -62,6 +62,19 @@ test('a wrong passphrase, recovery code, or authenticated context cannot decrypt
   );
 });
 
+test('a malformed key envelope is reported as corruption rather than incorrect credentials', async () => {
+  const enrollment = await createEncryptionEnrollment(userId, passphrase, storyIds);
+  const malformed = {
+    ...enrollment.userKey,
+    passphraseWrap: { ...enrollment.userKey.passphraseWrap, nonce: '' },
+  };
+
+  await assert.rejects(
+    () => unlockWithPassphrase(userId, malformed, enrollment.storyKeys, passphrase),
+    /invalid encrypted-key envelope/,
+  );
+});
+
 test('a corrupt story key is skipped without blocking healthy private stories', async () => {
   const enrollment = await createEncryptionEnrollment(userId, passphrase, storyIds);
   const corruptStoryKeys = enrollment.storyKeys.map((storyKey) =>
