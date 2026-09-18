@@ -153,10 +153,11 @@ test('the lint threshold round-trips and persists', () => {
 });
 
 test('a nonsensical threshold is refused and leaves the old value', () => {
-  const { svc } = service({ proseLintThreshold: 6 });
+  const { svc, saved } = service({ proseLintThreshold: 6 });
   const result = svc.patch({ proseLintThreshold: -3 });
   assert.ok(result.issues.some((i) => i.field === 'proseLintThreshold'));
   assert.equal(result.config.proseLintThreshold, 6);
+  assert.equal(saved().proseLintThreshold, 6, 'the rejected value never reached durable config');
 });
 
 test('dbPath cannot be changed while a world is open', () => {
@@ -188,6 +189,20 @@ test('a route to an unknown provider is refused', () => {
   const result = svc.patch({ routes: { narrate: 'nope:missing' } });
   assert.ok(result.issues.some((i) => i.field === 'routes.narrate'));
   assert.deepEqual(result.config.routes, {});
+});
+
+test('a mixed config patch with validation errors is not partially saved', () => {
+  const { svc, saved } = service({ proseLintThreshold: 6, routes: {} });
+  const result = svc.patch({
+    proseLintThreshold: 12,
+    routes: { narrate: 'nope:missing' },
+  });
+
+  assert.ok(result.issues.some((i) => i.field === 'routes.narrate'));
+  assert.equal(result.config.proseLintThreshold, 6);
+  assert.deepEqual(result.config.routes, {});
+  assert.equal(saved().proseLintThreshold, 6);
+  assert.deepEqual(saved().routes, {});
 });
 
 test('a route to a known preset is kept', () => {
