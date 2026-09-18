@@ -46,6 +46,24 @@ export interface BudgetOptions {
   minSlotTokens?: number;
 }
 
+export class FrameBudgetExceededError extends Error {
+  readonly budget: number;
+  readonly used: number;
+  readonly slots: Array<{ name: string; tokens: number }>;
+
+  constructor(
+    budget: number,
+    used: number,
+    slots: Array<{ name: string; tokens: number }>,
+  ) {
+    super(`frame requires ${used} tokens after compression/eviction, exceeding budget ${budget}`);
+    this.name = 'FrameBudgetExceededError';
+    this.budget = budget;
+    this.used = used;
+    this.slots = slots;
+  }
+}
+
 /**
  * Fits slots into the budget.
  *
@@ -109,9 +127,18 @@ export function assembleFrame(specs: SlotSpec[], opts: BudgetOptions): Frame {
   const live = slots.filter((s) => s.content.length > 0);
   live.sort((a, b) => b.priority - a.priority);
 
+  const used = live.reduce((n, s) => n + s.tokens, 0);
+  if (used > budget) {
+    throw new FrameBudgetExceededError(
+      budget,
+      used,
+      live.map((s) => ({ name: s.name, tokens: s.tokens })),
+    );
+  }
+
   const log: FrameLog = {
     budget,
-    used: live.reduce((n, s) => n + s.tokens, 0),
+    used,
     slots: live.map((s) => ({ name: s.name, tokens: s.tokens })),
     evicted,
     compressed,
