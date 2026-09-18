@@ -173,12 +173,13 @@ if (mcpAuth && !mcpResourceUrl) {
 
 /**
  * Web login. See `src/auth/config.ts`'s own header comment for the access
- * model (any WorkOS-verified identity, no per-user scoping) and priority
+ * model (any verified identity, no per-user scoping), which identity provider
+ * (`AUTH_PROVIDER`: WorkOS AuthKit or any OIDC issuer) and priority
  * (`AUTH_REQUIRE_LOGIN` in the environment, else `config.requireLogin` from
  * `fabulist.config.json`). Off by default, matching every other gate in this
  * app — a fresh `pnpm serve` on a laptop should never show a login screen
  * nobody asked for. `resolveAuthConfig` throws rather than silently running
- * without login when it *was* requested but the WorkOS env vars are
+ * without login when it *was* requested but the provider's env vars are
  * missing — a deployment that meant to require login and quietly didn't is
  * a much worse failure than refusing to start. The OAuth redirect URI's
  * origin comes from `AUTH_PUBLIC_ORIGIN` (or this server's own loopback bind
@@ -188,7 +189,9 @@ if (mcpAuth && !mcpResourceUrl) {
  */
 const authConfig = resolveAuthConfig(cfg, process.env, { host, port });
 console.log(
-  authConfig ? 'login required (WorkOS AuthKit)' : 'login not required \u2014 every route is open (set AUTH_REQUIRE_LOGIN=true to change this)',
+  authConfig
+    ? authConfig.provider.describe()
+    : 'login not required \u2014 every route is open (set AUTH_REQUIRE_LOGIN=true to change this)',
 );
 
 const server = createApiServer({

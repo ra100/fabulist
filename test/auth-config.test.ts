@@ -26,6 +26,7 @@ import {
   SESSION_COOKIE,
   type AuthConfig,
 } from '../src/auth/config.ts';
+import { createWorkosProvider } from '../src/auth/workos-provider.ts';
 import { defaultConfig } from '../src/config/config.ts';
 
 type FakeUser = { id: string; email: string };
@@ -60,13 +61,15 @@ function fakeSession(opts: {
 function authConfigWith(session: ReturnType<typeof fakeSession>, callbackOrigin = 'http://127.0.0.1:4317'): AuthConfig {
   return {
     requireLogin: true,
-    clientId: 'client_test',
-    cookiePassword: 'x'.repeat(32),
     adminEmails: new Set(),
     callbackOrigin,
-    workos: {
-      userManagement: { loadSealedSession: () => session },
-    } as unknown as WorkOS,
+    provider: createWorkosProvider({
+      clientId: 'client_test',
+      cookiePassword: 'x'.repeat(32),
+      workos: {
+        userManagement: { loadSealedSession: () => session },
+      } as unknown as WorkOS,
+    }),
   };
 }
 

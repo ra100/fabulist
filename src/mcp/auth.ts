@@ -29,9 +29,9 @@
  * "the tool is reachable with no check."
  */
 import { timingSafeEqual } from 'node:crypto';
-import { isIPv4 } from 'node:net';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyOptions } from 'jose';
 import type { SessionUser } from '../auth/config.ts';
+import { DiscoveryError, fetchIssuerMetadata, isTrustedKeySource } from '../auth/oidc-discovery.ts';
 
 export interface VerifiedUser {
   /** Stable subject id from the token — an AuthKit user id in OAuth mode, the literal string `dev` in dev-token mode. */
@@ -57,8 +57,9 @@ export interface McpAuth {
  * The verified token's subject, as the same `SessionUser` shape every REST
  * route and `CurrentStory.worldFor` already take.
  *
- * The point is that the ids line up: web login and MCP OAuth both authenticate
- * against the same AuthKit environment, so a token's `sub` *is* the
+ * The point is that the ids line up: point web login and MCP OAuth at the same
+ * issuer — AuthKit for both, or one generic OIDC provider for both
+ * (`AUTH_PROVIDER=oidc` plus `MCP_OAUTH_ISSUER`) — and a token's `sub` *is* the
  * `SessionUser.id` a browser session for the same person carries. That single
  * fact is what makes "log in on the web, connect the connector, same books"
  * true rather than aspirational — nothing here translates between two id
@@ -115,60 +116,6 @@ function extractBearer(header: string | undefined): string {
 }
 
 /**
- * Where to fetch the issuer's signing keys from, in preference order.
- *
- * An OAuth 2.1 authorization server publishes its `jwks_uri` in a metadata
- * document; the *path that document lives at* is standardised, the JWKS path
- * itself is not. AuthKit happens to serve keys at `/oauth2/jwks`, Keycloak at
- * `/protocol/openid-connect/certs`, Authelia at `/jwks.json`, Authentik at
- * `/jwks/`, Zitadel at `/oauth/v2/keys` — so anything that hardcodes one
- * vendor's path verifies tokens from that vendor only. Discovery is the whole
- * point: read the document, believe what it says.
- *
- * Both well-known suffixes are tried because the two specs that define this
- * overlap: OIDC Discovery 1.0 (`openid-configuration`) and RFC 8414
- * (`oauth-authorization-server`). So does the placement — a plain append is
- * what OIDC specifies and what every issuer above answers on, while RFC 8414
- * §3.1 inserts the well-known segment *before* the issuer's path component, so
- * an issuer that has a path (a Keycloak realm, an AuthKit-style tenant path)
- * gets both forms tried.
- */
-function discoveryUrls(issuer: string): string[] {
-  const { origin, pathname } = new URL(issuer);
-  const path = pathname.replace(/\/$/, '');
-  const urls: string[] = [];
-  for (const suffix of ['openid-configuration', 'oauth-authorization-server']) {
-    urls.push(`${issuer}/.well-known/${suffix}`);
-    if (path) urls.push(`${origin}/.well-known/${suffix}${path}`);
-  }
-  return urls;
-}
-
-/**
- * Whether signing keys (or the metadata document naming where they are) may be
- * read from `url`.
- *
- * Whoever can substitute the key set can mint tokens this server accepts, so
- * the keys have to arrive over an authenticated channel: `https:` only. The one
- * exception is plain `http:` to a loopback address — a local issuer during
- * development, or one behind a reverse proxy on the same host — because there
- * is no network path there for anyone to sit on. `localhost`, `127.0.0.0/8`
- * and `[::1]` count; a private-network or container hostname does not.
- */
-function isTrustedKeySource(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol === 'https:') return true;
-  if (parsed.protocol !== 'http:') return false;
-  const host = parsed.hostname;
-  return host === 'localhost' || host === '[::1]' || (isIPv4(host) && host.startsWith('127.'));
-}
-
-/**
  * How long one discovery attempt — every metadata URL, bodies included — may
  * take in total. Every concurrent `verify` waits on the same attempt, so an
  * issuer that accepts a connection and never answers must not be able to hold
@@ -181,72 +128,44 @@ const DISCOVERY_TIMEOUT_MS = 10_000;
  * Resolves the issuer's `jwks_uri` by metadata discovery, falling back to
  * AuthKit's `/oauth2/jwks` as a last resort.
  *
- * The fallback exists so that an issuer serving no metadata at all keeps
- * working exactly as it did before discovery existed — "this issuer publishes
- * no metadata" must degrade to the old behaviour rather than take down a
- * deployment that was fine yesterday. It does say so loudly once, since the
- * alternative is a puzzling 401.
+ * The rules for *where* metadata lives and *which* URLs may be trusted with a
+ * key set are shared with generic-OIDC web login (`src/auth/oidc-discovery.ts`)
+ * — one copy, because a second one that drifted by a condition would be a
+ * downgrade waiting to happen. What is specific to this side is the fallback.
  *
- * Only a *confirmed* absence earns the fallback, though: every URL answered,
- * and none with a usable document. If any attempt failed transiently — a
- * network or DNS error, the deadline, a 5xx/408/429 — this rejects instead, so
- * the caller retries discovery on the next request rather than settling for
- * a vendor-specific guess that a non-AuthKit issuer will never serve.
+ * It exists so that an issuer serving no metadata at all keeps working exactly
+ * as it did before discovery existed — "this issuer publishes no metadata" must
+ * degrade to the old behaviour rather than take down a deployment that was fine
+ * yesterday. It does say so loudly once, since the alternative is a puzzling
+ * 401.
  *
- * The `issuer` claimed by the metadata document is checked against the issuer
- * we asked about (RFC 8414 §3.3): a document that names someone else is a
- * mix-up, not a key source, and is skipped rather than trusted. So is one whose
- * `jwks_uri` fails `isTrustedKeySource`. Redirects are not followed (as
- * `createRemoteJWKSet` doesn't follow them either), so a metadata fetch cannot
- * be bounced onto a cleartext hop.
+ * Only a *confirmed* absence earns the fallback, though: the issuer answered,
+ * and with nothing usable. If the attempt failed transiently — a network or DNS
+ * error, the deadline, a 5xx/408/429 — this rejects instead, so the caller
+ * retries discovery on the next request rather than settling for a
+ * vendor-specific guess that a non-AuthKit issuer will never serve.
  */
 async function discoverJwksUri(issuer: string, timeoutMs: number): Promise<string> {
-  const signal = AbortSignal.timeout(timeoutMs);
-  const reasons: string[] = [];
-  let transient = false;
-  for (const url of discoveryUrls(issuer)) {
-    try {
-      const res = await fetch(url, { headers: { accept: 'application/json' }, redirect: 'manual', signal });
-      if (!res.ok) {
-        reasons.push(`${url}: HTTP ${res.status}`);
-        if (res.status >= 500 || res.status === 408 || res.status === 429) transient = true;
-        continue;
-      }
-      const doc: unknown = await res.json();
-      if (!doc || typeof doc !== 'object') {
-        reasons.push(`${url}: not a JSON object`);
-        continue;
-      }
-      const { issuer: claimedIssuer, jwks_uri: jwksUri } = doc as Record<string, unknown>;
-      const claimed = typeof claimedIssuer === 'string' ? claimedIssuer.replace(/\/$/, '') : undefined;
-      if (claimed && claimed !== issuer) {
-        reasons.push(`${url}: metadata names issuer ${claimed}`);
-        continue;
-      }
-      if (typeof jwksUri !== 'string' || !jwksUri) {
-        reasons.push(`${url}: no jwks_uri`);
-        continue;
-      }
-      if (!isTrustedKeySource(jwksUri)) {
-        reasons.push(`${url}: jwks_uri ${jwksUri} is not https (or loopback http)`);
-        continue;
-      }
-      return jwksUri;
-    } catch (err) {
-      reasons.push(`${url}: ${err instanceof Error ? err.message : String(err)}`);
-      // A body that isn't JSON is an answer (typically an HTML page served for
-      // any path); anything else — reset, DNS, timeout — is not.
-      if (!(err instanceof SyntaxError)) transient = true;
-    }
+  const fallbackTo = (reasons: string[]): string => {
+    const fallback = `${issuer}/oauth2/jwks`;
+    console.warn(`MCP auth: no authorization server metadata at ${issuer}, falling back to ${fallback} (${reasons.join('; ')})`);
+    return fallback;
+  };
+  let found: Awaited<ReturnType<typeof fetchIssuerMetadata>>;
+  try {
+    found = await fetchIssuerMetadata(issuer, timeoutMs);
+  } catch (err) {
+    if (err instanceof DiscoveryError && !err.transient) return fallbackTo(err.reasons);
+    const reasons = err instanceof DiscoveryError ? err.reasons.join('; ') : err instanceof Error ? err.message : String(err);
+    throw new Error(`could not read authorization server metadata at ${issuer}, will retry (${reasons})`);
   }
-  if (transient) {
-    throw new Error(`could not read authorization server metadata at ${issuer}, will retry (${reasons.join('; ')})`);
-  }
-  const fallback = `${issuer}/oauth2/jwks`;
-  console.warn(
-    `MCP auth: no authorization server metadata at ${issuer}, falling back to ${fallback} (${reasons.join('; ')})`,
-  );
-  return fallback;
+  const { url, doc } = found;
+  const jwksUri = doc.jwks_uri;
+  if (typeof jwksUri !== 'string' || !jwksUri) return fallbackTo([`${url}: no jwks_uri`]);
+  // A cleartext key URL is not followed even when the issuer's own metadata
+  // names it: whoever can answer it can mint tokens this server accepts.
+  if (!isTrustedKeySource(jwksUri)) return fallbackTo([`${url}: jwks_uri ${jwksUri} is not https (or loopback http)`]);
+  return jwksUri;
 }
 
 /**

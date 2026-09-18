@@ -296,7 +296,7 @@ async function boot(): Promise<void> {
   const authConfig = resolveAuthConfig(cfg, process.env, { host, port });
   console.log(
     authConfig
-      ? 'login required (WorkOS AuthKit)'
+      ? authConfig.provider.describe()
       : 'login not required — loopback-only local mode (set AUTH_REQUIRE_LOGIN=true to change this)',
   );
 
