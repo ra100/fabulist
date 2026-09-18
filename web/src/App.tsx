@@ -876,6 +876,7 @@ function BookTab({
   const [mutationPending, setMutationPending] = useState(false);
   const historyRequestGate = useRef(new HistoryRequestGate());
   const historyMutationLock = useRef(false);
+  const streamAbort = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
     const revision = historyRequestGate.current.beginRequest();
@@ -930,6 +931,7 @@ function BookTab({
   useEffect(() => {
     void load();
     return () => {
+      streamAbort.current?.abort();
       historyRequestGate.current.invalidate();
     };
   }, [load]);
@@ -968,6 +970,9 @@ function BookTab({
     setNotes([]);
     setStreaming('');
     setStage('');
+    streamAbort.current?.abort();
+    const abort = new AbortController();
+    streamAbort.current = abort;
     // The ruling waits ~150ms: under that it would only flash. It covers the
     // stretch where the gates run and no prose exists yet.
     const revealAwaiting = window.setTimeout(() => setAwaiting(text), 150);
@@ -1013,14 +1018,17 @@ function BookTab({
           }).finally(endHistoryMutation);
         },
         onError: (message) => {
+          if (abort.signal.aborted) return;
           setNotes([message]);
           endHistoryMutation();
         },
+        signal: abort.signal,
       });
     } catch (e) {
-      setNotes([e instanceof Error ? e.message : String(e)]);
+      if (!abort.signal.aborted) setNotes([e instanceof Error ? e.message : String(e)]);
       endHistoryMutation();
     } finally {
+      if (streamAbort.current === abort) streamAbort.current = null;
       if (!finished) endHistoryMutation();
     }
     // The committed turn is now in the book, so the provisional copy can go.
