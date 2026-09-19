@@ -10,7 +10,7 @@
  * migration plan this file is built up task-by-task against.
  */
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { api, type AppConfig, type ConfigBundle, type PatchResult, type ProviderSpec, type RollbackTarget, type Thread } from './api.ts';
+import { api, type AppConfig, type ConfigBundle, type Knobs, type PatchResult, type ProviderSpec, type RollbackTarget, type StyleContract, type Thread } from './api.ts';
 
 // --------------------------------------------------------------- meta / auth
 
@@ -206,9 +206,17 @@ export function usePinMutation() {
  * message — duplicating that as a blanket `onSuccess` here would either
  * race it or invalidate on paths (e.g. `regenerate`, which never calls
  * `onChanged()`) that today don't broadcast a change.
+ *
+ * `addAnchor` is the exception: it still invalidates `['anchors']` below,
+ * since `SettingsTab` (Task 10) now reads that key and would otherwise go
+ * stale after `BookTab`'s "pin + add anchor" flow.
  */
 export function useAddAnchorMutation() {
-  return useMutation({ mutationFn: (vars: { text: string; note: string }) => api.addAnchor(vars.text, vars.note) });
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { text: string; note: string }) => api.addAnchor(vars.text, vars.note),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: anchorsKeys.all }),
+  });
 }
 
 // ------------------------------------------------------------------ timeline
@@ -370,4 +378,40 @@ export function useTickMutation() {
     mutationFn: api.tick,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: consequencesKeys.all }),
   });
+}
+
+// -------------------------------------------------------------------- settings
+
+export const styleKeys = { all: ['style'] as const };
+
+export function useStyleQuery() {
+  return useQuery({ queryKey: styleKeys.all, queryFn: api.style });
+}
+
+export function useSetStyleMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: Partial<StyleContract>) => api.setStyle(patch),
+    onSuccess: (result) => queryClient.setQueryData(styleKeys.all, result),
+  });
+}
+
+export const knobsKeys = { all: ['knobs'] as const };
+
+export function useKnobsQuery() {
+  return useQuery({ queryKey: knobsKeys.all, queryFn: api.knobs });
+}
+
+export function useSetKnobsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: Partial<Knobs>) => api.setKnobs(patch),
+    onSuccess: (result) => queryClient.setQueryData(knobsKeys.all, result),
+  });
+}
+
+export const anchorsKeys = { all: ['anchors'] as const };
+
+export function useAnchorsQuery() {
+  return useQuery({ queryKey: anchorsKeys.all, queryFn: api.anchors });
 }
