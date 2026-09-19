@@ -10,7 +10,7 @@
  * migration plan this file is built up task-by-task against.
  */
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { api, type AppConfig, type ConfigBundle, type PatchResult, type ProviderSpec, type RollbackTarget } from './api.ts';
+import { api, type AppConfig, type ConfigBundle, type PatchResult, type ProviderSpec, type RollbackTarget, type Thread } from './api.ts';
 
 // --------------------------------------------------------------- meta / auth
 
@@ -217,6 +217,44 @@ export const timelineKeys = { all: ['timeline'] as const };
 
 export function useTimelineQuery() {
   return useQuery({ queryKey: timelineKeys.all, queryFn: api.timeline });
+}
+
+// ------------------------------------------------------------------- threads
+
+export const threadsKeys = { all: ['threads'] as const };
+
+export function useThreadsQuery() {
+  return useQuery({ queryKey: threadsKeys.all, queryFn: api.threads });
+}
+
+export function useCreateThreadMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { title: string; stakes: string }) => api.createThread(vars.title, vars.stakes),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: threadsKeys.all }),
+  });
+}
+
+export function useUpdateThreadMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { id: string; patch: Partial<Thread> }) => api.updateThread(vars.id, vars.patch),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: threadsKeys.all }),
+  });
+}
+
+/** Raising/lowering threads is exactly what a directive can do — the old handler's `await load()` re-fetch becomes an invalidate here too. */
+export function useAddDirectiveMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { text: string; strength: string }) => api.addDirective(vars.text, vars.strength),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: threadsKeys.all }),
+  });
+}
+
+/** The old handler never re-fetched threads on retire (only `onChanged()`, which refreshes `state.directives`) — no invalidate here either. */
+export function useRetireDirectiveMutation() {
+  return useMutation({ mutationFn: (directiveId: string) => api.retireDirective(directiveId) });
 }
 
 // -------------------------------------------------------------------- config
