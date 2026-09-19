@@ -563,16 +563,33 @@ export function useSetWorldVisibilityMutation() {
 
 export const providersKeys = { all: ['providers'] as const };
 
-export function useProvidersQuery() {
-  return useQuery({ queryKey: providersKeys.all, queryFn: api.providers });
+/** `enabled` defaults to `true` for `SetupWizard.tsx`'s eager use; `App.tsx`'s `ProvidersPanel` passes `false` since its probe is deliberately on-demand (touches local ports/credential helpers) and triggers via `refetch()` instead. */
+export function useProvidersQuery(enabled = true) {
+  return useQuery({ queryKey: providersKeys.all, queryFn: api.providers, enabled });
 }
 
-/** Text-model profile switch — shared by `SetupWizard.tsx` and (once Task 13 converts it) `App.tsx`'s `ProvidersPanel`. */
+/** Text-model profile switch — shared by `SetupWizard.tsx` and `App.tsx`'s `ProvidersPanel`. */
 export function useSetProfileMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (profile: string) => api.setProfile(profile),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: providersKeys.all }),
+  });
+}
+
+// ------------------------------------------------------------------ images
+
+export const imageProvidersKeys = { all: ['images', 'providers'] as const };
+
+export function useImageProvidersQuery() {
+  return useQuery({ queryKey: imageProvidersKeys.all, queryFn: api.images.providers });
+}
+
+export function useSetImageProfileMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (profile: string | null) => api.images.setProfile(profile),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: imageProvidersKeys.all }),
   });
 }
 
