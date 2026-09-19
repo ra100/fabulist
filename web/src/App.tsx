@@ -39,6 +39,7 @@ import {
   bookKeys,
   encryptionKeys,
   invalidateEverything,
+  timelineKeys,
   useAddAnchorMutation,
   useBlockMutation,
   useBookInfiniteQuery,
@@ -119,7 +120,6 @@ function ErrorNotice({ error }: { error: string | null }) {
 
 export function App() {
   const [tab, setTab] = useState<Tab>(() => tabForPath(window.location.pathname));
-  const [historyRevision, setHistoryRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // null while unknown, so the wizard does not flash before the check returns.
   const [fresh, setFresh] = useState<boolean | null>(null);
@@ -174,7 +174,6 @@ export function App() {
 
   const selectStory = useCallback((storyId: string) => {
     void invalidateEverything(queryClient);
-    setHistoryRevision((revision) => revision + 1);
     setSelectedStoryId(storyId);
   }, [queryClient]);
 
@@ -259,7 +258,7 @@ export function App() {
   }, [stateQuery.refetch, setupStatusQuery.refetch]);
 
   const refreshHistory = useCallback(async () => {
-    if (await refresh()) setHistoryRevision((revision) => revision + 1);
+    await refresh();
   }, [refresh]);
 
   // Independent of the world check: a stale server is worth saying even when
@@ -440,7 +439,6 @@ export function App() {
       ) : null}
       {tab === 'timeline' ? (
         <TimelineView
-          refreshKey={historyRevision}
           onStorySelected={selectStory}
           onChanged={refreshHistory}
           onOpenBook={() => navigateToTab('book')}
@@ -1124,6 +1122,7 @@ function BookTab({
       setRollbackOpen(false);
       try {
         await reloadBook();
+        await queryClient.invalidateQueries({ queryKey: timelineKeys.all });
         await onChanged();
       } catch (e) {
         setNotes((notes) => [...notes, `The rollback succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);

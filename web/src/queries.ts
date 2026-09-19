@@ -211,6 +211,14 @@ export function useAddAnchorMutation() {
   return useMutation({ mutationFn: (vars: { text: string; note: string }) => api.addAnchor(vars.text, vars.note) });
 }
 
+// ------------------------------------------------------------------ timeline
+
+export const timelineKeys = { all: ['timeline'] as const };
+
+export function useTimelineQuery() {
+  return useQuery({ queryKey: timelineKeys.all, queryFn: api.timeline });
+}
+
 // -------------------------------------------------------------------- config
 
 export const configKeys = { all: ['config'] as const };
