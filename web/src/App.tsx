@@ -40,6 +40,7 @@ import { Mark } from './Mark.tsx';
 import { HistoryRequestGate } from './history-request-gate.ts';
 import {
   encryptionKeys,
+  invalidateEverything,
   useCurrentUserQuery,
   useEncryptionKeysQuery,
   useEncryptionMigrationQuery,
@@ -48,6 +49,8 @@ import {
   useLogoutMutation,
   useMetaQuery,
   useMigrateMutation,
+  useSetupStatusQuery,
+  useStateQuery,
   useUnlockMutation,
 } from './queries.ts';
 import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
@@ -103,7 +106,6 @@ function ErrorNotice({ error }: { error: string | null }) {
 
 export function App() {
   const [tab, setTab] = useState<Tab>(() => tabForPath(window.location.pathname));
-  const [state, setState] = useState<State | null>(null);
   const [historyRevision, setHistoryRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // null while unknown, so the wizard does not flash before the check returns.
@@ -142,17 +144,26 @@ export function App() {
   }, [currentUser, keysQuery.data, migrationQuery.data]);
   const privateStorageError = currentUser ? (keysQuery.error ?? migrationQuery.error)?.message ?? null : null;
 
-  const stateRequestGate = useRef(new HistoryRequestGate());
+  const stateQuery = useStateQuery();
+  const setupStatusQuery = useSetupStatusQuery();
+  const state = stateQuery.data ?? null;
 
-  const invalidateRefreshRequests = useCallback(() => {
-    stateRequestGate.current.invalidate();
-  }, []);
+  /**
+   * Used to be "invalidate the manual `stateRequestGate` so a stale
+   * in-flight `refresh()` gets discarded" — now a no-op: `state`/`setup.status`
+   * are queries, so TanStack Query's own fetch-supersession already discards
+   * an outdated response once the mutation's own post-mutation refetch
+   * starts. Kept as a named callback (rather than inlining `() => {}` at each
+   * `onMutationStart` prop) until Tasks 5/11 convert `BookTab`/`StoriesTab`
+   * and drop the prop entirely.
+   */
+  const invalidateRefreshRequests = useCallback(() => {}, []);
 
   const selectStory = useCallback((storyId: string) => {
-    invalidateRefreshRequests();
+    void invalidateEverything(queryClient);
     setHistoryRevision((revision) => revision + 1);
     setSelectedStoryId(storyId);
-  }, [invalidateRefreshRequests]);
+  }, [queryClient]);
 
   const navigateToTab = useCallback((next: Tab) => {
     const path = pathForTab(next);
@@ -183,54 +194,60 @@ export function App() {
     };
   }, []);
 
-  const refresh = useCallback(async () => {
-    const revision = stateRequestGate.current.beginRequest();
-    const storyId = getSelectedStoryId();
-    try {
-      // Freshness is re-checked on every refresh, not just at mount. Switching
-      // worlds can move you into an *empty* world, and that has to open the
-      // setup wizard — a mount-only check left you looking at a book view with
-      // no canon, no cast and no way to start one, which is indistinguishable
-      // from the app being broken. Both reads happen together so the wizard
-      // decision and the state it is deciding about cannot disagree.
-      const [nextState, status] = await Promise.all([
-        api.state(),
-        api.setup.status().catch(() => null),
-      ]);
-      if (!stateRequestGate.current.isCurrent(revision) || getSelectedStoryId() !== storyId) return false;
-      setState(nextState);
-      // Null means the setup routes are disabled. Preserve an answer already
-      // received, but let first paint proceed for older servers.
-      if (status) {
-        setFresh(status.fresh);
-        setHasPlayer(status.hasPlayer);
-      } else {
+  // Combines `useStateQuery()`/`useSetupStatusQuery()` the way `refresh()`
+  // used to combine them in one `Promise.all` + try/catch: `setup.status()`'s
+  // answer is only consulted once `state` itself has succeeded, mirroring how
+  // the old code never even reached the destructured `status` when
+  // `api.state()` rejected (a `Promise.all` rejects as soon as its first
+  // promise does, and `setup.status()` cannot itself reject — it's the
+  // `.catch(() => null)`'d one). A locked private story silently swaps to the
+  // settings tab with no error banner; any other `state` failure shows it.
+  useEffect(() => {
+    if (stateQuery.isSuccess) {
+      setError(null);
+      // Null (never-known) means the setup routes are disabled — preserve an
+      // answer already known rather than blank it out.
+      if (setupStatusQuery.data) {
+        setFresh(setupStatusQuery.data.fresh);
+        setHasPlayer(setupStatusQuery.data.hasPlayer);
+      } else if (setupStatusQuery.isError) {
         setFresh((previous) => previous ?? false);
       }
-      setError(null);
-      return true;
-    } catch (e) {
-      if (!stateRequestGate.current.isCurrent(revision) || getSelectedStoryId() !== storyId) return false;
-      const message = e instanceof Error ? e.message : String(e);
+      return;
+    }
+    if (stateQuery.isError) {
+      const message = stateQuery.error instanceof Error ? stateQuery.error.message : String(stateQuery.error);
       if (isPrivateStoryLockedError(message)) {
         setFresh(false);
         setError(null);
         navigateToTab('settings');
-        return false;
+      } else {
+        setError(message);
       }
-      setError(message);
-      return false;
     }
-  }, [navigateToTab]);
+  }, [
+    stateQuery.isSuccess,
+    stateQuery.isError,
+    stateQuery.error,
+    setupStatusQuery.data,
+    setupStatusQuery.isError,
+    navigateToTab,
+  ]);
+
+  // Freshness is re-checked on every refresh, not just at mount. Switching
+  // worlds can move you into an *empty* world, and that has to open the
+  // setup wizard — a mount-only check left you looking at a book view with
+  // no canon, no cast and no way to start one, which is indistinguishable
+  // from the app being broken. Both reads happen together so the wizard
+  // decision and the state it is deciding about cannot disagree.
+  const refresh = useCallback(async () => {
+    const [stateResult] = await Promise.all([stateQuery.refetch(), setupStatusQuery.refetch()]);
+    return stateResult.isSuccess;
+  }, [stateQuery.refetch, setupStatusQuery.refetch]);
 
   const refreshHistory = useCallback(async () => {
     if (await refresh()) setHistoryRevision((revision) => revision + 1);
   }, [refresh]);
-
-  useEffect(() => {
-    void refresh();
-    return () => invalidateRefreshRequests();
-  }, [invalidateRefreshRequests, refresh]);
 
   // Independent of the world check: a stale server is worth saying even when
   // everything else looks fine, because the symptom appears later and elsewhere.
