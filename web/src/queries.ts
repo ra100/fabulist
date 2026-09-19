@@ -107,3 +107,33 @@ export function useSetupStatusQuery() {
 export function invalidateEverything(queryClient: QueryClient) {
   return queryClient.invalidateQueries();
 }
+
+// ------------------------------------------------------ graph / entity / search / cast
+
+export const graphKeys = {
+  list: (params: { layer?: string; type?: string; minWeight?: number }) => ['graph', params] as const,
+};
+
+export function useGraphQuery(params: { layer?: string; type?: string; minWeight?: number }) {
+  return useQuery({ queryKey: graphKeys.list(params), queryFn: () => api.graph(params) });
+}
+
+export const entityKeys = { detail: (id: string) => ['entity', id] as const };
+
+/** `enabled: id !== null` mirrors `GraphTab`'s old "selection cleared → clear detail" short-circuit. */
+export function useEntityQuery(id: string | null) {
+  return useQuery({ queryKey: entityKeys.detail(id ?? ''), queryFn: () => api.entity(id as string), enabled: id !== null });
+}
+
+export const searchKeys = { query: (q: string) => ['search', q] as const };
+
+/** `enabled: query.length > 0` mirrors the old effect's early return on an empty/whitespace query. */
+export function useSearchQuery(query: string) {
+  return useQuery({ queryKey: searchKeys.query(query), queryFn: () => api.search(query), enabled: query.length > 0 });
+}
+
+export const castKeys = { all: ['cast'] as const };
+
+export function useCastQuery() {
+  return useQuery({ queryKey: castKeys.all, queryFn: api.cast });
+}
