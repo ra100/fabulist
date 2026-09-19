@@ -8,7 +8,6 @@ import {
   type BookTurn,
   type CurrentUser,
   type DepthMode,
-  type Edge,
   type Entity,
   type EntityDetail,
   type ImageProvidersReport,
@@ -16,7 +15,6 @@ import {
   type Interrupt,
   type Job,
   type Knobs,
-  type Sheet,
   type PlayResponse,
   type ProvidersReport,
   type RollbackTarget,
@@ -41,14 +39,18 @@ import { HistoryRequestGate } from './history-request-gate.ts';
 import {
   encryptionKeys,
   invalidateEverything,
+  useCastQuery,
   useCurrentUserQuery,
   useEncryptionKeysQuery,
   useEncryptionMigrationQuery,
   useEnrollMutation,
+  useEntityQuery,
+  useGraphQuery,
   useLockMutation,
   useLogoutMutation,
   useMetaQuery,
   useMigrateMutation,
+  useSearchQuery,
   useSetupStatusQuery,
   useStateQuery,
   useUnlockMutation,
@@ -1667,7 +1669,6 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
 // --------------------------------------------------------------------- graph
 
 function GraphTab() {
-  const [data, setData] = useState<{ entities: Entity[]; edges: Edge[]; hiddenEdges: number } | null>(null);
   const [layer, setLayer] = useState('');
   const [type, setType] = useState('');
   /**
@@ -1677,36 +1678,26 @@ function GraphTab() {
    */
   const [showMentions, setShowMentions] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const [detail, setDetail] = useState<EntityDetail | null>(null);
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<Entity[]>([]);
-  const [searching, setSearching] = useState(false);
+  const [debouncedQuery, setDebouncedQuery] = useState('');
 
-  useEffect(() => {
-    void api
-      .graph({ layer: layer || undefined, type: type || undefined, ...(showMentions ? { minWeight: 0 } : {}) })
-      .then(setData);
-  }, [layer, type, showMentions]);
+  const { data } = useGraphQuery({
+    layer: layer || undefined,
+    type: type || undefined,
+    ...(showMentions ? { minWeight: 0 } : {}),
+  });
 
-  useEffect(() => {
-    if (!selected) return void setDetail(null);
-    void api.entity(selected).then(setDetail);
-  }, [selected]);
+  const { data: detail } = useEntityQuery(selected);
 
   // A 3,000-page ingest is not something type/layer filters alone can find
   // anything in — /api/search already existed, just unused by this view.
   useEffect(() => {
-    const q = query.trim();
-    if (!q) {
-      setResults([]);
-      return;
-    }
-    setSearching(true);
-    const h = window.setTimeout(() => {
-      void api.search(q).then(setResults).finally(() => setSearching(false));
-    }, 200);
+    const h = window.setTimeout(() => setDebouncedQuery(query.trim()), 200);
     return () => window.clearTimeout(h);
   }, [query]);
+  const { data: searchResults, isFetching: fetchingResults } = useSearchQuery(debouncedQuery);
+  const results = searchResults ?? [];
+  const searching = query.trim() !== debouncedQuery || fetchingResults;
 
   return (
     <div className="main">
@@ -1732,7 +1723,6 @@ function GraphTab() {
                     onClick={() => {
                       setSelected(e.id);
                       setQuery('');
-                      setResults([]);
                     }}
                   >
                     <b>{e.name}</b>
@@ -1769,7 +1759,7 @@ function GraphTab() {
         ) : null}
       </div>
       <aside className="side">
-        <EntityPanel detail={detail} onSelect={setSelected} entities={data?.entities} />
+        <EntityPanel detail={detail ?? null} onSelect={setSelected} entities={data?.entities} />
       </aside>
     </div>
   );
@@ -1924,7 +1914,6 @@ function EntityPanel({
 // ---------------------------------------------------------------------- cast
 
 function CastTab({ state }: { state: State | null }) {
-  const [cast, setCast] = useState<Array<{ sheet: Sheet; entity: Entity | null }>>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   // Same canon/chronicle distinction the graph tab filters on: canon is the
   // ingested source material, chronicle is what this playthrough has changed
@@ -1933,10 +1922,10 @@ function CastTab({ state }: { state: State | null }) {
   // played, with nothing to separate them.
   const [layer, setLayer] = useState('');
 
-  const load = useCallback(async () => setCast(await api.cast()), []);
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const { data: cast = [], refetch } = useCastQuery();
+  const load = useCallback(async () => {
+    await refetch();
+  }, [refetch]);
 
   const visible = layer ? cast.filter(({ entity }) => entity?.layer === layer) : cast;
 
