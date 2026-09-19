@@ -9,8 +9,8 @@
  * See `docs/superpowers/plans/2026-09-19-frontend-tanstack-query.md` for the
  * migration plan this file is built up task-by-task against.
  */
-import { useInfiniteQuery, useMutation, useQuery, type QueryClient } from '@tanstack/react-query';
-import { api, type RollbackTarget } from './api.ts';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { api, type AppConfig, type ConfigBundle, type PatchResult, type ProviderSpec, type RollbackTarget } from './api.ts';
 
 // --------------------------------------------------------------- meta / auth
 
@@ -209,4 +209,80 @@ export function usePinMutation() {
  */
 export function useAddAnchorMutation() {
   return useMutation({ mutationFn: (vars: { text: string; note: string }) => api.addAnchor(vars.text, vars.note) });
+}
+
+// -------------------------------------------------------------------- config
+
+export const configKeys = { all: ['config'] as const };
+
+export function useConfigQuery() {
+  return useQuery({ queryKey: configKeys.all, queryFn: api.config.get });
+}
+
+/**
+ * Shared by every config write below. Writes it to the cache immediately
+ * (this is server-confirmed data from the response, not a guess) so a
+ * blocklist toggle or patch is visible without waiting on a round trip, then
+ * invalidates to pick up anything `PatchResult` doesn't carry — e.g. a
+ * provider add/remove also changes `providerKeys`/`presets`. This is what
+ * `ConfigPanels.tsx`'s old `apply()` did by hand with a second
+ * `api.config.get()` call after every write.
+ *
+ * `App.tsx`'s `WhyPanel` block button and `ConfigPanels.tsx` share this one
+ * `['config']` cache entry via `useBlockMutation`, so a blocklist toggle from
+ * either place is now reflected in the other — previously these were two
+ * independent, un-synced fetches.
+ */
+function onConfigWriteSuccess(queryClient: QueryClient, result: PatchResult) {
+  queryClient.setQueryData(configKeys.all, (prev: ConfigBundle | undefined) =>
+    prev ? { ...prev, config: result.config } : prev,
+  );
+  void queryClient.invalidateQueries({ queryKey: configKeys.all });
+}
+
+export function useConfigPatchMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (partial: Partial<AppConfig>) => api.config.patch(partial),
+    onSuccess: (result) => onConfigWriteSuccess(queryClient, result),
+  });
+}
+
+export function useBlockMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (phrase: string) => api.config.block(phrase),
+    onSuccess: (result) => onConfigWriteSuccess(queryClient, result),
+  });
+}
+
+export function useUnblockMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (phrase: string) => api.config.unblock(phrase),
+    onSuccess: (result) => onConfigWriteSuccess(queryClient, result),
+  });
+}
+
+export function useRemoveProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (key: string) => api.config.removeProvider(key),
+    onSuccess: (result) => onConfigWriteSuccess(queryClient, result),
+  });
+}
+
+export function usePutProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { key: string; spec: ProviderSpec }) => api.config.putProvider(vars.key, vars.spec),
+    onSuccess: (result) => onConfigWriteSuccess(queryClient, result),
+  });
+}
+
+/** A probe, not a write: it contacts the provider to check reachability/credentials but never touches saved config, so nothing to invalidate. */
+export function useTestProviderMutation() {
+  return useMutation({
+    mutationFn: (vars: { key: string; spec: ProviderSpec }) => api.config.testProvider(vars.key, vars.spec),
+  });
 }
