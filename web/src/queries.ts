@@ -9,7 +9,7 @@
  * See `docs/superpowers/plans/2026-09-19-frontend-tanstack-query.md` for the
  * migration plan this file is built up task-by-task against.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, type QueryClient } from '@tanstack/react-query';
 import { api } from './api.ts';
 
 // --------------------------------------------------------------- meta / auth
@@ -76,4 +76,34 @@ export function useLockMutation() {
 
 export function useMigrateMutation() {
   return useMutation({ mutationFn: api.encryption.migrate });
+}
+
+// ------------------------------------------------------------- core story state
+
+export const stateKeys = { all: ['state'] as const };
+
+/**
+ * `retry: false`: the old code fetched `api.state()` once per `refresh()`
+ * call with no retry, and `App.tsx`'s locked-private-story handling needs
+ * a failure to settle immediately rather than spend several seconds
+ * retrying a 403 that will not go away until the story is unlocked.
+ */
+export function useStateQuery() {
+  return useQuery({ queryKey: stateKeys.all, queryFn: api.state, retry: false });
+}
+
+export const setupStatusKeys = { all: ['setupStatus'] as const };
+
+/**
+ * Also one-shot: an older server without this route fails every time, and
+ * `App.tsx` treats any error here as "setup routes disabled" (mirroring the
+ * old `.catch(() => null)`) — retrying would only delay that decision.
+ */
+export function useSetupStatusQuery() {
+  return useQuery({ queryKey: setupStatusKeys.all, queryFn: api.setup.status, retry: false });
+}
+
+/** Story/world switch: reload everything, matching today's `App.refresh()` broadcast. */
+export function invalidateEverything(queryClient: QueryClient) {
+  return queryClient.invalidateQueries();
 }
