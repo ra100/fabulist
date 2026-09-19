@@ -37,6 +37,7 @@ import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 import { HistoryRequestGate } from './history-request-gate.ts';
+import { useCurrentUserQuery, useLogoutMutation, useMetaQuery } from './queries.ts';
 import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
 import {
   isPrivateStoryLockedError,
@@ -109,13 +110,13 @@ export function App() {
   // field, so the badge can simply not render instead of showing a
   // misleading literal string. Purely informational: never feeds the
   // staleness check above, which compares routes, not this.
-  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const serverVersion = useMetaQuery().data?.version ?? null;
   // null while unknown, `{ user: null }` when login is off or this browser
   // has no session — SettingsTab reads `.isAdmin` off this to decide
   // whether to render the system-wide panels at all (the actual boundary
   // is server-side: `requireAdmin` in `src/server/api.ts` 403s those routes
   // regardless of what this renders).
-  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const currentUser = useCurrentUserQuery().data?.user ?? null;
   const [privateStorage, setPrivateStorage] = useState<PrivateStorageSnapshot | null>(null);
   const [privateStorageError, setPrivateStorageError] = useState<string | null>(null);
 
@@ -221,16 +222,6 @@ export function App() {
   // unrelated field just to save one more `/api/meta` hit (cheap, no body to
   // speak of) would make a reader wonder why a staleness check also carries
   // a version string.
-  useEffect(() => {
-    void api.meta().then((m) => setServerVersion(m.version ?? null)).catch(() => {});
-  }, []);
-
-  // Also independent of the world check: who is signed in has nothing to do
-  // with which world/story is open, and must not block first paint on it.
-  useEffect(() => {
-    void api.auth.me().then((r) => setCurrentUser(r.user)).catch(() => setCurrentUser(null));
-  }, []);
-
   const refreshPrivateStorage = useCallback(async () => {
     if (!currentUser) {
       setPrivateStorage(null);
@@ -276,22 +267,24 @@ export function App() {
     await refresh();
   }, [refresh, refreshPrivateStorage]);
 
+  const logoutMutation = useLogoutMutation();
+
   /**
    * Clears the server-side session cookie, then hard-navigates to `/` —
-   * not a client-side `setCurrentUser(null)` — so every other bit of state
-   * this browser tab was holding for the *previous* user (the open story,
-   * its cached turns, `sessionStorage`'s own `fabulist_story_id`) does not
+   * not a client-side cache reset — so every other bit of state this
+   * browser tab was holding for the *previous* user (the open story, its
+   * cached turns, `sessionStorage`'s own `fabulist_story_id`) does not
    * linger into whatever renders next. The gate in `src/server/api.ts`
    * gets to decide what "signed out" looks like (the landing page when
    * login is required) rather than this component guessing.
    */
   const signOut = useCallback(async () => {
     try {
-      await api.auth.logout();
+      await logoutMutation.mutateAsync();
     } finally {
       window.location.href = '/';
     }
-  }, []);
+  }, [logoutMutation]);
 
   if (fresh === null) return <><ErrorNotice error={error} /><div className="wizard"><div className="wizard-card dim">loading…</div></div></>;
 
