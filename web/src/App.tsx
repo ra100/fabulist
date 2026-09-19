@@ -35,11 +35,15 @@ import { FactsView } from './views/FactsView.tsx';
 import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
-import { HistoryRequestGate } from './history-request-gate.ts';
 import {
+  bookKeys,
   encryptionKeys,
   invalidateEverything,
+  useAddAnchorMutation,
+  useBookInfiniteQuery,
   useCastQuery,
+  useChaptersQuery,
+  useCloseSceneMutation,
   useCurrentUserQuery,
   useEncryptionKeysQuery,
   useEncryptionMigrationQuery,
@@ -50,9 +54,15 @@ import {
   useLogoutMutation,
   useMetaQuery,
   useMigrateMutation,
+  usePinMutation,
+  usePlayStreamMutation,
+  useRegenerateMutation,
+  useRollbackMutation,
   useSearchQuery,
   useSetupStatusQuery,
+  useSplitSceneMutation,
   useStateQuery,
+  useTurnQuery,
   useUnlockMutation,
 } from './queries.ts';
 import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
@@ -424,7 +434,6 @@ export function App() {
           state={state}
           hasPlayer={hasPlayer}
           onChanged={refreshHistory}
-          onMutationStart={invalidateRefreshRequests}
           onStorySelected={selectStory}
         />
       ) : null}
@@ -853,20 +862,32 @@ function BookTab({
   state,
   hasPlayer,
   onChanged,
-  onMutationStart,
   onStorySelected,
 }: {
   state: State | null;
   hasPlayer: boolean | null;
   onChanged: () => void | Promise<void>;
-  onMutationStart: () => void;
   onStorySelected: (storyId: string) => void;
 }) {
-  const [turns, setTurns] = useState<BookTurn[]>([]);
+  const queryClient = useQueryClient();
+  const bookQuery = useBookInfiniteQuery();
+  const { data: bookData, hasNextPage, isFetchingNextPage, fetchNextPage } = bookQuery;
+  // There is no "load more" control here — `BookTab` always wants the whole
+  // book, so it chain-fetches every page itself rather than exposing
+  // pagination to the UI (see `useBookInfiniteQuery`'s doc comment).
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage) void fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  const turns = useMemo(() => bookData?.pages.flatMap((p) => p.turns) ?? [], [bookData]);
+  const lastTurnId = turns.length ? turns[turns.length - 1]!.id : null;
+  // The why panel reads the last turn's stored meta rather than holding its
+  // own copy, so a reload or a tab switch does not lose it — the meta was
+  // already persisted with the turn; only the read was missing.
+  const lastMeta = useTurnQuery(lastTurnId).data?.meta ?? null;
+
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [interrupt, setInterrupt] = useState<{ interrupt: Interrupt; input: string } | null>(null);
-  const [lastMeta, setLastMeta] = useState<TurnMeta | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
   // Prose as it arrives, plus which gate the turn is currently passing through.
   const [streaming, setStreaming] = useState('');
@@ -895,70 +916,40 @@ function BookTab({
   /** Rollback panel: closed by default, since it destroys or forks committed prose and should never be one accidental click away. */
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
-  const [chapters, setChapters] = useState<Array<{ chapter: number; title: string; summary: string }>>([]);
+  const chapters = useChaptersQuery(rollbackOpen).data?.chapters ?? [];
   const [splittingId, setSplittingId] = useState<string | null>(null);
   const [mutationPending, setMutationPending] = useState(false);
-  const historyRequestGate = useRef(new HistoryRequestGate());
-  const historyMutationLock = useRef(false);
+  const mutationLock = useRef(false);
   const streamAbort = useRef<AbortController | null>(null);
 
-  const load = useCallback(async () => {
-    const revision = historyRequestGate.current.beginRequest();
-    const firstPage = await api.book();
-    const turns = [...firstPage.turns];
-    let offset = firstPage.nextOffset ?? null;
-    while (offset !== null) {
-      if (!historyRequestGate.current.isCurrent(revision)) return;
-      const page = await api.book({ offset });
-      if (!historyRequestGate.current.isCurrent(revision)) return;
-      turns.push(...page.turns);
-      offset = page.nextOffset ?? null;
-    }
-    if (!historyRequestGate.current.isCurrent(revision)) return;
-    setTurns(turns);
-    // The why panel reads the last turn's stored meta rather than holding its
-    // own copy, so a reload or a tab switch does not lose it — the meta was
-    // already persisted with the turn; only the read was missing.
-    const last = turns[turns.length - 1];
-    if (last) {
-      setLastMeta(null);
-      try {
-        const meta = await api.turn(last.id);
-        if (!historyRequestGate.current.isCurrent(revision)) return;
-        setLastMeta(meta.meta);
-      } catch {
-        // A stale panel is better than a crashed book view.
-      }
-    } else {
-      setLastMeta(null);
-    }
-  }, []);
+  const playStreamMutation = usePlayStreamMutation();
+  const closeSceneMutation = useCloseSceneMutation();
+  const rollbackMutation = useRollbackMutation();
+  const splitSceneMutation = useSplitSceneMutation();
+  const regenerateMutation = useRegenerateMutation();
+  const pinMutation = usePinMutation();
+  const addAnchorMutation = useAddAnchorMutation();
 
-  const invalidateHistoryRequests = (): number => {
-    const revision = historyRequestGate.current.invalidate();
-    onMutationStart();
-    return revision;
-  };
+  const reloadBook = () => queryClient.invalidateQueries({ queryKey: bookKeys.all });
 
-  const beginHistoryMutation = (): number | null => {
-    if (historyMutationLock.current) return null;
-    historyMutationLock.current = true;
+  /** Only one book-mutating action runs at a time; returns false if one already is. */
+  const beginMutation = (): boolean => {
+    if (mutationLock.current) return false;
+    mutationLock.current = true;
     setMutationPending(true);
-    return invalidateHistoryRequests();
+    return true;
   };
 
-  const endHistoryMutation = () => {
-    historyMutationLock.current = false;
+  const endMutation = () => {
+    mutationLock.current = false;
     setMutationPending(false);
   };
 
   useEffect(() => {
-    void load();
     return () => {
       streamAbort.current?.abort();
-      historyRequestGate.current.invalidate();
     };
-  }, [load]);
+  }, []);
 
   // Turns can arrive from outside this browser — the MCP connector plays into
   // the same story — so the book re-reads itself on a timer as well as after
@@ -966,7 +957,7 @@ function BookTab({
   // poll would overwrite the streaming prose with a book that does not have it
   // yet, and while a reroll is running for the same reason.
   useLivePoll(() => {
-    void load();
+    void reloadBook();
     onChanged();
   }, busy || mutationPending);
 
@@ -989,7 +980,7 @@ function BookTab({
   }, [turns.length, awaiting]);
 
   async function play(text: string, override = false) {
-    if (!text.trim() || busy || beginHistoryMutation() === null) return;
+    if (!text.trim() || busy || !beginMutation()) return;
     setBusy(true);
     setNotes([]);
     setStreaming('');
@@ -1012,8 +1003,9 @@ function BookTab({
       setInterrupt(null);
       if (o.kind === 'narrated') {
         setInput('');
-        const meta = (await api.turn(o.turn.id)).meta;
-        setLastMeta(meta);
+        // `o.turn.meta` already has what `useTurnQuery` would fetch — no
+        // separate read needed, `lastTurnId` reactively picks up the new
+        // turn once `reloadBook()` lands it in `turns`.
         const n: string[] = [];
         if (res.seeded) n.push(`${res.seeded} consequence${res.seeded === 1 ? '' : 's'} set in motion`);
         for (const f of res.tick?.fired ?? []) {
@@ -1021,7 +1013,7 @@ function BookTab({
         }
         if (res.tick?.transmissions.length) n.push(`${res.tick.transmissions.length} rumour(s) travelled`);
         setNotes(n);
-        await load();
+        await reloadBook();
         await onChanged();
       } else if (o.kind === 'answered') {
         setNotes([o.text]);
@@ -1032,28 +1024,32 @@ function BookTab({
 
     let finished = false;
     try {
-      await api.playStream(text, override, {
-        onStage: setStage,
-        onToken: (chunk) => setStreaming((prev) => prev + chunk),
-        onDone: (res) => {
-          finished = true;
-          void finish(res).catch((e: unknown) => {
-            setNotes([e instanceof Error ? e.message : String(e)]);
-          }).finally(endHistoryMutation);
+      await playStreamMutation.mutateAsync({
+        input: text,
+        overrideIntegrity: override,
+        handlers: {
+          onStage: setStage,
+          onToken: (chunk) => setStreaming((prev) => prev + chunk),
+          onDone: (res) => {
+            finished = true;
+            void finish(res).catch((e: unknown) => {
+              setNotes([e instanceof Error ? e.message : String(e)]);
+            }).finally(endMutation);
+          },
+          onError: (message) => {
+            if (abort.signal.aborted) return;
+            setNotes([message]);
+            endMutation();
+          },
+          signal: abort.signal,
         },
-        onError: (message) => {
-          if (abort.signal.aborted) return;
-          setNotes([message]);
-          endHistoryMutation();
-        },
-        signal: abort.signal,
       });
     } catch (e) {
       if (!abort.signal.aborted) setNotes([e instanceof Error ? e.message : String(e)]);
-      endHistoryMutation();
+      endMutation();
     } finally {
       if (streamAbort.current === abort) streamAbort.current = null;
-      if (!finished) endHistoryMutation();
+      if (!finished) endMutation();
     }
     // The committed turn is now in the book, so the provisional copy can go.
     window.clearTimeout(revealAwaiting);
@@ -1069,33 +1065,27 @@ function BookTab({
    * This calls the exact same compaction path.
    */
   async function closeScene() {
-    if (busy || closingScene || !turns.length || beginHistoryMutation() === null) return;
+    if (busy || closingScene || !turns.length || !beginMutation()) return;
     setClosingScene(true);
     try {
-      const res = await api.closeScene();
+      const res = await closeSceneMutation.mutateAsync();
       const n = [`scene ${res.closedScene} closed, now scene ${res.nowScene}`];
       if (res.summary) n.push(res.summary);
       if (res.chaptersSummarised.length) n.push(`chapter ${res.chaptersSummarised[0]} rolled up`);
       setNotes(n);
-      await load();
+      await reloadBook();
       await onChanged();
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
     } finally {
       setClosingScene(false);
-      endHistoryMutation();
+      endMutation();
     }
   }
 
-  /** Opens the rollback panel, loading the chapter list it needs on demand rather than on every book load. */
-  async function openRollback() {
-    if (rollbackOpen) return setRollbackOpen(false);
-    try {
-      setChapters((await api.chapters()).chapters);
-    } catch {
-      // A rollback by scene number still works with an empty chapter list.
-    }
-    setRollbackOpen(true);
+  /** Toggles the rollback panel; `useChaptersQuery(rollbackOpen)` fetches the chapter list on demand, and silently sits at `[]` on failure — a rollback by scene number still works with an empty chapter list. */
+  function openRollback() {
+    setRollbackOpen((open) => !open);
   }
 
   /**
@@ -1107,7 +1097,7 @@ function BookTab({
    * having to be opened deliberately.
    */
   async function doRollback(target: RollbackTarget, mode: 'fork' | 'destructive') {
-    if (rollbackBusy || historyMutationLock.current) return;
+    if (rollbackBusy || mutationLock.current) return;
     if (mode === 'destructive') {
       const label = 'turnId' in target
         ? 'the selected turn and every newer turn'
@@ -1115,12 +1105,12 @@ function BookTab({
       if (!window.confirm(`Discard ${label} permanently from this book? This cannot be undone.`)) return;
     }
     const sourceStoryId = getSelectedStoryId();
-    const mutationRevision = beginHistoryMutation();
-    if (mutationRevision === null) return;
+    if (!beginMutation()) return;
     setRollbackBusy(true);
     try {
-      const result = await api.rollback({ ...target, mode });
-      if (!historyRequestGate.current.isCurrent(mutationRevision) || getSelectedStoryId() !== sourceStoryId) return;
+      const result = await rollbackMutation.mutateAsync({ ...target, mode });
+      // The story may have been switched while this await was in flight.
+      if (getSelectedStoryId() !== sourceStoryId) return;
       const selectedTurn = 'turnId' in target ? turns.find((turn) => turn.id === target.turnId) : null;
       const targetLabel = selectedTurn ? `turn ${chapterTurnLabel(selectedTurn)}` : `scene ${result.toScene}`;
       if (result.mode === 'fork' && result.forkedStory) {
@@ -1132,7 +1122,7 @@ function BookTab({
       }
       setRollbackOpen(false);
       try {
-        await load();
+        await reloadBook();
         await onChanged();
       } catch (e) {
         setNotes((notes) => [...notes, `The rollback succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);
@@ -1141,18 +1131,18 @@ function BookTab({
       setNotes([`Rollback was not applied: ${e instanceof Error ? e.message : String(e)}. Try again.`]);
     } finally {
       setRollbackBusy(false);
-      endHistoryMutation();
+      endMutation();
     }
   }
 
   async function splitScene(turn: BookTurn) {
-    if (splittingId || beginHistoryMutation() === null) return;
+    if (splittingId || !beginMutation()) return;
     setSplittingId(turn.id);
     try {
-      const split = await api.splitScene(turn.id);
+      const split = await splitSceneMutation.mutateAsync(turn.id);
       setNotes([`Started scene ${split.scene} at turn ${chapterTurnLabel(turn)}.`]);
       try {
-        await load();
+        await reloadBook();
         await onChanged();
       } catch (e) {
         setNotes((notes) => [...notes, `The scene split succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);
@@ -1161,7 +1151,7 @@ function BookTab({
       setNotes([`The scene was not split at turn ${chapterTurnLabel(turn)}: ${e instanceof Error ? e.message : String(e)}. Try again.`]);
     } finally {
       setSplittingId(null);
-      endHistoryMutation();
+      endMutation();
     }
   }
 
@@ -1172,18 +1162,18 @@ function BookTab({
    * but fix this one thing" rather than a blind retry.
    */
   async function regenerate(id: string, note: string) {
-    if (regeneratingId || beginHistoryMutation() === null) return;
+    if (regeneratingId || !beginMutation()) return;
     setRegeneratingId(id);
     try {
-      await api.regenerate(id, note.trim() || undefined);
+      await regenerateMutation.mutateAsync({ id, note: note.trim() || undefined });
       setRerollOpenId(null);
       setRerollNote('');
-      await load();
+      await reloadBook();
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
     } finally {
       setRegeneratingId(null);
-      endHistoryMutation();
+      endMutation();
     }
   }
 
@@ -1270,15 +1260,15 @@ function BookTab({
                   <button
                     disabled={mutationPending}
                     onClick={async () => {
-                      if (beginHistoryMutation() === null) return;
+                      if (!beginMutation()) return;
                       try {
-                        await api.pin(t.id, !t.pinned);
-                        if (!t.pinned) await api.addAnchor(t.bookProse.slice(0, 300), 'pinned by the author');
-                        await load();
+                        await pinMutation.mutateAsync({ id: t.id, pinned: !t.pinned });
+                        if (!t.pinned) await addAnchorMutation.mutateAsync({ text: t.bookProse.slice(0, 300), note: 'pinned by the author' });
+                        await reloadBook();
                       } catch (e) {
                         setNotes([e instanceof Error ? e.message : String(e)]);
                       } finally {
-                        endHistoryMutation();
+                        endMutation();
                       }
                     }}
                   >
@@ -1392,7 +1382,7 @@ function BookTab({
                 className={rollbackOpen ? 'primary' : ''}
                 title="undo the last chapter or scene"
                 disabled={mutationPending || !turns.length}
-                onClick={() => void openRollback()}
+                onClick={openRollback}
               >
                 roll back…
               </button>
