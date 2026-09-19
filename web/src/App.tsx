@@ -40,6 +40,7 @@ import {
   encryptionKeys,
   invalidateEverything,
   useAddAnchorMutation,
+  useBlockMutation,
   useBookInfiniteQuery,
   useCastQuery,
   useChaptersQuery,
@@ -1577,6 +1578,7 @@ function RollbackPanel({
 
 /** Shows the machinery behind the last turn: the reason to trust it. */
 function WhyPanel({ meta }: { meta: TurnMeta | null }) {
+  const blockMutation = useBlockMutation();
   if (!meta) return <div className="card"><h3>why</h3><p className="empty">Play a turn.</p></div>;
   return (
     <div className="card">
@@ -1605,7 +1607,7 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
                   {f.excerpt ? (
                     <button
                       title={`never write "${f.excerpt}" again`}
-                      onClick={() => void api.config.block(f.excerpt).catch(() => {})}
+                      onClick={() => blockMutation.mutate(f.excerpt)}
                     >
                       block
                     </button>
