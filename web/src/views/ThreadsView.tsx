@@ -1,5 +1,12 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { api, type State, type Thread } from '../api.ts';
+import { Fragment, useRef, useState } from 'react';
+import type { State, Thread } from '../api.ts';
+import {
+  useAddDirectiveMutation,
+  useCreateThreadMutation,
+  useRetireDirectiveMutation,
+  useThreadsQuery,
+  useUpdateThreadMutation,
+} from '../queries.ts';
 
 function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
@@ -7,6 +14,7 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
   const [tension, setTension] = useState(thread.tension);
   // Drag ticks that land while a save is in flight; only the latest is kept.
   const pendingTension = useRef<number | null>(null);
+  const updateThreadMutation = useUpdateThreadMutation();
 
   function flushPending() {
     const next = pendingTension.current;
@@ -19,7 +27,7 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
 
   function save(patch: Partial<Thread>) {
     return async () => {
-      await api.updateThread(thread.id, patch);
+      await updateThreadMutation.mutateAsync({ id: thread.id, patch });
       onChanged();
     };
   }
@@ -147,7 +155,7 @@ function useAction(onSettled?: () => void) {
 }
 
 export function ThreadsView({ state, onChanged }: { state: State | null; onChanged: () => void }) {
-  const [threads, setThreads] = useState<Thread[]>([]);
+  const { data: threads = [] } = useThreadsQuery();
   const [text, setText] = useState('');
   const [strength, setStrength] = useState('push');
   const [diff, setDiff] = useState<Array<[string, string]> | null>(null);
@@ -157,24 +165,22 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
   const direct = useAction();
   const retire = useAction();
 
-  const load = useCallback(async () => setThreads(await api.threads()), []);
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const createThreadMutation = useCreateThreadMutation();
+  const addDirectiveMutation = useAddDirectiveMutation();
+  const retireDirectiveMutation = useRetireDirectiveMutation();
 
   function openThread() {
     return create.run(async () => {
-      await api.createThread(newTitle.trim(), newStakes.trim());
+      await createThreadMutation.mutateAsync({ title: newTitle.trim(), stakes: newStakes.trim() });
       setNewTitle('');
       setNewStakes('');
-      await load();
       onChanged();
     });
   }
 
   function applyDirective() {
     return direct.run(async () => {
-      const response = await api.addDirective(text, strength);
+      const response = await addDirectiveMutation.mutateAsync({ text, strength });
       const entries: Array<[string, string]> = [];
       if (response.diff.raisedThreadTitles.length) {
         entries.push(['raised', response.diff.raisedThreadTitles.join('; ')]);
@@ -190,14 +196,13 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
       }
       setDiff(entries.length ? entries : [['no change', 'nothing needed moving']]);
       setText('');
-      await load();
       onChanged();
     });
   }
 
   function retireDirective(directiveId: string) {
     return retire.run(async () => {
-      await api.retireDirective(directiveId);
+      await retireDirectiveMutation.mutateAsync(directiveId);
       onChanged();
     });
   }
@@ -211,14 +216,7 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
             it.
           </p>
           {threads.map((thread) => (
-            <ThreadCard
-              key={thread.id}
-              thread={thread}
-              onChanged={async () => {
-                await load();
-                onChanged();
-              }}
-            />
+            <ThreadCard key={thread.id} thread={thread} onChanged={onChanged} />
           ))}
           {threads.length === 0 ? <p className="empty">No threads yet — start one on the right.</p> : null}
         </div>
