@@ -9,8 +9,8 @@
  * See `docs/superpowers/plans/2026-09-19-frontend-tanstack-query.md` for the
  * migration plan this file is built up task-by-task against.
  */
-import { useMutation, useQuery, type QueryClient } from '@tanstack/react-query';
-import { api } from './api.ts';
+import { useInfiniteQuery, useMutation, useQuery, type QueryClient } from '@tanstack/react-query';
+import { api, type RollbackTarget } from './api.ts';
 
 // --------------------------------------------------------------- meta / auth
 
@@ -136,4 +136,77 @@ export const castKeys = { all: ['cast'] as const };
 
 export function useCastQuery() {
   return useQuery({ queryKey: castKeys.all, queryFn: api.cast });
+}
+
+// --------------------------------------------------------------- book / turn / play
+
+export const bookKeys = { all: ['book'] as const };
+
+/**
+ * `BookTab` has no "load more" control — it always wants the whole book —
+ * so it drives `fetchNextPage` itself in an effect until `hasNextPage` is
+ * false, rather than exposing pagination to the UI. `nextOffset` doubles as
+ * v5's "no more pages" sentinel (`null`).
+ */
+export function useBookInfiniteQuery() {
+  return useInfiniteQuery({
+    queryKey: bookKeys.all,
+    queryFn: ({ pageParam }) => api.book({ offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => lastPage.nextOffset,
+  });
+}
+
+export const turnKeys = { detail: (id: string) => ['turn', id] as const };
+
+/** `enabled: id !== null` — `BookTab` only ever wants the last loaded turn's meta, for the why panel. */
+export function useTurnQuery(id: string | null) {
+  return useQuery({ queryKey: turnKeys.detail(id ?? ''), queryFn: () => api.turn(id as string), enabled: id !== null });
+}
+
+/** Internals (the `onStage`/`onToken`/`onDone`/`onError` callbacks, the abort signal) stay in `BookTab` — this only wraps the call. */
+export function usePlayStreamMutation() {
+  return useMutation({
+    mutationFn: (vars: { input: string; overrideIntegrity: boolean; handlers: Parameters<typeof api.playStream>[2] }) =>
+      api.playStream(vars.input, vars.overrideIntegrity, vars.handlers),
+  });
+}
+
+export function useCloseSceneMutation() {
+  return useMutation({ mutationFn: api.closeScene });
+}
+
+export const chaptersKeys = { all: ['chapters'] as const };
+
+/** A GET, not a write: `BookTab` fetches this on demand when the rollback panel opens, not on every book load. */
+export function useChaptersQuery(enabled: boolean) {
+  return useQuery({ queryKey: chaptersKeys.all, queryFn: api.chapters, enabled });
+}
+
+export function useRollbackMutation() {
+  return useMutation({ mutationFn: (target: RollbackTarget & { mode?: 'fork' | 'destructive' }) => api.rollback(target) });
+}
+
+export function useSplitSceneMutation() {
+  return useMutation({ mutationFn: (turnId: string) => api.splitScene(turnId) });
+}
+
+export function useRegenerateMutation() {
+  return useMutation({ mutationFn: (vars: { id: string; note?: string }) => api.regenerate(vars.id, vars.note) });
+}
+
+export function usePinMutation() {
+  return useMutation({ mutationFn: (vars: { id: string; pinned: boolean }) => api.pin(vars.id, vars.pinned) });
+}
+
+/**
+ * None of these six invalidate `['book']` themselves: `BookTab`'s handlers
+ * already call `reloadBook()`/`onChanged()` at the exact points the old code
+ * called `load()`/`onChanged()`, each with its own per-action notes/error
+ * message — duplicating that as a blanket `onSuccess` here would either
+ * race it or invalidate on paths (e.g. `regenerate`, which never calls
+ * `onChanged()`) that today don't broadcast a change.
+ */
+export function useAddAnchorMutation() {
+  return useMutation({ mutationFn: (vars: { text: string; note: string }) => api.addAnchor(vars.text, vars.note) });
 }
