@@ -795,3 +795,15 @@ export function useSaveSheetMutation(entityId: string) {
       ),
   });
 }
+
+/**
+ * `api.lock`'s response is untyped (`post<unknown>`), so unlike
+ * `useSaveSheetMutation` there is no returned sheet to write into the cache
+ * — `CastTab`'s call site keeps its existing explicit `load()` afterward,
+ * same as several other mutations in this file that don't self-invalidate.
+ */
+export function useLockSheetFieldMutation() {
+  return useMutation({
+    mutationFn: (vars: { id: string; path: string; locked: boolean }) => api.lock(vars.id, vars.path, vars.locked),
+  });
+}
