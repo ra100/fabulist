@@ -41,6 +41,7 @@ import {
   invalidateEverything,
   timelineKeys,
   useAddAnchorMutation,
+  useAnchorsQuery,
   useBlockMutation,
   useBookInfiniteQuery,
   useCastQuery,
@@ -52,6 +53,7 @@ import {
   useEnrollMutation,
   useEntityQuery,
   useGraphQuery,
+  useKnobsQuery,
   useLockMutation,
   useLogoutMutation,
   useMetaQuery,
@@ -61,9 +63,12 @@ import {
   useRegenerateMutation,
   useRollbackMutation,
   useSearchQuery,
+  useSetKnobsMutation,
+  useSetStyleMutation,
   useSetupStatusQuery,
   useSplitSceneMutation,
   useStateQuery,
+  useStyleQuery,
   useTurnQuery,
   useUnlockMutation,
 } from './queries.ts';
@@ -2058,9 +2063,11 @@ function SettingsTab({
   privateStorageError: string | null;
   onPrivateStorageChanged: () => Promise<void>;
 }) {
-  const [style, setStyle] = useState<State['session']['style'] | null>(null);
-  const [knobs, setKnobs] = useState<State['session']['knobs'] | null>(null);
-  const [anchors, setAnchors] = useState<Array<{ id: number; text: string; note: string }>>([]);
+  const { data: style } = useStyleQuery();
+  const { data: knobs } = useKnobsQuery();
+  const { data: anchors = [] } = useAnchorsQuery();
+  const setStyleMutation = useSetStyleMutation();
+  const setKnobsMutation = useSetKnobsMutation();
   // No `currentUser` at all (login off) means there is no admin concept in
   // play here — the same "off means unrestricted, not restricted" shape
   // `requireAdmin` uses server-side. Once login is on, only an explicit
@@ -2068,18 +2075,12 @@ function SettingsTab({
   // simply never sees the controls whose routes would 403 them anyway.
   const showSystemSettings = !currentUser || currentUser.isAdmin;
 
-  useEffect(() => {
-    void api.style().then(setStyle);
-    void api.knobs().then(setKnobs);
-    void api.anchors().then(setAnchors);
-  }, []);
-
   const saveStyle = async (patch: Partial<NonNullable<typeof style>>) => {
-    setStyle(await api.setStyle(patch));
+    await setStyleMutation.mutateAsync(patch);
     onChanged();
   };
   const saveKnobs = async (patch: Partial<NonNullable<typeof knobs>>) => {
-    setKnobs(await api.setKnobs(patch));
+    await setKnobsMutation.mutateAsync(patch);
     onChanged();
   };
 
