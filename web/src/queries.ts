@@ -332,3 +332,42 @@ export function useTestProviderMutation() {
     mutationFn: (vars: { key: string; spec: ProviderSpec }) => api.config.testProvider(vars.key, vars.spec),
   });
 }
+
+// -------------------------------------------------------------- facts / causality
+
+export const factsKeys = { all: ['facts'] as const };
+
+export function useFactsQuery() {
+  return useQuery({ queryKey: factsKeys.all, queryFn: api.facts });
+}
+
+export function useRevokeKnowledgeMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { factId: string; entityId: string }) => api.revokeKnowledge(vars.factId, vars.entityId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: factsKeys.all }),
+  });
+}
+
+export function useGrantKnowledgeMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { factId: string; entityId: string; level: string }) =>
+      api.grantKnowledge(vars.factId, vars.entityId, vars.level),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: factsKeys.all }),
+  });
+}
+
+export const consequencesKeys = { all: ['consequences'] as const };
+
+export function useConsequencesQuery() {
+  return useQuery({ queryKey: consequencesKeys.all, queryFn: api.consequences });
+}
+
+export function useTickMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.tick,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: consequencesKeys.all }),
+  });
+}
