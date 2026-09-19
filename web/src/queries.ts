@@ -22,9 +22,11 @@ import {
   type PatchResult,
   type ProviderSpec,
   type RollbackTarget,
+  type Sheet,
   type Story,
   type StyleContract,
   type Thread,
+  type VisualStyle,
   type WikiCandidate,
 } from './api.ts';
 
@@ -706,5 +708,90 @@ export function useSetupContinueMutation() {
   return useMutation({
     mutationFn: (overrides: Parameters<typeof api.setup.continue>[0]) => api.setup.continue(overrides),
     onSuccess: (job) => seedJob(queryClient, job),
+  });
+}
+
+// ------------------------------------------------------- illustrate / sheet
+
+export const imageStatusKeys = { all: ['images', 'status'] as const };
+
+export function useImageStatusQuery() {
+  return useQuery({ queryKey: imageStatusKeys.all, queryFn: api.images.status });
+}
+
+export const illustrationKeys = {
+  forEntity: (entityId: string) => ['illustrations', 'entity', entityId] as const,
+  forTurn: (turnId: string) => ['illustrations', 'turn', turnId] as const,
+};
+
+export function useIllustrationsForEntityQuery(entityId: string) {
+  return useQuery({ queryKey: illustrationKeys.forEntity(entityId), queryFn: () => api.illustrate.forEntity(entityId) });
+}
+
+export function useIllustrationsForTurnQuery(turnId: string) {
+  return useQuery({ queryKey: illustrationKeys.forTurn(turnId), queryFn: () => api.illustrate.forTurn(turnId) });
+}
+
+export function usePortraitMutation(entityId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (visualStyle: VisualStyle) => api.illustrate.portrait(entityId, visualStyle),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: illustrationKeys.forEntity(entityId) }),
+  });
+}
+
+export function useIllustrateSceneMutation(turnId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (visualStyle: VisualStyle) => api.illustrate.scene(turnId, visualStyle),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: illustrationKeys.forTurn(turnId) }),
+  });
+}
+
+/** On-demand prompt fetches (no persistent loading UI): `enabled: false` + the caller's own `.refetch()` on click. */
+export function usePortraitPromptQuery(entityId: string, visualStyle: VisualStyle) {
+  return useQuery({
+    queryKey: ['illustrate', 'portraitPrompt', entityId, visualStyle],
+    queryFn: () => api.illustrate.portraitPrompt(entityId, visualStyle),
+    enabled: false,
+  });
+}
+
+export function useScenePromptQuery(turnId: string, visualStyle: VisualStyle) {
+  return useQuery({
+    queryKey: ['illustrate', 'scenePrompt', turnId, visualStyle],
+    queryFn: () => api.illustrate.scenePrompt(turnId, visualStyle),
+    enabled: false,
+  });
+}
+
+/** No built-in invalidation: portrait/scene discard each refetch their own gallery query afterward, so this stays a bare wrapper. */
+export function useRemoveIllustrationMutation() {
+  return useMutation({ mutationFn: (illustrationId: string) => api.illustrate.remove(illustrationId) });
+}
+
+type CastEntry = Awaited<ReturnType<typeof api.cast>>[number];
+
+/**
+ * Pattern H: serializes writes via `scope` so concurrent saves for the same
+ * entity (portrait discard, appearance blur, vow edits — all three panels
+ * are mounted together in `CastTab`) queue instead of racing, and each
+ * patch is built from the *currently cached* sheet (`['cast']`, the only
+ * place a `Sheet` lives client-side) rather than a stale closed-over prop,
+ * reproducing `createSheetSaveQueue`'s `latest`-tracking without the queue.
+ */
+export function useSaveSheetMutation(entityId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    scope: { id: `sheet-save-${entityId}` },
+    mutationFn: (buildPatch: (sheet: Sheet) => Partial<Sheet>) => {
+      const current = queryClient.getQueryData<CastEntry[]>(castKeys.all)?.find((c) => c.sheet.entityId === entityId)?.sheet;
+      if (!current) throw new Error(`no cached sheet for entity ${entityId}`);
+      return api.saveSheet(entityId, buildPatch(current));
+    },
+    onSuccess: (updated) =>
+      queryClient.setQueryData<CastEntry[]>(castKeys.all, (old) =>
+        old?.map((c) => (c.sheet.entityId === entityId ? { ...c, sheet: updated } : c)),
+      ),
   });
 }

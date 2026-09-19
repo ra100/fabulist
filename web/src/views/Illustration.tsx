@@ -10,6 +10,17 @@
  */
 import { useEffect, useState } from 'react';
 import { api, VISUAL_STYLES, type ComposedPrompt, type Illustration, type Sheet, type VisualStyle } from '../api.ts';
+import {
+  useIllustrateSceneMutation,
+  useIllustrationsForEntityQuery,
+  useIllustrationsForTurnQuery,
+  useImageStatusQuery,
+  usePortraitMutation,
+  usePortraitPromptQuery,
+  useRemoveIllustrationMutation,
+  useSaveSheetMutation,
+  useScenePromptQuery,
+} from '../queries.ts';
 
 /**
  * The five-way style picker asked for directly: realistic, drawing, sketch,
@@ -44,14 +55,9 @@ export function StylePicker({ value, onChange, disabled }: { value: VisualStyle;
  * answer and none of them should have to coordinate a shared fetch.
  */
 function useImageProviderReady(): boolean | null {
-  const [ready, setReady] = useState<boolean | null>(null);
-  useEffect(() => {
-    void api.images
-      .status()
-      .then((r) => setReady(r.ready))
-      .catch(() => setReady(false));
-  }, []);
-  return ready;
+  const { data, isError } = useImageStatusQuery();
+  if (isError) return false;
+  return data ? data.ready : null;
 }
 
 /**
@@ -113,45 +119,44 @@ function StatusLine({ illus, busy, error }: { illus: Illustration | null; busy: 
  */
 export function PortraitPanel({ sheet, onChanged }: { sheet: Sheet; onChanged: () => void }) {
   const [style, setStyle] = useState<VisualStyle>('drawing');
-  const [gallery, setGallery] = useState<Illustration[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState<ComposedPrompt | null>(null);
   const [showPrompt, setShowPrompt] = useState(false);
   const ready = useImageProviderReady();
 
-  const load = () => void api.illustrate.forEntity(sheet.entityId).then(setGallery);
-  useEffect(load, [sheet.entityId]);
+  const galleryQuery = useIllustrationsForEntityQuery(sheet.entityId);
+  const gallery = galleryQuery.data ?? [];
+  const promptQuery = usePortraitPromptQuery(sheet.entityId, style);
+  const portraitMutation = usePortraitMutation(sheet.entityId);
+  const removeIllustrationMutation = useRemoveIllustrationMutation();
+  const saveSheetMutation = useSaveSheetMutation(sheet.entityId);
 
   const current = gallery.find((i) => i.status === 'done');
+  const busy = portraitMutation.isPending;
+  const error = portraitMutation.error instanceof Error ? portraitMutation.error.message : null;
 
   async function generate() {
-    setBusy(true);
-    setError(null);
     try {
-      await api.illustrate.portrait(sheet.entityId, style);
-      load();
-      onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      await portraitMutation.mutateAsync(style);
+    } catch {
+      return;
     }
-    setBusy(false);
+    await galleryQuery.refetch();
+    onChanged();
   }
 
   async function loadPrompt() {
-    setPrompt(await api.illustrate.portraitPrompt(sheet.entityId, style));
+    await promptQuery.refetch();
     setShowPrompt(true);
   }
 
   async function discard() {
     if (!current) return;
-    await api.illustrate.remove(current.id);
+    await removeIllustrationMutation.mutateAsync(current.id);
     // The reference this portrait set is now gone; clear it rather than
     // leaving `Appearance` pointing at a file that no longer exists.
     if (sheet.appearance.referenceImagePath) {
-      await api.saveSheet(sheet.entityId, { appearance: { ...sheet.appearance, referenceImagePath: null, seed: null } });
+      await saveSheetMutation.mutateAsync((s) => ({ appearance: { ...s.appearance, referenceImagePath: null, seed: null } }));
     }
-    load();
+    await galleryQuery.refetch();
     onChanged();
   }
 
@@ -190,7 +195,7 @@ export function PortraitPanel({ sheet, onChanged }: { sheet: Sheet; onChanged: (
             steadier likeness across regenerations.
           </p>
         ) : null}
-        {showPrompt && prompt ? <PromptText prompt={prompt} /> : null}
+        {showPrompt && promptQuery.data ? <PromptText prompt={promptQuery.data} /> : null}
       </div>
     </div>
   );
@@ -207,11 +212,12 @@ export function AppearanceEditor({ sheet, onSaved }: { sheet: Sheet; onSaved: (s
   const [description, setDescription] = useState(sheet.appearance.description);
   const [attire, setAttire] = useState(sheet.appearance.attire);
   const [markers, setMarkers] = useState(sheet.appearance.markers.join('; '));
+  const saveSheetMutation = useSaveSheetMutation(sheet.entityId);
 
   async function save() {
-    const updated = await api.saveSheet(sheet.entityId, {
-      appearance: { ...sheet.appearance, description, attire, markers: markers.split(';').map((m) => m.trim()).filter(Boolean) },
-    });
+    const updated = await saveSheetMutation.mutateAsync((current) => ({
+      appearance: { ...current.appearance, description, attire, markers: markers.split(';').map((m) => m.trim()).filter(Boolean) },
+    }));
     onSaved(updated);
   }
 
@@ -251,45 +257,42 @@ export function AppearanceEditor({ sheet, onSaved }: { sheet: Sheet; onSaved: (s
  * becomes an image once used.
  */
 export function SceneIllustration({ turnId, defaultStyle }: { turnId: string; defaultStyle: VisualStyle }) {
-  const [illus, setIllus] = useState<Illustration | null>(null);
   const [style, setStyle] = useState<VisualStyle>(defaultStyle);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [prompt, setPrompt] = useState<ComposedPrompt | null>(null);
   const [showPrompt, setShowPrompt] = useState(false);
   const ready = useImageProviderReady();
 
+  const illustrationsQuery = useIllustrationsForTurnQuery(turnId);
+  const list = illustrationsQuery.data ?? [];
+  const illus = list.find((i) => i.status === 'done') ?? list[0] ?? null;
+  const promptQuery = useScenePromptQuery(turnId, style);
+  const sceneMutation = useIllustrateSceneMutation(turnId);
+  const removeIllustrationMutation = useRemoveIllustrationMutation();
+  const busy = sceneMutation.isPending;
+  const error = sceneMutation.error instanceof Error ? sceneMutation.error.message : null;
+
   useEffect(() => {
-    void api.illustrate.forTurn(turnId).then((list) => {
-      const done = list.find((i) => i.status === 'done') ?? list[0] ?? null;
-      setIllus(done);
-      if (done) setExpanded(true);
-    });
-  }, [turnId]);
+    if (illus) setExpanded(true);
+  }, [illus?.id]);
 
   async function generate() {
-    setBusy(true);
-    setError(null);
     try {
-      const created = await api.illustrate.scene(turnId, style);
-      setIllus(created);
-      setExpanded(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      await sceneMutation.mutateAsync(style);
+    } catch {
+      return;
     }
-    setBusy(false);
+    setExpanded(true);
   }
 
   async function loadPrompt() {
-    setPrompt(await api.illustrate.scenePrompt(turnId, style));
+    await promptQuery.refetch();
     setShowPrompt(true);
   }
 
   async function discard() {
     if (!illus) return;
-    await api.illustrate.remove(illus.id);
-    setIllus(null);
+    await removeIllustrationMutation.mutateAsync(illus.id);
+    await illustrationsQuery.refetch();
   }
 
   if (!expanded) {
@@ -322,7 +325,7 @@ export function SceneIllustration({ turnId, defaultStyle }: { turnId: string; de
               instead.
             </p>
           ) : null}
-          {showPrompt && prompt ? <PromptText prompt={prompt} /> : null}
+          {showPrompt && promptQuery.data ? <PromptText prompt={promptQuery.data} /> : null}
         </>
       )}
       <StatusLine illus={illus} busy={busy} error={error} />
