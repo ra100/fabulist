@@ -20,9 +20,7 @@ import {
   type RollbackTarget,
   type StaleServer,
   type State,
-  type Story,
   type TurnMeta,
-  type WorldSummary,
 } from './api.ts';
 import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
@@ -46,12 +44,16 @@ import {
   useBookInfiniteQuery,
   useCastQuery,
   useChaptersQuery,
+  useClaimStoriesMutation,
   useCloseSceneMutation,
+  useCreateStoryMutation,
+  useCreateWorldMutation,
   useCurrentUserQuery,
   useEncryptionKeysQuery,
   useEncryptionMigrationQuery,
   useEnrollMutation,
   useEntityQuery,
+  useForkStoryMutation,
   useGraphQuery,
   useKnobsQuery,
   useLockMutation,
@@ -61,16 +63,26 @@ import {
   usePinMutation,
   usePlayStreamMutation,
   useRegenerateMutation,
+  useRemoveStoryMutation,
+  useRemoveWorldMutation,
+  useRenameStoryMutation,
+  useRenameWorldMutation,
   useRollbackMutation,
   useSearchQuery,
   useSetKnobsMutation,
+  useSetSourcesMutation,
   useSetStyleMutation,
   useSetupStatusQuery,
+  useSetWorldVisibilityMutation,
   useSplitSceneMutation,
   useStateQuery,
+  useStoriesQuery,
   useStyleQuery,
+  useSwitchStoryMutation,
   useTurnQuery,
   useUnlockMutation,
+  useUnownedStoriesQuery,
+  useWorldsQuery,
 } from './queries.ts';
 import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
 import {
@@ -165,17 +177,6 @@ export function App() {
   const stateQuery = useStateQuery();
   const setupStatusQuery = useSetupStatusQuery();
   const state = stateQuery.data ?? null;
-
-  /**
-   * Used to be "invalidate the manual `stateRequestGate` so a stale
-   * in-flight `refresh()` gets discarded" — now a no-op: `state`/`setup.status`
-   * are queries, so TanStack Query's own fetch-supersession already discards
-   * an outdated response once the mutation's own post-mutation refetch
-   * starts. Kept as a named callback (rather than inlining `() => {}` at each
-   * `onMutationStart` prop) until Tasks 5/11 convert `BookTab`/`StoriesTab`
-   * and drop the prop entirely.
-   */
-  const invalidateRefreshRequests = useCallback(() => {}, []);
 
   const selectStory = useCallback((storyId: string) => {
     void invalidateEverything(queryClient);
@@ -461,8 +462,6 @@ export function App() {
             navigateToTab('book');
             void refresh();
           }}
-          onMutationStart={invalidateRefreshRequests}
-          onStorySelected={selectStory}
           onResetToWizard={() => setFresh(true)}
         />
       ) : null}
@@ -2269,17 +2268,19 @@ function SettingsTab({
  * `world_access` — which is strictly better than an admin flag, because it can say
  * "you own this one world" rather than only "you administer everything".
  */
-function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySelected, onResetToWizard }: {
+function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
   currentSceneTurn: string;
   onSwitched: () => void;
-  onMutationStart: () => void;
-  onStorySelected: (storyId: string) => void;
   onResetToWizard: () => void;
 }) {
-  const [stories, setStories] = useState<Story[] | null>(null);
+  const storiesQuery = useStoriesQuery();
+  const worldsQuery = useWorldsQuery();
   /** Imported books nobody owns yet — see the claim panel below. */
-  const [unowned, setUnowned] = useState<Story[]>([]);
-  const [worlds, setWorlds] = useState<WorldSummary[] | null>(null);
+  const unownedQuery = useUnownedStoriesQuery();
+  const stories = storiesQuery.data ?? null;
+  const worlds = worldsQuery.data?.worlds ?? null;
+  const unowned = unownedQuery.data ?? [];
+  const loadError = (storiesQuery.error ?? worldsQuery.error)?.message ?? null;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
@@ -2304,6 +2305,18 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
   const reading = (worlds ?? []).filter((w) => w.reading).map((w) => w.slug);
   const [sourceError, setSourceError] = useState<string | null>(null);
 
+  const setSourcesMutation = useSetSourcesMutation();
+  const switchStoryMutation = useSwitchStoryMutation();
+  const forkStoryMutation = useForkStoryMutation();
+  const createStoryMutation = useCreateStoryMutation();
+  const renameStoryMutation = useRenameStoryMutation();
+  const removeStoryMutation = useRemoveStoryMutation();
+  const claimStoriesMutation = useClaimStoriesMutation();
+  const createWorldMutation = useCreateWorldMutation();
+  const renameWorldMutation = useRenameWorldMutation();
+  const removeWorldMutation = useRemoveWorldMutation();
+  const setWorldVisibilityMutation = useSetWorldVisibilityMutation();
+
   /**
    * Adds or removes a world from what this book reads.
    *
@@ -2323,11 +2336,9 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
       return;
     }
     setSourceError(null);
-    onMutationStart();
     setBusy('sources');
     try {
-      await api.story.setSources(next);
-      await load();
+      await setSourcesMutation.mutateAsync(next);
       // Canon changed underneath every cached view, so the caller refetches
       // wholesale — the same thing a world switch used to require.
       onSwitched();
@@ -2338,31 +2349,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
     }
   };
 
-  const load = useCallback(async () => {
-    try {
-      // Three independent reads in parallel: changing sources invalidates all of
-      // them, so they are always refetched together anyway.
-      const [storyList, worldList, orphanList] = await Promise.all([
-        api.stories.list(),
-        api.worlds.list(),
-        // Unowned books never appear in the ordinary list — `owner_user_id = $1`
-        // cannot match NULL — so without this an imported save is in the database
-        // and nowhere on screen.
-        api.stories.unowned().catch(() => [] as Story[]),
-      ]);
-      setStories(storyList);
-      setWorlds(worldList.worlds);
-      setUnowned(orphanList);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
-  useEffect(() => void load(), [load]);
-
   const run = async (id: string, label: string, fn: () => Promise<void>) => {
-    onMutationStart();
     setBusy(id + label);
     try {
       await fn();
@@ -2378,7 +2365,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
     <div className="main">
       <div className="pane">
         <div className="measure-tool">
-          {error ? <div className="card warn">{error}</div> : null}
+          {error || loadError ? <div className="card warn">{error ?? loadError}</div> : null}
 
           <div className="card">
             <h3>worlds</h3>
@@ -2428,9 +2415,8 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                                 if (e.key === 'Escape') setWorldRenaming(null);
                                 if (e.key === 'Enter') {
                                   void run(w.slug, 'wrename', async () => {
-                                    await api.worlds.rename(w.slug, worldRenaming.title);
+                                    await renameWorldMutation.mutateAsync({ slug: w.slug, title: worldRenaming.title });
                                     setWorldRenaming(null);
-                                    await load();
                                     onSwitched();
                                   });
                                 }
@@ -2478,8 +2464,10 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                                   : 'let anyone signed in read this world'
                               }
                               onClick={() => void run(w.slug, 'wvis', async () => {
-                                await api.worlds.setVisibility(w.slug, w.visibility === 'public' ? 'private' : 'public');
-                                await load();
+                                await setWorldVisibilityMutation.mutateAsync({
+                                  slug: w.slug,
+                                  visibility: w.visibility === 'public' ? 'private' : 'public',
+                                });
                               })}
                             >
                               {w.visibility === 'public' ? 'make private' : 'make public'}
@@ -2498,8 +2486,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                             onClick={() => {
                               if (!window.confirm(`Delete the world "${w.title || w.slug}"? This removes its canon. Books are not touched.`)) return;
                               void run(w.slug, 'wdelete', async () => {
-                                await api.worlds.remove(w.slug);
-                                await load();
+                                await removeWorldMutation.mutateAsync(w.slug);
                               });
                             }}
                           >
@@ -2522,9 +2509,8 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                 disabled={busy === 'newworld create'}
                 title="creates an empty world; switch to it and the setup wizard will offer to ingest a wiki"
                 onClick={() => void run('newworld', 'create', async () => {
-                  await api.worlds.create(newWorldTitle.trim() || undefined);
+                  await createWorldMutation.mutateAsync(newWorldTitle.trim() || undefined);
                   setNewWorldTitle('');
-                  await load();
                 })}
               >
                 add world
@@ -2568,9 +2554,8 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                               onKeyDown={async (e) => {
                                 if (e.key !== 'Enter') return;
                                 await run(s.id, 'rename', async () => {
-                                  await api.stories.rename(s.id, renaming.title);
+                                  await renameStoryMutation.mutateAsync({ id: s.id, title: renaming.title });
                                   setRenaming(null);
-                                  await load();
                                 });
                               }}
                             />
@@ -2593,9 +2578,9 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                             disabled={s.current || busy === `${s.id}switch`}
                             title={s.current ? 'already reading this book' : 'open this book'}
                             onClick={() => void run(s.id, 'switch', async () => {
-                              await api.stories.switchTo(s.id);
-                              // Client-side selection, not just the server-side
-                              // call above: once login is on, `world.storyId`
+                              // `useSwitchStoryMutation` also does the
+                              // client-side selection, not just the server-side
+                              // call: once login is on, `world.storyId`
                               // resolution happens per-request from *this user's*
                               // own stories (`worldFor`, `src/store/index.ts`),
                               // not from the legacy shared pointer `switchTo`
@@ -2603,8 +2588,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                               // this, every request after a successful switch
                               // would keep resolving back to "my most recently
                               // played" rather than the one just picked.
-                              onStorySelected(s.id);
-                              await load();
+                              await switchStoryMutation.mutateAsync(s.id);
                               onSwitched();
                             })}
                           >
@@ -2632,8 +2616,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                             onClick={async () => {
                               if (!window.confirm(`Delete "${s.title || 'untitled story'}"? This only removes this one story — canon and other stories are unaffected.`)) return;
                               await run(s.id, 'delete', async () => {
-                                await api.stories.remove(s.id);
-                                await load();
+                                await removeStoryMutation.mutateAsync(s.id);
                               });
                             }}
                           >
@@ -2669,10 +2652,9 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                     disabled={busy === `claim${st.id}`}
                     onClick={() =>
                       run(st.id, 'claim', async () => {
-                        await api.stories.claim(st.id);
-                        // Refetch: the claimed book moves out of this panel and into
-                        // the library above, and `run` does not reload on its own.
-                        await load();
+                        // Invalidated on success: the claimed book moves out of
+                        // this panel and into the library above.
+                        await claimStoriesMutation.mutateAsync(st.id);
                       })
                     }
                   >
@@ -2687,8 +2669,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                   disabled={busy === 'claimall'}
                   onClick={() =>
                     run('all', 'claim', async () => {
-                      await api.stories.claim();
-                      await load();
+                      await claimStoriesMutation.mutateAsync(undefined);
                     })
                   }
                 >
@@ -2708,8 +2689,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
               className="primary"
               disabled={busy === 'new'}
               onClick={() => void run('new', 'create', async () => {
-                await api.stories.create();
-                await load();
+                await createStoryMutation.mutateAsync(undefined);
               })}
             >
               new book
@@ -2739,9 +2719,8 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                   onClick={() => void run(forkFrom.id, 'fork', async () => {
                     const scene = forkScene.trim() ? Number(forkScene.trim()) : undefined;
                     if (scene !== undefined && (!Number.isFinite(scene) || scene < 1)) throw new Error('scene must be a number of 1 or greater');
-                    await api.stories.fork(forkFrom.id, forkTitle.trim() || undefined, scene);
+                    await forkStoryMutation.mutateAsync({ fromStoryId: forkFrom.id, title: forkTitle.trim() || undefined, atScene: scene });
                     setForkFrom(null);
-                    await load();
                   })}
                 >
                   create branch
@@ -2761,7 +2740,6 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
               className="warn"
               onClick={async () => {
                 if (!window.confirm('Discard this book and start a blank one? Its scenes and prose go; canon and every other book stay.')) return;
-                onMutationStart();
                 await api.setup.reset();
                 onResetToWizard();
               }}

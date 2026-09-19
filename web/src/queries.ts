@@ -10,7 +10,19 @@
  * migration plan this file is built up task-by-task against.
  */
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { api, type AppConfig, type ConfigBundle, type Knobs, type PatchResult, type ProviderSpec, type RollbackTarget, type StyleContract, type Thread } from './api.ts';
+import {
+  api,
+  setSelectedStoryId,
+  type AppConfig,
+  type ConfigBundle,
+  type Knobs,
+  type PatchResult,
+  type ProviderSpec,
+  type RollbackTarget,
+  type Story,
+  type StyleContract,
+  type Thread,
+} from './api.ts';
 
 // --------------------------------------------------------------- meta / auth
 
@@ -414,4 +426,131 @@ export const anchorsKeys = { all: ['anchors'] as const };
 
 export function useAnchorsQuery() {
   return useQuery({ queryKey: anchorsKeys.all, queryFn: api.anchors });
+}
+
+// ------------------------------------------------------------- stories / worlds
+
+export const storiesKeys = {
+  all: ['stories'] as const,
+  unowned: ['stories', 'unowned'] as const,
+};
+
+export function useStoriesQuery() {
+  return useQuery({ queryKey: storiesKeys.all, queryFn: api.stories.list });
+}
+
+/** Swallows a failed fetch into an empty list, same as the old `.catch(() => [])` at the call site. */
+export function useUnownedStoriesQuery() {
+  return useQuery({ queryKey: storiesKeys.unowned, queryFn: () => api.stories.unowned().catch(() => [] as Story[]) });
+}
+
+export const worldsKeys = { all: ['worlds'] as const };
+
+export function useWorldsQuery() {
+  return useQuery({ queryKey: worldsKeys.all, queryFn: api.worlds.list });
+}
+
+export function useCreateStoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (title?: string) => api.stories.create(title),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: storiesKeys.all }),
+  });
+}
+
+/** Branches a story without switching to it — `StoriesTab`'s old handler only ever re-fetched the story list. */
+export function useForkStoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { fromStoryId: string; title?: string; atScene?: number }) =>
+      api.stories.fork(vars.fromStoryId, vars.title, vars.atScene),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: storiesKeys.all }),
+  });
+}
+
+/** Pattern D: a story switch changes what every cached view means, so this reloads everything, matching today's `App.refresh()` broadcast. */
+export function useSwitchStoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (storyId: string) => api.stories.switchTo(storyId),
+    onSuccess: (_data, storyId) => {
+      setSelectedStoryId(storyId);
+      return invalidateEverything(queryClient);
+    },
+  });
+}
+
+export function useRenameStoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { id: string; title: string }) => api.stories.rename(vars.id, vars.title),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: storiesKeys.all }),
+  });
+}
+
+export function useRemoveStoryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.stories.remove(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: storiesKeys.all }),
+  });
+}
+
+/** Backs both the single-book and "claim all" buttons — `id` omitted claims every unowned book. */
+export function useClaimStoriesMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id?: string) => api.stories.claim(id),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: storiesKeys.all }),
+        queryClient.invalidateQueries({ queryKey: storiesKeys.unowned }),
+      ]),
+  });
+}
+
+/**
+ * Changes which worlds this story reads — i.e. its canon — so every cached
+ * view is stale afterward, "the same thing a world switch used to require"
+ * (see `App.tsx`'s `toggleSource`, which this replaces).
+ */
+export function useSetSourcesMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (slugs: string[]) => api.story.setSources(slugs),
+    onSuccess: () => invalidateEverything(queryClient),
+  });
+}
+
+export function useCreateWorldMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (title?: string) => api.worlds.create(title),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: worldsKeys.all }),
+  });
+}
+
+export function useRenameWorldMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { slug: string; title: string }) => api.worlds.rename(vars.slug, vars.title),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: worldsKeys.all }),
+  });
+}
+
+export function useRemoveWorldMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (slug: string) => api.worlds.remove(slug),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: worldsKeys.all }),
+  });
+}
+
+export function useSetWorldVisibilityMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { slug: string; visibility: 'public' | 'private' }) =>
+      api.worlds.setVisibility(vars.slug, vars.visibility),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: worldsKeys.all }),
+  });
 }
