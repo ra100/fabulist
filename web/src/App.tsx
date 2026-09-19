@@ -35,6 +35,7 @@ import {
   encryptionKeys,
   ingestHealthKeys,
   invalidateEverything,
+  storiesKeys,
   timelineKeys,
   useAddAnchorMutation,
   useAnchorsQuery,
@@ -57,6 +58,7 @@ import {
   useIngestHealthQuery,
   useKnobsQuery,
   useLockMutation,
+  useLockSheetFieldMutation,
   useLogoutMutation,
   useMetaQuery,
   useMigrateMutation,
@@ -569,6 +571,7 @@ function PrivateStoragePanel({
   const unlockMutation = useUnlockMutation();
   const lockMutation = useLockMutation();
   const migrateMutation = useMigrateMutation();
+  const queryClient = useQueryClient();
 
   const prepare = async () => {
     if (passphrase !== confirmation) {
@@ -578,7 +581,10 @@ function PrivateStoragePanel({
     setBusy(true);
     setError(null);
     try {
-      const stories = await api.stories.list();
+      // Reuses whatever `useStoriesQuery()` (StoriesTab) already has cached
+      // rather than firing a second independent fetch — same `['stories']`
+      // key, so this is a cache hit whenever the stories tab has loaded.
+      const stories = await queryClient.fetchQuery({ queryKey: storiesKeys.all, queryFn: api.stories.list });
       const next = await createEncryptionEnrollment(user.id, passphrase, stories.map((story) => story.id));
       setDraft(next);
       setPassphrase('');
@@ -1928,6 +1934,7 @@ function CastTab({ state }: { state: State | null }) {
   const load = useCallback(async () => {
     await refetch();
   }, [refetch]);
+  const lockSheetFieldMutation = useLockSheetFieldMutation();
 
   const visible = layer ? cast.filter(({ entity }) => entity?.layer === layer) : cast;
 
@@ -1988,7 +1995,7 @@ function CastTab({ state }: { state: State | null }) {
                           className={on ? 'primary' : ''}
                           aria-pressed={on}
                           onClick={async () => {
-                            await api.lock(sheet.entityId, path, !on);
+                            await lockSheetFieldMutation.mutateAsync({ id: sheet.entityId, path, locked: !on });
                             await load();
                           }}
                         >
