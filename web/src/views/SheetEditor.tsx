@@ -11,9 +11,9 @@
  * are the exception — add/remove/toggle-broken write immediately since
  * there is no natural "blur" for a button.
  */
-import { useRef, useState } from 'react';
-import { api, type Sheet, type Vow } from '../api.ts';
-import { createSheetSaveQueue, type SheetPatchBuilder } from './sheetSaveQueue.ts';
+import { useState } from 'react';
+import type { Sheet, Vow } from '../api.ts';
+import { useSaveSheetMutation } from '../queries.ts';
 
 const list = (s: string) => s.split(';').map((x) => x.trim()).filter(Boolean);
 
@@ -102,16 +102,13 @@ function VowRow({
 
 export function SheetEditor({ sheet, currentScene, onSaved }: { sheet: Sheet; currentScene: number; onSaved: (s: Sheet) => void }) {
   const [error, setError] = useState<string | null>(null);
-  const saver = useRef<ReturnType<typeof createSheetSaveQueue> | null>(null);
-  if (!saver.current) {
-    saver.current = createSheetSaveQueue(sheet, api.saveSheet, onSaved);
-  }
-  saver.current.updateBase(sheet);
+  const saveSheetMutation = useSaveSheetMutation(sheet.entityId);
 
-  function save(buildPatch: SheetPatchBuilder) {
+  function save(buildPatch: (sheet: Sheet) => Partial<Sheet>) {
     setError(null);
-    void saver.current?.save(buildPatch).catch((err: unknown) => {
-      setError(err instanceof Error ? err.message : String(err));
+    saveSheetMutation.mutate(buildPatch, {
+      onSuccess: onSaved,
+      onError: (err) => setError(err instanceof Error ? err.message : String(err)),
     });
   }
 
