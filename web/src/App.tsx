@@ -1,4 +1,5 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   api,
   checkServerFreshness,
@@ -37,7 +38,18 @@ import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
 import { HistoryRequestGate } from './history-request-gate.ts';
-import { useCurrentUserQuery, useLogoutMutation, useMetaQuery } from './queries.ts';
+import {
+  encryptionKeys,
+  useCurrentUserQuery,
+  useEncryptionKeysQuery,
+  useEncryptionMigrationQuery,
+  useEnrollMutation,
+  useLockMutation,
+  useLogoutMutation,
+  useMetaQuery,
+  useMigrateMutation,
+  useUnlockMutation,
+} from './queries.ts';
 import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
 import {
   isPrivateStoryLockedError,
@@ -117,8 +129,18 @@ export function App() {
   // is server-side: `requireAdmin` in `src/server/api.ts` 403s those routes
   // regardless of what this renders).
   const currentUser = useCurrentUserQuery().data?.user ?? null;
-  const [privateStorage, setPrivateStorage] = useState<PrivateStorageSnapshot | null>(null);
-  const [privateStorageError, setPrivateStorageError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const keysQuery = useEncryptionKeysQuery(!!currentUser);
+  const migrationQuery = useEncryptionMigrationQuery(!!currentUser);
+  // Mirrors the old combined `Promise.all([keys(), migration()])` fetch:
+  // stays `null` until both reads have landed at least once, and (since
+  // `.data` persists across a failed background refetch) keeps showing the
+  // last-known snapshot rather than blanking out when a refetch errors.
+  const privateStorage = useMemo<PrivateStorageSnapshot | null>(() => {
+    if (!currentUser || !keysQuery.data || !migrationQuery.data) return null;
+    return { keys: keysQuery.data, migration: migrationQuery.data.migration };
+  }, [currentUser, keysQuery.data, migrationQuery.data]);
+  const privateStorageError = currentUser ? (keysQuery.error ?? migrationQuery.error)?.message ?? null : null;
 
   const stateRequestGate = useRef(new HistoryRequestGate());
 
@@ -222,38 +244,17 @@ export function App() {
   // unrelated field just to save one more `/api/meta` hit (cheap, no body to
   // speak of) would make a reader wonder why a staleness check also carries
   // a version string.
-  const refreshPrivateStorage = useCallback(async () => {
-    if (!currentUser) {
-      setPrivateStorage(null);
-      setPrivateStorageError(null);
-      return;
-    }
-    try {
-      const [keys, { migration }] = await Promise.all([
-        api.encryption.keys(),
-        api.encryption.migration(),
-      ]);
-      setPrivateStorage({ keys, migration });
-      setPrivateStorageError(null);
-    } catch (err) {
-      setPrivateStorageError(err instanceof Error ? err.message : String(err));
-      throw err;
-    }
-  }, [currentUser]);
-
-  useEffect(() => {
-    void refreshPrivateStorage().catch(() => {});
-  }, [refreshPrivateStorage]);
-
   useEffect(() => {
     const expiries = privateStorage?.keys.grants
       .map(({ expiresAt }) => Date.parse(expiresAt))
       .filter(Number.isFinite) ?? [];
     if (!expiries.length) return;
     const delay = Math.max(1_000, Math.min(...expiries) - Date.now() + 250);
-    const timer = window.setTimeout(() => void refreshPrivateStorage().catch(() => {}), delay);
+    const timer = window.setTimeout(() => {
+      void queryClient.invalidateQueries({ queryKey: encryptionKeys.all });
+    }, delay);
     return () => window.clearTimeout(timer);
-  }, [privateStorage, refreshPrivateStorage]);
+  }, [privateStorage, queryClient]);
 
   const openPrivateStorage = useCallback(() => {
     navigateToTab('settings');
@@ -263,9 +264,9 @@ export function App() {
   }, [navigateToTab]);
 
   const refreshAfterPrivateStorageChange = useCallback(async () => {
-    await refreshPrivateStorage();
+    await queryClient.invalidateQueries({ queryKey: encryptionKeys.all });
     await refresh();
-  }, [refresh, refreshPrivateStorage]);
+  }, [refresh, queryClient]);
 
   const logoutMutation = useLogoutMutation();
 
@@ -526,6 +527,10 @@ function PrivateStoragePanel({
   const enrolled = keyBundle?.enrolled ?? null;
   const grants = keyBundle?.grants ?? [];
   const migration = snapshot?.migration ?? null;
+  const enrollMutation = useEnrollMutation();
+  const unlockMutation = useUnlockMutation();
+  const lockMutation = useLockMutation();
+  const migrateMutation = useMigrateMutation();
 
   const prepare = async () => {
     if (passphrase !== confirmation) {
@@ -552,7 +557,7 @@ function PrivateStoragePanel({
     setBusy(true);
     setError(null);
     try {
-      await api.encryption.enroll(draft);
+      await enrollMutation.mutateAsync(draft);
       setDraft(null);
       await onChanged();
     } catch (err) {
@@ -571,7 +576,7 @@ function PrivateStoragePanel({
       unlocked = unlockWithRecovery
         ? await unlockWithRecoveryCode(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret)
         : await unlockWithPassphrase(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret);
-      const result = await api.encryption.unlock(storyKeyHandoff(unlocked.storyKeys));
+      const result = await unlockMutation.mutateAsync(storyKeyHandoff(unlocked.storyKeys));
       if (!result.grants.length) throw new Error('no private stories were unlocked');
       setUnlockSecret('');
       await onChanged();
@@ -590,7 +595,7 @@ function PrivateStoragePanel({
     setBusy(true);
     setError(null);
     try {
-      await api.encryption.lock();
+      await lockMutation.mutateAsync();
       setUnlockSecret('');
       window.location.reload();
     } catch (err) {
@@ -604,7 +609,7 @@ function PrivateStoragePanel({
     setBusy(true);
     setError(null);
     try {
-      await api.encryption.migrate();
+      await migrateMutation.mutateAsync();
       await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

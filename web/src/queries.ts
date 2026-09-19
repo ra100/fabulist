@@ -36,3 +36,44 @@ export function useCurrentUserQuery() {
 export function useLogoutMutation() {
   return useMutation({ mutationFn: api.auth.logout });
 }
+
+// ---------------------------------------------------------------- encryption
+
+/** `all` is the shared prefix used to invalidate both reads together (see `App.tsx`'s `refreshAfterPrivateStorageChange`). */
+export const encryptionKeys = {
+  all: ['encryption'] as const,
+  keys: ['encryption', 'keys'] as const,
+  migration: ['encryption', 'migration'] as const,
+};
+
+export function useEncryptionKeysQuery(enabled: boolean) {
+  return useQuery({ queryKey: encryptionKeys.keys, queryFn: api.encryption.keys, enabled });
+}
+
+export function useEncryptionMigrationQuery(enabled: boolean) {
+  return useQuery({ queryKey: encryptionKeys.migration, queryFn: api.encryption.migration, enabled });
+}
+
+/**
+ * These four don't invalidate on success themselves: `App.tsx`'s
+ * `PrivateStoragePanel` already calls its `onChanged` prop at the exact
+ * point each handler used to re-fetch (and, for `unlock`, only on some
+ * outcomes — an empty grant list throws before ever re-fetching), so
+ * duplicating that as a blanket `onSuccess` invalidate here would either
+ * race it or invalidate on paths that today never re-fetch.
+ */
+export function useEnrollMutation() {
+  return useMutation({ mutationFn: api.encryption.enroll });
+}
+
+export function useUnlockMutation() {
+  return useMutation({ mutationFn: api.encryption.unlock });
+}
+
+export function useLockMutation() {
+  return useMutation({ mutationFn: () => api.encryption.lock() });
+}
+
+export function useMigrateMutation() {
+  return useMutation({ mutationFn: api.encryption.migrate });
+}
