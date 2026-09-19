@@ -5,23 +5,40 @@
  * is one the player can actually answer, and the cost of an ingest is on screen
  * before anything is spent.
  */
-import { useEffect, useRef, useState } from 'react';
-import {
-  api,
-  type AppConfig,
-  type CandidateCharacter,
-  type CharacterSketch,
-  type ConfigBundle,
-  type DiscoverResult,
-  type IngestPlan,
-  type Job,
-  type PackSummary,
-  type PreviewResult,
-  type ProvidersReport,
-  type StyleContract,
-  type ValidationIssue,
-  type WikiCandidate,
+import { useEffect, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import type {
+  CandidateCharacter,
+  CharacterSketch,
+  DiscoverResult,
+  IngestPlan,
+  Job,
+  PackSummary,
+  PatchResult,
+  PreviewResult,
+  ProvidersReport,
+  StyleContract,
+  WikiCandidate,
 } from '../api.ts';
+import {
+  configKeys,
+  providersKeys,
+  useConfigQuery,
+  useEntityQuery,
+  useProvidersQuery,
+  useSetProfileMutation,
+  useSetupCancelMutation,
+  useSetupCharactersQuery,
+  useSetupCustomMutation,
+  useSetupDiscoverMutation,
+  useSetupIngestMutation,
+  useSetupJobQuery,
+  useSetupPackMutation,
+  useSetupPacksQuery,
+  useSetupPlanMutation,
+  useSetupPlayerMutation,
+  useSetupResolveMutation,
+} from '../queries.ts';
 import { ProvidersEditor } from './ConfigPanels.tsx';
 import { Mark } from '../Mark.tsx';
 
@@ -58,29 +75,44 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   // distinguishable from a 0 the user typed.
   const [pageBudget, setPageBudget] = useState('');
   const [passBBudget, setPassBBudget] = useState('');
-  const [job, setJob] = useState<Job | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [customDesc, setCustomDesc] = useState('');
-  const [cast, setCast] = useState<CandidateCharacter[]>([]);
   const [castSketch, setCastSketch] = useState<CharacterSketch | null>(null);
+  const [selectedCast, setSelectedCast] = useState<CandidateCharacter | null>(null);
   const [opening, setOpening] = useState('');
 
   // The shipped original worlds. Fetched when the gallery is first opened rather
   // than on mount: most sessions never reach this step, and the list is static
   // content that cannot go stale within a session.
-  const [packs, setPacks] = useState<PackSummary[] | null>(null);
+  const [packsRequested, setPacksRequested] = useState(false);
   const [pack, setPack] = useState<PackSummary | null>(null);
 
   // Half-closed already: settings can switch profile live, but the wizard used
   // to build the world silently on the mock regardless. A first-time visitor
   // meets deliberately plain prose at exactly the moment they are deciding
   // whether any of this is good, so offer the better model up front instead.
-  const [providers, setProviders] = useState<ProvidersReport | null>(null);
   const [switchingProfile, setSwitchingProfile] = useState(false);
   const [dismissedOffer, setDismissedOffer] = useState(false);
 
-  useEffect(() => {
-    void api.providers().then(setProviders).catch(() => {});
-  }, []);
+  const queryClient = useQueryClient();
+  const providersQuery = useProvidersQuery();
+  const providers = providersQuery.data ?? null;
+  const setProfileMutation = useSetProfileMutation();
+  const packsQuery = useSetupPacksQuery(packsRequested);
+  const packs = packsQuery.data?.packs ?? null;
+  const packMutation = useSetupPackMutation();
+  const resolveMutation = useSetupResolveMutation();
+  const planMutation = useSetupPlanMutation();
+  const customMutation = useSetupCustomMutation();
+  const discoverMutation = useSetupDiscoverMutation();
+  const ingestMutation = useSetupIngestMutation();
+  const cancelMutation = useSetupCancelMutation();
+  const setPlayerMutation = useSetupPlayerMutation();
+  const jobQuery = useSetupJobQuery(jobId);
+  const job = jobQuery.data ?? null;
+  const castQuery = useSetupCharactersQuery(step === 'cast');
+  const cast = castQuery.data ?? [];
+  const entityQuery = useEntityQuery(selectedCast?.id ?? null);
 
   const betterProfiles = (providers?.usableProfiles ?? []).filter((p) => p !== 'mock' && p !== providers?.profile);
 
@@ -95,43 +127,52 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
     setBusy(false);
   };
 
-  // Poll a running job. Progress is stages plus counts, never a fake percentage.
-  // Two job kinds land here: `discover` (the crawl+preview, feeding back into
-  // the still-editable plan) and `ingest`/`custom-world` (the actual write).
-  // They resolve to different steps, so the branch is on `job.kind` rather than
-  // a single fixed "done → cast" path.
-  const pollRef = useRef<number | null>(null);
+  // Same lookup, whether triggered by the button or by pressing Enter in the field.
+  const resolveUniverse = () =>
+    guard(async () => {
+      const res = await resolveMutation.mutateAsync(universe);
+      setCandidates(res.candidates);
+      if (!res.candidates.length) setError('I could not find a wiki for that. Try another name, or paste a wiki URL.');
+    });
+
+  // React to a polled job reaching a terminal status. Progress display itself
+  // (stages plus counts, never a fake percentage) is `useSetupJobQuery`'s
+  // `refetchInterval`; this only runs the one-time transition each job kind
+  // resolves to. Two job kinds land here: `discover` (the crawl+preview,
+  // feeding back into the still-editable plan) and `ingest`/`custom-world`
+  // (the actual write) — the branch is on `job.kind`, not a single fixed
+  // "done → cast" path.
   useEffect(() => {
-    if (job?.status !== 'running') return;
-    const tick = async () => {
-      try {
-        const next = await api.setup.job(job.id);
-        setJob(next);
-        if (next.status === 'done') {
-          if (next.kind === 'discover') {
-            const result = next.result as DiscoverResult;
-            setPreview(result);
-            setRefined(true);
-            setPlan((p) => (p ? { ...p, character: result.character } : p));
-            setStep('preview');
-          } else {
-            const result = next.result as { opening?: string } | null;
-            setOpening(result?.opening ?? '');
-            setCast(await api.setup.characters());
-            setStep('cast');
-          }
-        } else if (next.status === 'failed') {
-          setError(next.error ?? 'the job failed');
-        }
-      } catch {
-        // A dropped poll is not fatal; the next tick retries.
+    if (!job) return;
+    if (job.status === 'done') {
+      if (job.kind === 'discover') {
+        const result = job.result as DiscoverResult;
+        setPreview(result);
+        setRefined(true);
+        setPlan((p) => (p ? { ...p, character: result.character } : p));
+        setStep('preview');
+      } else {
+        const result = job.result as { opening?: string } | null;
+        setOpening(result?.opening ?? '');
+        setStep('cast');
       }
-    };
-    pollRef.current = window.setInterval(tick, 700);
-    return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
-    };
+    } else if (job.status === 'failed') {
+      setError(job.error ?? 'the job failed');
+    }
   }, [job]);
+
+  // Building the cast sketch from the entity the player picked in the `cast` step.
+  useEffect(() => {
+    if (!entityQuery.data || !selectedCast) return;
+    const detail = entityQuery.data;
+    setCastSketch({
+      existing: selectedCast.name,
+      name: selectedCast.name,
+      role: detail.entity.summary ?? '',
+      goals: detail.sheet?.identity.goals ?? [],
+      vows: (detail.sheet?.contract.vows ?? []).map((v) => ({ text: v.text, rank: v.rank })),
+    });
+  }, [entityQuery.data, selectedCast]);
 
   return (
     <div className="wizard">
@@ -182,9 +223,8 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                         void guard(async () => {
                           setSwitchingProfile(true);
                           try {
-                            const res = await api.setProfile(name);
-                            if (res.ok) setProviders(await api.providers());
-                            else setError(res.notes.join(' ') || `could not switch to ${name}`);
+                            const res = await setProfileMutation.mutateAsync(name);
+                            if (!res.ok) setError(res.notes.join(' ') || `could not switch to ${name}`);
                           } finally {
                             setSwitchingProfile(false);
                           }
@@ -236,7 +276,10 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 disabled={busy}
                 onClick={() =>
                   void guard(async () => {
-                    if (!packs) setPacks((await api.setup.packs()).packs);
+                    if (!packsRequested) {
+                      setPacksRequested(true);
+                      await packsQuery.refetch();
+                    }
                     setStep('packs');
                   })
                 }
@@ -308,7 +351,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                   disabled={busy}
                   onClick={() =>
                     void guard(async () => {
-                      const res = await api.setup.pack(pack.id, s.id);
+                      const res = await packMutation.mutateAsync({ packId: pack.id, scenarioId: s.id });
                       setOpening(res.opening);
                       if (res.warnings.length) setError(res.warnings.join(' · '));
                       setStep('ready');
@@ -333,7 +376,9 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
         {step === 'models' ? (
           <ModelsStep
             providers={providers}
-            onProvidersChanged={async () => setProviders(await api.providers())}
+            onProvidersChanged={async () => {
+              await queryClient.invalidateQueries({ queryKey: providersKeys.all });
+            }}
             onBack={() => setStep('source')}
           />
         ) : null}
@@ -349,13 +394,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 placeholder="The Witcher, Discworld, Dune, a wiki URL…"
                 onChange={(e) => setUniverse(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && universe.trim()) {
-                    void guard(async () => {
-                      const res = await api.setup.resolve(universe);
-                      setCandidates(res.candidates);
-                      if (!res.candidates.length) setError('I could not find a wiki for that. Try another name, or paste a wiki URL.');
-                    });
-                  }
+                  if (e.key === 'Enter' && universe.trim()) void resolveUniverse();
                 }}
               />
             </label>
@@ -363,13 +402,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               <button
                 className="primary"
                 disabled={busy || !universe.trim()}
-                onClick={() =>
-                  void guard(async () => {
-                    const res = await api.setup.resolve(universe);
-                    setCandidates(res.candidates);
-                    if (!res.candidates.length) setError('I could not find a wiki for that. Try another name, or paste a wiki URL.');
-                  })
-                }
+                onClick={() => void resolveUniverse()}
               >
                 {busy ? 'looking…' : 'find it'}
               </button>
@@ -424,7 +457,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 disabled={busy || !wish.trim()}
                 onClick={() =>
                   void guard(async () => {
-                    const p = await api.setup.plan(wish, wiki);
+                    const p = await planMutation.mutateAsync({ wish, wiki });
                     setPlan(p);
                     setStep('plan');
                   })
@@ -459,7 +492,8 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 disabled={busy || customDesc.trim().length < 20}
                 onClick={() =>
                   void guard(async () => {
-                    setJob(await api.setup.custom(customDesc));
+                    const j = await customMutation.mutateAsync(customDesc);
+                    setJobId(j.id);
                     setStep('running');
                   })
                 }
@@ -567,19 +601,19 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 onClick={() =>
                   void guard(async () => {
                     setRefined(false);
-                    const j = await api.setup.discover(
-                      wiki.baseUrl,
-                      plan.seeds,
-                      plan.mode,
-                      plan.character,
-                      plan.excludeCategories,
-                      wiki.name,
-                      {
+                    const j = await discoverMutation.mutateAsync({
+                      baseUrl: wiki.baseUrl,
+                      seeds: plan.seeds,
+                      mode: plan.mode,
+                      character: plan.character,
+                      excludeCategories: plan.excludeCategories,
+                      title: wiki.name,
+                      budgets: {
                         ...(pageBudget ? { maxPages: Number(pageBudget) } : {}),
                         ...(passBBudget ? { passBMaxPages: Number(passBBudget) } : {}),
                       },
-                    );
-                    setJob(j);
+                    });
+                    setJobId(j.id);
                     setStep('discovering');
                   })
                 }
@@ -673,7 +707,13 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 disabled={busy}
                 onClick={() =>
                   void guard(async () => {
-                    setJob(await api.setup.ingest(preview.previewKey, plan.character, plan.style, plan.opening));
+                    const j = await ingestMutation.mutateAsync({
+                      previewKey: preview.previewKey,
+                      character: plan.character,
+                      style: plan.style,
+                      opening: plan.opening,
+                    });
+                    setJobId(j.id);
                     setStep('running');
                   })
                 }
@@ -691,7 +731,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
 
             {job.status === 'running' ? (
               <div className="row">
-                <button onClick={() => void api.setup.cancel(job.id)}>stop, keep what's read</button>
+                <button onClick={() => cancelMutation.mutate(job.id)}>stop, keep what's read</button>
               </div>
             ) : null}
           </>
@@ -709,19 +749,8 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 <button
                   key={c.id}
                   className="choice small"
-                  disabled={busy}
-                  onClick={() =>
-                    void guard(async () => {
-                      const detail = await api.entity(c.id);
-                      setCastSketch({
-                        existing: c.name,
-                        name: c.name,
-                        role: detail.entity.summary ?? '',
-                        goals: detail.sheet?.identity.goals ?? [],
-                        vows: (detail.sheet?.contract.vows ?? []).map((v) => ({ text: v.text, rank: v.rank })),
-                      });
-                    })
-                  }
+                  disabled={entityQuery.isFetching}
+                  onClick={() => setSelectedCast(c)}
                 >
                   <b>
                     {c.name} {c.hasVows ? <span className="tag">has vows</span> : null}
@@ -747,7 +776,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                     disabled={busy}
                     onClick={() =>
                       void guard(async () => {
-                        const res = await api.setup.setPlayer(castSketch);
+                        const res = await setPlayerMutation.mutateAsync(castSketch);
                         setOpening(res.opening);
                         setStep('ready');
                       })
@@ -928,25 +957,22 @@ function ModelsStep({
   onProvidersChanged: () => Promise<void>;
   onBack: () => void;
 }) {
-  const [bundle, setBundle] = useState<ConfigBundle | null>(null);
+  const queryClient = useQueryClient();
+  const configQuery = useConfigQuery();
+  const bundle = configQuery.data ?? null;
+  const setProfileMutation = useSetProfileMutation();
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
+  // `ProvidersEditor`'s own writes already refresh the shared `['config']`
+  // cache (see `onConfigWriteSuccess` in `queries.ts`) — this is still a real
+  // reload, not `ConfigPanels.tsx`'s no-op one, because this call site also
+  // wants to re-probe `providers` afterward (below).
   const reload = async () => {
-    try {
-      setBundle(await api.config.get());
-    } catch (e) {
-      setNote(e instanceof Error ? e.message : String(e));
-    }
+    await queryClient.invalidateQueries({ queryKey: configKeys.all });
   };
 
-  // Load the config once on entering the step. `reload` is redefined every
-  // render, so depending on it would refetch continuously.
-  useEffect(() => {
-    void reload();
-  }, []);
-
-  const apply = async (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => {
+  const apply = async (fn: () => Promise<PatchResult>) => {
     setBusy(true);
     setNote(null);
     try {
@@ -990,7 +1016,7 @@ function ModelsStep({
                     setBusy(true);
                     setNote(null);
                     try {
-                      const res = await api.setProfile(name);
+                      const res = await setProfileMutation.mutateAsync(name);
                       if (!res.ok) setNote(res.notes.join(' ') || `could not switch to ${name}`);
                       await onProvidersChanged();
                     } catch (e) {

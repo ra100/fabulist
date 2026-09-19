@@ -14,7 +14,10 @@ import {
   api,
   setSelectedStoryId,
   type AppConfig,
+  type CharacterSketch,
   type ConfigBundle,
+  type IngestBudgetOverrides,
+  type Job,
   type Knobs,
   type PatchResult,
   type ProviderSpec,
@@ -22,6 +25,7 @@ import {
   type Story,
   type StyleContract,
   type Thread,
+  type WikiCandidate,
 } from './api.ts';
 
 // --------------------------------------------------------------- meta / auth
@@ -552,5 +556,138 @@ export function useSetWorldVisibilityMutation() {
     mutationFn: (vars: { slug: string; visibility: 'public' | 'private' }) =>
       api.worlds.setVisibility(vars.slug, vars.visibility),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: worldsKeys.all }),
+  });
+}
+
+// ------------------------------------------------------------------- setup
+
+export const providersKeys = { all: ['providers'] as const };
+
+export function useProvidersQuery() {
+  return useQuery({ queryKey: providersKeys.all, queryFn: api.providers });
+}
+
+/** Text-model profile switch — shared by `SetupWizard.tsx` and (once Task 13 converts it) `App.tsx`'s `ProvidersPanel`. */
+export function useSetProfileMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (profile: string) => api.setProfile(profile),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: providersKeys.all }),
+  });
+}
+
+export const setupJobKeys = { detail: (id: string) => ['setup', 'job', id] as const };
+
+/**
+ * Polls while `status === 'running'`; `'done' | 'failed' | 'cancelled'` all
+ * stop it. Matches both manual `setInterval(tick, 700)` loops it replaces
+ * (`SetupWizard.tsx`'s job effect and `App.tsx`'s `IngestHealthPanel`) —
+ * same 700ms cadence, same stop condition, shared by both call sites since
+ * they poll the identical `/setup/job/:id` resource.
+ */
+export function useSetupJobQuery(jobId: string | null) {
+  return useQuery({
+    queryKey: setupJobKeys.detail(jobId ?? ''),
+    queryFn: () => api.setup.job(jobId as string),
+    enabled: jobId !== null,
+    refetchInterval: (query) => (query.state.data?.status === 'running' ? 700 : false),
+  });
+}
+
+/** Seeds the job cache with a start-mutation's own response, so the first render shows real progress instead of an empty state until the first poll lands. */
+function seedJob(queryClient: QueryClient, job: Job) {
+  queryClient.setQueryData(setupJobKeys.detail(job.id), job);
+}
+
+export function useSetupResolveMutation() {
+  return useMutation({ mutationFn: (query: string) => api.setup.resolve(query) });
+}
+
+export function useSetupPlanMutation() {
+  return useMutation({
+    mutationFn: (vars: { wish: string; wiki: WikiCandidate }) => api.setup.plan(vars.wish, vars.wiki),
+  });
+}
+
+export function useSetupDiscoverMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      baseUrl: string;
+      seeds: string[];
+      mode: string;
+      character: CharacterSketch;
+      excludeCategories: string[];
+      title: string;
+      budgets: IngestBudgetOverrides;
+    }) =>
+      api.setup.discover(vars.baseUrl, vars.seeds, vars.mode, vars.character, vars.excludeCategories, vars.title, vars.budgets),
+    onSuccess: (job) => seedJob(queryClient, job),
+  });
+}
+
+export function useSetupIngestMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { previewKey: string; character: CharacterSketch; style: Partial<StyleContract>; opening: string }) =>
+      api.setup.ingest(vars.previewKey, vars.character, vars.style, vars.opening),
+    onSuccess: (job) => seedJob(queryClient, job),
+  });
+}
+
+export function useSetupCustomMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (description: string) => api.setup.custom(description),
+    onSuccess: (job) => seedJob(queryClient, job),
+  });
+}
+
+export const setupPacksKeys = { all: ['setup', 'packs'] as const };
+
+/** Fetched on demand, not on mount: most sessions never open the gallery, and it's static content for the session. */
+export function useSetupPacksQuery(enabled: boolean) {
+  return useQuery({ queryKey: setupPacksKeys.all, queryFn: api.setup.packs, enabled });
+}
+
+export function useSetupPackMutation() {
+  return useMutation({
+    mutationFn: (vars: { packId: string; scenarioId?: string }) => api.setup.pack(vars.packId, vars.scenarioId),
+  });
+}
+
+export function useSetupCancelMutation() {
+  return useMutation({ mutationFn: (id: string) => api.setup.cancel(id) });
+}
+
+export const setupCharactersKeys = { all: ['setup', 'characters'] as const };
+
+export function useSetupCharactersQuery(enabled: boolean) {
+  return useQuery({ queryKey: setupCharactersKeys.all, queryFn: api.setup.characters, enabled });
+}
+
+export function useSetupPlayerMutation() {
+  return useMutation({ mutationFn: (sketch: Partial<CharacterSketch>) => api.setup.setPlayer(sketch) });
+}
+
+export function useSetupResetMutation() {
+  return useMutation({ mutationFn: () => api.setup.reset() });
+}
+
+export function useRebuildCanonMutation() {
+  return useMutation({ mutationFn: () => api.setup.rebuildCanon() });
+}
+
+export const ingestHealthKeys = { all: ['setup', 'ingestHealth'] as const };
+
+export function useIngestHealthQuery() {
+  return useQuery({ queryKey: ingestHealthKeys.all, queryFn: api.setup.ingestHealth });
+}
+
+export function useSetupContinueMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (overrides: Parameters<typeof api.setup.continue>[0]) => api.setup.continue(overrides),
+    onSuccess: (job) => seedJob(queryClient, job),
   });
 }

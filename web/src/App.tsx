@@ -11,7 +11,6 @@ import {
   type Entity,
   type EntityDetail,
   type ImageProvidersReport,
-  type IngestHealth,
   type Interrupt,
   type Job,
   type Knobs,
@@ -36,6 +35,7 @@ import { Mark } from './Mark.tsx';
 import {
   bookKeys,
   encryptionKeys,
+  ingestHealthKeys,
   invalidateEverything,
   timelineKeys,
   useAddAnchorMutation,
@@ -55,6 +55,7 @@ import {
   useEntityQuery,
   useForkStoryMutation,
   useGraphQuery,
+  useIngestHealthQuery,
   useKnobsQuery,
   useLockMutation,
   useLogoutMutation,
@@ -62,6 +63,7 @@ import {
   useMigrateMutation,
   usePinMutation,
   usePlayStreamMutation,
+  useRebuildCanonMutation,
   useRegenerateMutation,
   useRemoveStoryMutation,
   useRemoveWorldMutation,
@@ -72,6 +74,9 @@ import {
   useSetKnobsMutation,
   useSetSourcesMutation,
   useSetStyleMutation,
+  useSetupContinueMutation,
+  useSetupJobQuery,
+  useSetupResetMutation,
   useSetupStatusQuery,
   useSetWorldVisibilityMutation,
   useSplitSceneMutation,
@@ -2316,6 +2321,8 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
   const renameWorldMutation = useRenameWorldMutation();
   const removeWorldMutation = useRemoveWorldMutation();
   const setWorldVisibilityMutation = useSetWorldVisibilityMutation();
+  const resetMutation = useSetupResetMutation();
+  const rebuildCanonMutation = useRebuildCanonMutation();
 
   /**
    * Adds or removes a world from what this book reads.
@@ -2740,7 +2747,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
               className="warn"
               onClick={async () => {
                 if (!window.confirm('Discard this book and start a blank one? Its scenes and prose go; canon and every other book stay.')) return;
-                await api.setup.reset();
+                await resetMutation.mutateAsync();
                 onResetToWizard();
               }}
             >
@@ -2761,7 +2768,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
               disabled={busy === 'rebuild'}
               onClick={() => void run('canon', 'rebuild', async () => {
                 if (!window.confirm('Empty this world\u2019s canon so it can be ingested again? No prose is deleted.')) return;
-                await api.setup.rebuildCanon();
+                await rebuildCanonMutation.mutateAsync();
                 onResetToWizard();
               })}
             >
@@ -2825,9 +2832,14 @@ function UsagePanel({ usage }: { usage: State['usage'] | null }) {
  * saying so would just be noise on every settings screen that will never use
  * this panel.
  */
-function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | undefined; onChanged: () => void }) {
-  const [health, setHealth] = useState<IngestHealth | null>(null);
-  const [job, setJob] = useState<Job | null>(null);
+function IngestHealthPanel({ onChanged }: { worldTitle: string | undefined; onChanged: () => void }) {
+  const queryClient = useQueryClient();
+  const healthQuery = useIngestHealthQuery();
+  const health = healthQuery.data ?? null;
+  const [jobId, setJobId] = useState<string | null>(null);
+  const jobQuery = useSetupJobQuery(jobId);
+  const job = jobQuery.data ?? null;
+  const continueMutation = useSetupContinueMutation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [moreSeeds, setMoreSeeds] = useState('');
@@ -2835,40 +2847,13 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
   // Blank leaves this world's stored budget alone; a number re-crawls wider.
   const [morePages, setMorePages] = useState('');
 
-  const refresh = useCallback(async () => {
-    try {
-      setHealth(await api.setup.ingestHealth());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
+  // A continue job landing on a terminal status: re-read health (pages moved
+  // from pending/failed to done) and tell the app at large something changed,
+  // same two things the old manual poll loop did once it saw `status !== 'running'`.
   useEffect(() => {
-    void refresh();
-  }, [refresh, worldTitle]);
-
-  // Poll while a continue job is running, same shape as the wizard's own job
-  // polling — stages and counts, never a fake percentage.
-  const pollRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (job?.status !== 'running') return;
-    const tick = async () => {
-      try {
-        const next = await api.setup.job(job.id);
-        setJob(next);
-        if (next.status !== 'running') {
-          await refresh();
-          onChanged();
-        }
-      } catch {
-        // A dropped poll is not fatal; the next tick retries.
-      }
-    };
-    pollRef.current = window.setInterval(tick, 700);
-    return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
-    };
-  }, [job, refresh, onChanged]);
+    if (!job || job.status === 'running') return;
+    void queryClient.invalidateQueries({ queryKey: ingestHealthKeys.all }).then(() => onChanged());
+  }, [job, onChanged, queryClient]);
 
   // The escalation ladder stops at deep: "all" is a whole-wiki budget and is
   // only servable from an offline dump ingest, so it is never something this
@@ -2890,7 +2875,8 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
           // is skipped, so widening only pays for what is new.
           if (morePages) overrides.maxPages = Number(morePages);
         }
-        setJob(await api.setup.continue(overrides));
+        const j = await continueMutation.mutateAsync(overrides);
+        setJobId(j.id);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -2907,7 +2893,7 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
     <div className="card">
       <div className="row">
         <h3 className="grow" style={{ margin: 0 }}>reading {context?.wikiName}</h3>
-        <button disabled={busy} onClick={() => void refresh()}>refresh</button>
+        <button disabled={busy} onClick={() => void healthQuery.refetch()}>refresh</button>
       </div>
 
       {error ? <p className="small warn">{error}</p> : null}
