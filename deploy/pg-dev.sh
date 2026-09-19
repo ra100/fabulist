@@ -21,11 +21,16 @@ PGDATA="${FABULIST_PG_DATA:-$(cd "$(dirname "$0")/.." && pwd)/data/pgdev}"
 SOCKET_DIR="${FABULIST_PG_SOCKET:-/tmp}"
 
 # Homebrew's postgresql@18 is not on PATH by default (it is keg-only), so the
-# binaries are located explicitly rather than assumed. Falling back to PATH lets
-# this work on a Linux box or in CI where `initdb` is a normal command.
+# binaries are located explicitly rather than assumed. On Debian-family Linux,
+# `pg_config --bindir` finds versioned server binaries such as
+# /usr/lib/postgresql/18/bin even when only client tools are on PATH.
 PGBIN="${FABULIST_PG_BIN:-/opt/homebrew/opt/postgresql@18/bin}"
 if [ ! -x "$PGBIN/initdb" ]; then
-  PGBIN="$(dirname "$(command -v initdb)")"
+  if command -v initdb >/dev/null 2>&1; then
+    PGBIN="$(dirname "$(command -v initdb)")"
+  elif command -v pg_config >/dev/null 2>&1; then
+    PGBIN="$(pg_config --bindir)"
+  fi
 fi
 
 CONN="postgres://postgres@localhost:$PORT/fabulist_dev?host=$SOCKET_DIR"
