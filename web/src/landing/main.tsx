@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createRoot } from 'react-dom/client';
 import { bootPalette } from '../palette.ts';
 import '../styles.css';
@@ -9,6 +10,14 @@ import { Landing } from './Landing.tsx';
 // same stored key, so the marketing page and the app agree on their colour.
 bootPalette();
 
+// Independent from the main app's QueryClient: this is a separate HTML entry
+// point (landing.html) that never mounts alongside App.tsx.
+const queryClient = new QueryClient();
+
 const el = document.getElementById('root');
 if (!el) throw new Error('missing #root');
-createRoot(el).render(<Landing />);
+createRoot(el).render(
+  <QueryClientProvider client={queryClient}>
+    <Landing />
+  </QueryClientProvider>,
+);
