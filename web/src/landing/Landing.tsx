@@ -20,8 +20,9 @@
  * imply more than the state records" would be arguing against itself.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { PRESETS, resolvePalette, savePalette } from '../palette.ts';
+import { useCurrentUserQuery } from '../queries.ts';
 
 const MCP_URL = 'https://fabulist.rast.io/mcp';
 const REPO = 'https://github.com/ra100/fabulist';
@@ -488,24 +489,13 @@ export function Landing() {
   // null while unknown: a visitor who already has a session should be offered the
   // chronicle, not a sign-in they do not need. 401 here is the normal answer and
   // not an error — it is how the gate says "not signed in".
-  const [signedIn, setSignedIn] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    fetch('/api/auth/me')
-      .then((r) => (r.ok ? r.json() : null))
-      // `{ user: null }` is the honest answer when login is not configured at
-      // all, and it is a 200 — so the body decides this, not the status.
-      .then((d) => {
-        if (live) setSignedIn(!!d?.user);
-      })
-      .catch(() => {
-        if (live) setSignedIn(false);
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
+  //
+  // `{ user: null }` is the honest answer when login is not configured at
+  // all, and it is a 200 — so the body decides this, not the status. A
+  // fetch failure (network error, non-2xx) also reads as "not signed in"
+  // rather than "unknown", matching the previous raw-fetch behaviour.
+  const currentUserQuery = useCurrentUserQuery();
+  const signedIn = currentUserQuery.isPending ? null : !!currentUserQuery.data?.user;
 
   const enter = signedIn ? { href: '/', label: 'Open the chronicle' } : { href: '/auth/login', label: 'Sign in' };
 

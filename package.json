@@ -69,6 +69,7 @@
   "dependencies": {
     "7zip-min": "^3.0.1",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "@tanstack/react-query": "^5.103.1",
     "@workos-inc/node": "^10.13.0",
     "jose": "^6.2.12",
     "pg": "^8.23.0",
