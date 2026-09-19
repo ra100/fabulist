@@ -7,15 +7,17 @@
  * at the moment a phrase annoys you — so it is also addable straight from a lint
  * finding in the why panel.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
+import type { AppConfig, ConfigBundle, PatchResult, ProbeResult, ProviderSpec, ValidationIssue } from '../api.ts';
 import {
-  api,
-  type AppConfig,
-  type ConfigBundle,
-  type ProbeResult,
-  type ProviderSpec,
-  type ValidationIssue,
-} from '../api.ts';
+  useBlockMutation,
+  useConfigPatchMutation,
+  useConfigQuery,
+  usePutProviderMutation,
+  useRemoveProviderMutation,
+  useTestProviderMutation,
+  useUnblockMutation,
+} from '../queries.ts';
 
 const KINDS = ['openai-compat', 'anthropic', 'ollama', 'bedrock', 'google', 'copilot'] as const;
 const DIALECTS = ['openai', 'vllm', 'llamacpp'] as const;
@@ -41,41 +43,32 @@ function relevantFields(kind: string): Array<'baseUrl' | 'dialect' | 'apiKeyEnv'
 }
 
 export function ConfigPanels({ onChanged }: { onChanged?: () => void }) {
-  const [bundle, setBundle] = useState<ConfigBundle | null>(null);
+  const { data: bundle, error: loadError } = useConfigQuery();
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setBundle(await api.config.get());
-    } catch (e) {
-      setNote(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const apply = async (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => {
+  // Cache writes (merging `PatchResult.config` back in, invalidating for
+  // `providerKeys`/`presets` changes) happen inside the mutation hooks
+  // themselves (`queries.ts`), shared with `App.tsx`'s `WhyPanel`; this wrapper
+  // is left only with the per-call UI bookkeeping the old code mixed in.
+  const apply = async (fn: () => Promise<PatchResult>) => {
     setBusy(true);
     setNote(null);
     try {
       const result = await fn();
       setIssues(result.issues);
-      setBundle((prev) => (prev ? { ...prev, config: result.config } : prev));
       if (result.registryRebuilt) setNote('models reloaded — takes effect on the next turn');
       onChanged?.();
-      // Provider keys may have changed, so refresh the surrounding lists.
-      setBundle(await api.config.get());
     } catch (e) {
       setNote(e instanceof Error ? e.message : String(e));
     }
     setBusy(false);
   };
 
-  if (!bundle) return <div className="card"><h3>configuration</h3><p className="empty">loading…</p></div>;
+  if (!bundle) {
+    return <div className="card"><h3>configuration</h3><p className="empty">{loadError ? loadError.message : 'loading…'}</p></div>;
+  }
   const cfg = bundle.config;
 
   return (
@@ -94,7 +87,11 @@ export function ConfigPanels({ onChanged }: { onChanged?: () => void }) {
 
       <ProsePanel cfg={cfg} busy={busy} apply={apply} />
       <RoutingPanel bundle={bundle} busy={busy} apply={apply} />
-      <ProvidersEditor bundle={bundle} busy={busy} apply={apply} reload={load} />
+      {/* `reload` is a no-op here: `useConfigQuery`'s cache already refreshes itself
+          after every write (see `onConfigWriteSuccess` in `queries.ts`). `SetupWizard.tsx`'s
+          `ModelsStep` still passes its own real `reload` — its `bundle` is plain local
+          state, not this cache, so it still needs telling to re-fetch. */}
+      <ProvidersEditor bundle={bundle} busy={busy} apply={apply} reload={async () => {}} />
     </>
   );
 }
@@ -108,9 +105,12 @@ function ProsePanel({
 }: {
   cfg: AppConfig;
   busy: boolean;
-  apply: (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => Promise<void>;
+  apply: (fn: () => Promise<PatchResult>) => Promise<void>;
 }) {
   const [phrase, setPhrase] = useState('');
+  const patchMutation = useConfigPatchMutation();
+  const blockMutation = useBlockMutation();
+  const unblockMutation = useUnblockMutation();
 
   return (
     <div className="card">
@@ -122,7 +122,7 @@ function ProsePanel({
         </label>
         <input
           type="range" min="0" max="40" step="1" value={cfg.proseLintThreshold} disabled={busy}
-          onChange={(e) => void apply(() => api.config.patch({ proseLintThreshold: Number(e.target.value) }))}
+          onChange={(e) => void apply(() => patchMutation.mutateAsync({ proseLintThreshold: Number(e.target.value) }))}
         />
         <p className="hint">
           Lower rewrites more often. Over-tuned it produces careful, characterless prose, so the style anchors above do
@@ -142,13 +142,13 @@ function ProsePanel({
           onChange={(e) => setPhrase(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && phrase.trim()) {
-              void apply(() => api.config.block(phrase)).then(() => setPhrase(''));
+              void apply(() => blockMutation.mutateAsync(phrase)).then(() => setPhrase(''));
             }
           }}
         />
         <button
           disabled={busy || phrase.trim().length < 2}
-          onClick={() => void apply(() => api.config.block(phrase)).then(() => setPhrase(''))}
+          onClick={() => void apply(() => blockMutation.mutateAsync(phrase)).then(() => setPhrase(''))}
         >
           block
         </button>
@@ -156,7 +156,7 @@ function ProsePanel({
       {cfg.blocklist.length ? (
         <div className="chips" style={{ marginTop: 9 }}>
           {cfg.blocklist.map((p) => (
-            <button key={p} className="chip on" disabled={busy} title="stop blocking this" onClick={() => void apply(() => api.config.unblock(p))}>
+            <button key={p} className="chip on" disabled={busy} title="stop blocking this" onClick={() => void apply(() => unblockMutation.mutateAsync(p))}>
               {p} ×
             </button>
           ))}
@@ -177,9 +177,10 @@ function RoutingPanel({
 }: {
   bundle: ConfigBundle;
   busy: boolean;
-  apply: (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => Promise<void>;
+  apply: (fn: () => Promise<PatchResult>) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  const patchMutation = useConfigPatchMutation();
   const cfg = bundle.config;
 
   return (
@@ -202,7 +203,7 @@ function RoutingPanel({
               <select
                 value={cfg.routes[role] ?? ''}
                 disabled={busy}
-                onChange={(e) => void apply(() => api.config.patch({ routes: { ...cfg.routes, [role]: e.target.value } }))}
+                onChange={(e) => void apply(() => patchMutation.mutateAsync({ routes: { ...cfg.routes, [role]: e.target.value } }))}
               >
                 <option value="">(profile default)</option>
                 {bundle.providerKeys.map((key) => (
@@ -237,13 +238,16 @@ export function ProvidersEditor({
 }: {
   bundle: ConfigBundle;
   busy: boolean;
-  apply: (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => Promise<void>;
+  apply: (fn: () => Promise<PatchResult>) => Promise<void>;
   reload: () => Promise<void>;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [key, setKey] = useState('');
   const [spec, setSpec] = useState<ProviderSpec>(BLANK);
   const [tested, setTested] = useState<(ProbeResult & { issues: ValidationIssue[] }) | null>(null);
+  const removeProviderMutation = useRemoveProviderMutation();
+  const putProviderMutation = usePutProviderMutation();
+  const testProviderMutation = useTestProviderMutation();
   const cfg = bundle.config;
 
   const startEdit = (name: string) => {
@@ -324,7 +328,7 @@ export function ProvidersEditor({
               <button
                 style={{ padding: '2px 7px', fontSize: 11 }}
                 disabled={busy}
-                onClick={() => void apply(() => api.config.removeProvider(name))}
+                onClick={() => void apply(() => removeProviderMutation.mutateAsync(name))}
               >
                 ×
               </button>
@@ -429,7 +433,7 @@ export function ProvidersEditor({
           <div className="row" style={{ marginTop: 10 }}>
             <button
               disabled={busy || !spec.model.trim()}
-              onClick={() => void api.config.testProvider(key || 'candidate', spec).then(setTested)}
+              onClick={() => testProviderMutation.mutate({ key: key || 'candidate', spec }, { onSuccess: setTested })}
             >
               test it
             </button>
@@ -437,7 +441,7 @@ export function ProvidersEditor({
               className="primary"
               disabled={busy || !key.trim() || !spec.model.trim()}
               onClick={() =>
-                void apply(() => api.config.putProvider(key, spec)).then(async () => {
+                void apply(() => putProviderMutation.mutateAsync({ key, spec })).then(async () => {
                   setEditing(null);
                   await reload();
                 })
