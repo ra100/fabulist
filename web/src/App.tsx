@@ -10,12 +10,10 @@ import {
   type DepthMode,
   type Entity,
   type EntityDetail,
-  type ImageProvidersReport,
   type Interrupt,
   type Job,
   type Knobs,
   type PlayResponse,
-  type ProvidersReport,
   type RollbackTarget,
   type StaleServer,
   type State,
@@ -55,6 +53,7 @@ import {
   useEntityQuery,
   useForkStoryMutation,
   useGraphQuery,
+  useImageProvidersQuery,
   useIngestHealthQuery,
   useKnobsQuery,
   useLockMutation,
@@ -63,6 +62,7 @@ import {
   useMigrateMutation,
   usePinMutation,
   usePlayStreamMutation,
+  useProvidersQuery,
   useRebuildCanonMutation,
   useRegenerateMutation,
   useRemoveStoryMutation,
@@ -71,7 +71,9 @@ import {
   useRenameWorldMutation,
   useRollbackMutation,
   useSearchQuery,
+  useSetImageProfileMutation,
   useSetKnobsMutation,
+  useSetProfileMutation,
   useSetSourcesMutation,
   useSetStyleMutation,
   useSetupContinueMutation,
@@ -3012,27 +3014,19 @@ function IngestHealthPanel({ onChanged }: { worldTitle: string | undefined; onCh
  * cheaper than a user concluding the feature does not exist.
  */
 function ImageProvidersPanel() {
-  const [report, setReport] = useState<ImageProvidersReport | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const probe = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      setReport(await api.images.providers());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-    setBusy(false);
-  };
-
-  // Probe once on mount; the button re-runs it on demand. `probe` is
-  // deliberately not a dependency — it is redefined every render, so depending
-  // on it would re-probe on every keystroke elsewhere in the panel.
-  useEffect(() => {
-    void probe();
-  }, []);
+  const reportQuery = useImageProvidersQuery();
+  const report = reportQuery.data ?? null;
+  const setProfileMutation = useSetImageProfileMutation();
+  const busy = reportQuery.isFetching || setProfileMutation.isPending;
+  const error = reportQuery.error
+    ? reportQuery.error instanceof Error
+      ? reportQuery.error.message
+      : String(reportQuery.error)
+    : setProfileMutation.error
+      ? setProfileMutation.error instanceof Error
+        ? setProfileMutation.error.message
+        : String(setProfileMutation.error)
+      : null;
 
   const badge = (status: string) =>
     status === 'ready' ? (
@@ -3043,24 +3037,13 @@ function ImageProvidersPanel() {
       <span className="status pending">not set</span>
     );
 
-  const setProfile = (name: string | null) =>
-    void (async () => {
-      setBusy(true);
-      setError(null);
-      try {
-        await api.images.setProfile(name);
-        setReport(await api.images.providers());
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-      setBusy(false);
-    })();
+  const setProfile = (name: string | null) => setProfileMutation.mutate(name);
 
   return (
     <div className="card">
       <div className="row">
         <h3 className="grow" style={{ margin: 0 }}>illustration</h3>
-        <button disabled={busy} onClick={() => void probe()}>
+        <button disabled={busy} onClick={() => void reportQuery.refetch()}>
           {busy ? 'checking…' : 'recheck'}
         </button>
       </div>
@@ -3124,20 +3107,19 @@ function ImageProvidersPanel() {
  * Probing touches local ports and credential helpers, so it is on demand.
  */
 function ProvidersPanel() {
-  const [report, setReport] = useState<ProvidersReport | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const probe = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      setReport(await api.providers());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-    setBusy(false);
-  };
+  const reportQuery = useProvidersQuery(false);
+  const report = reportQuery.data ?? null;
+  const setProfileMutation = useSetProfileMutation();
+  const busy = reportQuery.isFetching || setProfileMutation.isPending;
+  const error = reportQuery.error
+    ? reportQuery.error instanceof Error
+      ? reportQuery.error.message
+      : String(reportQuery.error)
+    : setProfileMutation.error
+      ? setProfileMutation.error instanceof Error
+        ? setProfileMutation.error.message
+        : String(setProfileMutation.error)
+      : null;
 
   // The state is information; the fix is the action. Only the action takes colour.
   const badge = (status: string) =>
@@ -3153,7 +3135,7 @@ function ProvidersPanel() {
     <div className="card">
       <div className="row">
         <h3 className="grow" style={{ margin: 0 }}>models available here</h3>
-        <button disabled={busy} onClick={() => void probe()}>
+        <button disabled={busy} onClick={() => void reportQuery.refetch()}>
           {busy ? 'checking…' : report ? 'recheck' : 'check'}
         </button>
       </div>
@@ -3191,19 +3173,7 @@ function ProvidersPanel() {
                     className={name === report.profile ? 'primary' : ''}
                     aria-pressed={name === report.profile}
                     disabled={busy || name === report.profile}
-                    onClick={() =>
-                      void (async () => {
-                        setBusy(true);
-                        setError(null);
-                        try {
-                          await api.setProfile(name);
-                          setReport(await api.providers());
-                        } catch (e) {
-                          setError(e instanceof Error ? e.message : String(e));
-                        }
-                        setBusy(false);
-                      })()
-                    }
+                    onClick={() => setProfileMutation.mutate(name, { onSuccess: () => void reportQuery.refetch() })}
                   >
                     {name}
                   </button>
