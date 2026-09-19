@@ -1,17 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, type Entity, type Fact, type Sheet } from '../api.ts';
+import { useState } from 'react';
+import { useCastQuery, useFactsQuery, useGrantKnowledgeMutation, useRevokeKnowledgeMutation } from '../queries.ts';
 
 export function FactsView() {
-  const [facts, setFacts] = useState<Fact[]>([]);
-  const [cast, setCast] = useState<Array<{ sheet: Sheet; entity: Entity | null }>>([]);
+  const { data: facts = [] } = useFactsQuery();
+  const { data: cast = [] } = useCastQuery();
+  const revokeKnowledge = useRevokeKnowledgeMutation();
+  const grantKnowledge = useGrantKnowledgeMutation();
   const [grantTarget, setGrantTarget] = useState<Record<string, string>>({});
   const [grantLevel, setGrantLevel] = useState<Record<string, string>>({});
-
-  const load = useCallback(async () => setFacts(await api.facts()), []);
-  useEffect(() => {
-    void load();
-    void api.cast().then(setCast);
-  }, [load]);
 
   return (
     <div className="main">
@@ -58,10 +54,7 @@ export function FactsView() {
                         <button
                           aria-label={`revoke ${fact.text} from ${knower.name}`}
                           title="revoke — back to never told"
-                          onClick={async () => {
-                            await api.revokeKnowledge(fact.id, knower.entityId);
-                            await load();
-                          }}
+                          onClick={() => revokeKnowledge.mutate({ factId: fact.id, entityId: knower.entityId })}
                         >
                           ×
                         </button>
@@ -97,10 +90,9 @@ export function FactsView() {
                     </select>
                     <button
                       disabled={!target}
-                      onClick={async () => {
-                        await api.grantKnowledge(fact.id, target, level);
+                      onClick={() => {
+                        grantKnowledge.mutate({ factId: fact.id, entityId: target, level });
                         setGrantTarget((previous) => ({ ...previous, [fact.id]: '' }));
-                        await load();
                       }}
                     >
                       grant

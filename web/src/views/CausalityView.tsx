@@ -1,13 +1,11 @@
-import { Fragment, useEffect, useState } from 'react';
-import { api, type Consequence } from '../api.ts';
+import { Fragment, useState } from 'react';
+import type { Consequence } from '../api.ts';
+import { useConsequencesQuery, useTickMutation } from '../queries.ts';
 
 export function CausalityView() {
-  const [consequences, setConsequences] = useState<Consequence[]>([]);
+  const { data: consequences = [] } = useConsequencesQuery();
+  const tick = useTickMutation();
   const [reveal, setReveal] = useState(false);
-
-  useEffect(() => {
-    void api.consequences().then(setConsequences);
-  }, []);
 
   const byDepth = [...consequences].sort((a, b) => a.depth - b.depth || a.createdScene - b.createdScene);
   const collapsed: Array<Consequence & { count: number }> = [];
@@ -47,14 +45,7 @@ export function CausalityView() {
             <button className={reveal ? 'primary' : ''} onClick={() => setReveal(!reveal)}>
               {reveal ? 'hide spoilers' : 'reveal hidden'}
             </button>
-            <button
-              onClick={async () => {
-                await api.tick();
-                setConsequences(await api.consequences());
-              }}
-            >
-              tick world
-            </button>
+            <button onClick={() => tick.mutate()}>tick world</button>
           </div>
 
           <div className="chain">
