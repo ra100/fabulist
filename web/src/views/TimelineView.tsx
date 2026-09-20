@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
-import { api, type Timeline } from '../api.ts';
-import { HistoryRequestGate } from '../history-request-gate.ts';
+import { Fragment, useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { api, getSelectedStoryId, type Timeline } from '../api.ts';
+import { queryKeys } from '../query-keys.ts';
 import { canBranchFromTimelineScene } from '../timeline-branching.ts';
 
 export function TimelineView({
@@ -14,30 +15,19 @@ export function TimelineView({
   onChanged: () => void | Promise<void>;
   onOpenBook: () => void;
 }) {
-  const [timeline, setTimeline] = useState<Timeline | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [reveal, setReveal] = useState<Set<number>>(new Set());
   const [branchingScene, setBranchingScene] = useState<number | null>(null);
-  const requestGate = useRef(new HistoryRequestGate());
+  const [branchError, setBranchError] = useState<string | null>(null);
+  const storyId = getSelectedStoryId();
 
-  useEffect(() => {
-    const revision = requestGate.current.beginRequest();
-    let disposed = false;
-    setError(null);
-    void api.timeline()
-      .then((nextTimeline) => {
-        if (disposed || !requestGate.current.isCurrent(revision)) return;
-        setTimeline(nextTimeline);
-      })
-      .catch((reason: unknown) => {
-        if (disposed || !requestGate.current.isCurrent(revision)) return;
-        setError(reason instanceof Error ? reason.message : String(reason));
-      });
-    return () => {
-      disposed = true;
-      requestGate.current.invalidate();
-    };
-  }, [refreshKey]);
+  // refreshKey (the history revision) sits in the key: a revision bump or a
+  // story switch swaps to a fresh cache slice instead of racing an old
+  // in-flight fetch into the new view.
+  const timelineQuery = useQuery({
+    queryKey: queryKeys.timeline(storyId, refreshKey),
+    queryFn: () => api.timeline(),
+  });
+  const timeline = timelineQuery.data ?? null;
 
   const chapterMeta = new Map((timeline?.chapters ?? []).map((c) => [c.chapter, c]));
   const byChapter = new Map<number, Timeline['scenes']>();
@@ -48,19 +38,27 @@ export function TimelineView({
   }
   const chapterNumbers = [...byChapter.keys()].sort((a, b) => a - b);
 
+  const error =
+    branchError ??
+    (timelineQuery.error instanceof Error ? timelineQuery.error.message : String(timelineQuery.error));
+
+  const branch = useMutation({
+    mutationFn: (scene: number) => api.rollback({ scene, mode: 'fork' }),
+  });
+
   async function branchFromScene(scene: number) {
     if (branchingScene !== null) return;
     setBranchingScene(scene);
-    setError(null);
+    setBranchError(null);
     try {
-      const result = await api.rollback({ scene, mode: 'fork' });
+      const result = await branch.mutateAsync(scene);
       if (!result.forkedStory) throw new Error('branch did not return a forked book');
       onStorySelected(result.forkedStory.id);
       await onChanged();
-      setBranchingScene(null);
       onOpenBook();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setBranchError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
       setBranchingScene(null);
     }
   }

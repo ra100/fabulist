@@ -9,7 +9,9 @@
  * image gets generated, only that this component handles it.
  */
 import { useEffect, useState } from 'react';
-import { api, VISUAL_STYLES, type ComposedPrompt, type Illustration, type Sheet, type VisualStyle } from '../api.ts';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
+import { api, getSelectedStoryId, VISUAL_STYLES, type ComposedPrompt, type Illustration, type Sheet, type VisualStyle } from '../api.ts';
+import { queryKeys } from '../query-keys.ts';
 
 /**
  * The five-way style picker asked for directly: realistic, drawing, sketch,
@@ -38,20 +40,23 @@ export function StylePicker({ value, onChange, disabled }: { value: VisualStyle;
 }
 
 /**
- * Whether a real image provider is configured right now. Checked once per
- * mount rather than threaded down as a prop, because every consumer of this
- * hook (the portrait panel, every scene panel in a long book) needs the same
- * answer and none of them should have to coordinate a shared fetch.
+ * Whether a real image provider is configured right now. Every consumer of
+ * this hook (the portrait panel, every scene panel in a long book) needs the
+ * same answer, so it reads one shared query instead of each panel probing —
+ * and none of them has to coordinate the fetch with its siblings.
  */
 function useImageProviderReady(): boolean | null {
-  const [ready, setReady] = useState<boolean | null>(null);
-  useEffect(() => {
-    void api.images
-      .status()
-      .then((r) => setReady(r.ready))
-      .catch(() => setReady(false));
-  }, []);
-  return ready;
+  const storyId = getSelectedStoryId();
+  // Shared key: every portrait and scene panel on screen asks the same
+  // question, so they all read one cached answer instead of probing each.
+  const query = useQuery({
+    queryKey: queryKeys.imagesStatus(storyId),
+    queryFn: () => api.images.status(),
+  });
+  // The old probe's catch set ready to false, not null — a failed status call
+  // reads as "no image model" so the prompt fallback still shows.
+  if (query.error) return false;
+  return query.data?.ready ?? null;
 }
 
 /**
@@ -113,47 +118,58 @@ function StatusLine({ illus, busy, error }: { illus: Illustration | null; busy: 
  */
 export function PortraitPanel({ sheet, onChanged }: { sheet: Sheet; onChanged: () => void }) {
   const [style, setStyle] = useState<VisualStyle>('drawing');
-  const [gallery, setGallery] = useState<Illustration[]>([]);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<ComposedPrompt | null>(null);
   const [showPrompt, setShowPrompt] = useState(false);
   const ready = useImageProviderReady();
 
-  const load = () => void api.illustrate.forEntity(sheet.entityId).then(setGallery);
-  useEffect(load, [sheet.entityId]);
+  // The old mount load is now the query's initial fetch; keepPreviousData holds
+  // the previous character's gallery until the new one lands, like the old
+  // setGallery-only-on-success.
+  const storyId = getSelectedStoryId();
+  const galleryQuery = useQuery({
+    queryKey: queryKeys.illustrationGallery(storyId, sheet.entityId),
+    queryFn: () => api.illustrate.forEntity(sheet.entityId),
+    placeholderData: keepPreviousData,
+  });
+  const gallery = galleryQuery.data ?? [];
 
   const current = gallery.find((i) => i.status === 'done');
 
-  async function generate() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.illustrate.portrait(sheet.entityId, style);
-      load();
+  const generate = useMutation({
+    mutationFn: () => api.illustrate.portrait(sheet.entityId, style),
+    onMutate: () => setError(null),
+    onSuccess: () => {
+      // Fire-and-forget like the old load(); a failed reload keeps the list.
+      void galleryQuery.refetch();
       onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-    setBusy(false);
-  }
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
 
-  async function loadPrompt() {
-    setPrompt(await api.illustrate.portraitPrompt(sheet.entityId, style));
-    setShowPrompt(true);
-  }
+  const loadPrompt = useMutation({
+    mutationFn: () => api.illustrate.portraitPrompt(sheet.entityId, style),
+    onSuccess: (p) => {
+      setPrompt(p);
+      setShowPrompt(true);
+    },
+  });
 
-  async function discard() {
-    if (!current) return;
-    await api.illustrate.remove(current.id);
-    // The reference this portrait set is now gone; clear it rather than
-    // leaving `Appearance` pointing at a file that no longer exists.
-    if (sheet.appearance.referenceImagePath) {
-      await api.saveSheet(sheet.entityId, { appearance: { ...sheet.appearance, referenceImagePath: null, seed: null } });
-    }
-    load();
-    onChanged();
-  }
+  const discard = useMutation({
+    mutationFn: async () => {
+      if (!current) return;
+      await api.illustrate.remove(current.id);
+      // The reference this portrait set is now gone; clear it rather than
+      // leaving `Appearance` pointing at a file that no longer exists.
+      if (sheet.appearance.referenceImagePath) {
+        await api.saveSheet(sheet.entityId, { appearance: { ...sheet.appearance, referenceImagePath: null, seed: null } });
+      }
+    },
+    onSuccess: () => {
+      void galleryQuery.refetch();
+      onChanged();
+    },
+  });
 
   return (
     <div className="portrait-panel">
@@ -165,20 +181,20 @@ export function PortraitPanel({ sheet, onChanged }: { sheet: Sheet; onChanged: (
         )}
       </div>
       <div className="portrait-controls">
-        <StylePicker value={style} onChange={setStyle} disabled={busy} />
+        <StylePicker value={style} onChange={setStyle} disabled={generate.isPending} />
         <div className="row" style={{ marginTop: 'var(--s2)' }}>
           {ready ? (
-            <button disabled={busy} onClick={() => void generate()}>
-              {busy ? 'generating…' : current ? 'regenerate' : 'generate portrait'}
+            <button disabled={generate.isPending} onClick={() => generate.mutate()}>
+              {generate.isPending ? 'generating…' : current ? 'regenerate' : 'generate portrait'}
             </button>
           ) : null}
-          <button onClick={() => (showPrompt ? setShowPrompt(false) : void loadPrompt())}>
+          <button onClick={() => (showPrompt ? setShowPrompt(false) : loadPrompt.mutate())}>
             {showPrompt ? 'hide prompt' : ready ? 'copy prompt instead' : 'copy prompt'}
           </button>
-          {current ? <button onClick={() => void discard()}>discard</button> : null}
+          {current ? <button onClick={() => discard.mutate()}>discard</button> : null}
           {gallery.length > 1 ? <span className="small dimmer">{gallery.length} generated</span> : null}
         </div>
-        <StatusLine illus={current ?? null} busy={busy} error={error} />
+        <StatusLine illus={current ?? null} busy={generate.isPending} error={error} />
         {ready === false ? (
           <p className="small dimmer" style={{ marginTop: 'var(--s2)' }}>            No image model configured (see settings → illustration) — copy the prompt into whatever image tool you
             have instead.
@@ -208,12 +224,13 @@ export function AppearanceEditor({ sheet, onSaved }: { sheet: Sheet; onSaved: (s
   const [attire, setAttire] = useState(sheet.appearance.attire);
   const [markers, setMarkers] = useState(sheet.appearance.markers.join('; '));
 
-  async function save() {
-    const updated = await api.saveSheet(sheet.entityId, {
-      appearance: { ...sheet.appearance, description, attire, markers: markers.split(';').map((m) => m.trim()).filter(Boolean) },
-    });
-    onSaved(updated);
-  }
+  const save = useMutation({
+    mutationFn: () =>
+      api.saveSheet(sheet.entityId, {
+        appearance: { ...sheet.appearance, description, attire, markers: markers.split(';').map((m) => m.trim()).filter(Boolean) },
+      }),
+    onSuccess: (updated) => onSaved(updated),
+  });
 
   return (
     <div className="appearance-editor">
@@ -224,12 +241,12 @@ export function AppearanceEditor({ sheet, onSaved }: { sheet: Sheet; onSaved: (s
           value={description}
           placeholder="build, face, colouring, bearing — what stays true in every image"
           onChange={(e) => setDescription(e.target.value)}
-          onBlur={save}
+          onBlur={() => save.mutate()}
         />
       </label>
       <label className="field-row block">
         <span>attire</span>
-        <input value={attire} placeholder="what they wear by default" onChange={(e) => setAttire(e.target.value)} onBlur={save} />
+        <input value={attire} placeholder="what they wear by default" onChange={(e) => setAttire(e.target.value)} onBlur={() => save.mutate()} />
       </label>
       <label className="field-row block">
         <span>markers</span>
@@ -237,7 +254,7 @@ export function AppearanceEditor({ sheet, onSaved }: { sheet: Sheet; onSaved: (s
           value={markers}
           placeholder="scars, tattoos — separated by ;"
           onChange={(e) => setMarkers(e.target.value)}
-          onBlur={save}
+          onBlur={() => save.mutate()}
         />
       </label>
     </div>
@@ -253,44 +270,52 @@ export function AppearanceEditor({ sheet, onSaved }: { sheet: Sheet; onSaved: (s
 export function SceneIllustration({ turnId, defaultStyle }: { turnId: string; defaultStyle: VisualStyle }) {
   const [illus, setIllus] = useState<Illustration | null>(null);
   const [style, setStyle] = useState<VisualStyle>(defaultStyle);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [prompt, setPrompt] = useState<ComposedPrompt | null>(null);
   const [showPrompt, setShowPrompt] = useState(false);
   const ready = useImageProviderReady();
+  const storyId = getSelectedStoryId();
+
+  // The old code fetched once per turn and then lived entirely in local state —
+  // it never reloaded after generate or discard. Keep that: the query only
+  // seeds `illus`, and the mutations below own every later change. A refetch
+  // here would resurface a second illustration where the old code showed none.
+  const illustrationsQuery = useQuery({
+    queryKey: queryKeys.sceneIllustrations(storyId, turnId),
+    queryFn: () => api.illustrate.forTurn(turnId),
+  });
 
   useEffect(() => {
-    void api.illustrate.forTurn(turnId).then((list) => {
-      const done = list.find((i) => i.status === 'done') ?? list[0] ?? null;
-      setIllus(done);
-      if (done) setExpanded(true);
-    });
-  }, [turnId]);
+    const list = illustrationsQuery.data;
+    if (!list) return;
+    const done = list.find((i) => i.status === 'done') ?? list[0] ?? null;
+    setIllus(done);
+    if (done) setExpanded(true);
+  }, [illustrationsQuery.data]);
 
-  async function generate() {
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await api.illustrate.scene(turnId, style);
+  const generate = useMutation({
+    mutationFn: () => api.illustrate.scene(turnId, style),
+    onMutate: () => setError(null),
+    onSuccess: (created) => {
       setIllus(created);
       setExpanded(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-    setBusy(false);
-  }
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
 
-  async function loadPrompt() {
-    setPrompt(await api.illustrate.scenePrompt(turnId, style));
-    setShowPrompt(true);
-  }
+  const loadPrompt = useMutation({
+    mutationFn: () => api.illustrate.scenePrompt(turnId, style),
+    onSuccess: (p) => {
+      setPrompt(p);
+      setShowPrompt(true);
+    },
+  });
 
-  async function discard() {
-    if (!illus) return;
-    await api.illustrate.remove(illus.id);
-    setIllus(null);
-  }
+  const discard = useMutation({
+    mutationFn: () => api.illustrate.remove(illus!.id),
+    onSuccess: () => setIllus(null),
+  });
 
   if (!expanded) {
     return (
@@ -305,14 +330,18 @@ export function SceneIllustration({ turnId, defaultStyle }: { turnId: string; de
       {illus?.status === 'done' ? (
         <>
           <img src={api.illustrate.imageUrl(illus.id)} alt="scene illustration" />
-          <button className="scene-illustrate-toggle" onClick={() => void discard()}>discard</button>
+          <button className="scene-illustrate-toggle" onClick={() => discard.mutate()}>discard</button>
         </>
       ) : (
         <>
           <div className="row" style={{ marginBottom: 'var(--s2)' }}>
-            <StylePicker value={style} onChange={setStyle} disabled={busy} />
-            {ready ? <button disabled={busy} onClick={() => void generate()}>{busy ? 'generating…' : 'generate'}</button> : null}
-            <button onClick={() => (showPrompt ? setShowPrompt(false) : void loadPrompt())}>
+            <StylePicker value={style} onChange={setStyle} disabled={generate.isPending} />
+            {ready ? (
+              <button disabled={generate.isPending} onClick={() => generate.mutate()}>
+                {generate.isPending ? 'generating…' : 'generate'}
+              </button>
+            ) : null}
+            <button onClick={() => (showPrompt ? setShowPrompt(false) : loadPrompt.mutate())}>
               {showPrompt ? 'hide prompt' : ready ? 'copy prompt instead' : 'copy prompt'}
             </button>
           </div>
@@ -325,7 +354,7 @@ export function SceneIllustration({ turnId, defaultStyle }: { turnId: string; de
           {showPrompt && prompt ? <PromptText prompt={prompt} /> : null}
         </>
       )}
-      <StatusLine illus={illus} busy={busy} error={error} />
+      <StatusLine illus={illus} busy={generate.isPending} error={error} />
     </div>
   );
 }

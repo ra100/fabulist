@@ -1,13 +1,25 @@
-import { Fragment, useEffect, useState } from 'react';
-import { api, type Consequence } from '../api.ts';
+import { Fragment, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, getSelectedStoryId, type Consequence } from '../api.ts';
+import { queryKeys } from '../query-keys.ts';
 
 export function CausalityView() {
-  const [consequences, setConsequences] = useState<Consequence[]>([]);
   const [reveal, setReveal] = useState(false);
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
 
-  useEffect(() => {
-    void api.consequences().then(setConsequences);
-  }, []);
+  const consequencesQuery = useQuery({
+    queryKey: queryKeys.consequences(storyId),
+    queryFn: () => api.consequences(),
+  });
+  const consequences = consequencesQuery.data ?? [];
+
+  const tick = useMutation({
+    mutationFn: () => api.tick(),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.consequences(storyId) });
+    },
+  });
 
   const byDepth = [...consequences].sort((a, b) => a.depth - b.depth || a.createdScene - b.createdScene);
   const collapsed: Array<Consequence & { count: number }> = [];
@@ -47,14 +59,7 @@ export function CausalityView() {
             <button className={reveal ? 'primary' : ''} onClick={() => setReveal(!reveal)}>
               {reveal ? 'hide spoilers' : 'reveal hidden'}
             </button>
-            <button
-              onClick={async () => {
-                await api.tick();
-                setConsequences(await api.consequences());
-              }}
-            >
-              tick world
-            </button>
+            <button onClick={() => void tick.mutate()}>tick world</button>
           </div>
 
           <div className="chain">

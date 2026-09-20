@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   api,
   checkServerFreshness,
@@ -7,23 +8,17 @@ import {
   type BookTurn,
   type CurrentUser,
   type DepthMode,
-  type Edge,
   type Entity,
   type EntityDetail,
-  type ImageProvidersReport,
-  type IngestHealth,
   type Interrupt,
   type Job,
   type Knobs,
-  type Sheet,
   type PlayResponse,
   type ProvidersReport,
   type RollbackTarget,
-  type StaleServer,
   type State,
   type Story,
   type TurnMeta,
-  type WorldSummary,
 } from './api.ts';
 import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
@@ -36,7 +31,7 @@ import { FactsView } from './views/FactsView.tsx';
 import { ThreadsView } from './views/ThreadsView.tsx';
 import { PRESETS, resolvePalette, savePalette } from './palette.ts';
 import { Mark } from './Mark.tsx';
-import { HistoryRequestGate } from './history-request-gate.ts';
+import { queryKeys } from './query-keys.ts';
 import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
 import {
   isPrivateStoryLockedError,
@@ -90,7 +85,6 @@ function ErrorNotice({ error }: { error: string | null }) {
 
 export function App() {
   const [tab, setTab] = useState<Tab>(() => tabForPath(window.location.pathname));
-  const [state, setState] = useState<State | null>(null);
   const [historyRevision, setHistoryRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // null while unknown, so the wizard does not flash before the check returns.
@@ -102,34 +96,17 @@ export function App() {
    * it, so the symptom was an ordinary-looking empty book with no explanation.
    */
   const [hasPlayer, setHasPlayer] = useState<boolean | null>(null);
-  // Non-null when the server predates this bundle. See `checkServerFreshness`.
-  const [stale, setStale] = useState<StaleServer | null>(null);
-  // `package.json`'s version on the running server — null while unknown, and
-  // stays null (rather than 'unknown') on a server old enough to predate the
-  // field, so the badge can simply not render instead of showing a
-  // misleading literal string. Purely informational: never feeds the
-  // staleness check above, which compares routes, not this.
-  const [serverVersion, setServerVersion] = useState<string | null>(null);
-  // null while unknown, `{ user: null }` when login is off or this browser
-  // has no session — SettingsTab reads `.isAdmin` off this to decide
-  // whether to render the system-wide panels at all (the actual boundary
-  // is server-side: `requireAdmin` in `src/server/api.ts` 403s those routes
-  // regardless of what this renders).
-  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
-  const [privateStorage, setPrivateStorage] = useState<PrivateStorageSnapshot | null>(null);
-  const [privateStorageError, setPrivateStorageError] = useState<string | null>(null);
 
-  const stateRequestGate = useRef(new HistoryRequestGate());
-
-  const invalidateRefreshRequests = useCallback(() => {
-    stateRequestGate.current.invalidate();
-  }, []);
+  const queryClient = useQueryClient();
+  // Every story-scoped key carries the selected story, so switching stories
+  // swaps the cache slice instead of racing an in-flight fetch into the new
+  // view — the race the request gate used to guard.
+  const storyId = getSelectedStoryId();
 
   const selectStory = useCallback((storyId: string) => {
-    invalidateRefreshRequests();
     setHistoryRevision((revision) => revision + 1);
     setSelectedStoryId(storyId);
-  }, [invalidateRefreshRequests]);
+  }, []);
 
   const navigateToTab = useCallback((next: Tab) => {
     const path = pathForTab(next);
@@ -160,60 +137,65 @@ export function App() {
     };
   }, []);
 
-  const refresh = useCallback(async () => {
-    const revision = stateRequestGate.current.beginRequest();
-    const storyId = getSelectedStoryId();
-    try {
-      // Freshness is re-checked on every refresh, not just at mount. Switching
-      // worlds can move you into an *empty* world, and that has to open the
-      // setup wizard — a mount-only check left you looking at a book view with
-      // no canon, no cast and no way to start one, which is indistinguishable
-      // from the app being broken. Both reads happen together so the wizard
-      // decision and the state it is deciding about cannot disagree.
-      const [nextState, status] = await Promise.all([
+  // The world state and the setup-wizard decision arrive together so they
+  // cannot disagree; freshness is re-checked on every refresh, not just at
+  // mount. Switching worlds can move you into an *empty* world, and that has
+  // to open the setup wizard — a mount-only check left you looking at a book
+  // view with no canon, no cast and no way to start one, which is
+  // indistinguishable from the app being broken.
+  const appStateQuery = useQuery({
+    queryKey: queryKeys.appState(storyId),
+    placeholderData: keepPreviousData,
+    queryFn: async () => {
+      const [worldState, status] = await Promise.all([
         api.state(),
         api.setup.status().catch(() => null),
       ]);
-      if (!stateRequestGate.current.isCurrent(revision) || getSelectedStoryId() !== storyId) return false;
-      setState(nextState);
-      // Null means the setup routes are disabled. Preserve an answer already
-      // received, but let first paint proceed for older servers.
-      if (status) {
-        setFresh(status.fresh);
-        setHasPlayer(status.hasPlayer);
-      } else {
-        setFresh((previous) => previous ?? false);
-      }
-      setError(null);
-      return true;
-    } catch (e) {
-      if (!stateRequestGate.current.isCurrent(revision) || getSelectedStoryId() !== storyId) return false;
-      const message = e instanceof Error ? e.message : String(e);
+      return { state: worldState, status };
+    },
+  });
+  const state = appStateQuery.data?.state ?? null;
+
+  // v5 has no per-query onSuccess/onError, so the side effects the old
+  // callbacks carried run here. A fetch that finishes after the story has
+  // moved on must not touch the fresh/hasPlayer/error state of the story now
+  // selected — the same guard the request gate used to provide — and a
+  // keepPreviousData frame is still the previous story's answer, so it must
+  // not act either.
+  const appStateData = appStateQuery.data;
+  const appStateError = appStateQuery.error;
+  const appStateIsPlaceholder = appStateQuery.isPlaceholderData;
+  useEffect(() => {
+    if (getSelectedStoryId() !== storyId) return;
+    if (appStateIsPlaceholder) return;
+    if (appStateError) {
+      const message = appStateError instanceof Error ? appStateError.message : String(appStateError);
       if (isPrivateStoryLockedError(message)) {
         setFresh(false);
         setError(null);
         navigateToTab('settings');
-        return false;
+      } else {
+        setError(message);
       }
-      setError(message);
-      return false;
+      return;
     }
-  }, [navigateToTab]);
-
-  const refreshHistory = useCallback(async () => {
-    if (await refresh()) setHistoryRevision((revision) => revision + 1);
-  }, [refresh]);
-
-  useEffect(() => {
-    void refresh();
-    return () => invalidateRefreshRequests();
-  }, [invalidateRefreshRequests, refresh]);
+    const data = appStateData;
+    if (!data) return;
+    // Null means the setup routes are disabled. Preserve an answer already
+    // received, but let first paint proceed for older servers.
+    if (data.status) {
+      setFresh(data.status.fresh);
+      setHasPlayer(data.status.hasPlayer);
+    } else {
+      setFresh((previous) => previous ?? false);
+    }
+    setError(null);
+  }, [appStateData, appStateError, appStateIsPlaceholder, storyId, navigateToTab]);
 
   // Independent of the world check: a stale server is worth saying even when
   // everything else looks fine, because the symptom appears later and elsewhere.
-  useEffect(() => {
-    void checkServerFreshness().then(setStale).catch(() => {});
-  }, []);
+  const staleQuery = useQuery({ queryKey: queryKeys.serverFreshness(), queryFn: checkServerFreshness });
+  const stale = staleQuery.data ?? null;
 
   // Separate call from the freshness check above rather than threading the
   // version through `checkServerFreshness`'s return value: that function's
@@ -221,38 +203,43 @@ export function App() {
   // unrelated field just to save one more `/api/meta` hit (cheap, no body to
   // speak of) would make a reader wonder why a staleness check also carries
   // a version string.
-  useEffect(() => {
-    void api.meta().then((m) => setServerVersion(m.version ?? null)).catch(() => {});
-  }, []);
+  const serverMetaQuery = useQuery({ queryKey: queryKeys.serverMeta(), queryFn: () => api.meta() });
+  const serverVersion = serverMetaQuery.data?.version ?? null;
 
   // Also independent of the world check: who is signed in has nothing to do
   // with which world/story is open, and must not block first paint on it.
-  useEffect(() => {
-    void api.auth.me().then((r) => setCurrentUser(r.user)).catch(() => setCurrentUser(null));
-  }, []);
+  const authQuery = useQuery({ queryKey: queryKeys.authMe(), queryFn: async () => (await api.auth.me()).user });
+  const currentUser = authQuery.data ?? null;
 
-  const refreshPrivateStorage = useCallback(async () => {
-    if (!currentUser) {
-      setPrivateStorage(null);
-      setPrivateStorageError(null);
-      return;
-    }
-    try {
+  const privateStorageQuery = useQuery({
+    queryKey: queryKeys.privateStorage(currentUser?.id ?? ''),
+    enabled: !!currentUser,
+    queryFn: async () => {
       const [keys, { migration }] = await Promise.all([
         api.encryption.keys(),
         api.encryption.migration(),
       ]);
-      setPrivateStorage({ keys, migration });
-      setPrivateStorageError(null);
-    } catch (err) {
-      setPrivateStorageError(err instanceof Error ? err.message : String(err));
-      throw err;
-    }
-  }, [currentUser]);
+      return { keys, migration };
+    },
+  });
+  const privateStorage = privateStorageQuery.data ?? null;
+  const privateStorageError = privateStorageQuery.error instanceof Error ? privateStorageQuery.error.message : null;
 
-  useEffect(() => {
-    void refreshPrivateStorage().catch(() => {});
-  }, [refreshPrivateStorage]);
+  // `invalidateQueries` resolves after the refetch it triggered has settled, so
+  // awaiting it and then reading the cache keeps the old refresh() contract:
+  // true only when the state actually reloaded.
+  const refresh = useCallback(async () => {
+    const key = queryKeys.appState(getSelectedStoryId());
+    await queryClient.invalidateQueries({ queryKey: key });
+    const snapshot = queryClient.getQueryState(key);
+    return snapshot?.data !== undefined && !snapshot.error;
+  }, [queryClient]);
+
+  const refreshHistory = useCallback(async () => {
+    if (await refresh()) setHistoryRevision((revision) => revision + 1);
+  }, [refresh]);
+
+  const refetchPrivateStorage = privateStorageQuery.refetch;
 
   useEffect(() => {
     const expiries = privateStorage?.keys.grants
@@ -260,9 +247,9 @@ export function App() {
       .filter(Number.isFinite) ?? [];
     if (!expiries.length) return;
     const delay = Math.max(1_000, Math.min(...expiries) - Date.now() + 250);
-    const timer = window.setTimeout(() => void refreshPrivateStorage().catch(() => {}), delay);
+    const timer = window.setTimeout(() => void refetchPrivateStorage().catch(() => {}), delay);
     return () => window.clearTimeout(timer);
-  }, [privateStorage, refreshPrivateStorage]);
+  }, [privateStorage, refetchPrivateStorage]);
 
   const openPrivateStorage = useCallback(() => {
     navigateToTab('settings');
@@ -272,9 +259,9 @@ export function App() {
   }, [navigateToTab]);
 
   const refreshAfterPrivateStorageChange = useCallback(async () => {
-    await refreshPrivateStorage();
+    await refetchPrivateStorage();
     await refresh();
-  }, [refresh, refreshPrivateStorage]);
+  }, [refresh, refetchPrivateStorage]);
 
   /**
    * Clears the server-side session cookie, then hard-navigates to `/` —
@@ -411,7 +398,6 @@ export function App() {
           state={state}
           hasPlayer={hasPlayer}
           onChanged={refreshHistory}
-          onMutationStart={invalidateRefreshRequests}
           onStorySelected={selectStory}
         />
       ) : null}
@@ -425,7 +411,7 @@ export function App() {
       ) : null}
       {tab === 'graph' ? <GraphTab /> : null}
       {tab === 'cast' ? <CastTab state={state} /> : null}
-      {tab === 'threads' ? <ThreadsView state={state} onChanged={refresh} /> : null}
+      {tab === 'threads' ? <ThreadsView state={state} onChanged={() => void refresh()} /> : null}
       {tab === 'causality' ? <CausalityView /> : null}
       {tab === 'facts' ? <FactsView /> : null}
       {tab === 'library' ? (
@@ -435,7 +421,6 @@ export function App() {
             navigateToTab('book');
             void refresh();
           }}
-          onMutationStart={invalidateRefreshRequests}
           onStorySelected={selectStory}
           onResetToWizard={() => setFresh(true)}
         />
@@ -527,98 +512,85 @@ function PrivateStoragePanel({
   const [copied, setCopied] = useState(false);
   const [unlockWithRecovery, setUnlockWithRecovery] = useState(false);
   const [unlockSecret, setUnlockSecret] = useState('');
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const keyBundle = snapshot?.keys ?? null;
   const enrolled = keyBundle?.enrolled ?? null;
   const grants = keyBundle?.grants ?? [];
   const migration = snapshot?.migration ?? null;
 
-  const prepare = async () => {
-    if (passphrase !== confirmation) {
-      setError('the passphrase confirmation does not match');
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
+  // One mutation per action, the way the five old async functions were. Each
+  // `mutationFn` keeps its original try-block body — including the awaited
+  // `onChanged()` — so `isPending` covers exactly the window the old shared
+  // `busy` flag covered. `onMutate` clears the error the way each function's
+  // leading `setError(null)` did.
+  const prepare = useMutation({
+    mutationFn: async () => {
       const stories = await api.stories.list();
-      const next = await createEncryptionEnrollment(user.id, passphrase, stories.map((story) => story.id));
+      return createEncryptionEnrollment(user.id, passphrase, stories.map((story) => story.id));
+    },
+    onMutate: () => setError(null),
+    onSuccess: (next) => {
       setDraft(next);
       setPassphrase('');
       setConfirmation('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
 
-  const enroll = async () => {
-    if (!draft || !acknowledged) return;
-    setBusy(true);
-    setError(null);
-    try {
+  const enroll = useMutation({
+    mutationFn: async () => {
+      if (!draft) throw new Error('nothing to save — the enrollment draft is gone');
       await api.encryption.enroll(draft);
       setDraft(null);
       await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+    },
+    onMutate: () => setError(null),
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
 
-  const unlock = async () => {
-    if (!keyBundle?.userKey) return;
-    setBusy(true);
-    setError(null);
-    let unlocked: Awaited<ReturnType<typeof unlockWithPassphrase>> | null = null;
-    try {
-      unlocked = unlockWithRecovery
+  const unlock = useMutation({
+    mutationFn: async () => {
+      if (!keyBundle?.userKey) throw new Error('no user key to unlock');
+      const unlocked = unlockWithRecovery
         ? await unlockWithRecoveryCode(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret)
         : await unlockWithPassphrase(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret);
-      const result = await api.encryption.unlock(storyKeyHandoff(unlocked.storyKeys));
-      if (!result.grants.length) throw new Error('no private stories were unlocked');
-      setUnlockSecret('');
-      await onChanged();
-      if (unlocked.failedStoryKeys.length) {
-        setError(`Skipped corrupt private-story key(s): ${unlocked.failedStoryKeys.map((item) => item.storyId).join(', ')}`);
+      try {
+        const result = await api.encryption.unlock(storyKeyHandoff(unlocked.storyKeys));
+        if (!result.grants.length) throw new Error('no private stories were unlocked');
+        setUnlockSecret('');
+        await onChanged();
+        if (unlocked.failedStoryKeys.length) {
+          setError(`Skipped corrupt private-story key(s): ${unlocked.failedStoryKeys.map((item) => item.storyId).join(', ')}`);
+        }
+      } finally {
+        // The old finally ran this on every path once a key was derived.
+        eraseUnlockedStoryKeys(unlocked);
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (unlocked) eraseUnlockedStoryKeys(unlocked);
-      setBusy(false);
-    }
-  };
+    },
+    onMutate: () => setError(null),
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
 
-  const lock = async () => {
-    setBusy(true);
-    setError(null);
-    try {
+  const lock = useMutation({
+    mutationFn: async () => {
       await api.encryption.lock();
       setUnlockSecret('');
       window.location.reload();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+    },
+    onMutate: () => setError(null),
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
 
-  const migrate = async () => {
-    setBusy(true);
-    setError(null);
-    try {
+  const migrate = useMutation({
+    mutationFn: async () => {
       await api.encryption.migrate();
       await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+    },
+    onMutate: () => setError(null),
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  const busy = prepare.isPending || enroll.isPending || unlock.isPending || lock.isPending || migrate.isPending;
 
   const copyRecoveryCode = async () => {
     if (!draft) return;
@@ -662,8 +634,8 @@ function PrivateStoragePanel({
         </div>
         {grants.length ? (
           <div className="private-storage-actions">
-            <button onClick={() => void lock()} disabled={busy}>{busy ? 'locking…' : 'lock private stories'}</button>
-            <button className="primary" onClick={() => void migrate()} disabled={busy || migrationComplete}>
+            <button onClick={() => lock.mutate()} disabled={busy}>{busy ? 'locking…' : 'lock private stories'}</button>
+            <button className="primary" onClick={() => migrate.mutate()} disabled={busy || migrationComplete}>
               {busy ? 'migrating…' : migrationComplete ? 'private stories migrated' : 'migrate all private stories'}
             </button>
           </div>
@@ -687,7 +659,7 @@ function PrivateStoragePanel({
               />
             </label>
             <div className="private-storage-actions">
-              <button className="primary" onClick={() => void unlock()} disabled={busy || !unlockSecret}>
+              <button className="primary" onClick={() => unlock.mutate()} disabled={busy || !unlockSecret}>
                 {busy ? 'unlocking…' : 'unlock private stories'}
               </button>
               <span className="small dimmer">The passcode and recovery code never leave this browser.</span>
@@ -721,7 +693,11 @@ function PrivateStoragePanel({
             className="private-storage-form"
             onSubmit={(event) => {
               event.preventDefault();
-              void prepare();
+              if (passphrase !== confirmation) {
+                setError('the passphrase confirmation does not match');
+                return;
+              }
+              prepare.mutate();
             }}
           >
             <label className="field-row">
@@ -767,7 +743,14 @@ function PrivateStoragePanel({
             <span>I saved this code somewhere secure.</span>
           </label>
           <div className="private-storage-actions">
-            <button className="primary" onClick={() => void enroll()} disabled={!acknowledged || busy}>
+            <button
+              className="primary"
+              onClick={() => {
+                if (!draft || !acknowledged) return;
+                enroll.mutate();
+              }}
+              disabled={!acknowledged || busy}
+            >
               {busy ? 'saving…' : 'save recovery setup'}
             </button>
             <button onClick={() => { setDraft(null); setAcknowledged(false); setCopied(false); }}>start over</button>
@@ -836,20 +819,16 @@ function BookTab({
   state,
   hasPlayer,
   onChanged,
-  onMutationStart,
   onStorySelected,
 }: {
   state: State | null;
   hasPlayer: boolean | null;
   onChanged: () => void | Promise<void>;
-  onMutationStart: () => void;
   onStorySelected: (storyId: string) => void;
 }) {
-  const [turns, setTurns] = useState<BookTurn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [interrupt, setInterrupt] = useState<{ interrupt: Interrupt; input: string } | null>(null);
-  const [lastMeta, setLastMeta] = useState<TurnMeta | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
   // Prose as it arrives, plus which gate the turn is currently passing through.
   const [streaming, setStreaming] = useState('');
@@ -878,56 +857,76 @@ function BookTab({
   /** Rollback panel: closed by default, since it destroys or forks committed prose and should never be one accidental click away. */
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
-  const [chapters, setChapters] = useState<Array<{ chapter: number; title: string; summary: string }>>([]);
   const [splittingId, setSplittingId] = useState<string | null>(null);
   const [mutationPending, setMutationPending] = useState(false);
-  const historyRequestGate = useRef(new HistoryRequestGate());
   const historyMutationLock = useRef(false);
   const streamAbort = useRef<AbortController | null>(null);
 
-  const load = useCallback(async () => {
-    const revision = historyRequestGate.current.beginRequest();
-    const firstPage = await api.book();
-    const turns = [...firstPage.turns];
-    let offset = firstPage.nextOffset ?? null;
-    while (offset !== null) {
-      if (!historyRequestGate.current.isCurrent(revision)) return;
-      const page = await api.book({ offset });
-      if (!historyRequestGate.current.isCurrent(revision)) return;
-      turns.push(...page.turns);
-      offset = page.nextOffset ?? null;
-    }
-    if (!historyRequestGate.current.isCurrent(revision)) return;
-    setTurns(turns);
-    // The why panel reads the last turn's stored meta rather than holding its
-    // own copy, so a reload or a tab switch does not lose it — the meta was
-    // already persisted with the turn; only the read was missing.
-    const last = turns[turns.length - 1];
-    if (last) {
-      setLastMeta(null);
-      try {
-        const meta = await api.turn(last.id);
-        if (!historyRequestGate.current.isCurrent(revision)) return;
-        setLastMeta(meta.meta);
-      } catch {
-        // A stale panel is better than a crashed book view.
+  const queryClient = useQueryClient();
+  const storyId = getSelectedStoryId();
+  // Turns can arrive from outside this browser — the MCP connector plays into
+  // the same story — so the book re-reads itself on a timer as well as after
+  // its own actions. Paused while a local turn is in flight (`busy`), or the
+  // poll would overwrite the streaming prose with a book that does not have it
+  // yet, and while a history mutation is running for the same reason.
+  const paused = busy || mutationPending;
+  const bookQuery = useQuery({
+    queryKey: queryKeys.book(storyId),
+    queryFn: async () => {
+      const firstPage = await api.book();
+      const all = [...firstPage.turns];
+      let offset = firstPage.nextOffset ?? null;
+      while (offset !== null) {
+        const page = await api.book({ offset });
+        all.push(...page.turns);
+        offset = page.nextOffset ?? null;
       }
-    } else {
-      setLastMeta(null);
-    }
-  }, []);
+      return all;
+    },
+    refetchInterval: paused ? false : LIVE_POLL_MS,
+  });
+  const turns = bookQuery.data ?? [];
 
-  const invalidateHistoryRequests = (): number => {
-    const revision = historyRequestGate.current.invalidate();
-    onMutationStart();
-    return revision;
-  };
+  // The why panel reads the last turn's stored meta from the cache rather than
+  // holding its own copy, so a reload or a tab switch does not lose it — the
+  // meta was already persisted with the turn; only the read was missing. Meta
+  // is immutable per turn except for a reroll, and rerolls invalidate the whole
+  // `turn-meta` prefix below, so no periodic re-read is needed. A failed fetch
+  // leaves the panel stale rather than crashing the book view — the same
+  // trade the old swallowed catch made.
+  const lastTurnId = turns.length ? turns[turns.length - 1]!.id : null;
+  const turnMetaQuery = useQuery({
+    queryKey: queryKeys.turnMeta(storyId, lastTurnId ?? ''),
+    enabled: !!lastTurnId,
+    queryFn: () => api.turn(lastTurnId!),
+  });
+  const lastMeta = turnMetaQuery.data?.meta ?? null;
 
-  const beginHistoryMutation = (): number | null => {
-    if (historyMutationLock.current) return null;
+  // The rollback panel's chapter list loads on demand: `openRollback` fetches it
+  // into the cache before the panel mounts, because the panel derives its
+  // unit/chapter defaults from the list at mount. A failed fetch leaves an empty
+  // (or stale) list — what the old swallowed catch produced — and rollback by
+  // scene number still works with that.
+  const chapters = queryClient.getQueryData<Awaited<ReturnType<typeof api.chapters>>>(queryKeys.chapters(storyId))?.chapters ?? [];
+
+  const refreshBook = useCallback(async () => {
+    const sid = getSelectedStoryId();
+    await queryClient.invalidateQueries({ queryKey: ['book', sid] });
+    // `invalidateQueries` settles after the refetch it triggered, so the cache
+    // state now reflects the reload. A failed reload must surface to the caller
+    // (the old `load()` threw and callers reported it), not hide in the cache.
+    const bookState = queryClient.getQueryState(queryKeys.book(sid));
+    if (bookState?.error) throw bookState.error;
+    // A reroll rewrites one turn's meta in place, so after any history change
+    // the whole prefix is stale, not just the last turn's entry.
+    await queryClient.invalidateQueries({ queryKey: ['turn-meta', sid] });
+  }, [queryClient]);
+
+  const beginHistoryMutation = (): boolean => {
+    if (historyMutationLock.current) return false;
     historyMutationLock.current = true;
     setMutationPending(true);
-    return invalidateHistoryRequests();
+    return true;
   };
 
   const endHistoryMutation = () => {
@@ -936,21 +935,15 @@ function BookTab({
   };
 
   useEffect(() => {
-    void load();
     return () => {
       streamAbort.current?.abort();
-      historyRequestGate.current.invalidate();
     };
-  }, [load]);
+  }, []);
 
-  // Turns can arrive from outside this browser — the MCP connector plays into
-  // the same story — so the book re-reads itself on a timer as well as after
-  // its own actions. Paused while a local turn is in flight (`busy`), or the
-  // poll would overwrite the streaming prose with a book that does not have it
-  // yet, and while a reroll is running for the same reason.
+  // The book's own polling runs on the query's `refetchInterval` above; this
+  // timer keeps the world state (threads, divergences, counts) moving in step.
   useLivePoll(() => {
-    void load();
-    onChanged();
+    void onChanged();
   }, busy || mutationPending);
 
   // The first render is history, not an arrival, so it does not animate.
@@ -972,7 +965,7 @@ function BookTab({
   }, [turns.length, awaiting]);
 
   async function play(text: string, override = false) {
-    if (!text.trim() || busy || beginHistoryMutation() === null) return;
+    if (!text.trim() || busy || !beginHistoryMutation()) return;
     setBusy(true);
     setNotes([]);
     setStreaming('');
@@ -994,9 +987,9 @@ function BookTab({
 
       setInterrupt(null);
       if (o.kind === 'narrated') {
+        // The new turn becomes the last one when the book refetch below lands,
+        // which moves the `turn-meta` query to it and fills the why panel.
         setInput('');
-        const meta = (await api.turn(o.turn.id)).meta;
-        setLastMeta(meta);
         const n: string[] = [];
         if (res.seeded) n.push(`${res.seeded} consequence${res.seeded === 1 ? '' : 's'} set in motion`);
         for (const f of res.tick?.fired ?? []) {
@@ -1004,7 +997,7 @@ function BookTab({
         }
         if (res.tick?.transmissions.length) n.push(`${res.tick.transmissions.length} rumour(s) travelled`);
         setNotes(n);
-        await load();
+        await refreshBook();
         await onChanged();
       } else if (o.kind === 'answered') {
         setNotes([o.text]);
@@ -1052,7 +1045,7 @@ function BookTab({
    * This calls the exact same compaction path.
    */
   async function closeScene() {
-    if (busy || closingScene || !turns.length || beginHistoryMutation() === null) return;
+    if (busy || closingScene || !turns.length || !beginHistoryMutation()) return;
     setClosingScene(true);
     try {
       const res = await api.closeScene();
@@ -1060,7 +1053,7 @@ function BookTab({
       if (res.summary) n.push(res.summary);
       if (res.chaptersSummarised.length) n.push(`chapter ${res.chaptersSummarised[0]} rolled up`);
       setNotes(n);
-      await load();
+      await refreshBook();
       await onChanged();
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
@@ -1070,13 +1063,13 @@ function BookTab({
     }
   }
 
-  /** Opens the rollback panel, loading the chapter list it needs on demand rather than on every book load. */
+  /** Opens the rollback panel; its chapter list loads on demand rather than on every book load. The fetch must land before the panel mounts — it derives unit/chapter defaults from the list at mount — and a failure still opens with an empty list, which is what the old swallowed catch produced. */
   async function openRollback() {
     if (rollbackOpen) return setRollbackOpen(false);
     try {
-      setChapters((await api.chapters()).chapters);
+      await queryClient.fetchQuery({ queryKey: queryKeys.chapters(storyId), queryFn: () => api.chapters() });
     } catch {
-      // A rollback by scene number still works with an empty chapter list.
+      // Swallow like the old code did: open anyway with no (or stale) list.
     }
     setRollbackOpen(true);
   }
@@ -1098,12 +1091,14 @@ function BookTab({
       if (!window.confirm(`Discard ${label} permanently from this book? This cannot be undone.`)) return;
     }
     const sourceStoryId = getSelectedStoryId();
-    const mutationRevision = beginHistoryMutation();
-    if (mutationRevision === null) return;
+    if (!beginHistoryMutation()) return;
     setRollbackBusy(true);
     try {
       const result = await api.rollback({ ...target, mode });
-      if (!historyRequestGate.current.isCurrent(mutationRevision) || getSelectedStoryId() !== sourceStoryId) return;
+      // The book itself may have moved on while the rollback ran (a story
+      // switch from another tab) — applying notes or reloading for a book that
+      // is no longer selected would be wrong.
+      if (getSelectedStoryId() !== sourceStoryId) return;
       const selectedTurn = 'turnId' in target ? turns.find((turn) => turn.id === target.turnId) : null;
       const targetLabel = selectedTurn ? `turn ${chapterTurnLabel(selectedTurn)}` : `scene ${result.toScene}`;
       if (result.mode === 'fork' && result.forkedStory) {
@@ -1115,7 +1110,7 @@ function BookTab({
       }
       setRollbackOpen(false);
       try {
-        await load();
+        await refreshBook();
         await onChanged();
       } catch (e) {
         setNotes((notes) => [...notes, `The rollback succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);
@@ -1129,13 +1124,13 @@ function BookTab({
   }
 
   async function splitScene(turn: BookTurn) {
-    if (splittingId || beginHistoryMutation() === null) return;
+    if (splittingId || !beginHistoryMutation()) return;
     setSplittingId(turn.id);
     try {
       const split = await api.splitScene(turn.id);
       setNotes([`Started scene ${split.scene} at turn ${chapterTurnLabel(turn)}.`]);
       try {
-        await load();
+        await refreshBook();
         await onChanged();
       } catch (e) {
         setNotes((notes) => [...notes, `The scene split succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);
@@ -1155,13 +1150,15 @@ function BookTab({
    * but fix this one thing" rather than a blind retry.
    */
   async function regenerate(id: string, note: string) {
-    if (regeneratingId || beginHistoryMutation() === null) return;
+    if (regeneratingId || !beginHistoryMutation()) return;
     setRegeneratingId(id);
     try {
       await api.regenerate(id, note.trim() || undefined);
       setRerollOpenId(null);
       setRerollNote('');
-      await load();
+      // No `onChanged` here on purpose: a reroll rewrites prose in place and
+      // leaves the world state untouched — the old code skipped it too.
+      await refreshBook();
     } catch (e) {
       setNotes([e instanceof Error ? e.message : String(e)]);
     } finally {
@@ -1253,11 +1250,11 @@ function BookTab({
                   <button
                     disabled={mutationPending}
                     onClick={async () => {
-                      if (beginHistoryMutation() === null) return;
+                      if (!beginHistoryMutation()) return;
                       try {
                         await api.pin(t.id, !t.pinned);
                         if (!t.pinned) await api.addAnchor(t.bookProse.slice(0, 300), 'pinned by the author');
-                        await load();
+                        await refreshBook();
                       } catch (e) {
                         setNotes([e instanceof Error ? e.message : String(e)]);
                       } finally {
@@ -1570,6 +1567,9 @@ function RollbackPanel({
 
 /** Shows the machinery behind the last turn: the reason to trust it. */
 function WhyPanel({ meta }: { meta: TurnMeta | null }) {
+  // No `onError`: the old `.catch(() => {})` swallowed block failures silently,
+  // and a failed mutation simply parks its error in state without surfacing it.
+  const block = useMutation({ mutationFn: (excerpt: string) => api.config.block(excerpt) });
   if (!meta) return <div className="card"><h3>why</h3><p className="empty">Play a turn.</p></div>;
   return (
     <div className="card">
@@ -1598,7 +1598,7 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
                   {f.excerpt ? (
                     <button
                       title={`never write "${f.excerpt}" again`}
-                      onClick={() => void api.config.block(f.excerpt).catch(() => {})}
+                      onClick={() => block.mutate(f.excerpt)}
                     >
                       block
                     </button>
@@ -1652,7 +1652,6 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
 // --------------------------------------------------------------------- graph
 
 function GraphTab() {
-  const [data, setData] = useState<{ entities: Entity[]; edges: Edge[]; hiddenEdges: number } | null>(null);
   const [layer, setLayer] = useState('');
   const [type, setType] = useState('');
   /**
@@ -1662,36 +1661,51 @@ function GraphTab() {
    */
   const [showMentions, setShowMentions] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const [detail, setDetail] = useState<EntityDetail | null>(null);
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<Entity[]>([]);
-  const [searching, setSearching] = useState(false);
+  const storyId = getSelectedStoryId();
 
-  useEffect(() => {
-    void api
-      .graph({ layer: layer || undefined, type: type || undefined, ...(showMentions ? { minWeight: 0 } : {}) })
-      .then(setData);
-  }, [layer, type, showMentions]);
+  // `keepPreviousData` keeps the old graph on screen while a filter change
+  // fetches — the old `.then(setData)` never cleared it either. The key carries
+  // the story, which also fixes a latent bug: the old effect never re-ran on a
+  // story switch, so the panel kept showing the previous world's graph.
+  const graphQuery = useQuery({
+    queryKey: queryKeys.graph(storyId, layer, type, showMentions),
+    queryFn: () => api.graph({ layer: layer || undefined, type: type || undefined, ...(showMentions ? { minWeight: 0 } : {}) }),
+    placeholderData: keepPreviousData,
+  });
+  const data = graphQuery.data ?? null;
 
-  useEffect(() => {
-    if (!selected) return void setDetail(null);
-    void api.entity(selected).then(setDetail);
-  }, [selected]);
+  // Same trade for the entity detail: the old `.then(setDetail)` left the
+  // previous entity on screen until the new one arrived. With no selection the
+  // query is disabled and the panel is cleared explicitly, as before.
+  const entityQuery = useQuery({
+    queryKey: queryKeys.entity(storyId, selected ?? ''),
+    enabled: !!selected,
+    placeholderData: keepPreviousData,
+    queryFn: () => api.entity(selected!),
+  });
+  const detail = selected ? (entityQuery.data ?? null) : null;
 
   // A 3,000-page ingest is not something type/layer filters alone can find
-  // anything in — /api/search already existed, just unused by this view.
+  // anything in — /api/search already existed, just unused by this view. The
+  // input debounces into `debouncedQuery`; the fetch itself is a query keyed on
+  // it, so a story switch or a fast re-type cannot race a stale result back in.
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   useEffect(() => {
     const q = query.trim();
-    if (!q) {
-      setResults([]);
-      return;
-    }
-    setSearching(true);
-    const h = window.setTimeout(() => {
-      void api.search(q).then(setResults).finally(() => setSearching(false));
-    }, 200);
+    if (!q) return setDebouncedQuery('');
+    const h = window.setTimeout(() => setDebouncedQuery(q), 200);
     return () => window.clearTimeout(h);
   }, [query]);
+  const searchQuery = useQuery({
+    queryKey: queryKeys.graphSearch(storyId, debouncedQuery),
+    queryFn: () => api.search(debouncedQuery),
+    enabled: !!debouncedQuery,
+  });
+  const results = searchQuery.data ?? [];
+  // The old code flagged "searching" the instant a keystroke landed (before the
+  // debounce fired) and cleared it only when the fetch settled.
+  const searching = !!query.trim() && (query.trim() !== debouncedQuery || searchQuery.isPending || searchQuery.isFetching);
 
   return (
     <div className="main">
@@ -1717,7 +1731,6 @@ function GraphTab() {
                     onClick={() => {
                       setSelected(e.id);
                       setQuery('');
-                      setResults([]);
                     }}
                   >
                     <b>{e.name}</b>
@@ -1909,7 +1922,6 @@ function EntityPanel({
 // ---------------------------------------------------------------------- cast
 
 function CastTab({ state }: { state: State | null }) {
-  const [cast, setCast] = useState<Array<{ sheet: Sheet; entity: Entity | null }>>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   // Same canon/chronicle distinction the graph tab filters on: canon is the
   // ingested source material, chronicle is what this playthrough has changed
@@ -1917,11 +1929,25 @@ function CastTab({ state }: { state: State | null }) {
   // navigation entity) sits in the same list as the cast actually being
   // played, with nothing to separate them.
   const [layer, setLayer] = useState('');
+  const storyId = getSelectedStoryId();
 
-  const load = useCallback(async () => setCast(await api.cast()), []);
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // Same key FactsView reads its candidate names from, so both tabs share one
+  // cache entry instead of racing two fetches of the same list.
+  const castQuery = useQuery({
+    queryKey: queryKeys.cast(storyId),
+    queryFn: () => api.cast(),
+  });
+  const cast = castQuery.data ?? [];
+
+  // The old `load()` was fire-and-forget at every call site; refetch keeps that.
+  const refreshCast = useCallback(() => void castQuery.refetch(), [castQuery]);
+
+  // No error handler on purpose: the old async onClick had no catch either, so
+  // a failed lock reached the global unhandledrejection handler exactly as before.
+  const lock = useMutation({
+    mutationFn: (args: { entityId: string; path: string; on: boolean }) => api.lock(args.entityId, args.path, args.on),
+    onSuccess: () => void castQuery.refetch(),
+  });
 
   const visible = layer ? cast.filter(({ entity }) => entity?.layer === layer) : cast;
 
@@ -1966,10 +1992,10 @@ function CastTab({ state }: { state: State | null }) {
               {openId === sheet.entityId ? (
                 <div className="sheet-detail">
                   <h3 className="eyebrow rule" style={{ marginTop: 0 }}>appearance</h3>
-                  <PortraitPanel sheet={sheet} onChanged={load} />
-                  <AppearanceEditor sheet={sheet} onSaved={load} />
+                  <PortraitPanel sheet={sheet} onChanged={refreshCast} />
+                  <AppearanceEditor sheet={sheet} onSaved={refreshCast} />
 
-                  <SheetEditor sheet={sheet} currentScene={state?.session.scene ?? 0} onSaved={load} />
+                  <SheetEditor sheet={sheet} currentScene={state?.session.scene ?? 0} onSaved={refreshCast} />
 
                   {/* Locks are how nudging parameters actually works. */}
                   <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>locks</h3>
@@ -1981,9 +2007,8 @@ function CastTab({ state }: { state: State | null }) {
                           key={path}
                           className={on ? 'primary' : ''}
                           aria-pressed={on}
-                          onClick={async () => {
-                            await api.lock(sheet.entityId, path, !on);
-                            await load();
+                          onClick={() => {
+                            void lock.mutateAsync({ entityId: sheet.entityId, path, on: !on });
                           }}
                         >
                           {on ? '◆' : '◇'} {path.replace('condition.', '').replace('locationId', 'location')}
@@ -2063,9 +2088,26 @@ function SettingsTab({
   privateStorageError: string | null;
   onPrivateStorageChanged: () => Promise<void>;
 }) {
-  const [style, setStyle] = useState<State['session']['style'] | null>(null);
-  const [knobs, setKnobs] = useState<State['session']['knobs'] | null>(null);
-  const [anchors, setAnchors] = useState<Array<{ id: number; text: string; note: string }>>([]);
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
+
+  // Three independent cache slices: the old code fetched all three on mount and
+  // updated each one independently, so a style save never refetched knobs.
+  const styleQuery = useQuery({
+    queryKey: queryKeys.style(storyId),
+    queryFn: () => api.style(),
+  });
+  const knobsQuery = useQuery({
+    queryKey: queryKeys.knobs(storyId),
+    queryFn: () => api.knobs(),
+  });
+  const anchorsQuery = useQuery({
+    queryKey: queryKeys.anchors(storyId),
+    queryFn: () => api.anchors(),
+  });
+  const style = styleQuery.data ?? null;
+  const knobs = knobsQuery.data ?? null;
+  const anchors = anchorsQuery.data ?? [];
   // No `currentUser` at all (login off) means there is no admin concept in
   // play here — the same "off means unrestricted, not restricted" shape
   // `requireAdmin` uses server-side. Once login is on, only an explicit
@@ -2073,20 +2115,22 @@ function SettingsTab({
   // simply never sees the controls whose routes would 403 them anyway.
   const showSystemSettings = !currentUser || currentUser.isAdmin;
 
-  useEffect(() => {
-    void api.style().then(setStyle);
-    void api.knobs().then(setKnobs);
-    void api.anchors().then(setAnchors);
-  }, []);
-
-  const saveStyle = async (patch: Partial<NonNullable<typeof style>>) => {
-    setStyle(await api.setStyle(patch));
-    onChanged();
-  };
-  const saveKnobs = async (patch: Partial<NonNullable<typeof knobs>>) => {
-    setKnobs(await api.setKnobs(patch));
-    onChanged();
-  };
+  // The old `setStyle(await api.setStyle(patch))` replaced the card's state with
+  // the server's answer; setQueryData keeps that exactly, without a refetch.
+  const saveStyle = useMutation({
+    mutationFn: (patch: Partial<NonNullable<typeof style>>) => api.setStyle(patch),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKeys.style(storyId), next);
+      onChanged();
+    },
+  });
+  const saveKnobs = useMutation({
+    mutationFn: (patch: Partial<NonNullable<typeof knobs>>) => api.setKnobs(patch),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKeys.knobs(storyId), next);
+      onChanged();
+    },
+  });
 
   return (
     <div className="main">
@@ -2114,7 +2158,7 @@ function SettingsTab({
             ] as const).map(([key, opts]) => (
               <label className="field-row" key={key}>
                 <span>{key}</span>
-                <select value={style[key] as string} onChange={(e) => void saveStyle({ [key]: e.target.value })}>
+                <select value={style[key] as string} onChange={(e) => saveStyle.mutate({ [key]: e.target.value })}>
                   {opts.map((o) => <option key={o} value={o}>{o}</option>)}
                 </select>
               </label>
@@ -2123,7 +2167,7 @@ function SettingsTab({
               <span>genre</span>
               <input
                 defaultValue={style.genreLens}
-                onBlur={(e) => void saveStyle({ genreLens: e.target.value })}
+                onBlur={(e) => saveStyle.mutate({ genreLens: e.target.value })}
               />
             </label>
             <label className="field-row">
@@ -2131,19 +2175,19 @@ function SettingsTab({
               <input
                 defaultValue={style.comparables.join(', ')}
                 placeholder="naming a work beats any stack of adjectives"
-                onBlur={(e) => void saveStyle({ comparables: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
+                onBlur={(e) => saveStyle.mutate({ comparables: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
               />
             </label>
             <label className="field-row">
               <span>scene target</span>
               <input
                 type="number" defaultValue={style.sceneTarget}
-                onBlur={(e) => void saveStyle({ sceneTarget: Number(e.target.value) })}
+                onBlur={(e) => saveStyle.mutate({ sceneTarget: Number(e.target.value) })}
               />
             </label>
             <label className="field-row">
               <span>illustration style</span>
-              <StylePicker value={style.visualStyle} onChange={(v) => void saveStyle({ visualStyle: v })} />
+              <StylePicker value={style.visualStyle} onChange={(v) => saveStyle.mutate({ visualStyle: v })} />
             </label>
             <label className="field-row block">
               <span>visual anchor</span>
@@ -2151,7 +2195,7 @@ function SettingsTab({
                 rows={2}
                 defaultValue={style.visualAnchor}
                 placeholder="what stays true in every image of this world — architecture, dress, light, palette"
-                onBlur={(e) => void saveStyle({ visualAnchor: e.target.value })}
+                onBlur={(e) => saveStyle.mutate({ visualAnchor: e.target.value })}
               />
             </label>
           </div>
@@ -2198,7 +2242,7 @@ function SettingsTab({
               <select
                 value={knobs.characterStrictness}
                 onChange={(e) =>
-                  void saveKnobs({ characterStrictness: e.target.value as Knobs['characterStrictness'] })
+                  saveKnobs.mutate({ characterStrictness: e.target.value as Knobs['characterStrictness'] })
                 }
               >
                 <option value="permissive">permissive — narrate anything</option>
@@ -2211,7 +2255,7 @@ function SettingsTab({
               <label>canon fidelity</label>
               <select
                 value={knobs.canonFidelity}
-                onChange={(e) => void saveKnobs({ canonFidelity: e.target.value as Knobs['canonFidelity'] })}
+                onChange={(e) => saveKnobs.mutate({ canonFidelity: e.target.value as Knobs['canonFidelity'] })}
               >
                 <option value="strict">strict</option>
                 <option value="flexible">flexible</option>
@@ -2234,7 +2278,7 @@ function SettingsTab({
                 <div className="scale">
                   <input
                     type="range" min={min} max={max} step={step} value={knobs[key] as number}
-                    onChange={(e) => void saveKnobs({ [key]: Number(e.target.value) })}
+                    onChange={(e) => saveKnobs.mutate({ [key]: Number(e.target.value) })}
                   />
                 </div>
               </div>
@@ -2273,21 +2317,51 @@ function SettingsTab({
  * `world_access` — which is strictly better than an admin flag, because it can say
  * "you own this one world" rather than only "you administer everything".
  */
-function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySelected, onResetToWizard }: {
+function StoriesTab({ currentSceneTurn, onSwitched, onStorySelected, onResetToWizard }: {
   currentSceneTurn: string;
   onSwitched: () => void;
-  onMutationStart: () => void;
   onStorySelected: (storyId: string) => void;
   onResetToWizard: () => void;
 }) {
-  const [stories, setStories] = useState<Story[] | null>(null);
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
+
+  // The three reads were always fetched together — changing sources invalidates
+  // all of them — so one combined query keeps that. Per-field null semantics are
+  // preserved by deriving each from the same snapshot: a failed first fetch
+  // leaves stories/worlds null and unowned empty, exactly as the old states did.
+  const storiesQuery = useQuery({
+    queryKey: queryKeys.stories(storyId),
+    queryFn: async () => {
+      const [storyList, worldList, orphanList] = await Promise.all([
+        api.stories.list(),
+        api.worlds.list(),
+        // Unowned books never appear in the ordinary list — `owner_user_id = $1`
+        // cannot match NULL — so without this an imported save is in the database
+        // and nowhere on screen.
+        api.stories.unowned().catch(() => [] as Story[]),
+      ]);
+      return { stories: storyList, worlds: worldList.worlds, unowned: orphanList };
+    },
+  });
+  const storiesData = storiesQuery.data ?? null;
+  const stories = storiesData?.stories ?? null;
   /** Imported books nobody owns yet — see the claim panel below. */
-  const [unowned, setUnowned] = useState<Story[]>([]);
-  const [worlds, setWorlds] = useState<WorldSummary[] | null>(null);
+  const unowned = storiesData?.unowned ?? [];
+  const worlds = storiesData?.worlds ?? null;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const [worldRenaming, setWorldRenaming] = useState<{ slug: string; title: string } | null>(null);
+
+  // v5 has no per-query onError, so the old callback's line lands here, with
+  // its guard intact: a late failure from a story you have already left must
+  // not write its message into this one.
+  const storiesError = storiesQuery.error;
+  useEffect(() => {
+    if (getSelectedStoryId() !== storyId) return;
+    if (storiesError) setError(storiesError instanceof Error ? storiesError.message : String(storiesError));
+  }, [storiesError, storyId]);
   const [newWorldTitle, setNewWorldTitle] = useState('');
   const [forkFrom, setForkFrom] = useState<{ id: string; title: string } | null>(null);
   const [forkScene, setForkScene] = useState('');
@@ -2327,11 +2401,10 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
       return;
     }
     setSourceError(null);
-    onMutationStart();
     setBusy('sources');
     try {
       await api.story.setSources(next);
-      await load();
+      await refresh();
       // Canon changed underneath every cached view, so the caller refetches
       // wholesale — the same thing a world switch used to require.
       onSwitched();
@@ -2342,31 +2415,19 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
     }
   };
 
-  const load = useCallback(async () => {
-    try {
-      // Three independent reads in parallel: changing sources invalidates all of
-      // them, so they are always refetched together anyway.
-      const [storyList, worldList, orphanList] = await Promise.all([
-        api.stories.list(),
-        api.worlds.list(),
-        // Unowned books never appear in the ordinary list — `owner_user_id = $1`
-        // cannot match NULL — so without this an imported save is in the database
-        // and nowhere on screen.
-        api.stories.unowned().catch(() => [] as Story[]),
-      ]);
-      setStories(storyList);
-      setWorlds(worldList.worlds);
-      setUnowned(orphanList);
+  // The old load() caught its own failures into `error`; refetch never rejects,
+  // so the cache is checked for the same effect. Success clears it, as before.
+  const refresh = async () => {
+    await storiesQuery.refetch();
+    const snapshot = queryClient.getQueryState(queryKeys.stories(storyId));
+    if (snapshot?.error) {
+      setError(snapshot.error instanceof Error ? snapshot.error.message : String(snapshot.error));
+    } else {
       setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
-
-  useEffect(() => void load(), [load]);
+  };
 
   const run = async (id: string, label: string, fn: () => Promise<void>) => {
-    onMutationStart();
     setBusy(id + label);
     try {
       await fn();
@@ -2434,7 +2495,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                                   void run(w.slug, 'wrename', async () => {
                                     await api.worlds.rename(w.slug, worldRenaming.title);
                                     setWorldRenaming(null);
-                                    await load();
+                                    await refresh();
                                     onSwitched();
                                   });
                                 }
@@ -2483,7 +2544,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                               }
                               onClick={() => void run(w.slug, 'wvis', async () => {
                                 await api.worlds.setVisibility(w.slug, w.visibility === 'public' ? 'private' : 'public');
-                                await load();
+                                await refresh();
                               })}
                             >
                               {w.visibility === 'public' ? 'make private' : 'make public'}
@@ -2503,7 +2564,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                               if (!window.confirm(`Delete the world "${w.title || w.slug}"? This removes its canon. Books are not touched.`)) return;
                               void run(w.slug, 'wdelete', async () => {
                                 await api.worlds.remove(w.slug);
-                                await load();
+                                await refresh();
                               });
                             }}
                           >
@@ -2528,7 +2589,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                 onClick={() => void run('newworld', 'create', async () => {
                   await api.worlds.create(newWorldTitle.trim() || undefined);
                   setNewWorldTitle('');
-                  await load();
+                  await refresh();
                 })}
               >
                 add world
@@ -2574,7 +2635,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                                 await run(s.id, 'rename', async () => {
                                   await api.stories.rename(s.id, renaming.title);
                                   setRenaming(null);
-                                  await load();
+                                  await refresh();
                                 });
                               }}
                             />
@@ -2608,7 +2669,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                               // would keep resolving back to "my most recently
                               // played" rather than the one just picked.
                               onStorySelected(s.id);
-                              await load();
+                              await refresh();
                               onSwitched();
                             })}
                           >
@@ -2637,7 +2698,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                               if (!window.confirm(`Delete "${s.title || 'untitled story'}"? This only removes this one story — canon and other stories are unaffected.`)) return;
                               await run(s.id, 'delete', async () => {
                                 await api.stories.remove(s.id);
-                                await load();
+                                await refresh();
                               });
                             }}
                           >
@@ -2676,7 +2737,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                         await api.stories.claim(st.id);
                         // Refetch: the claimed book moves out of this panel and into
                         // the library above, and `run` does not reload on its own.
-                        await load();
+                        await refresh();
                       })
                     }
                   >
@@ -2692,7 +2753,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                   onClick={() =>
                     run('all', 'claim', async () => {
                       await api.stories.claim();
-                      await load();
+                      await refresh();
                     })
                   }
                 >
@@ -2713,7 +2774,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
               disabled={busy === 'new'}
               onClick={() => void run('new', 'create', async () => {
                 await api.stories.create();
-                await load();
+                await refresh();
               })}
             >
               new book
@@ -2745,7 +2806,7 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
                     if (scene !== undefined && (!Number.isFinite(scene) || scene < 1)) throw new Error('scene must be a number of 1 or greater');
                     await api.stories.fork(forkFrom.id, forkTitle.trim() || undefined, scene);
                     setForkFrom(null);
-                    await load();
+                    await refresh();
                   })}
                 >
                   create branch
@@ -2765,7 +2826,6 @@ function StoriesTab({ currentSceneTurn, onSwitched, onMutationStart, onStorySele
               className="warn"
               onClick={async () => {
                 if (!window.confirm('Discard this book and start a blank one? Its scenes and prose go; canon and every other book stay.')) return;
-                onMutationStart();
                 await api.setup.reset();
                 onResetToWizard();
               }}
@@ -2852,49 +2912,60 @@ function UsagePanel({ usage }: { usage: State['usage'] | null }) {
  * this panel.
  */
 function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | undefined; onChanged: () => void }) {
-  const [health, setHealth] = useState<IngestHealth | null>(null);
-  const [job, setJob] = useState<Job | null>(null);
-  const [busy, setBusy] = useState(false);
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [moreSeeds, setMoreSeeds] = useState('');
   const [deeper, setDeeper] = useState(false);
   // Blank leaves this world's stored budget alone; a number re-crawls wider.
   const [morePages, setMorePages] = useState('');
 
-  const refresh = useCallback(async () => {
-    try {
-      setHealth(await api.setup.ingestHealth());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+  // The old refresh() only replaced state on success and never cleared the
+  // error line on success either — v5 keeps previous data on refetch failure,
+  // which is the same shape.
+  const healthQuery = useQuery({
+    queryKey: queryKeys.ingestHealth(storyId),
+    queryFn: () => api.setup.ingestHealth(),
+  });
+  const health = healthQuery.data ?? null;
 
+  // v5 has no per-query onError, so the old callback's line lands here.
+  const healthError = healthQuery.error;
   useEffect(() => {
-    void refresh();
-  }, [refresh, worldTitle]);
+    if (healthError) setError(healthError instanceof Error ? healthError.message : String(healthError));
+  }, [healthError]);
+
+  // The world title can change inside one story (a re-ingest); the storyId in
+  // the key covers switches, this covers the rest. Mount is skipped — the
+  // query's own initial fetch already happened.
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    void healthQuery.refetch();
+  }, [worldTitle, healthQuery]);
 
   // Poll while a continue job is running, same shape as the wizard's own job
-  // polling — stages and counts, never a fake percentage.
-  const pollRef = useRef<number | null>(null);
+  // polling — stages and counts, never a fake percentage. A failed poll just
+  // leaves the data 'running', so the interval retries on its own.
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const jobQuery = useQuery({
+    queryKey: queryKeys.setupJob(storyId, activeJobId ?? ''),
+    queryFn: () => api.setup.job(activeJobId as string),
+    enabled: !!activeJobId,
+    refetchInterval: (query) => (query.state.data?.status === 'running' ? 700 : false),
+  });
+  const job = jobQuery.data ?? null;
+
+  // The old tick ran refresh + onChanged on the first poll that saw a
+  // terminal status; this fires on the same transition.
   useEffect(() => {
-    if (job?.status !== 'running') return;
-    const tick = async () => {
-      try {
-        const next = await api.setup.job(job.id);
-        setJob(next);
-        if (next.status !== 'running') {
-          await refresh();
-          onChanged();
-        }
-      } catch {
-        // A dropped poll is not fatal; the next tick retries.
-      }
-    };
-    pollRef.current = window.setInterval(tick, 700);
-    return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
-    };
-  }, [job, refresh, onChanged]);
+    if (!job || job.status === 'running') return;
+    void healthQuery.refetch();
+    onChanged();
+  }, [job, healthQuery, onChanged]);
 
   // The escalation ladder stops at deep: "all" is a whole-wiki budget and is
   // only servable from an offline dump ingest, so it is never something this
@@ -2902,26 +2973,30 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
   const nextMode = (current: DepthMode): DepthMode =>
     current === 'skim' ? 'mid' : current === 'mid' ? 'deep' : 'deep';
 
-  const start = (widen: boolean) =>
-    void (async () => {
-      setBusy(true);
-      setError(null);
-      try {
-        const overrides: { seeds?: string[]; mode?: string; maxPages?: number } = {};
-        if (widen) {
-          const added = moreSeeds.split(',').map((s) => s.trim()).filter(Boolean);
-          if (added.length && health?.context) overrides.seeds = [...health.context.seeds, ...added];
-          if (deeper && health?.context) overrides.mode = nextMode(health.context.mode);
-          // Re-crawls at the wider budget; every page Pass B already finished
-          // is skipped, so widening only pays for what is new.
-          if (morePages) overrides.maxPages = Number(morePages);
-        }
-        setJob(await api.setup.continue(overrides));
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+  const start = useMutation({
+    mutationFn: async (widen: boolean) => {
+      const overrides: { seeds?: string[]; mode?: string; maxPages?: number } = {};
+      if (widen) {
+        const added = moreSeeds.split(',').map((s) => s.trim()).filter(Boolean);
+        if (added.length && health?.context) overrides.seeds = [...health.context.seeds, ...added];
+        if (deeper && health?.context) overrides.mode = nextMode(health.context.mode);
+        // Re-crawls at the wider budget; every page Pass B already finished
+        // is skipped, so widening only pays for what is new.
+        if (morePages) overrides.maxPages = Number(morePages);
       }
-      setBusy(false);
-    })();
+      return api.setup.continue(overrides);
+    },
+    onMutate: () => setError(null),
+    onSuccess: (next) => {
+      // The old setJob showed the continue response immediately, before the
+      // first poll tick; seeding the cache does the same.
+      queryClient.setQueryData(queryKeys.setupJob(storyId, next.id), next);
+      setActiveJobId(next.id);
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const busy = start.isPending;
 
   if (!health?.hasContext) return null; // nothing to continue: not a wiki ingest
 
@@ -2933,7 +3008,7 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
     <div className="card">
       <div className="row">
         <h3 className="grow" style={{ margin: 0 }}>reading {context?.wikiName}</h3>
-        <button disabled={busy} onClick={() => void refresh()}>refresh</button>
+        <button disabled={busy} onClick={() => void healthQuery.refetch()}>refresh</button>
       </div>
 
       {error ? <p className="small warn">{error}</p> : null}
@@ -2982,7 +3057,7 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
 
       {!complete || pagesFailed ? (
         <div className="row" style={{ marginTop: 'var(--s3)' }}>
-          <button className="primary" disabled={busy || job?.status === 'running'} onClick={() => start(false)}>
+          <button className="primary" disabled={busy || job?.status === 'running'} onClick={() => start.mutate(false)}>
             {pagesFailed || pagesPending ? 'continue reading' : 'start pass B'}
           </button>
         </div>
@@ -3026,7 +3101,7 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
             </label>
           ) : null}
           <div className="row" style={{ marginTop: 'var(--s2)' }}>
-            <button disabled={busy || job?.status === 'running' || (!moreSeeds.trim() && !deeper && !morePages)} onClick={() => start(true)}>
+            <button disabled={busy || job?.status === 'running' || (!moreSeeds.trim() && !deeper && !morePages)} onClick={() => start.mutate(true)}>
               read more
             </button>
           </div>
@@ -3052,27 +3127,29 @@ function IngestHealthPanel({ worldTitle, onChanged }: { worldTitle: string | und
  * cheaper than a user concluding the feature does not exist.
  */
 function ImageProvidersPanel() {
-  const [report, setReport] = useState<ImageProvidersReport | null>(null);
-  const [busy, setBusy] = useState(false);
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
 
-  const probe = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      setReport(await api.images.providers());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-    setBusy(false);
-  };
+  // The old mount probe is now the query's initial fetch; recheck re-runs it.
+  // The error line only clears when a new action starts, as before.
+  const reportQuery = useQuery({
+    queryKey: queryKeys.imageProviders(storyId),
+    queryFn: () => api.images.providers(),
+  });
+  const report = reportQuery.data ?? null;
 
-  // Probe once on mount; the button re-runs it on demand. `probe` is
-  // deliberately not a dependency — it is redefined every render, so depending
-  // on it would re-probe on every keystroke elsewhere in the panel.
+  // v5 has no per-query onError. The error line still only clears when a new
+  // action starts (recheck and setProfile do that), exactly as before.
+  const reportError = reportQuery.error;
   useEffect(() => {
-    void probe();
-  }, []);
+    if (reportError) setError(reportError instanceof Error ? reportError.message : String(reportError));
+  }, [reportError]);
+
+  const recheck = () => {
+    setError(null);
+    void reportQuery.refetch();
+  };
 
   const badge = (status: string) =>
     status === 'ready' ? (
@@ -3083,24 +3160,27 @@ function ImageProvidersPanel() {
       <span className="status pending">not set</span>
     );
 
-  const setProfile = (name: string | null) =>
-    void (async () => {
-      setBusy(true);
-      setError(null);
-      try {
-        await api.images.setProfile(name);
-        setReport(await api.images.providers());
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-      setBusy(false);
-    })();
+  const setProfile = useMutation({
+    mutationFn: async (name: string | null) => {
+      await api.images.setProfile(name);
+      // The old code re-probed after switching; the fresh report lands in the
+      // cache via onSuccess, so no extra refetch.
+      return api.images.providers();
+    },
+    onMutate: () => setError(null),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKeys.imageProviders(storyId), next);
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const busy = reportQuery.isFetching || setProfile.isPending;
 
   return (
     <div className="card">
       <div className="row">
         <h3 className="grow" style={{ margin: 0 }}>illustration</h3>
-        <button disabled={busy} onClick={() => void probe()}>
+        <button disabled={busy} onClick={recheck}>
           {busy ? 'checking…' : 'recheck'}
         </button>
       </div>
@@ -3134,7 +3214,7 @@ function ImageProvidersPanel() {
               className={report.profile === 'none' ? 'primary' : ''}
               aria-pressed={report.profile === 'none'}
               disabled={busy || report.profile === 'none'}
-              onClick={() => setProfile(null)}
+              onClick={() => setProfile.mutate(null)}
             >
               off
             </button>
@@ -3144,7 +3224,7 @@ function ImageProvidersPanel() {
                 className={r.key === report.profile ? 'primary' : ''}
                 aria-pressed={r.key === report.profile}
                 disabled={busy || r.key === report.profile}
-                onClick={() => setProfile(r.key)}
+                onClick={() => setProfile.mutate(r.key)}
               >
                 {r.key}
               </button>
@@ -3164,20 +3244,40 @@ function ImageProvidersPanel() {
  * Probing touches local ports and credential helpers, so it is on demand.
  */
 function ProvidersPanel() {
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
   const [report, setReport] = useState<ProvidersReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Deliberately not a mount query: probing touches local ports and credential
+  // helpers, so it stays on demand (see the panel doc comment). fetchQuery
+  // still routes it through the cache, so two quick probes dedupe.
   const probe = async () => {
     setBusy(true);
     setError(null);
     try {
-      setReport(await api.providers());
+      setReport(await queryClient.fetchQuery({ queryKey: queryKeys.providers(storyId), queryFn: () => api.providers() }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
     setBusy(false);
   };
+
+  const switchProfile = useMutation({
+    mutationFn: async (name: string) => {
+      await api.setProfile(name);
+      return api.providers();
+    },
+    onMutate: () => setError(null),
+    onSuccess: (next) => {
+      setReport(next);
+      queryClient.setQueryData(queryKeys.providers(storyId), next);
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const anyBusy = busy || switchProfile.isPending;
 
   // The state is information; the fix is the action. Only the action takes colour.
   const badge = (status: string) =>
@@ -3193,8 +3293,8 @@ function ProvidersPanel() {
     <div className="card">
       <div className="row">
         <h3 className="grow" style={{ margin: 0 }}>models available here</h3>
-        <button disabled={busy} onClick={() => void probe()}>
-          {busy ? 'checking…' : report ? 'recheck' : 'check'}
+        <button disabled={anyBusy} onClick={() => void probe()}>
+          {anyBusy ? 'checking…' : report ? 'recheck' : 'check'}
         </button>
       </div>
 
@@ -3230,20 +3330,8 @@ function ProvidersPanel() {
                     key={name}
                     className={name === report.profile ? 'primary' : ''}
                     aria-pressed={name === report.profile}
-                    disabled={busy || name === report.profile}
-                    onClick={() =>
-                      void (async () => {
-                        setBusy(true);
-                        setError(null);
-                        try {
-                          await api.setProfile(name);
-                          setReport(await api.providers());
-                        } catch (e) {
-                          setError(e instanceof Error ? e.message : String(e));
-                        }
-                        setBusy(false);
-                      })()
-                    }
+                    disabled={anyBusy || name === report.profile}
+                    onClick={() => switchProfile.mutate(name)}
                   >
                     {name}
                   </button>

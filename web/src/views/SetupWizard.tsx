@@ -5,13 +5,14 @@
  * is one the player can actually answer, and the cost of an ingest is on screen
  * before anything is spent.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   api,
+  getSelectedStoryId,
   type AppConfig,
   type CandidateCharacter,
   type CharacterSketch,
-  type ConfigBundle,
   type DiscoverResult,
   type IngestPlan,
   type Job,
@@ -22,6 +23,7 @@ import {
   type ValidationIssue,
   type WikiCandidate,
 } from '../api.ts';
+import { queryKeys } from '../query-keys.ts';
 import { ProvidersEditor } from './ConfigPanels.tsx';
 import { Mark } from '../Mark.tsx';
 
@@ -43,7 +45,6 @@ const blankSketch = (): CharacterSketch => ({ existing: null, name: '', role: ''
 
 export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) {
   const [step, setStep] = useState<Step>('source');
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [universe, setUniverse] = useState('');
@@ -58,7 +59,6 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   // distinguishable from a 0 the user typed.
   const [pageBudget, setPageBudget] = useState('');
   const [passBBudget, setPassBBudget] = useState('');
-  const [job, setJob] = useState<Job | null>(null);
   const [customDesc, setCustomDesc] = useState('');
   const [cast, setCast] = useState<CandidateCharacter[]>([]);
   const [castSketch, setCastSketch] = useState<CharacterSketch | null>(null);
@@ -74,64 +74,231 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
   // to build the world silently on the mock regardless. A first-time visitor
   // meets deliberately plain prose at exactly the moment they are deciding
   // whether any of this is good, so offer the better model up front instead.
-  const [providers, setProviders] = useState<ProvidersReport | null>(null);
-  const [switchingProfile, setSwitchingProfile] = useState(false);
   const [dismissedOffer, setDismissedOffer] = useState(false);
 
-  useEffect(() => {
-    void api.providers().then(setProviders).catch(() => {});
-  }, []);
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
+
+  // The old mount probe is now the query's initial fetch; it shares its key
+  // with the settings panels' probes, which are the same request. A failed
+  // probe leaves `providers` null, as before — nothing here displays its error.
+  const providersQuery = useQuery({
+    queryKey: queryKeys.providers(storyId),
+    queryFn: () => api.providers(),
+  });
+  const providers = providersQuery.data ?? null;
 
   const betterProfiles = (providers?.usableProfiles ?? []).filter((p) => p !== 'mock' && p !== providers?.profile);
 
-  const guard = async (fn: () => Promise<void>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+  // Poll a running job. Progress is stages plus counts, never a fake percentage.
+  // One query per job id, polling on the same 700 ms cadence the old interval
+  // used; a failed poll leaves the data 'running', so the interval retries by
+  // itself — the old tick's swallowed catch did the same thing.
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const jobQuery = useQuery({
+    queryKey: queryKeys.setupJob(storyId, activeJobId ?? ''),
+    queryFn: () => api.setup.job(activeJobId as string),
+    enabled: !!activeJobId,
+    refetchInterval: (query) => (query.state.data?.status === 'running' ? 700 : false),
+  });
+  const job = jobQuery.data ?? null;
+
+  // The old tick's terminal branch. Two job kinds land here: `discover` (the
+  // crawl+preview, feeding back into the still-editable plan) and
+  // `ingest`/`custom-world` (the actual write). They resolve to different
+  // steps, so the branch is on `job.kind` rather than a single fixed
+  // "done → cast" path. The guard keeps a terminal job handled once even if a
+  // refetch hands back a new data object for it.
+  const [handledJobId, setHandledJobId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!job || job.status === 'running' || handledJobId === job.id) return;
+    if (job.status === 'done') {
+      if (job.kind === 'discover') {
+        const result = job.result as DiscoverResult;
+        setPreview(result);
+        setRefined(true);
+        setPlan((p) => (p ? { ...p, character: result.character } : p));
+        setStep('preview');
+      } else {
+        const result = job.result as { opening?: string } | null;
+        setOpening(result?.opening ?? '');
+        // The old tick awaited this before advancing and stranded the step in
+        // 'running' forever when it failed; a dropped fetch now just leaves
+        // the list empty for now, recoverable from the cast step.
+        void api.setup.characters().then(setCast).catch(() => {});
+        setStep('cast');
+      }
+    } else if (job.status === 'failed') {
+      setError(job.error ?? 'the job failed');
     }
-    setBusy(false);
+    setHandledJobId(job.id);
+  }, [job, handledJobId]);
+
+  // The old setJob showed the create response immediately, before the first
+  // poll tick; seeding the cache does the same.
+  const seedJob = (j: Job) => {
+    queryClient.setQueryData(queryKeys.setupJob(storyId, j.id), j);
+    setActiveJobId(j.id);
   };
 
-  // Poll a running job. Progress is stages plus counts, never a fake percentage.
-  // Two job kinds land here: `discover` (the crawl+preview, feeding back into
-  // the still-editable plan) and `ingest`/`custom-world` (the actual write).
-  // They resolve to different steps, so the branch is on `job.kind` rather than
-  // a single fixed "done → cast" path.
-  const pollRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (job?.status !== 'running') return;
-    const tick = async () => {
-      try {
-        const next = await api.setup.job(job.id);
-        setJob(next);
-        if (next.status === 'done') {
-          if (next.kind === 'discover') {
-            const result = next.result as DiscoverResult;
-            setPreview(result);
-            setRefined(true);
-            setPlan((p) => (p ? { ...p, character: result.character } : p));
-            setStep('preview');
-          } else {
-            const result = next.result as { opening?: string } | null;
-            setOpening(result?.opening ?? '');
-            setCast(await api.setup.characters());
-            setStep('cast');
-          }
-        } else if (next.status === 'failed') {
-          setError(next.error ?? 'the job failed');
-        }
-      } catch {
-        // A dropped poll is not fatal; the next tick retries.
-      }
-    };
-    pollRef.current = window.setInterval(tick, 700);
-    return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
-    };
-  }, [job]);
+  // One mutation per action, the way the guard-wrapped async blocks were. Each
+  // onMutate clears the error line the way guard's leading setError(null) did;
+  // each step advance sits in onSuccess so a failed call never moves the
+  // wizard forward, exactly as the old try-block ordering guaranteed.
+  const switchProfile = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await api.setProfile(name);
+      if (!res.ok) throw new Error(res.notes.join(' ') || `could not switch to ${name}`);
+      return api.providers();
+    },
+    onMutate: () => setError(null),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKeys.providers(storyId), next);
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const loadPacks = useMutation({
+    mutationFn: async () => {
+      if (packs) return packs;
+      return (await api.setup.packs()).packs;
+    },
+    onMutate: () => setError(null),
+    onSuccess: (list) => {
+      setPacks(list);
+      setStep('packs');
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const applyPack = useMutation({
+    mutationFn: (args: { packId: string; scenarioId: string }) => api.setup.pack(args.packId, args.scenarioId),
+    onMutate: () => setError(null),
+    onSuccess: (res) => {
+      setOpening(res.opening);
+      if (res.warnings.length) setError(res.warnings.join(' · '));
+      setStep('ready');
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const resolveWiki = useMutation({
+    mutationFn: () => api.setup.resolve(universe),
+    onMutate: () => setError(null),
+    onSuccess: (res) => {
+      setCandidates(res.candidates);
+      if (!res.candidates.length) setError('I could not find a wiki for that. Try another name, or paste a wiki URL.');
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const makePlan = useMutation({
+    mutationFn: (args: { wish: string; wiki: WikiCandidate }) => api.setup.plan(args.wish, args.wiki),
+    onMutate: () => setError(null),
+    onSuccess: (p) => {
+      setPlan(p);
+      setStep('plan');
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const buildCustom = useMutation({
+    mutationFn: () => api.setup.custom(customDesc),
+    onMutate: () => setError(null),
+    onSuccess: (j) => {
+      seedJob(j);
+      setStep('running');
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const startDiscover = useMutation({
+    mutationFn: (args: { wiki: WikiCandidate; plan: IngestPlan; pageBudget: string; passBBudget: string }) =>
+      api.setup.discover(
+        args.wiki.baseUrl,
+        args.plan.seeds,
+        args.plan.mode,
+        args.plan.character,
+        args.plan.excludeCategories,
+        args.wiki.name,
+        {
+          ...(args.pageBudget ? { maxPages: Number(args.pageBudget) } : {}),
+          ...(args.passBBudget ? { passBMaxPages: Number(args.passBBudget) } : {}),
+        },
+      ),
+    onMutate: () => {
+      setError(null);
+      setRefined(false);
+    },
+    onSuccess: (j) => {
+      seedJob(j);
+      setStep('discovering');
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const startIngest = useMutation({
+    mutationFn: (args: {
+      previewKey: string;
+      character: CharacterSketch;
+      style: IngestPlan['style'];
+      opening: string;
+    }) => api.setup.ingest(args.previewKey, args.character, args.style, args.opening),
+    onMutate: () => setError(null),
+    onSuccess: (j) => {
+      seedJob(j);
+      setStep('running');
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const cancelJob = useMutation({
+    mutationFn: (id: string) => api.setup.cancel(id),
+  });
+
+  const loadCastDetail = useMutation({
+    mutationFn: async (candidate: CandidateCharacter) => {
+      const detail = await api.entity(candidate.id);
+      return { candidate, detail };
+    },
+    onMutate: () => setError(null),
+    onSuccess: ({ candidate, detail }) => {
+      setCastSketch({
+        existing: candidate.name,
+        name: candidate.name,
+        role: detail.entity.summary ?? '',
+        goals: detail.sheet?.identity.goals ?? [],
+        vows: (detail.sheet?.contract.vows ?? []).map((v) => ({ text: v.text, rank: v.rank })),
+      });
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const setPlayer = useMutation({
+    mutationFn: (sketch: CharacterSketch) => api.setup.setPlayer(sketch),
+    onMutate: () => setError(null),
+    onSuccess: (res) => {
+      setOpening(res.opening);
+      setStep('ready');
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const begin = useMutation({
+    mutationFn: async () => {
+      await onDone();
+    },
+    onMutate: () => setError(null),
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
+
+  // The old shared busy flag disabled every action button while any one was in
+  // flight; the disjunction keeps that window exactly. Profile switching runs
+  // on its own flag, as before.
+  const busy =
+    loadPacks.isPending || applyPack.isPending || resolveWiki.isPending || makePlan.isPending ||
+    buildCustom.isPending || startDiscover.isPending || startIngest.isPending ||
+    loadCastDetail.isPending || setPlayer.isPending || begin.isPending;
 
   return (
     <div className="wizard">
@@ -175,22 +342,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 </p>
                 <div className="row wrap">
                   {betterProfiles.map((name) => (
-                    <button
-                      key={name}
-                      disabled={switchingProfile}
-                      onClick={() =>
-                        void guard(async () => {
-                          setSwitchingProfile(true);
-                          try {
-                            const res = await api.setProfile(name);
-                            if (res.ok) setProviders(await api.providers());
-                            else setError(res.notes.join(' ') || `could not switch to ${name}`);
-                          } finally {
-                            setSwitchingProfile(false);
-                          }
-                        })
-                      }
-                    >
+                    <button key={name} disabled={switchProfile.isPending} onClick={() => switchProfile.mutate(name)}>
                       use {name}
                     </button>
                   ))}
@@ -231,16 +383,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 It is also the one route that needs no model, no network and no
                 waiting, and the only one whose output is the same everywhere.
               */}
-              <button
-                className="choice"
-                disabled={busy}
-                onClick={() =>
-                  void guard(async () => {
-                    if (!packs) setPacks((await api.setup.packs()).packs);
-                    setStep('packs');
-                  })
-                }
-              >
+              <button className="choice" disabled={busy} onClick={() => loadPacks.mutate()}>
                 <b>One of our worlds</b>
                 <span>
                   Original settings built for this engine — science fiction, fantasy, historical, contemporary. Ready to
@@ -306,14 +449,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                   key={s.id}
                   className="choice"
                   disabled={busy}
-                  onClick={() =>
-                    void guard(async () => {
-                      const res = await api.setup.pack(pack.id, s.id);
-                      setOpening(res.opening);
-                      if (res.warnings.length) setError(res.warnings.join(' · '));
-                      setStep('ready');
-                    })
-                  }
+                  onClick={() => applyPack.mutate({ packId: pack.id, scenarioId: s.id })}
                 >
                   <b>{s.title}</b>
                   <span className="small dim">you play {s.playerName}</span>
@@ -333,7 +469,9 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
         {step === 'models' ? (
           <ModelsStep
             providers={providers}
-            onProvidersChanged={async () => setProviders(await api.providers())}
+            onProvidersChanged={async () => {
+              await providersQuery.refetch();
+            }}
             onBack={() => setStep('source')}
           />
         ) : null}
@@ -349,28 +487,12 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 placeholder="The Witcher, Discworld, Dune, a wiki URL…"
                 onChange={(e) => setUniverse(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && universe.trim()) {
-                    void guard(async () => {
-                      const res = await api.setup.resolve(universe);
-                      setCandidates(res.candidates);
-                      if (!res.candidates.length) setError('I could not find a wiki for that. Try another name, or paste a wiki URL.');
-                    });
-                  }
+                  if (e.key === 'Enter' && universe.trim()) resolveWiki.mutate();
                 }}
               />
             </label>
             <div className="row">
-              <button
-                className="primary"
-                disabled={busy || !universe.trim()}
-                onClick={() =>
-                  void guard(async () => {
-                    const res = await api.setup.resolve(universe);
-                    setCandidates(res.candidates);
-                    if (!res.candidates.length) setError('I could not find a wiki for that. Try another name, or paste a wiki URL.');
-                  })
-                }
-              >
+              <button className="primary" disabled={busy || !universe.trim()} onClick={() => resolveWiki.mutate()}>
                 {busy ? 'looking…' : 'find it'}
               </button>
             </div>
@@ -419,17 +541,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               anything is read.
             </p>
             <div className="row">
-              <button
-                className="primary"
-                disabled={busy || !wish.trim()}
-                onClick={() =>
-                  void guard(async () => {
-                    const p = await api.setup.plan(wish, wiki);
-                    setPlan(p);
-                    setStep('plan');
-                  })
-                }
-              >
+              <button className="primary" disabled={busy || !wish.trim()} onClick={() => makePlan.mutate({ wish, wiki })}>
                 {busy ? 'thinking…' : 'plan it'}
               </button>
             </div>
@@ -454,16 +566,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               all of it afterwards.
             </p>
             <div className="row">
-              <button
-                className="primary"
-                disabled={busy || customDesc.trim().length < 20}
-                onClick={() =>
-                  void guard(async () => {
-                    setJob(await api.setup.custom(customDesc));
-                    setStep('running');
-                  })
-                }
-              >
+              <button className="primary" disabled={busy || customDesc.trim().length < 20} onClick={() => buildCustom.mutate()}>
                 {busy ? 'starting…' : 'build it'}
               </button>
             </div>
@@ -564,25 +667,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               <button
                 className="primary"
                 disabled={busy || plan.seeds.length === 0}
-                onClick={() =>
-                  void guard(async () => {
-                    setRefined(false);
-                    const j = await api.setup.discover(
-                      wiki.baseUrl,
-                      plan.seeds,
-                      plan.mode,
-                      plan.character,
-                      plan.excludeCategories,
-                      wiki.name,
-                      {
-                        ...(pageBudget ? { maxPages: Number(pageBudget) } : {}),
-                        ...(passBBudget ? { passBMaxPages: Number(passBBudget) } : {}),
-                      },
-                    );
-                    setJob(j);
-                    setStep('discovering');
-                  })
-                }
+                onClick={() => startDiscover.mutate({ wiki, plan, pageBudget, passBBudget })}
               >
                 see what that costs
               </button>
@@ -672,10 +757,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                 className="primary"
                 disabled={busy}
                 onClick={() =>
-                  void guard(async () => {
-                    setJob(await api.setup.ingest(preview.previewKey, plan.character, plan.style, plan.opening));
-                    setStep('running');
-                  })
+                  startIngest.mutate({ previewKey: preview.previewKey, character: plan.character, style: plan.style, opening: plan.opening })
                 }
               >
                 read it and begin
@@ -691,7 +773,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
 
             {job.status === 'running' ? (
               <div className="row">
-                <button onClick={() => void api.setup.cancel(job.id)}>stop, keep what's read</button>
+                <button onClick={() => cancelJob.mutate(job.id)}>stop, keep what's read</button>
               </div>
             ) : null}
           </>
@@ -706,23 +788,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
             </p>
             <div className="list scroll">
               {cast.slice(0, 24).map((c) => (
-                <button
-                  key={c.id}
-                  className="choice small"
-                  disabled={busy}
-                  onClick={() =>
-                    void guard(async () => {
-                      const detail = await api.entity(c.id);
-                      setCastSketch({
-                        existing: c.name,
-                        name: c.name,
-                        role: detail.entity.summary ?? '',
-                        goals: detail.sheet?.identity.goals ?? [],
-                        vows: (detail.sheet?.contract.vows ?? []).map((v) => ({ text: v.text, rank: v.rank })),
-                      });
-                    })
-                  }
-                >
+                <button key={c.id} className="choice small" disabled={busy} onClick={() => loadCastDetail.mutate(c)}>
                   <b>
                     {c.name} {c.hasVows ? <span className="tag">has vows</span> : null}
                   </b>
@@ -742,17 +808,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
               <>
                 <CharacterEditor sketch={castSketch} onChange={setCastSketch} />
                 <div className="row">
-                  <button
-                    className="primary"
-                    disabled={busy}
-                    onClick={() =>
-                      void guard(async () => {
-                        const res = await api.setup.setPlayer(castSketch);
-                        setOpening(res.opening);
-                        setStep('ready');
-                      })
-                    }
-                  >
+                  <button className="primary" disabled={busy} onClick={() => setPlayer.mutate(castSketch)}>
                     play as this character
                   </button>
                 </div>
@@ -767,7 +823,7 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
             <h3 className="opening-label">Where we begin</h3>
             <p className="opening">{opening || 'Somewhere with a decision already waiting.'}</p>
             <div className="row">
-              <button className="primary" disabled={busy} onClick={() => void guard(async () => { await onDone(); })}>
+              <button className="primary" disabled={busy} onClick={() => begin.mutate()}>
                 begin
               </button>
             </div>
@@ -928,30 +984,43 @@ function ModelsStep({
   onProvidersChanged: () => Promise<void>;
   onBack: () => void;
 }) {
-  const [bundle, setBundle] = useState<ConfigBundle | null>(null);
+  const storyId = getSelectedStoryId();
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  const reload = async () => {
-    try {
-      setBundle(await api.config.get());
-    } catch (e) {
-      setNote(e instanceof Error ? e.message : String(e));
-    }
-  };
+  // The old mount reload is now the query's initial fetch. It shares its key
+  // with the settings panels' bundle, so a config change made in either place
+  // shows up in both. A failed fetch keeps the last good bundle and lands in
+  // `note`, like the old reload's catch.
+  const bundleQuery = useQuery({
+    queryKey: queryKeys.configBundle(storyId),
+    queryFn: () => api.config.get(),
+  });
+  const bundle = bundleQuery.data ?? null;
 
-  // Load the config once on entering the step. `reload` is redefined every
-  // render, so depending on it would refetch continuously.
+  // v5 has no per-query onError, so the old catch's line lands here.
+  const bundleError = bundleQuery.error;
   useEffect(() => {
-    void reload();
-  }, []);
+    if (bundleError) setNote(bundleError instanceof Error ? bundleError.message : String(bundleError));
+  }, [bundleError]);
+
+  // A stable refetch now, so it can be passed straight to the editor.
+  const reload = async () => {
+    await bundleQuery.refetch();
+  };
 
   const apply = async (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => {
     setBusy(true);
     setNote(null);
     try {
       await fn();
-      await reload();
+      // v5's refetch never rejects, so check its error explicitly — a failed
+      // reload keeps the last good bundle and surfaces the line here.
+      const reloaded = await bundleQuery.refetch();
+      if (reloaded.error) {
+        setNote(reloaded.error instanceof Error ? reloaded.error.message : String(reloaded.error));
+        return;
+      }
       // A newly kept provider can make a profile usable, so re-probe rather
       // than leaving the list below stale.
       await onProvidersChanged();
@@ -960,6 +1029,17 @@ function ModelsStep({
     }
     setBusy(false);
   };
+
+  const switchProfile = useMutation({
+    mutationFn: (name: string) => api.setProfile(name),
+    onMutate: () => setNote(null),
+    onSuccess: async (res) => {
+      if (!res.ok) setNote(res.notes.join(' ') || `could not switch to ${name}`);
+      // The old code re-probed on both outcomes; keep that.
+      await onProvidersChanged();
+    },
+    onError: (e) => setNote(e instanceof Error ? e.message : String(e)),
+  });
 
   const usable = providers?.usableProfiles ?? [];
   const current = providers?.profile ?? 'mock';
@@ -984,21 +1064,8 @@ function ModelsStep({
                 key={name}
                 className={name === current ? 'primary' : ''}
                 aria-pressed={name === current}
-                disabled={busy || name === current}
-                onClick={() =>
-                  void (async () => {
-                    setBusy(true);
-                    setNote(null);
-                    try {
-                      const res = await api.setProfile(name);
-                      if (!res.ok) setNote(res.notes.join(' ') || `could not switch to ${name}`);
-                      await onProvidersChanged();
-                    } catch (e) {
-                      setNote(e instanceof Error ? e.message : String(e));
-                    }
-                    setBusy(false);
-                  })()
-                }
+                disabled={busy || switchProfile.isPending || name === current}
+                onClick={() => switchProfile.mutate(name)}
               >
                 {name}
               </button>

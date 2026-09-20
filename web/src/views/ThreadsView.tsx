@@ -1,36 +1,51 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { api, type State, type Thread } from '../api.ts';
+import { Fragment, useRef, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, getSelectedStoryId, type State, type Thread } from '../api.ts';
+import { queryKeys } from '../query-keys.ts';
 
-function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => void }) {
+function errorMessage(reason: unknown) {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
+function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => void | Promise<void> }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(thread.title);
   const [tension, setTension] = useState(thread.tension);
   // Drag ticks that land while a save is in flight; only the latest is kept.
   const pendingTension = useRef<number | null>(null);
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
 
-  function flushPending() {
-    const next = pendingTension.current;
-    if (next === null) return;
-    pendingTension.current = null;
-    void run(save({ tension: next }));
-  }
-
-  const { busy, error, run, inFlight } = useAction(flushPending);
-
-  function save(patch: Partial<Thread>) {
-    return async () => {
-      await api.updateThread(thread.id, patch);
-      onChanged();
-    };
-  }
+  const save = useMutation({
+    mutationFn: (patch: Partial<Thread>) => api.updateThread(thread.id, patch),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.threads(storyId) });
+      void onChanged();
+    },
+    // Once the guard is released, flush any drag tick queued mid-flight.
+    onSettled: () => {
+      const next = pendingTension.current;
+      if (next === null) return;
+      pendingTension.current = null;
+      void save.mutateAsync({ tension: next });
+    },
+  });
 
   function changeTension(value: number) {
     setTension(value);
-    if (inFlight.current) {
+    if (save.isPending) {
       pendingTension.current = value;
       return;
     }
-    void run(save({ tension: value }));
+    void save.mutateAsync({ tension: value });
+  }
+
+  // Single-flight, like the old useAction guard: a title blur landing while a
+  // save is in flight is dropped rather than racing it.
+  function commitTitle() {
+    const next = title.trim();
+    if (!next || next === thread.title || save.isPending) return;
+    void save.mutateAsync({ title: next });
   }
 
   return (
@@ -44,10 +59,7 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
             onChange={(event) => setTitle(event.target.value)}
             onBlur={() => {
               setEditing(false);
-              const next = title.trim();
-              if (next && next !== thread.title) {
-                void run(save({ title: next }));
-              }
+              commitTitle();
             }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') (event.target as HTMLInputElement).blur();
@@ -57,7 +69,7 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
           <button
             className="name sm grow as-h2"
             title="click to retitle"
-            disabled={busy}
+            disabled={save.isPending}
             onClick={() => setEditing(true)}
             style={{ cursor: 'text', textAlign: 'left' }}
           >
@@ -67,22 +79,22 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
         <span className="tag">{thread.status}</span>
         {thread.status === 'open' ? (
           <>
-            <button title="mark resolved" disabled={busy} onClick={() => void run(save({ status: 'resolved' }))}>
+            <button title="mark resolved" disabled={save.isPending} onClick={() => void save.mutateAsync({ status: 'resolved' })}>
               resolve
             </button>
-            <button title="mark abandoned" disabled={busy} onClick={() => void run(save({ status: 'abandoned' }))}>
+            <button title="mark abandoned" disabled={save.isPending} onClick={() => void save.mutateAsync({ status: 'abandoned' })}>
               abandon
             </button>
           </>
         ) : (
-          <button title="reopen this thread" disabled={busy} onClick={() => void run(save({ status: 'open' }))}>
+          <button title="reopen this thread" disabled={save.isPending} onClick={() => void save.mutateAsync({ status: 'open' })}>
             reopen
           </button>
         )}
       </div>
-      {error ? (
+      {save.error ? (
         <div className="small warn" style={{ margin: '0 0 var(--s3)' }}>
-          {error}
+          {errorMessage(save.error)}
         </div>
       ) : null}
       <div className="small dim" style={{ margin: '5px 0 var(--s4)', maxWidth: '44rem' }}>
@@ -119,62 +131,34 @@ function ThreadCard({ thread, onChanged }: { thread: Thread; onChanged: () => vo
   );
 }
 
-// Shared shape for mutations: a single-flight guard (ref, since state reads
-// inside async continuations would be stale), a busy flag to disable the
-// control while in flight, an error line for surfaced failures, and an
-// optional settled hook that runs once the guard is released.
-function useAction(onSettled?: () => void) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const inFlight = useRef(false);
-
-  async function run(action: () => Promise<void>) {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      await action();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-    inFlight.current = false;
-    setBusy(false);
-    onSettled?.();
-  }
-
-  return { busy, error, run, inFlight };
-}
-
-export function ThreadsView({ state, onChanged }: { state: State | null; onChanged: () => void }) {
-  const [threads, setThreads] = useState<Thread[]>([]);
+export function ThreadsView({ state, onChanged }: { state: State | null; onChanged: () => void | Promise<void> }) {
   const [text, setText] = useState('');
   const [strength, setStrength] = useState('push');
   const [diff, setDiff] = useState<Array<[string, string]> | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [newStakes, setNewStakes] = useState('');
-  const create = useAction();
-  const direct = useAction();
-  const retire = useAction();
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
 
-  const load = useCallback(async () => setThreads(await api.threads()), []);
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const threadsQuery = useQuery({
+    queryKey: queryKeys.threads(storyId),
+    queryFn: () => api.threads(),
+  });
+  const threads = threadsQuery.data ?? [];
 
-  function openThread() {
-    return create.run(async () => {
-      await api.createThread(newTitle.trim(), newStakes.trim());
+  const create = useMutation({
+    mutationFn: () => api.createThread(newTitle.trim(), newStakes.trim()),
+    onSuccess: async () => {
       setNewTitle('');
       setNewStakes('');
-      await load();
-      onChanged();
-    });
-  }
+      await queryClient.invalidateQueries({ queryKey: queryKeys.threads(storyId) });
+      void onChanged();
+    },
+  });
 
-  function applyDirective() {
-    return direct.run(async () => {
-      const response = await api.addDirective(text, strength);
+  const direct = useMutation({
+    mutationFn: (input: { text: string; strength: string }) => api.addDirective(input.text, input.strength),
+    onSuccess: async (response) => {
       const entries: Array<[string, string]> = [];
       if (response.diff.raisedThreadTitles.length) {
         entries.push(['raised', response.diff.raisedThreadTitles.join('; ')]);
@@ -190,17 +174,17 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
       }
       setDiff(entries.length ? entries : [['no change', 'nothing needed moving']]);
       setText('');
-      await load();
-      onChanged();
-    });
-  }
+      await queryClient.invalidateQueries({ queryKey: queryKeys.threads(storyId) });
+      void onChanged();
+    },
+  });
 
-  function retireDirective(directiveId: string) {
-    return retire.run(async () => {
-      await api.retireDirective(directiveId);
-      onChanged();
-    });
-  }
+  const retire = useMutation({
+    mutationFn: (directiveId: string) => api.retireDirective(directiveId),
+    onSuccess: () => {
+      void onChanged();
+    },
+  });
 
   return (
     <div className="main">
@@ -211,14 +195,7 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
             it.
           </p>
           {threads.map((thread) => (
-            <ThreadCard
-              key={thread.id}
-              thread={thread}
-              onChanged={async () => {
-                await load();
-                onChanged();
-              }}
-            />
+            <ThreadCard key={thread.id} thread={thread} onChanged={onChanged} />
           ))}
           {threads.length === 0 ? <p className="empty">No threads yet — start one on the right.</p> : null}
         </div>
@@ -246,14 +223,14 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
           <button
             className="primary"
             style={{ marginTop: 'var(--s2)' }}
-            disabled={create.busy || !newTitle.trim()}
-            onClick={() => void openThread()}
+            disabled={create.isPending || !newTitle.trim()}
+            onClick={() => void create.mutateAsync().catch(() => {})}
           >
-            {create.busy ? 'opening…' : 'open thread'}
+            {create.isPending ? 'opening…' : 'open thread'}
           </button>
           {create.error ? (
             <div className="small warn" style={{ marginTop: 'var(--s2)' }}>
-              {create.error}
+              {errorMessage(create.error)}
             </div>
           ) : null}
         </div>
@@ -272,13 +249,17 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
               <option value="push">push</option>
               <option value="mandate">mandate</option>
             </select>
-            <button className="primary" disabled={direct.busy || !text.trim()} onClick={() => void applyDirective()}>
-              {direct.busy ? 'applying…' : 'apply'}
+            <button
+              className="primary"
+              disabled={direct.isPending || !text.trim()}
+              onClick={() => void direct.mutateAsync({ text, strength }).catch(() => {})}
+            >
+              {direct.isPending ? 'applying…' : 'apply'}
             </button>
           </div>
           {direct.error ? (
             <div className="small warn" style={{ marginTop: 'var(--s2)' }}>
-              {direct.error}
+              {errorMessage(direct.error)}
             </div>
           ) : null}
           {diff ? (
@@ -307,8 +288,8 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
                 <button
                   aria-label={`retire directive: ${directive.text}`}
                   title="retire this directive"
-                  disabled={retire.busy}
-                  onClick={() => void retireDirective(directive.id)}
+                  disabled={retire.isPending}
+                  onClick={() => void retire.mutateAsync(directive.id).catch(() => {})}
                 >
                   ×
                 </button>
@@ -316,7 +297,7 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
             ))}
             {retire.error ? (
               <div className="small warn" style={{ marginTop: 'var(--s2)' }}>
-                {retire.error}
+                {errorMessage(retire.error)}
               </div>
             ) : null}
           </div>

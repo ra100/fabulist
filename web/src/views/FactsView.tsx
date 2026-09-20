@@ -1,17 +1,40 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, type Entity, type Fact, type Sheet } from '../api.ts';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, getSelectedStoryId } from '../api.ts';
+import { queryKeys } from '../query-keys.ts';
 
 export function FactsView() {
-  const [facts, setFacts] = useState<Fact[]>([]);
-  const [cast, setCast] = useState<Array<{ sheet: Sheet; entity: Entity | null }>>([]);
   const [grantTarget, setGrantTarget] = useState<Record<string, string>>({});
   const [grantLevel, setGrantLevel] = useState<Record<string, string>>({});
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
 
-  const load = useCallback(async () => setFacts(await api.facts()), []);
-  useEffect(() => {
-    void load();
-    void api.cast().then(setCast);
-  }, [load]);
+  const factsQuery = useQuery({
+    queryKey: queryKeys.facts(storyId),
+    queryFn: () => api.facts(),
+  });
+  const castQuery = useQuery({
+    queryKey: queryKeys.cast(storyId),
+    queryFn: () => api.cast(),
+  });
+  const facts = factsQuery.data ?? [];
+  const cast = castQuery.data ?? [];
+
+  const grant = useMutation({
+    mutationFn: (args: { factId: string; target: string; level: string }) =>
+      api.grantKnowledge(args.factId, args.target, args.level),
+    onSuccess: async (_data, args) => {
+      setGrantTarget((previous) => ({ ...previous, [args.factId]: '' }));
+      await queryClient.invalidateQueries({ queryKey: queryKeys.facts(storyId) });
+    },
+  });
+
+  const revoke = useMutation({
+    mutationFn: (args: { factId: string; entityId: string }) => api.revokeKnowledge(args.factId, args.entityId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.facts(storyId) });
+    },
+  });
 
   return (
     <div className="main">
@@ -58,10 +81,9 @@ export function FactsView() {
                         <button
                           aria-label={`revoke ${fact.text} from ${knower.name}`}
                           title="revoke — back to never told"
-                          onClick={async () => {
-                            await api.revokeKnowledge(fact.id, knower.entityId);
-                            await load();
-                          }}
+                          onClick={() =>
+                            void revoke.mutateAsync({ factId: fact.id, entityId: knower.entityId }).catch(() => {})
+                          }
                         >
                           ×
                         </button>
@@ -96,12 +118,10 @@ export function FactsView() {
                       <option value="wrong">wrong</option>
                     </select>
                     <button
-                      disabled={!target}
-                      onClick={async () => {
-                        await api.grantKnowledge(fact.id, target, level);
-                        setGrantTarget((previous) => ({ ...previous, [fact.id]: '' }));
-                        await load();
-                      }}
+                      disabled={!target || grant.isPending}
+                      onClick={() =>
+                        void grant.mutateAsync({ factId: fact.id, target, level }).catch(() => {})
+                      }
                     >
                       grant
                     </button>

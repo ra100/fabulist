@@ -7,15 +7,18 @@
  * at the moment a phrase annoys you — so it is also addable straight from a lint
  * finding in the why panel.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   api,
+  getSelectedStoryId,
   type AppConfig,
   type ConfigBundle,
   type ProbeResult,
   type ProviderSpec,
   type ValidationIssue,
 } from '../api.ts';
+import { queryKeys } from '../query-keys.ts';
 
 const KINDS = ['openai-compat', 'anthropic', 'ollama', 'bedrock', 'google', 'copilot'] as const;
 const DIALECTS = ['openai', 'vllm', 'llamacpp'] as const;
@@ -41,22 +44,26 @@ function relevantFields(kind: string): Array<'baseUrl' | 'dialect' | 'apiKeyEnv'
 }
 
 export function ConfigPanels({ onChanged }: { onChanged?: () => void }) {
-  const [bundle, setBundle] = useState<ConfigBundle | null>(null);
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setBundle(await api.config.get());
-    } catch (e) {
-      setNote(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+  const storyId = getSelectedStoryId();
+  const queryClient = useQueryClient();
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // The old mount load is now the query's initial fetch. It shares its key
+  // with the setup wizard's models step, so a config change made in either
+  // place shows up in both.
+  const bundleQuery = useQuery({
+    queryKey: queryKeys.configBundle(storyId),
+    queryFn: () => api.config.get(),
+  });
+  const bundle = bundleQuery.data ?? null;
+
+  // A stable refetch now, so it can be passed straight to the editor.
+  const load = async () => {
+    await bundleQuery.refetch();
+  };
 
   const apply = async (fn: () => Promise<{ config: AppConfig; issues: ValidationIssue[]; registryRebuilt: boolean }>) => {
     setBusy(true);
@@ -64,11 +71,19 @@ export function ConfigPanels({ onChanged }: { onChanged?: () => void }) {
     try {
       const result = await fn();
       setIssues(result.issues);
-      setBundle((prev) => (prev ? { ...prev, config: result.config } : prev));
+      // The response's config is authoritative for what it touched; seed the
+      // cache so panels re-render before the refetch lands.
+      queryClient.setQueryData(queryKeys.configBundle(storyId), (prev: ConfigBundle | undefined) =>
+        prev ? { ...prev, config: result.config } : prev);
       if (result.registryRebuilt) setNote('models reloaded — takes effect on the next turn');
       onChanged?.();
-      // Provider keys may have changed, so refresh the surrounding lists.
-      setBundle(await api.config.get());
+      // Provider keys may have changed, so refresh the surrounding lists. v5's
+      // refetch never rejects, so check its error explicitly — a failed reload
+      // keeps the last good bundle and surfaces the line here.
+      const reloaded = await bundleQuery.refetch();
+      if (reloaded.error) {
+        setNote(reloaded.error instanceof Error ? reloaded.error.message : String(reloaded.error));
+      }
     } catch (e) {
       setNote(e instanceof Error ? e.message : String(e));
     }
@@ -245,6 +260,13 @@ export function ProvidersEditor({
   const [spec, setSpec] = useState<ProviderSpec>(BLANK);
   const [tested, setTested] = useState<(ProbeResult & { issues: ValidationIssue[] }) | null>(null);
   const cfg = bundle.config;
+
+  // A probe only: it reads the candidate spec and reports back, changing no
+  // shared state — so it stays a one-shot mutation into local `tested`.
+  const testProvider = useMutation({
+    mutationFn: (args: { key: string; spec: ProviderSpec }) => api.config.testProvider(args.key, args.spec),
+    onSuccess: (res) => setTested(res),
+  });
 
   const startEdit = (name: string) => {
     const existing = bundle.presets[name] ?? BLANK;
@@ -429,7 +451,7 @@ export function ProvidersEditor({
           <div className="row" style={{ marginTop: 10 }}>
             <button
               disabled={busy || !spec.model.trim()}
-              onClick={() => void api.config.testProvider(key || 'candidate', spec).then(setTested)}
+              onClick={() => testProvider.mutate({ key: key || 'candidate', spec })}
             >
               test it
             </button>

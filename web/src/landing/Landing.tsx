@@ -20,8 +20,10 @@
  * imply more than the state records" would be arguing against itself.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { PRESETS, resolvePalette, savePalette } from '../palette.ts';
+import { queryKeys } from '../query-keys.ts';
 
 const MCP_URL = 'https://fabulist.rast.io/mcp';
 const REPO = 'https://github.com/ra100/fabulist';
@@ -487,25 +489,22 @@ export function Landing() {
 
   // null while unknown: a visitor who already has a session should be offered the
   // chronicle, not a sign-in they do not need. 401 here is the normal answer and
-  // not an error — it is how the gate says "not signed in".
-  const [signedIn, setSignedIn] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    fetch('/api/auth/me')
-      .then((r) => (r.ok ? r.json() : null))
+  // not an error — it is how the gate says "not signed in" — so a non-OK status
+  // resolves to `null` (signed out) instead of throwing, exactly as the old
+  // fetch chain did. A failed request likewise reads as signed out: the only
+  // consumer below tests truthiness, where null and false agree.
+  const meQuery = useQuery({
+    queryKey: queryKeys.authMe(),
+    queryFn: async () => {
+      const r = await fetch('/api/auth/me');
+      if (!r.ok) return null;
+      const d = (await r.json()) as { user?: unknown } | null;
       // `{ user: null }` is the honest answer when login is not configured at
       // all, and it is a 200 — so the body decides this, not the status.
-      .then((d) => {
-        if (live) setSignedIn(!!d?.user);
-      })
-      .catch(() => {
-        if (live) setSignedIn(false);
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
+      return d?.user ?? null;
+    },
+  });
+  const signedIn = meQuery.data === undefined ? null : !!meQuery.data;
 
   const enter = signedIn ? { href: '/', label: 'Open the chronicle' } : { href: '/auth/login', label: 'Sign in' };
 
