@@ -2517,12 +2517,24 @@ export function createApiServer(opts: ServerOptions) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
+    // The OAuth provider's redirect back to `/auth/callback` is *necessarily*
+    // a cross-site top-level navigation — that is the entire mechanism of
+    // the authorization-code flow, not an attack shape. Browsers typically
+    // send no `Origin` header at all on a plain GET navigation, so
+    // `passesFetchSiteGuard` (and potentially `applyCors`, if the provider's
+    // origin ever were included) would reject every real login attempt with
+    // this guard in place unconditionally. The route's actual CSRF defense
+    // is the one-time OAuth `state` (`consumeOAuthState`, `src/auth/routes.ts`)
+    // sealed into a short-lived cookie during `/auth/login` and checked
+    // inside `handleCallback` itself — the origin/fetch-site checks below
+    // are simply the wrong tool for this one request shape.
+    const isAuthCallback = authConfig !== undefined && req.method === 'GET' && url.pathname === '/auth/callback';
     const origin = requestOrigin(req);
     const originAllowed = applyCors(req, res, url, authConfig, mcpResourceUrl);
-    if (!originAllowed) {
+    if (!isAuthCallback && !originAllowed) {
       return send(res, 403, { error: 'cross-origin requests are not allowed from this origin' });
     }
-    if (!passesFetchSiteGuard(req, origin.origin !== null)) {
+    if (!isAuthCallback && !passesFetchSiteGuard(req, origin.origin !== null)) {
       return send(res, 403, { error: 'cross-site browser requests are not allowed' });
     }
     if (req.method === 'OPTIONS') {

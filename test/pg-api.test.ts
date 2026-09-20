@@ -270,6 +270,66 @@ test('CORS is allowlisted and cross-site browser requests fail closed', async (t
   if (!ran) t.skip('no Postgres configured');
 });
 
+/**
+ * `/auth/callback` is reached by the browser following the identity
+ * provider's redirect back — a genuinely cross-site top-level navigation,
+ * carrying `Sec-Fetch-Site: cross-site` and (as real browsers do for plain
+ * GET navigations) no `Origin` header at all. Both are exactly the shape
+ * the CORS/fetch-site guard above exists to reject for `/api/*` routes, so
+ * without an explicit exemption this route — the one request shape the
+ * entire login flow depends on — would 403 on every real login attempt.
+ * The route's actual CSRF defense is the one-time OAuth `state`
+ * (`consumeOAuthState`), not this guard, so a request with no matching
+ * state is expected to redirect to `/auth/login` (`handleCallback`'s normal
+ * "that attempt didn't work" path) rather than being blocked with a 403
+ * before it ever reaches the handler.
+ */
+test('the OAuth callback is reachable as the cross-site navigation it actually is', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'callback', 'Callback');
+    const story = await createStory(db, { title: 'Callback story', worldIds: [worldId] });
+    const world = await World.forStory(db, story.id);
+    const providers = new ProviderRegistry(new MockProvider());
+    const server = createApiServer({
+      world: () => world,
+      db,
+      engine: new Engine({ world: () => world, db, providers }),
+      authConfig: {
+        requireLogin: true,
+        adminEmails: new Set<string>(),
+        callbackOrigin: 'https://fabulist.example.com',
+        provider: createWorkosProvider({
+          clientId: 'client_test',
+          cookiePassword: 'x'.repeat(32),
+          workos: {
+            userManagement: {
+              loadSealedSession: () => ({
+                authenticate: async () => ({ authenticated: false as const, reason: 'invalid_session_cookie' as const }),
+              }),
+            },
+          } as unknown as WorkOS,
+        }),
+      },
+    });
+    await listen(server);
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const response = await fetch(`${base}/auth/callback?code=x&state=y`, {
+        headers: { 'sec-fetch-site': 'cross-site' },
+        redirect: 'manual',
+      });
+      // A 0/opaqueredirect status is what `redirect: 'manual'` reports for a
+      // real 3xx — the assertion that matters is that it is *not* one of
+      // the guard's 403s, i.e. the request reached `handleCallback`.
+      assert.notEqual(response.status, 403);
+      assert.equal(response.headers.get('location'), '/auth/login');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('state uses the selected world record title when metadata is absent', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(
