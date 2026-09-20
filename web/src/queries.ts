@@ -9,7 +9,14 @@
  * See `docs/superpowers/plans/2026-09-19-frontend-tanstack-query.md` for the
  * migration plan this file is built up task-by-task against.
  */
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import {
+  MutationCache,
+  QueryClient,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import {
   api,
   setSelectedStoryId,
@@ -29,6 +36,49 @@ import {
   type VisualStyle,
   type WikiCandidate,
 } from './api.ts';
+
+/**
+ * Shared by both entry points (`main.tsx`, `landing/main.tsx` — separate
+ * `QueryClient`s, same policy).
+ *
+ * `retry: false` / `refetchOnWindowFocus: false`: the app this replaces was
+ * a one-shot `fetch()` per action, with no retry and no refetch-on-focus.
+ * Leaving these at TanStack Query's defaults (3 retries, refetch on window
+ * focus) would be a real behavior change — a failing request would now
+ * silently retry for several seconds before surfacing an error, and
+ * switching back to the tab would trigger a wave of background refetches
+ * the original app never did.
+ *
+ * `mutationCache.onError`: `useMutation`'s `mutate()` (as opposed to
+ * `mutateAsync()`) deliberately swallows the rejection so a fire-and-forget
+ * call site never produces a real unhandled-rejection event — several call
+ * sites (world tick, knowledge grant/revoke, setup cancel, the inline
+ * blocklist button) call bare `.mutate()` with no local error display. The
+ * original app's only error-surfacing mechanism for an action with no local
+ * recovery was exactly that global unhandled-rejection listener (see
+ * `App.tsx`'s comment on it), so a mutation failure with no local handling
+ * would otherwise now fail completely silently. `MutationCache`'s global
+ * `onError` is guaranteed to run for every mutation regardless of any
+ * per-mutation `onError` (unlike `defaultOptions`, which a call site can
+ * override) — dispatching a DOM event keeps this file decoupled from
+ * `App.tsx`'s React state; `App.tsx` listens for `fabulist:mutation-error`
+ * alongside `unhandledrejection`/`error` in the same effect.
+ */
+export function createQueryClient(): QueryClient {
+  return new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+        refetchOnWindowFocus: false,
+      },
+    },
+    mutationCache: new MutationCache({
+      onError: (error) => {
+        window.dispatchEvent(new CustomEvent('fabulist:mutation-error', { detail: error }));
+      },
+    }),
+  });
+}
 
 // --------------------------------------------------------------- meta / auth
 

@@ -188,8 +188,12 @@ export function App() {
   const state = stateQuery.data ?? null;
 
   const selectStory = useCallback((storyId: string) => {
-    void invalidateEverything(queryClient);
+    // Selection first: invalidateEverything's refetches read the selected
+    // story id via `withStoryId()` inside each queryFn, so a query that
+    // starts before the id is updated would fetch the *old* story's data
+    // under the new story's screen.
     setSelectedStoryId(storyId);
+    void invalidateEverything(queryClient);
   }, [queryClient]);
 
   const navigateToTab = useCallback((next: Tab) => {
@@ -207,17 +211,32 @@ export function App() {
   // Most actions have their own local recovery. This is the last line of
   // defence for one that does not: React does not render rejected async event
   // handlers, so without it an API failure only reaches the browser console.
+  //
+  // `mutation-error` is the TanStack Query equivalent of an unhandled
+  // rejection: `useMutation`'s `mutate()` (as opposed to `mutateAsync()`)
+  // deliberately swallows the rejection so a fire-and-forget call site never
+  // produces a real unhandled-rejection event — several call sites (world
+  // tick, knowledge grant/revoke, setup cancel, the inline blocklist button)
+  // call bare `.mutate()` with no local error display, so without this they
+  // would fail completely silently. `main.tsx`'s `MutationCache.onError`
+  // dispatches this event for every mutation failure, which is guaranteed to
+  // fire regardless of any per-mutation `onError` override (unlike
+  // `defaultOptions`) — the same "last line of defence" this effect already
+  // is for everything else.
   useEffect(() => {
     const report = (reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason));
     const onUnhandledRejection = (event: PromiseRejectionEvent) => report(event.reason);
     const onError = (event: ErrorEvent) => {
       if (event.error) report(event.error);
     };
+    const onMutationError = (event: Event) => report((event as CustomEvent<unknown>).detail);
     window.addEventListener('unhandledrejection', onUnhandledRejection);
     window.addEventListener('error', onError);
+    window.addEventListener('fabulist:mutation-error', onMutationError);
     return () => {
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
       window.removeEventListener('error', onError);
+      window.removeEventListener('fabulist:mutation-error', onMutationError);
     };
   }, []);
 
@@ -887,13 +906,21 @@ function BookTab({
 }) {
   const queryClient = useQueryClient();
   const bookQuery = useBookInfiniteQuery();
-  const { data: bookData, hasNextPage, isFetchingNextPage, fetchNextPage } = bookQuery;
+  const { data: bookData, hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage } = bookQuery;
   // There is no "load more" control here — `BookTab` always wants the whole
   // book, so it chain-fetches every page itself rather than exposing
   // pagination to the UI (see `useBookInfiniteQuery`'s doc comment).
+  //
+  // `hasNextPage` is derived from the last *successfully* fetched page's
+  // `nextOffset` — a failed `fetchNextPage()` doesn't add a page, so it
+  // stays true even after the failure. Without the `isFetchNextPageError`
+  // check this would retry the same failing page forever (bounded by one
+  // round-trip per cycle, so not a tight loop, but an unbounded background
+  // hammering of a failing endpoint with no visible sign anything is wrong
+  // — the book would just look stuck loading, silently, forever).
   useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage) void fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+    if (hasNextPage && !isFetchingNextPage && !isFetchNextPageError) void fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage]);
   const turns = useMemo(() => bookData?.pages.flatMap((p) => p.turns) ?? [], [bookData]);
   const lastTurnId = turns.length ? turns[turns.length - 1]!.id : null;
   // The why panel reads the last turn's stored meta rather than holding its
@@ -932,7 +959,8 @@ function BookTab({
   /** Rollback panel: closed by default, since it destroys or forks committed prose and should never be one accidental click away. */
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
-  const chapters = useChaptersQuery(rollbackOpen).data?.chapters ?? [];
+  const chaptersQuery = useChaptersQuery(rollbackOpen);
+  const chapters = chaptersQuery.data?.chapters ?? [];
   const [splittingId, setSplittingId] = useState<string | null>(null);
   const [mutationPending, setMutationPending] = useState(false);
   const mutationLock = useRef(false);
@@ -946,7 +974,12 @@ function BookTab({
   const pinMutation = usePinMutation();
   const addAnchorMutation = useAddAnchorMutation();
 
-  const reloadBook = () => queryClient.invalidateQueries({ queryKey: bookKeys.all });
+  // `throwOnError: true`: `invalidateQueries` otherwise swallows a failed
+  // refetch and resolves successfully regardless — every `await
+  // reloadBook()` call site below already has a try/catch specifically
+  // distinguishing "the action succeeded but the reload failed" from "the
+  // action itself failed"; without this they were unreachable dead code.
+  const reloadBook = () => queryClient.invalidateQueries({ queryKey: bookKeys.all }, { throwOnError: true });
 
   /** Only one book-mutating action runs at a time; returns false if one already is. */
   const beginMutation = (): boolean => {
@@ -1099,7 +1132,14 @@ function BookTab({
     }
   }
 
-  /** Toggles the rollback panel; `useChaptersQuery(rollbackOpen)` fetches the chapter list on demand, and silently sits at `[]` on failure — a rollback by scene number still works with an empty chapter list. */
+  /**
+   * Toggles the rollback panel; `useChaptersQuery(rollbackOpen)` fetches the
+   * chapter list on demand, and silently sits at `[]` on failure — a
+   * rollback by scene number still works with an empty chapter list.
+   * `RollbackPanel` itself is only mounted once that first fetch settles
+   * (see the render site) so its once-only `useState` defaults never freeze
+   * on a pre-fetch empty list.
+   */
   function openRollback() {
     setRollbackOpen((open) => !open);
   }
@@ -1207,6 +1247,13 @@ function BookTab({
                   : 'There is no canon here yet either.'}{' '}
                 Open <b>Library → start a new book</b> to run the wizard, or call <code>start_story</code> over MCP after
                 picking someone with <code>list_characters</code>.
+              </div>
+            ) : null}
+            {bookQuery.isError || isFetchNextPageError ? (
+              <div className="card warn" role="alert">
+                {isFetchNextPageError
+                  ? `Some of this book's history failed to load: ${bookQuery.error instanceof Error ? bookQuery.error.message : String(bookQuery.error)}. What's shown below may be incomplete.`
+                  : `This book failed to load: ${bookQuery.error instanceof Error ? bookQuery.error.message : String(bookQuery.error)}.`}
               </div>
             ) : null}
             {turns.length === 0 && hasPlayer !== false ? (
@@ -1363,7 +1410,20 @@ function BookTab({
               </div>
             ) : null}
 
-            {rollbackOpen ? <RollbackPanel state={state} chapters={chapters} turns={turns} busy={mutationPending} onRollback={doRollback} onCancel={() => setRollbackOpen(false)} /> : null}
+            {rollbackOpen ? (
+              chaptersQuery.isPending ? (
+                // Mirrors the original `openRollback()`'s await-before-open:
+                // `RollbackPanel`'s own `useState` initializers derive their
+                // defaults from `chapters` once, at mount — mounting it
+                // before the first fetch settles would freeze those
+                // defaults at "no chapters yet" even after real data
+                // arrives, since a later prop change doesn't re-run a
+                // `useState` initializer.
+                <p className="empty">opening…</p>
+              ) : (
+                <RollbackPanel state={state} chapters={chapters} turns={turns} busy={mutationPending} onRollback={doRollback} onCancel={() => setRollbackOpen(false)} />
+              )
+            ) : null}
 
             <textarea
               value={input}
