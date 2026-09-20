@@ -1,6 +1,7 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { createRoot } from 'react-dom/client';
 import { bootPalette } from '../palette.ts';
+import { createQueryClient } from '../queries.ts';
 import '../styles.css';
 import './landing.css';
 import { Landing } from './Landing.tsx';
@@ -11,8 +12,10 @@ import { Landing } from './Landing.tsx';
 bootPalette();
 
 // Independent from the main app's QueryClient: this is a separate HTML entry
-// point (landing.html) that never mounts alongside App.tsx.
-const queryClient = new QueryClient();
+// point (landing.html) that never mounts alongside App.tsx. Same policy
+// (retry/refetch/mutation-error defaults) via the shared factory, even
+// though this page has no mutations today.
+const queryClient = createQueryClient();
 
 const el = document.getElementById('root');
 if (!el) throw new Error('missing #root');

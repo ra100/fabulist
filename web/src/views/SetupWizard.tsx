@@ -278,7 +278,12 @@ export function SetupWizard({ onDone }: { onDone: () => void | Promise<void> }) 
                   void guard(async () => {
                     if (!packsRequested) {
                       setPacksRequested(true);
-                      await packsQuery.refetch();
+                      // `refetch()` resolves successfully even on failure by
+                      // default, so without `throwOnError` a failed fetch
+                      // would still advance to the (empty) gallery below
+                      // with no visible error — `guard()`'s catch only
+                      // fires on an actual throw.
+                      await packsQuery.refetch({ throwOnError: true });
                     }
                     setStep('packs');
                   })
