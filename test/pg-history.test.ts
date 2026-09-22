@@ -210,6 +210,46 @@ test('turn rollback preserves the selected checkpoint and forks only retained hi
   if (!ran) t.skip('no Postgres configured');
 });
 
+/**
+ * The array-valued jsonb columns, which every other rollback test leaves empty.
+ *
+ * `restoreLayout` reinserts checkpoint rows through one generic `INSERT`, and
+ * node-postgres encodes a JS array as a Postgres *array literal* — so
+ * `['char:pc']` reached a jsonb column as `{"char:pc"}` and the whole rollback
+ * failed with `invalid input syntax for type json`, while an empty `[]` reached
+ * it as `{}` and restored silently as an empty *object*. Both are invisible to
+ * a test that only counts rows, which is why the destructive rollback above
+ * passed throughout.
+ */
+test('destructive turn rollback restores array-valued jsonb columns', async (t) => {
+  const ran = await withPg(async (db) => {
+    const worldId = await makeWorld(db, 'jsonb-array-rollback');
+    const storyId = await makeStory(db, 'jsonb-array-rollback-story', [worldId]);
+    const world = await World.forStory(db, storyId);
+    await world.graph.upsert({ id: 'char:pc', type: 'Character', name: 'Player' }, 'chronicle');
+
+    const thread = await world.threads.create({
+      title: 'The sealed archive',
+      stakes: 'who reads it first',
+      tension: 0.5,
+      parties: ['char:pc'],
+      resolutions: [],
+      status: 'open',
+      createdScene: 1,
+    });
+    const first = await world.chronicle.addTurn(turnInput(1));
+    await world.history.capture(first.id);
+    const second = await world.chronicle.addTurn(turnInput(2));
+    await world.history.capture(second.id);
+
+    await rollback(db, world, { turnId: first.id, mode: 'destructive' });
+    const restored = await world.threads.get(thread.id);
+    assert.deepEqual(restored?.parties, ['char:pc'], 'a populated jsonb array survives the restore');
+    assert.deepEqual(restored?.resolutions, [], 'an empty jsonb array stays an array, not an object');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('legacy turn rollback rejects the target without changing PostgreSQL history', async (t) => {
   const ran = await withPg(async (db) => {
     const worldId = await makeWorld(db, 'legacy-turn-rollback');

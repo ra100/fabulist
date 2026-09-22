@@ -513,13 +513,37 @@ export class HistoryStore {
     );
   }
 
+  /**
+   * Arrays are serialised as JSON; everything else is bound as-is.
+   *
+   * `layout` reads these rows with `SELECT *`, so node-postgres has already
+   * parsed every jsonb column into a JS value. Binding those values straight
+   * back is right for an object — node-postgres runs it through
+   * `JSON.stringify` — and wrong for an array, which it encodes as a Postgres
+   * *array literal* instead. `threads.parties`, `threads.resolutions`,
+   * `events.participants` and `chron_sheets.locks` are all jsonb arrays, so a
+   * story with any of them populated failed the whole restore with `invalid
+   * input syntax for type json` on `{"char:anselm"}`, and an empty one was
+   * worse than that: `[]` encodes as `{}`, which jsonb accepts as an empty
+   * *object*, so the rollback appeared to succeed and left the column the
+   * wrong JSON type.
+   *
+   * Every array-valued column across `TABLES` is jsonb and none is a native
+   * Postgres array, so `Array.isArray` is a complete test here. `forkStory`
+   * has the same hazard and answers it from `information_schema` instead
+   * (`jsonColumnsOf`); that is the more general guard, and the one to reach
+   * for if a native array column is ever added to these tables.
+   */
   private async insert(queryable: Queryable, table: string, entry: Record<string, unknown>): Promise<void> {
     const columns = Object.keys(entry);
     if (!columns.length) return;
     const slots = columns.map((_, index) => `$${index + 1}`).join(', ');
     await queryable.query(
       `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${slots})`,
-      columns.map((column) => entry[column]),
+      columns.map((column) => {
+        const value = entry[column];
+        return Array.isArray(value) ? JSON.stringify(value) : value;
+      }),
     );
   }
 
