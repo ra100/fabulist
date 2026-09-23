@@ -19,9 +19,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { AddressInfo } from 'node:net';
-import type { WorkOS } from '@workos-inc/node';
 import { makeWorld, withPg } from './pg-harness.ts';
+import { PEOPLE, fakeAuth, listenSignedIn, sessionUser, type AsUser, type Who } from './signed-in.ts';
 import { World, createWorld, worldFor } from '../src/store/index-pg.ts';
 import { createStory, getStory } from '../src/store/world-pg.ts';
 import { worldRoleFor } from '../src/store/access-pg.ts';
@@ -32,8 +31,6 @@ import { Engine } from '../src/loop/engine-pg.ts';
 import { SetupService } from '../src/setup/service-pg.ts';
 import { IllustrationService } from '../src/illustration/service-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
-import { createWorkosProvider } from '../src/auth/workos-provider.ts';
-import { SESSION_COOKIE, type AuthConfig, type SessionUser } from '../src/auth/config.ts';
 import {
   composeIllustrationPromptTool,
   createCustomWorldTool,
@@ -43,45 +40,6 @@ import {
   type McpToolContext,
 } from '../src/mcp/tools-pg.ts';
 import type { Db } from '../src/db/pg.ts';
-
-const PEOPLE = {
-  alice: { id: 'user:alice', email: 'alice@example.com' },
-  bob: { id: 'user:bob', email: 'bob@example.com' },
-  admin: { id: 'user:admin', email: 'admin@example.com' },
-} as const;
-type Who = keyof typeof PEOPLE;
-
-function sessionUser(who: Who): SessionUser {
-  return { ...PEOPLE[who], firstName: null, lastName: null, isAdmin: who === 'admin' };
-}
-
-/** A WorkOS double keyed by cookie value: `fabulist_session=alice` is Alice. */
-function fakeAuth(): AuthConfig {
-  return {
-    requireLogin: true,
-    adminEmails: new Set([PEOPLE.admin.email]),
-    callbackOrigin: 'http://127.0.0.1:4317',
-    provider: createWorkosProvider({
-      clientId: 'client_test',
-      cookiePassword: 'x'.repeat(32),
-      workos: {
-        userManagement: {
-          loadSealedSession: ({ sessionData }: { sessionData: string }) => ({
-            authenticate: async () => {
-              const who = PEOPLE[sessionData as Who];
-              return who
-                ? {
-                    authenticated: true as const,
-                    user: { id: who.id, email: who.email, firstName: null, lastName: null },
-                  }
-                : { authenticated: false as const, reason: 'invalid_session_cookie' as const };
-            },
-          }),
-        },
-      } as unknown as WorkOS,
-    }),
-  };
-}
 
 /** Exactly what `serve-pg.ts` hands every long-lived service. */
 const loginOffResolver = (db: Db) => () => worldFor(db, null);
@@ -108,13 +66,6 @@ async function twoTenants(db: Db, sharedTitle = 'Shared') {
   return { shared, aliceStory: alice.id, bobStory: bob.id };
 }
 
-/** The fields these tests read from a JSON reply; everything else is only logged on failure. */
-interface JsonReply {
-  status: number;
-  body: { error?: string; storyId?: string; worldId?: number };
-}
-type AsUser = (who: Who, method: string, path: string, body?: unknown) => Promise<JsonReply>;
-
 async function withSignedInServer(
   db: Db,
   fn: (as: AsUser) => Promise<void>,
@@ -122,25 +73,19 @@ async function withSignedInServer(
 ): Promise<void> {
   const boot = loginOffResolver(db);
   const providers = new ProviderRegistry(opts.provider ?? new MockProvider());
-  const server = createApiServer({
-    world: boot,
-    db,
-    engine: new Engine({ world: boot, db, providers }),
-    setup: new SetupService({ world: boot, db, providers }),
-    authConfig: fakeAuth(),
-  });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const as: AsUser = (who, method, path, body) =>
-    fetch(`${base}${path}`, {
-      method,
-      headers: { cookie: `${SESSION_COOKIE}=${who}`, 'content-type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }).then(async (res) => ({ status: res.status, body: await res.json() }));
+  const { as, close } = await listenSignedIn(
+    createApiServer({
+      world: boot,
+      db,
+      engine: new Engine({ world: boot, db, providers }),
+      setup: new SetupService({ world: boot, db, providers }),
+      authConfig: fakeAuth(),
+    }),
+  );
   try {
     await fn(as);
   } finally {
-    await new Promise<void>((r) => server.close(() => r()));
+    await close();
   }
 }
 
