@@ -26,6 +26,7 @@
 import type { Queryable } from '../db/pg.ts';
 import { randomUUID } from 'node:crypto';
 import type { SessionUser } from '../auth/config.ts';
+import { WorldAccessError } from '../domain/types.ts';
 import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
 import { PrivateStoryLockedError } from './private-story-access.ts';
@@ -146,9 +147,9 @@ export async function assertWorldAccess(
   needed: WorldRole,
 ): Promise<WorldRole> {
   const role = await worldRoleFor(db, user, worldId);
-  if (!role) throw new Error(`no world ${worldId}`);
+  if (!role) throw new WorldAccessError(404, `no world ${worldId}`);
   if (RANK[role] < RANK[needed]) {
-    throw new Error(`this world requires ${needed} access; you have ${role}`);
+    throw new WorldAccessError(403, `this world requires ${needed} access; you have ${role}`);
   }
   return role;
 }

@@ -36,6 +36,7 @@ import { ChronicleStore, type ChronicleCrypto } from './chronicle-pg.ts';
 import { GraphStore } from './graph-pg.ts';
 import { IllustrationStore } from './illustration-pg.ts';
 import { HistoryStore } from './history-pg.ts';
+import { assertWorldAccess, grantWorldAccess } from './access-pg.ts';
 import {
   ConsequenceStore,
   DirectiveStore,
@@ -404,6 +405,14 @@ export async function renameWorld(db: Queryable, slug: string, title: string): P
  * only by the caller because the binding is persistent — resolving the wrong
  * story once is a stale read, binding it is a write into another user's book.
  *
+ * Owning the story is not enough to write into the world it is bound to. A new
+ * user's first story reads the instance's shared public canon (see
+ * `resolveOrCreateStoryForUser`), so "my story is bound to it" would otherwise
+ * let any signed-in account overwrite every other reader's source material, and
+ * put its own text into their prompts. A signed-in caller therefore needs
+ * `ingest` on an already-bound world, and is made `owner` of a world it binds
+ * here, since it is the one filling it.
+ *
  * Needs the ingest role: creating a world is a system write (see
  * `schema-pg-roles.sql`).
  */
@@ -432,7 +441,10 @@ export async function ensureCanonWorldFor(
     }
 
     const bound = await sourcesFor(tx, storyId);
-    if (bound[0]) return bound[0].worldId;
+    if (bound[0]) {
+      if (opts.user) await assertWorldAccess(tx, opts.user, bound[0].worldId, 'ingest');
+      return bound[0].worldId;
+    }
 
     // The story lock does not cover the *world*: two different stories lock two
     // different rows, both found the same empty world free, and
@@ -464,6 +476,7 @@ export async function ensureCanonWorldFor(
       storyId,
       worldId,
     ]);
+    if (opts.user) await grantWorldAccess(tx, worldId, opts.user.id, 'owner');
     return worldId;
   });
 }

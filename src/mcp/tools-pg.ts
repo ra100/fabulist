@@ -997,11 +997,14 @@ export async function composeIllustrationPromptTool(
   const style = parseVisualStyle(args.visualStyle);
   const note =
     'Copy-pasteable fallback — no provider was called and nothing was generated or stored. Paste prompt/negativePrompt into whatever image tool is available.';
+  // This connection's own story, for both subjects: the service's getter is the
+  // instance's most recently played story, so composing through it described
+  // somebody else's characters and places.
+  const world = await ctx.world();
   if (args.subject === 'portrait') {
-    const composed = await ctx.illustrations.composePortrait(args.entityId, style);
+    const composed = await ctx.illustrations.composePortrait(args.entityId, style, world);
     return { ...composed, note };
   }
-  const world = await ctx.world();
   const turn = await world.chronicle.getTurn(args.turnId);
   if (!turn) throw new Error(`compose_illustration_prompt: no turn ${args.turnId}`);
   const firstEvent = turn.delta?.events[0];
@@ -1015,6 +1018,7 @@ export async function composeIllustrationPromptTool(
     presentIds,
     turn.bookProse.slice(0, 400),
     style,
+    world,
   );
   return { ...composed, note };
 }
@@ -1187,7 +1191,10 @@ export async function commitIngestTool(
 ): Promise<Job<IngestJobResult>> {
   if (!ctx.setup) throw new Error('commit_ingest: this server has no setup service enabled');
   // Authored into this connection's own story, not the setup service's
-  // process-wide one — see `AuthoringTarget`.
+  // process-wide one — see `AuthoringTarget` — and refused up front when that
+  // story reads a world this user may not write.
+  const target = { world: await ctx.world(), user: ctx.user ?? null };
+  await ctx.setup.assertMayAuthor(target);
   return ctx.setup.startIngest(
     args.previewKey,
     {
@@ -1195,7 +1202,7 @@ export async function commitIngestTool(
       style: args.style ?? {},
       opening: args.opening ?? '',
     },
-    { world: await ctx.world(), user: ctx.user ?? null },
+    target,
   );
 }
 
@@ -1205,7 +1212,10 @@ export async function createCustomWorldTool(
   args: { description: string; style?: Partial<IngestPlan['style']> },
 ): Promise<Job<ApplyCustomResult>> {
   if (!ctx.setup) throw new Error('create_custom_world: this server has no setup service enabled');
-  return ctx.setup.startCustomWorld(args.description.trim(), args.style, { world: await ctx.world(), user: ctx.user ?? null });
+  const target = { world: await ctx.world(), user: ctx.user ?? null };
+  // Before the job, because the job pays for a model call before it writes.
+  await ctx.setup.assertMayAuthor(target);
+  return ctx.setup.startCustomWorld(args.description.trim(), args.style, target);
 }
 
 /** `use_sample_world`. The MCP-side counterpart of `POST /api/setup/sample` \u2014 the built-in example, for trying the engine with no setup at all. */
@@ -1267,7 +1277,10 @@ export async function resetStoryTool(ctx: McpToolContext) {
   // undo; this discards one playthrough and leaves canon and every other story
   // alone. Rebuilding canon is `rebuild_canon` below — separating them is what the
   // Postgres user/system split made possible.
-  const storyId = await ctx.setup.resetMyStory();
+  //
+  // This connection's own story. The setup service's getter is the instance's
+  // most recently played story, so a reset through it deleted somebody else's.
+  const storyId = await ctx.setup.resetMyStory({ world: await ctx.world(), user: ctx.user ?? null });
   ctx.selectStory?.(storyId);
   return { ok: true, storyId };
 }
@@ -1281,10 +1294,17 @@ export async function resetStoryTool(ctx: McpToolContext) {
  * built on it. Stories reading the world keep everything and will reference canon
  * ids that no longer resolve until it is re-ingested, which the integrity check
  * reports rather than hides.
+ *
+ * Admin-only, exactly as `POST /api/canon/rebuild` is: the canon belongs to every
+ * reader of the world, not to this connection. And the world emptied is the one
+ * this connection's own story reads, never the service's getter's.
  */
 export async function rebuildCanonTool(ctx: McpToolContext) {
   if (!ctx.setup) throw new Error('rebuild_canon: this server has no setup service enabled');
-  return ctx.setup.rebuildCanon();
+  if (ctx.user && !ctx.user.isAdmin) throw new Error('rebuild_canon: restricted to administrators');
+  const worldId = (await ctx.world()).sources[0]?.worldId;
+  if (worldId === undefined) throw new Error('rebuild_canon: this story reads no canon world');
+  return ctx.setup.rebuildCanon(worldId);
 }
 
 // ------------------------------------------- ChatGPT search/fetch compatibility
