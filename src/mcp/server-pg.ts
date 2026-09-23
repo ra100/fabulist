@@ -1223,6 +1223,13 @@ export interface McpDiagnosticEvent {
 
 let mcpDiagnosticSequence = 0;
 const mcpDiagnosticEvents: McpDiagnosticEvent[] = [];
+/**
+ * The feed is public and anyone who can reach `/mcp` writes the method and tool
+ * names in it, so they are kept to a prefix: enough to read, too little to store
+ * or serve a megabyte of somebody else's text 30 times over.
+ */
+const MCP_DIAGNOSTIC_NAME_CHARS = 64;
+const clipName = (name: string): string => name.slice(0, MCP_DIAGNOSTIC_NAME_CHARS);
 
 function toolName(body: unknown): string | undefined {
   if (!body || typeof body !== 'object' || !('params' in body)) return undefined;
@@ -1238,11 +1245,12 @@ function recordMcpDiagnostic(
   outcome: string,
   detail?: string,
 ): void {
+  const tool = toolName(body);
   mcpDiagnosticEvents.push({
     sequence: ++mcpDiagnosticSequence,
     at: new Date().toISOString(),
-    method: requestMethod(body) ?? 'unknown',
-    ...(toolName(body) ? { tool: toolName(body) } : {}),
+    method: clipName(requestMethod(body) ?? 'unknown'),
+    ...(tool ? { tool: clipName(tool) } : {}),
     session,
     outcome,
     ...(detail ? { detail } : {}),
