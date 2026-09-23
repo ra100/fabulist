@@ -19,7 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import { type Server, request } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { makeWorld, withPg } from './pg-harness.ts';
@@ -132,6 +132,38 @@ class BlockingNarratorProvider extends MockProvider {
 
 function listen(server: Server): Promise<void> {
   return new Promise((r) => server.listen(0, '127.0.0.1', () => r()));
+}
+
+/**
+ * One request with the headers *exactly* as given, which `fetch` cannot do:
+ * undici derives `Sec-Fetch-Mode` from the request's own mode and overwrites
+ * whatever the caller set, so a faked top-level navigation arrives as
+ * `sec-fetch-mode: cors` and tests the wrong thing. `http.request` sends the
+ * header block verbatim, which is the point when the assertion is about how
+ * the server reads a real browser's fetch metadata.
+ */
+function rawRequest(
+  base: string,
+  path: string,
+  method: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: string }> {
+  const url = new URL(path, base);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { hostname: url.hostname, port: url.port, path: url.pathname + url.search, method, headers },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 /**
@@ -263,6 +295,36 @@ test('CORS is allowlisted and cross-site browser requests fail closed', async (t
       });
       assert.equal(deniedFetchSite.status, 403);
       assert.match(await deniedFetchSite.text(), /cross-site browser requests are not allowed/);
+
+      // A cross-site *subresource* read is the thing this guard exists for:
+      // `fetch`/XHR from another origin, which an attacker's page could read.
+      const deniedCrossSiteFetch = await fetch(`${base}/api/health`, {
+        headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' },
+      });
+      assert.equal(deniedCrossSiteFetch.status, 403);
+      assert.match(await deniedCrossSiteFetch.text(), /cross-site browser requests are not allowed/);
+
+      // A cross-site *navigation* is not: a link from another site, or the
+      // redirect chain out of an OAuth login, reaches the app exactly like
+      // this — `cross-site`, no `Origin` (browsers omit it on GET
+      // navigations) — and must render the page rather than a 403 body.
+      const crossSiteNavigation = await rawRequest(base, '/api/health', 'GET', {
+        'sec-fetch-site': 'cross-site',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-dest': 'document',
+      });
+      assert.equal(crossSiteNavigation.status, 200, crossSiteNavigation.body);
+
+      // ...but only for safe methods: a cross-site form POST is still the
+      // classic CSRF shape, navigation or not.
+      const deniedCrossSitePost = await rawRequest(base, '/api/play', 'POST', {
+        'content-type': 'application/json',
+        'sec-fetch-site': 'cross-site',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-dest': 'document',
+      });
+      assert.equal(deniedCrossSitePost.status, 403);
+      assert.match(deniedCrossSitePost.body, /cross-site browser requests are not allowed/);
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
