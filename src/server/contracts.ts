@@ -10,13 +10,29 @@ import { z } from 'zod';
  * validated in their handlers rather than represented as request-body schemas.
  */
 
+/**
+ * The longest a player's turn may be. A turn's text goes, unevicted, into every
+ * model role the turn runs, so without a cap one request body could cost a
+ * quarter of a million tokens per role.
+ */
+export const MAX_TURN_INPUT_CHARS = 4_000;
+/** Directives ride along in every prompt while they last, so they are shorter still. */
+export const MAX_DIRECTIVE_CHARS = 2_000;
+/** Every other free-text field that reaches a model: a world description, a wish, a note. */
+export const MAX_FREE_TEXT_CHARS = 10_000;
+
 export const playBodySchema = z.object({
-  input: z.string().trim().min(1, 'input required'),
+  input: z
+    .string()
+    .trim()
+    .min(1, 'input required')
+    .max(MAX_TURN_INPUT_CHARS, `a turn is at most ${MAX_TURN_INPUT_CHARS} characters`),
   overrideIntegrity: z.boolean().optional(),
 }).strict();
 
-const nonEmptyText = z.string().trim().min(1);
-const shortText = z.string().max(10_000);
+/** Every free-text field has some ceiling; the ones read into prompts have tighter ones above. */
+const nonEmptyText = z.string().trim().min(1).max(MAX_FREE_TEXT_CHARS);
+const shortText = z.string().max(MAX_FREE_TEXT_CHARS);
 const optionalTitle = z.string().max(500).optional();
 const stringList = z.array(shortText);
 const visualStyle = z.enum(['realistic', 'drawing', 'sketch', 'draft', 'animation']);
@@ -37,7 +53,11 @@ export const updateThreadBodySchema = z.object({
 }).strict();
 
 export const directiveBodySchema = z.object({
-  text: nonEmptyText,
+  text: z
+    .string()
+    .trim()
+    .min(1)
+    .max(MAX_DIRECTIVE_CHARS, `a directive is at most ${MAX_DIRECTIVE_CHARS} characters`),
   scope: z.enum(['scene', 'chapter', 'campaign']).optional(),
   strength: z.enum(['hint', 'push', 'mandate']).optional(),
   lifetimeScenes: z.number().int().nonnegative().nullable().optional(),

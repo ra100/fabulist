@@ -822,6 +822,24 @@ identity_providers:
         userinfo_signed_response_alg: none
 ```
 
+**What a signed-in account can spend.** Anyone who can sign in (or connect an MCP client) can
+make this server call its model and image providers, so with login on those calls are bounded
+per account. Admins are not metered, and neither is a login-off local run.
+
+- **A paid-call budget.** Every turn, regeneration, compaction, illustration and wizard step
+  that reaches a provider or crawls a wiki spends one call. An account gets
+  `FABULIST_PAID_CALLS_BURST` calls at once (default 20), refilled at
+  `FABULIST_PAID_CALLS_PER_MINUTE` (default 30). Past that, REST answers `429` with
+  `Retry-After` and MCP returns a tool error. `FABULIST_PAID_CALLS_PER_MINUTE=0` turns
+  metering off. The budget is per process and per account, so also set spend limits with each
+  provider.
+- **An ingest ceiling.** A non-admin may preview and ingest at most the wizard's default scope
+  (`mid`: 600 pages over 2 hops). `deep` and bigger budgets are for admins.
+- **Input caps.** A turn is at most 4,000 characters, a directive 2,000, and other free text
+  10,000.
+- **Shared canon.** Writing into a world needs the `ingest` role on it (or admin); a signed-in
+  user who starts a fresh world owns it.
+
 ---
 
 ## Layout

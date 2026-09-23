@@ -32,6 +32,7 @@ import { listStories } from '../store/world-pg.ts';
 import { seedWorld } from '../seed/verrow-pg.ts';
 import { Engine } from '../loop/engine-pg.ts';
 import { createApiServer } from '../server/api-pg.ts';
+import { DEFAULT_PAID_CALL_LIMIT, paidCallLimitFromEnv } from '../server/rate-limit.ts';
 import { buildImageRegistry, buildSwappableRegistry, loadConfig } from '../config/config.ts';
 import { makeProseGate } from '../lint/gate.ts';
 import { SetupService } from '../setup/service-pg.ts';
@@ -303,6 +304,18 @@ async function boot(): Promise<void> {
       : 'login not required — loopback-only local mode (set AUTH_REQUIRE_LOGIN=true to change this)',
   );
 
+  // Unset keeps the server's default, which meters signed-in non-admins whenever
+  // login is on; a malformed value throws here rather than running unmetered.
+  const paidCallLimit = paidCallLimitFromEnv(process.env);
+  if (authConfig) {
+    const effective = paidCallLimit === undefined ? DEFAULT_PAID_CALL_LIMIT : paidCallLimit;
+    console.log(
+      effective
+        ? `paid calls: ${effective.burst} at once, then ${effective.perMinute}/min per signed-in user (admins unmetered)`
+        : 'paid calls: not metered (FABULIST_PAID_CALLS_PER_MINUTE=0)',
+    );
+  }
+
   const server = createApiServer({
     world: resolveWorld,
     db: play,
@@ -318,6 +331,7 @@ async function boot(): Promise<void> {
     mcpAuth: mcpAuth ?? undefined,
     mcpResourceUrl,
     authConfig: authConfig ?? undefined,
+    ...(paidCallLimit !== undefined ? { paidCallLimit } : {}),
   });
   server.listen(port, host, () => {
     console.log(`fabulist on http://${host}:${port}`);

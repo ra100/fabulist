@@ -48,7 +48,13 @@ import {
 import { tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
 import type { Entity, VisualStyle } from '../domain/types.ts';
 import { WorldAccessError } from '../domain/types.ts';
-import { limitsFromWire, SetupBusyError, type SetupService } from '../setup/service-pg.ts';
+import {
+  assertIngestBudgetFor,
+  IngestBudgetError,
+  limitsFromWire,
+  SetupBusyError,
+  type SetupService,
+} from '../setup/service-pg.ts';
 import type { IngestLimits } from '../ingest/depth-pg.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
@@ -78,6 +84,7 @@ import {
 } from '../store/private-story-migration-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
+import { DEFAULT_PAID_CALL_LIMIT, RateLimiter, type PaidCallLimit } from './rate-limit.ts';
 import {
   createThreadBodySchema,
   createStoryBodySchema,
@@ -179,6 +186,14 @@ export interface ServerOptions {
   authConfig?: AuthConfig;
   /** Browser-unlocked story keys held in process memory only. */
   ephemeralStoryKeys?: EphemeralStoryKeyStore;
+  /**
+   * How many paid calls (`PAID_ROUTES`, and the MCP tools that call
+   * `chargePaidCall`) each signed-in non-admin may make — see `RateLimiter`.
+   * Omitted means `DEFAULT_PAID_CALL_LIMIT` whenever login is on; `null` turns
+   * metering off. Login-off local use is never metered: there is one person, and
+   * it is their bill.
+   */
+  paidCallLimit?: PaidCallLimit | null;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -329,6 +344,31 @@ function passesFetchSiteGuard(req: IncomingMessage, crossSiteHasAllowedOrigin: b
  * loop below has one place to ask "does this one need bytes instead."
  */
 const RAW_BODY_ROUTES = new Set<string>();
+
+/**
+ * Routes that reach a paid model or image provider, or crawl a wiki on the
+ * operator's behalf, keyed like `RAW_BODY_ROUTES`. Each one spends a call from
+ * the signed-in caller's budget before its body is even read, and is answered
+ * 429 once that budget is empty. Checked against the registered routes once the
+ * module has loaded (below the last `route`), so a typo cannot quietly leave
+ * one unmetered.
+ */
+const PAID_ROUTES = new Set<string>([
+  'POST /api/play',
+  'POST /api/play/stream',
+  'POST /api/turn/:id/regenerate',
+  'POST /api/compact',
+  'POST /api/scene/close',
+  'POST /api/illustrate/portrait/:id',
+  'POST /api/illustrate/scene/:turnId',
+  'POST /api/setup/resolve',
+  'POST /api/setup/plan',
+  'POST /api/setup/preview',
+  'POST /api/setup/discover',
+  'POST /api/setup/ingest',
+  'POST /api/setup/custom',
+  'POST /api/setup/continue',
+]);
 
 /** Set once per process, so the client can tell a restart from a reload. */
 const STARTED_AT = new Date().toISOString();
@@ -2122,7 +2162,7 @@ route('POST', '/api/setup/plan', async (_req, res, { setup, body }) => {
 });
 
 /** What it would cost, before anything is spent. */
-route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
+route('POST', '/api/setup/preview', async (_req, res, { setup, body, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const parsed = parseBody(setupPreviewBodySchema, body);
@@ -2138,13 +2178,16 @@ route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
     return send(res, 400, { error: e instanceof Error ? e.message : String(e) });
   }
   try {
+    // A non-admin's ceiling is the wizard's default scope, checked before the
+    // crawl: the crawl itself is the first thing a bigger budget spends.
+    assertIngestBudgetFor(user, mode ?? 'mid', limits);
     send(
       res,
       200,
       await svc.preview(baseUrl, seeds, mode ?? 'mid', excludeCategories ?? [], title ?? '', undefined, limits),
     );
   } catch (e) {
-    send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+    send(res, setupFailureStatus(e, 400), { error: e instanceof Error ? e.message : String(e) });
   }
 });
 
@@ -2154,7 +2197,7 @@ route('POST', '/api/setup/preview', async (_req, res, { setup, body }) => {
  * the wizard and was, until now, the one with no progress reporting at all.
  * Also returns a character sketch refined against what was actually found.
  */
-route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
+route('POST', '/api/setup/discover', (_req, res, { setup, body, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const parsed = parseBody(setupDiscoverBodySchema, body);
@@ -2162,13 +2205,14 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
   const sketch = character ?? { existing: null, name: '', role: '', goals: [], vows: [] };
   try {
     const limits = limitsFromWire(parsed);
+    assertIngestBudgetFor(user, mode ?? 'mid', limits);
     send(
       res,
       200,
       svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? '', limits),
     );
   } catch (e) {
-    send(res, 400, { error: e instanceof Error ? e.message : String(e) });
+    send(res, setupFailureStatus(e, 400), { error: e instanceof Error ? e.message : String(e) });
   }
 });
 
@@ -2179,6 +2223,7 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
  */
 function setupFailureStatus(err: unknown, otherwise: number): number {
   if (err instanceof WorldAccessError) return err.status;
+  if (err instanceof IngestBudgetError) return 403;
   return err instanceof SetupBusyError ? 409 : otherwise;
 }
 
@@ -2428,6 +2473,12 @@ route('POST', '/api/canon/rebuild', async (_req, res, { setup, user, authConfig,
 
 // ------------------------------------------------------------------- server
 
+for (const key of PAID_ROUTES) {
+  if (!routes.some((r) => `${r.method} ${r.path}` === key)) {
+    throw new Error(`PAID_ROUTES lists "${key}", which is not a registered route`);
+  }
+}
+
 function serveStatic(res: ServerResponse, webRoot: string, pathname: string): boolean {
   // Normalise and confine to webRoot so `..` cannot escape it.
   const rel = normalize(pathname === '/' ? '/index.html' : pathname).replace(/^(\.\.[/\\])+/, '');
@@ -2501,6 +2552,11 @@ export function createApiServer(opts: ServerOptions) {
   const ephemeralStoryKeys = opts.ephemeralStoryKeys ?? new EphemeralStoryKeyStore();
   const dataRoot = opts.dataRoot ?? 'data';
   const db = opts.db;
+  const paidCallLimit = opts.paidCallLimit === undefined ? (authConfig ? DEFAULT_PAID_CALL_LIMIT : null) : opts.paidCallLimit;
+  const paidCalls = paidCallLimit ? new RateLimiter(paidCallLimit.burst, paidCallLimit.perMinute) : null;
+  /** Null when `user` may make this paid call now, else the seconds until they may. Admins are not metered. */
+  const paidCallWait = (user: SessionUser | null): number | null =>
+    paidCalls && user && !user.isAdmin ? paidCalls.take(user.id) : null;
   // Where illustration bytes live. Resolved once: it is a path, not state, and
   // every per-request `World` needs it to answer `illustrations.absolutePath`.
   const imagesDir = opts.imagesDir ?? join(dataRoot, 'images');
@@ -2555,6 +2611,12 @@ export function createApiServer(opts: ServerOptions) {
       setup,
       illustrations,
       dataRoot,
+      // A tool error rather than an HTTP 429: the model reading the result is the
+      // one who has to slow down, and it can only read a tool result.
+      chargePaidCall: () => {
+        const wait = paidCallWait(user);
+        if (wait !== null) throw new Error(`too many paid calls; try again in ${wait}s`);
+      },
     };
   };
 
@@ -2738,6 +2800,13 @@ export function createApiServer(opts: ServerOptions) {
     if (url.pathname.startsWith('/api/')) {
       const match = routes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
       if (!match) return send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
+      if (PAID_ROUTES.has(`${match.method} ${match.path}`)) {
+        const wait = paidCallWait(user);
+        if (wait !== null) {
+          res.setHeader('retry-after', String(wait));
+          return send(res, 429, { error: `too many requests that reach a paid provider; try again in ${wait}s` });
+        }
+      }
       const params = url.pathname.match(match.pattern)?.groups ?? {};
       const isRawBody = RAW_BODY_ROUTES.has(`${match.method} ${match.path}`);
       try {

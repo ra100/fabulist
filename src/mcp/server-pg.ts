@@ -16,6 +16,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { z } from 'zod';
+import { MAX_DIRECTIVE_CHARS, MAX_FREE_TEXT_CHARS, MAX_TURN_INPUT_CHARS } from '../server/contracts.ts';
 import type { McpAuth, VerifiedUser } from './auth.ts';
 import { addDefaultOutputSchema } from './output-schema.ts';
 import {
@@ -481,7 +482,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         'The finished turn comes back in one call \u2014 the alternative to propose_turn/commit_narration for a caller that would rather ' +
         'not implement the two-step split, or whose own model should not be the one writing this world\u2019s prose style.',
       inputSchema: {
-        input: z.string().describe("The player's turn, in their own words."),
+        input: z.string().max(MAX_TURN_INPUT_CHARS).describe("The player's turn, in their own words."),
         overrideIntegrity: z
           .boolean()
           .optional()
@@ -502,7 +503,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         'options a human author would see; call resolve_interrupt with one of them rather than commit_narration. ' +
         "If the input was an out-of-fiction question about the world rather than an action, this returns status 'answered' with the answer directly \u2014 nothing to narrate.",
       inputSchema: {
-        text: z.string().describe("The player's turn, in their own words \u2014 shorthand is fine."),
+        text: z.string().max(MAX_TURN_INPUT_CHARS).describe("The player's turn, in their own words \u2014 shorthand is fine."),
         actorId: z.string().optional().describe('Override which character acts; defaults to the player character.'),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -537,7 +538,10 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         "and the option's effect the user picked. 'override' and 'establish-break' proceed to awaiting-narration, same as propose_turn; " +
         "'revise' and 'switch-character' write nothing \u2014 ask the user for different input instead.",
       inputSchema: {
-        originalText: z.string().describe('The originalText field from the interrupted propose_turn response.'),
+        originalText: z
+          .string()
+          .max(MAX_TURN_INPUT_CHARS)
+          .describe('The originalText field from the interrupted propose_turn response.'),
         effect: z.enum(['override', 'establish-break', 'revise', 'switch-character']),
         actorId: z.string().optional(),
       },
@@ -648,7 +652,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         'Steer the future: a scene/chapter/campaign-scoped nudge the world model bends toward. Reports the recalculation it ' +
         'triggers (which threads rose or fell), because silent recalculation is how you stop trusting the machinery.',
       inputSchema: {
-        text: z.string().describe('The directive itself, in plain language.'),
+        text: z.string().max(MAX_DIRECTIVE_CHARS).describe('The directive itself, in plain language.'),
         scope: z.enum(['scene', 'chapter', 'campaign']).optional().describe('Defaults to "chapter".'),
         strength: z.enum(['hint', 'push', 'mandate']).optional().describe('Defaults to "push".'),
         lifetimeScenes: z.number().int().positive().optional().describe('Defaults to 5.'),
@@ -843,7 +847,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     'resolve_wiki',
     {
       description: 'Resolve free text (a franchise/setting name) to candidate wikis, for plan_world/preview_ingest.',
-      inputSchema: { query: z.string() },
+      inputSchema: { query: z.string().max(500) },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async ({ query }) => toolResult(await resolveWikiTool(ctx, { query })),
@@ -854,7 +858,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     {
       description: 'Turn free text plus a resolved wiki (from resolve_wiki) into an editable ingest plan.',
       inputSchema: {
-        wish: z.string().describe('What kind of story the player wants.'),
+        wish: z.string().max(MAX_FREE_TEXT_CHARS).describe('What kind of story the player wants.'),
         wiki: z.object({
           name: z.string(),
           baseUrl: z.string(),
@@ -992,7 +996,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     {
       description:
         'Build an authored world from a plain-language description, no wiki involved. Runs as a background job (poll with get_setup_job).',
-      inputSchema: { description: z.string(), style: z.record(z.string(), z.unknown()).optional() },
+      inputSchema: { description: z.string().max(MAX_FREE_TEXT_CHARS), style: z.record(z.string(), z.unknown()).optional() },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ description, style }) => toolResult(await createCustomWorldTool(ctx, { description, style })),

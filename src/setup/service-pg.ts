@@ -106,6 +106,19 @@ export class SetupBusyError extends Error {
   }
 }
 
+/**
+ * The caller asked one ingest to read more than a non-administrator may.
+ *
+ * Its own class so routes can answer 403 — the request is well-formed, just not
+ * this caller's to make — rather than 400.
+ */
+export class IngestBudgetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IngestBudgetError';
+  }
+}
+
 export interface PreviewResult {
   preview: DiscoveryPreview;
   mode: DepthMode;
@@ -155,6 +168,37 @@ function assertBudgetIsServable(mode: DepthMode, spec: DepthSpec): void {
       `Run it offline instead — pnpm ingest --wiki=<url> --seed="…" --dump --mode=all --commit — ` +
       `or give a finite page budget here (any size; there is no 3,000-page ceiling any more).`,
   );
+}
+
+/**
+ * The most one ingest may read for a signed-in caller who is not an
+ * administrator: the `mid` preset the wizard defaults to — 600 pages over two
+ * hops, with relation extraction on the core of them.
+ *
+ * `deep` is up to 3,000 model calls and a 3,000-page crawl of somebody else's
+ * wiki, and the page and hop budgets are otherwise uncapped. That is the
+ * operator's spend and the operator's standing with the wiki, so it is an
+ * administrator's decision, not any account's. Login off (`null`) and admins
+ * keep every budget `assertBudgetIsServable` allows.
+ *
+ * Thrown rather than clamped, for the reason that function gives.
+ */
+export function assertIngestBudgetFor(
+  user: SessionUser | null | undefined,
+  mode: DepthMode,
+  limits: IngestLimits = {},
+): void {
+  if (!user || user.isAdmin) return;
+  if (mode === 'deep' || mode === 'all') {
+    throw new IngestBudgetError(`a ${mode} ingest needs an administrator; choose skim or mid`);
+  }
+  const ceiling = specFor('mid');
+  const spec = specFor(mode, limits);
+  if (spec.maxPages > ceiling.maxPages || spec.hops > ceiling.hops) {
+    throw new IngestBudgetError(
+      `without an administrator an ingest reads at most ${ceiling.maxPages} pages over ${ceiling.hops} hops`,
+    );
+  }
 }
 
 /**
@@ -521,6 +565,10 @@ export class SetupService {
     if (!cached) throw new Error('no preview for that key; run a preview first');
 
     const { crawl: scoped, baseUrl, mode, limits, title, seeds, excludeCategories } = cached;
+    // Checked again here, not only at preview time: previews are cached under a
+    // key anyone can reconstruct, so a non-admin could otherwise commit an
+    // administrator's deep preview.
+    assertIngestBudgetFor(target?.user, mode, limits);
     const spec = specFor(mode, limits);
     const wikiName = new URL(baseUrl).hostname.split('.')[0] ?? 'wiki';
     const claim = this.claimAuthoring('ingest', target);
