@@ -21,7 +21,13 @@ import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequenc
 import type { IllustrationService } from '../illustration/service-pg.ts';
 import { NoImageProviderError } from '../illustration/service-pg.ts';
 import { assignPlayerCharacter, proposeOpening, type ApplyCustomResult } from '../setup/apply-pg.ts';
-import { limitsFromWire, type SetupService, type IngestJobResult, type PreviewResult } from '../setup/service-pg.ts';
+import {
+  assertIngestBudgetFor,
+  limitsFromWire,
+  type SetupService,
+  type IngestJobResult,
+  type PreviewResult,
+} from '../setup/service-pg.ts';
 import type { CharacterSketch, IngestPlan } from '../setup/planner.ts';
 import type { WikiCandidate } from '../setup/directory.ts';
 import type { DepthMode } from '../ingest/depth-pg.ts';
@@ -79,6 +85,13 @@ export interface McpToolContext {
   /** Undefined on a server built with no image provider configured — see `requireIllustrations`'s REST-side equivalent in `src/server/api.ts`. */
   illustrations?: IllustrationService;
   dataRoot: string;
+  /**
+   * Spends one call from this connection's paid-call budget, throwing when it is
+   * empty; every tool that reaches a model, an image provider or a wiki calls it
+   * first. `/mcp` always sets it, as a no-op for login-off and administrators
+   * (see `RateLimiter`); absent — a test or an embedded caller — is unmetered.
+   */
+  chargePaidCall?: () => void;
 }
 
 const VISUAL_STYLES: VisualStyle[] = ['realistic', 'drawing', 'sketch', 'draft', 'animation'];
@@ -573,6 +586,7 @@ export async function startStoryTool(
  * which never run before Narrate — so it is not part of this return type.
  */
 export async function proposeTurnTool(ctx: McpToolContext, args: { text: string; actorId?: string }) {
+  ctx.chargePaidCall?.();
   // `world` is passed explicitly rather than left to `Engine`'s own getter:
   // that getter is the process-wide shared pointer, so without this an
   // identified caller's turn would be gated and committed against whichever
@@ -634,6 +648,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
  * turn runs after its own Narrator role, shared code either way).
  */
 export async function commitNarrationTool(ctx: McpToolContext, args: { resumeToken: string; prose: string }) {
+  ctx.chargePaidCall?.();
   // Same reason as `proposeTurnTool`: the pending turn belongs to this user's
   // story, and `commitExternalNarration` refuses a story mismatch — which,
   // resolved through the shared pointer, is what any other reader's switch
@@ -694,6 +709,7 @@ export async function resolveInterruptTool(
     actorId?: string;
   },
 ) {
+  ctx.chargePaidCall?.();
   if (args.effect === 'revise' || args.effect === 'switch-character') {
     return { status: 'nothing-written' as const, hint: 'try a different action, or a different character' };
   }
@@ -735,6 +751,7 @@ export async function resolveInterruptTool(
  * be the one writing this world's prose style.
  */
 export async function playTool(ctx: McpToolContext, args: { input: string; overrideIntegrity?: boolean }) {
+  ctx.chargePaidCall?.();
   const world = await ctx.world();
   return playTurn(ctx.db, ctx.engine, world, args.input, { overrideIntegrity: args.overrideIntegrity });
 }
@@ -755,6 +772,7 @@ export async function pinTurnTool(ctx: McpToolContext, args: { id: string; pinne
  * pinned turn rather than silently no-opping.
  */
 export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string; note?: string }) {
+  ctx.chargePaidCall?.();
   const world = await ctx.world();
   return regenerateProseWithCheckpoint(ctx.db, world, ctx.engine, args.id, {
     ...(args.note?.trim() ? { note: args.note.trim() } : {}),
@@ -922,6 +940,7 @@ export async function addAnchorTool(ctx: McpToolContext, args: { text: string; n
  * `setup`/`currentWorld` are (see `requireIllustrations`'s REST-side equivalent).
  */
 export async function generatePortraitTool(ctx: McpToolContext, args: { entityId: string; visualStyle?: string }) {
+  ctx.chargePaidCall?.();
   if (!ctx.illustrations) {
     throw new Error('generate_portrait: this server has no image provider configured');
   }
@@ -943,6 +962,7 @@ export async function generateSceneIllustrationTool(
   ctx: McpToolContext,
   args: { turnId: string; visualStyle?: string },
 ) {
+  ctx.chargePaidCall?.();
   if (!ctx.illustrations) {
     throw new Error('generate_scene_illustration: this server has no image provider configured');
   }
@@ -1044,6 +1064,7 @@ export async function tickTool(ctx: McpToolContext) {
  * unsummarised (omit it).
  */
 export async function compactTool(ctx: McpToolContext, args: { scene?: number; force?: boolean }) {
+  ctx.chargePaidCall?.();
   const world = await ctx.world();
   const compactor = ctx.engine.compaction();
   if (typeof args.scene === 'number') {
@@ -1060,6 +1081,7 @@ export async function compactTool(ctx: McpToolContext, args: { scene?: number; f
  * compaction never runs.
  */
 export async function closeSceneTool(ctx: McpToolContext) {
+  ctx.chargePaidCall?.();
   const world = await ctx.world();
   return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
     const before = await transactionWorld.session.get();
@@ -1099,12 +1121,14 @@ export async function exportStoryTool(ctx: McpToolContext, args: { format?: 'mar
 
 /** `resolve_wiki`. The MCP-side counterpart of `POST /api/setup/resolve` \u2014 resolves free text to candidate wikis. */
 export async function resolveWikiTool(ctx: McpToolContext, args: { query: string }) {
+  ctx.chargePaidCall?.();
   if (!ctx.setup) throw new Error('resolve_wiki: this server has no setup service enabled');
   return { candidates: await ctx.setup.resolveWiki(args.query.trim()) };
 }
 
 /** `plan_world`. The MCP-side counterpart of `POST /api/setup/plan` \u2014 free text plus a resolved wiki (from resolve_wiki) becomes an editable ingest plan. */
 export async function planWorldTool(ctx: McpToolContext, args: { wish: string; wiki: WikiCandidate }) {
+  ctx.chargePaidCall?.();
   if (!ctx.setup) throw new Error('plan_world: this server has no setup service enabled');
   return ctx.setup.plan(args.wish.trim(), args.wiki);
 }
@@ -1133,7 +1157,10 @@ export async function previewIngestTool(
     passBMaxPages?: number | string;
   },
 ) {
+  ctx.chargePaidCall?.();
   if (!ctx.setup) throw new Error('preview_ingest: this server has no setup service enabled');
+  const limits = limitsFromWire(args);
+  assertIngestBudgetFor(ctx.user, args.mode ?? 'mid', limits);
   return ctx.setup.preview(
     args.baseUrl,
     args.seeds,
@@ -1141,7 +1168,7 @@ export async function previewIngestTool(
     args.excludeCategories ?? [],
     args.title ?? '',
     undefined,
-    limitsFromWire(args),
+    limits,
   );
 }
 
@@ -1166,8 +1193,11 @@ export async function discoverWorldTool(
     passBMaxPages?: number | string;
   },
 ): Promise<Job<PreviewResult & { previewKey: string; character: CharacterSketch }>> {
+  ctx.chargePaidCall?.();
   if (!ctx.setup) throw new Error('discover_world: this server has no setup service enabled');
   const sketch = args.character ?? { existing: null, name: '', role: '', goals: [], vows: [] };
+  const limits = limitsFromWire(args);
+  assertIngestBudgetFor(ctx.user, args.mode ?? 'mid', limits);
   return ctx.setup.startDiscover(
     args.baseUrl,
     args.seeds,
@@ -1175,7 +1205,7 @@ export async function discoverWorldTool(
     sketch,
     args.excludeCategories ?? [],
     args.title ?? '',
-    limitsFromWire(args),
+    limits,
   );
 }
 
@@ -1189,6 +1219,7 @@ export async function commitIngestTool(
   ctx: McpToolContext,
   args: { previewKey: string; character?: CharacterSketch; style?: Partial<IngestPlan['style']>; opening?: string },
 ): Promise<Job<IngestJobResult>> {
+  ctx.chargePaidCall?.();
   if (!ctx.setup) throw new Error('commit_ingest: this server has no setup service enabled');
   // Authored into this connection's own story, not the setup service's
   // process-wide one — see `AuthoringTarget` — and refused up front when that
@@ -1211,6 +1242,7 @@ export async function createCustomWorldTool(
   ctx: McpToolContext,
   args: { description: string; style?: Partial<IngestPlan['style']> },
 ): Promise<Job<ApplyCustomResult>> {
+  ctx.chargePaidCall?.();
   if (!ctx.setup) throw new Error('create_custom_world: this server has no setup service enabled');
   const target = { world: await ctx.world(), user: ctx.user ?? null };
   // Before the job, because the job pays for a model call before it writes.
