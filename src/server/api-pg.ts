@@ -288,11 +288,36 @@ function applyCors(
   return true;
 }
 
+/**
+ * A top-level page visit: `GET`/`HEAD`, mode `navigate`, destination
+ * `document`. Every inbound link to the app has this shape — and when the
+ * link (or an OAuth redirect chain, which keeps its initiator's site for the
+ * whole chain) started on another origin, it arrives as
+ * `Sec-Fetch-Site: cross-site` with no `Origin` header at all, because
+ * browsers omit `Origin` on plain GET navigations. The fetch-site guard is
+ * the wrong tool for that shape: an attacker cannot read a navigation's
+ * response, only send the user to a page they could have typed themselves,
+ * and every state-changing route is a POST that the guard still rejects.
+ * Framing is not a loophole either — `frame-ancestors 'none'` plus
+ * `X-Frame-Options: DENY` already kill nested document loads, and a framed
+ * navigation would carry `dest: iframe` rather than `document` regardless.
+ */
+function isTopLevelNavigation(req: IncomingMessage): boolean {
+  return (
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    req.headers['sec-fetch-mode'] === 'navigate' &&
+    req.headers['sec-fetch-dest'] === 'document'
+  );
+}
+
 function passesFetchSiteGuard(req: IncomingMessage, crossSiteHasAllowedOrigin: boolean): boolean {
   const fetchSite = req.headers['sec-fetch-site'];
   if (typeof fetchSite !== 'string') return true;
   const site = fetchSite.toLowerCase();
-  return SAFE_FETCH_SITES.has(site) || (site === 'cross-site' && crossSiteHasAllowedOrigin);
+  return (
+    SAFE_FETCH_SITES.has(site) ||
+    (site === 'cross-site' && (crossSiteHasAllowedOrigin || isTopLevelNavigation(req)))
+  );
 }
 
 /**
