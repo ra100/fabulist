@@ -51,9 +51,15 @@ export class IllustrationService {
     return overrideStyle ? { ...style, visualStyle: overrideStyle } : style;
   }
 
-  /** The prompt alone, for the "no provider — copy this into whatever you have" path. Never touches the provider or the illustrations table. */
-  async composePortrait(entityId: EntityId, overrideStyle?: VisualStyle): Promise<ComposedPrompt> {
-    const world = await this.getWorld();
+  /**
+   * The prompt alone, for the "no provider — copy this into whatever you have" path. Never touches the provider or the illustrations table.
+   *
+   * `worldOverride` is the request's own story, exactly as for `illustratePortrait`. Omitted, the
+   * captured getter decides, which in `serve-pg` is the instance's most recently played story —
+   * somebody else's characters, for a signed-in caller.
+   */
+  async composePortrait(entityId: EntityId, overrideStyle?: VisualStyle, worldOverride?: World): Promise<ComposedPrompt> {
+    const world = worldOverride ?? (await this.getWorld());
     const [entity, sheet, style] = await Promise.all([
       world.graph.get(entityId),
       world.cast.getOrBlank(entityId),
@@ -63,15 +69,16 @@ export class IllustrationService {
     return composePortraitPrompt(entity, sheet, style);
   }
 
-  /** Same split for scenes, reading present cast the same way `illustrateScene` does. */
+  /** Same split for scenes, reading present cast the same way `illustrateScene` does, and the same `worldOverride`. */
   async composeScene(
     turnId: string,
     locationId: EntityId | null,
     presentIds: EntityId[],
     sceneDetail: string,
     overrideStyle?: VisualStyle,
+    worldOverride?: World,
   ): Promise<ComposedPrompt> {
-    const world = await this.getWorld();
+    const world = worldOverride ?? (await this.getWorld());
     const { location, present, style } = await this.sceneSubjects(world, locationId, presentIds, overrideStyle);
     return composeScenePrompt(location, present, style, sceneDetail);
   }

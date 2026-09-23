@@ -9,6 +9,7 @@
 import { ensureCanonWorldFor, type World } from '../store/index-pg.ts';
 import type { Db } from '../db/pg.ts';
 import type { SessionUser } from '../auth/config.ts';
+import { assertWorldAccess } from '../store/access-pg.ts';
 import { createStory, defaultWorldIds } from '../store/world-pg.ts';
 import type { StoryId } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
@@ -1052,19 +1053,48 @@ export class SetupService {
    *
    * A replacement story is created so the caller has somewhere to land, reading
    * the same canon worlds the old one did.
+   *
+   * `target` is the request's own story and user, as for the authoring methods
+   * (see `AuthoringTarget`). Without it the service's getter decides, which in
+   * `serve-pg` is the most recently played story on the whole instance: a
+   * signed-in reset through that path deleted whichever book somebody else had
+   * just played. The owner is checked again here, under the story's row lock,
+   * and the replacement is theirs.
    */
-  async resetMyStory(storyId?: StoryId): Promise<StoryId> {
-    const world = await this.getWorld();
-    const target = storyId ?? world.storyId;
+  async resetMyStory(target?: AuthoringTarget): Promise<StoryId> {
+    const world = target?.world ?? (await this.getWorld());
+    const user = target?.user ?? null;
     const worldIds = world.sources.map((src) => src.worldId);
 
     return this.db.tx(async (client) => {
+      if (user) {
+        const { rows } = await client.query<{ owner_user_id: string | null }>(
+          `SELECT owner_user_id FROM stories WHERE id = $1 FOR UPDATE`,
+          [world.storyId],
+        );
+        if (!rows[0]) throw new Error(`no story ${world.storyId}`);
+        if (rows[0].owner_user_id !== user.id) throw new Error(`story ${world.storyId} does not belong to this user`);
+      }
       // Created before the delete, so a failure leaves the old story intact
       // rather than leaving the library with nothing to open.
-      const fresh = await createStory(client, { title: '', worldIds });
-      await client.query(`DELETE FROM stories WHERE id = $1`, [target]);
+      const fresh = await createStory(client, { title: '', worldIds, ...(user ? { ownerUserId: user.id } : {}) });
+      await client.query(`DELETE FROM stories WHERE id = $1`, [world.storyId]);
       return fresh.id;
     });
+  }
+
+  /**
+   * Refuses, before anything is spent, an authoring request into a canon world
+   * the caller may only read.
+   *
+   * `ensureCanonWorldFor` makes the same check under the story lock and is the
+   * one that counts. This one exists so a refusal costs nothing: a custom world
+   * pays for a model call before it resolves where to write, and an ingest would
+   * otherwise start a job that can only fail.
+   */
+  async assertMayAuthor(target: AuthoringTarget): Promise<void> {
+    const worldId = target.world.sources[0]?.worldId;
+    if (target.user && worldId !== undefined) await assertWorldAccess(this.db, target.user, worldId, 'ingest');
   }
 
   /**

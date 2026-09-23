@@ -451,6 +451,23 @@ export class RollbackTargetError extends Error {
   }
 }
 
+/**
+ * The caller lacks the role an operation needs on a canon world.
+ *
+ * Carries its HTTP answer: 404 when the caller may not see the world at all
+ * (confirming that a private world exists is the leak), 403 when they can see it
+ * but may not do this to it.
+ */
+export class WorldAccessError extends Error {
+  readonly status: 403 | 404;
+
+  constructor(status: 403 | 404, message: string) {
+    super(message);
+    this.name = 'WorldAccessError';
+    this.status = status;
+  }
+}
+
 export type InputClass = 'action' | 'dialogue' | 'ooc-directive' | 'meta-query';
 
 export interface Intent {

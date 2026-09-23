@@ -47,6 +47,7 @@ import {
 } from '../store/access-pg.ts';
 import { tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
 import type { Entity, VisualStyle } from '../domain/types.ts';
+import { WorldAccessError } from '../domain/types.ts';
 import { limitsFromWire, SetupBusyError, type SetupService } from '../setup/service-pg.ts';
 import type { IngestLimits } from '../ingest/depth-pg.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
@@ -2173,9 +2174,11 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body }) => {
 
 /**
  * 409 when canon is already being written for this story or world — a conflict
- * the caller can wait out — else `otherwise`, the route's own failure status.
+ * the caller can wait out — the access error's own 403/404 when the caller may
+ * not write into this world, else `otherwise`, the route's own failure status.
  */
 function setupFailureStatus(err: unknown, otherwise: number): number {
+  if (err instanceof WorldAccessError) return err.status;
   return err instanceof SetupBusyError ? 409 : otherwise;
 }
 
@@ -2186,12 +2189,18 @@ function setupFailureStatus(err: unknown, otherwise: number): number {
  * `world`, which `worldFor` resolved for this user and ownership-checked — never
  * the service's own process-wide world. Authoring binds an unbound story to a
  * canon world, so resolving the wrong story here is a persistent write into it.
+ *
+ * Owning the story is not the same as being allowed to write its world: a story
+ * bound to shared public canon needs `ingest` on that world (see
+ * `ensureCanonWorldFor`). `assertMayAuthor` asks before a job or a model call is
+ * started, so a refusal costs nothing.
  */
-route('POST', '/api/setup/ingest', (_req, res, { setup, body, world, user }) => {
+route('POST', '/api/setup/ingest', async (_req, res, { setup, body, world, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { previewKey, character, style, opening } = parseBody(setupIngestBodySchema, body);
   try {
+    await svc.assertMayAuthor({ world, user });
     const job = svc.startIngest(
       previewKey,
       {
@@ -2207,10 +2216,11 @@ route('POST', '/api/setup/ingest', (_req, res, { setup, body, world, user }) => 
   }
 });
 
-route('POST', '/api/setup/custom', (_req, res, { setup, body, world, user }) => {
+route('POST', '/api/setup/custom', async (_req, res, { setup, body, world, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { description, style } = parseBody(setupCustomBodySchema, body);
+  await svc.assertMayAuthor({ world, user });
   try {
     send(res, 200, svc.startCustomWorld(description.trim(), style, { world, user }));
   } catch (err) {
@@ -2369,7 +2379,7 @@ route('POST', '/api/setup/continue', async (_req, res, { setup, body, user, auth
  * same button. They are separate routes now, which is the user/system split made
  * reachable: see `POST /api/canon/rebuild` for the other half.
  */
-route('POST', '/api/setup/reset', async (_req, res, { setup, db, user }) => {
+route('POST', '/api/setup/reset', async (_req, res, { setup, db, user, world }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   if (user) {
@@ -2379,9 +2389,11 @@ route('POST', '/api/setup/reset', async (_req, res, { setup, db, user }) => {
       return send(res, 409, { error: error instanceof Error ? error.message : String(error) });
     }
   }
+  // `world` is this request's own story — `worldFor` resolved and ownership-checked
+  // it — never the service's getter, which is somebody else's most recent book.
   // `createStory` stamps `last_played_at`, so the replacement is what the next
   // request resolves to — no server-wide pointer to rebind.
-  const storyId = await svc.resetMyStory();
+  const storyId = await svc.resetMyStory({ world, user });
   send(res, 200, { ok: true, storyId });
 });
 
@@ -2395,13 +2407,20 @@ route('POST', '/api/setup/reset', async (_req, res, { setup, db, user }) => {
  * longer resolve until it is re-ingested — which `pnpm integrity-pg` reports
  * honestly rather than hiding, and which is recoverable where deleting somebody's
  * novel is not.
+ *
+ * The world rebuilt is the primary source of the admin's own story for this
+ * request, not whatever the service's getter resolves: that is the most recently
+ * played story on the instance, so the click wiped whichever world a stranger had
+ * just been reading.
  */
-route('POST', '/api/canon/rebuild', async (_req, res, { setup, user, authConfig }) => {
+route('POST', '/api/canon/rebuild', async (_req, res, { setup, user, authConfig, world }) => {
   if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireSetup(res, setup);
   if (!svc) return;
+  const worldId = world.sources[0]?.worldId;
+  if (worldId === undefined) return send(res, 400, { error: 'this story reads no canon world to rebuild' });
   try {
-    send(res, 200, await svc.rebuildCanon());
+    send(res, 200, await svc.rebuildCanon(worldId));
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }

@@ -1065,7 +1065,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     {
       description:
         'Empty this canon world so it can be re-ingested, leaving every story\u2019s chronicle and prose intact. Stories will ' +
-        'reference canon ids that do not resolve until the world is ingested again; nothing anyone wrote is lost.',
+        'reference canon ids that do not resolve until the world is ingested again; nothing anyone wrote is lost. ' +
+        'Administrators only.',
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async () => toolResult(await rebuildCanonTool(ctx)),

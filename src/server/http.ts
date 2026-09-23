@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { output, ZodTypeAny } from 'zod';
-import { RollbackTargetError, SceneSplitTargetError } from '../domain/types.ts';
+import { RollbackTargetError, SceneSplitTargetError, WorldAccessError } from '../domain/types.ts';
 
 const DEFAULT_JSON_LIMIT = 1024 * 1024;
 const DEFAULT_RAW_LIMIT = 256 * 1024 * 1024;
@@ -58,7 +58,7 @@ export function readRawBody(req: IncomingMessage, limit = DEFAULT_RAW_LIMIT): Pr
 }
 
 export function statusForError(err: unknown): number {
-  if (err instanceof HttpError) return err.status;
+  if (err instanceof HttpError || err instanceof WorldAccessError) return err.status;
   return err instanceof SceneSplitTargetError || err instanceof RollbackTargetError ? 400 : 500;
 }
 
