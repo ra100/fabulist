@@ -17,3 +17,8 @@ coverage
 .DS_Store
 .cache
 .scratch
+# Secrets. The build stage runs `COPY . .`, so anything here would be baked
+# into an image layer.
+.env*
+*.env
+**/app.env

@@ -6,6 +6,10 @@ dist/
 *.db-shm
 .env
 .env.local
+# The release workflow renders the VPS secrets into app.env; never let a copy reach Git.
+.env.*
+*.env
+app.env
 
 # Personal override of fabulist.config.json (and any --config= alternative),
 # same *.local convention as .env.local above. The tracked config carries
