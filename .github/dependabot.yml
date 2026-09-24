@@ -8,9 +8,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Minor and patch bumps travel together; each major gets its own PR, because a
+    # major is a migration (zod 3 to 4 broke the typecheck) and one of them must
+    # not hold up every routine update in the group.
     groups:
-      npm:
+      npm-minor-patch:
         patterns: ['*']
+        update-types: [minor, patch]
   - package-ecosystem: docker
     directory: /
     schedule:
