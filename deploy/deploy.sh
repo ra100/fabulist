@@ -9,6 +9,11 @@ cd "$(dirname "$0")"
 
 action="${1:-}"
 
+# The helper container the ownership fixes below run as root, with host
+# directories bind-mounted. Pinned by digest (alpine 3.24.2) so a retagged
+# `alpine` cannot run as root against the host.
+ALPINE_IMAGE="alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
+
 load_app_env() {
   local name value
 
@@ -149,7 +154,7 @@ case "$action" in
       # brand-new directory as "unreadable" and therefore as an initialised database —
       # refusing to start on a fresh box. Asking the container to say which case it
       # found removes the ambiguity entirely.
-      pg_probe="$(docker run --rm -v "$pg_parent:/parent" --user 0 alpine sh -c \
+      pg_probe="$(docker run --rm -v "$pg_parent:/parent" --user 0 "$ALPINE_IMAGE" sh -c \
         "d='/parent/$pg_leaf'
          [ -d \"\$d\" ] || { echo ABSENT; exit 0; }
          if find \"\$d\" -maxdepth 3 -name PG_VERSION -print -quit 2>/dev/null | grep -q .; then
@@ -244,7 +249,7 @@ case "$action" in
     if [ -d "${FABULIST_DATA_DIR:-./fabulist-data}" ]; then
       data_parent="$(cd "$(dirname "${FABULIST_DATA_DIR:-./fabulist-data}")" && pwd)"
       data_leaf="$(basename "${FABULIST_DATA_DIR:-./fabulist-data}")"
-      if docker run --rm -v "$data_parent:/parent" --user 0 alpine sh -c "
+      if docker run --rm -v "$data_parent:/parent" --user 0 "$ALPINE_IMAGE" sh -c "
           d='/parent/$data_leaf'
           mkdir -p \"\$d/images\" \"\$d/worlds\"
           chown 1000:1000 \"\$d\" \"\$d/worlds\"
@@ -298,7 +303,7 @@ case "$action" in
     # must not reach the delete. This branch deleted a real database once, when the
     # probe could not read the directory and its failure was read as emptiness.
     if [ -z "${FABULIST_PG:-}" ] && [ "${pg_initialised:-unknown}" = false ]; then
-      if docker run --rm -v "$pg_parent:/parent" --user 0 alpine sh -c \
+      if docker run --rm -v "$pg_parent:/parent" --user 0 "$ALPINE_IMAGE" sh -c \
         "rm -rf '/parent/$pg_leaf' && mkdir -p '/parent/$pg_leaf'"; then
         echo "cleared an uninitialised database directory (no cluster present)"
       else
@@ -441,7 +446,7 @@ case "$action" in
       # so the probe that was meant to explain the failure was itself defeated by it,
       # and then passed an empty path to `docker run`.
       echo "as seen inside a root container:"
-      docker run --rm -v "$(cd "$(dirname "${FABULIST_PG_DIR:-./fabulist-pg}")" && pwd):/parent" --user 0 alpine sh -c \
+      docker run --rm -v "$(cd "$(dirname "${FABULIST_PG_DIR:-./fabulist-pg}")" && pwd):/parent" --user 0 "$ALPINE_IMAGE" sh -c \
         "d=/parent/$(basename "${FABULIST_PG_DIR:-./fabulist-pg}"); ls -ldn \"\$d\"; ls -an \"\$d\" | head -5; touch \"\$d/.probe\" 2>&1 && echo 'root CAN write the mount' && rm -f \"\$d/.probe\" || echo 'root CANNOT write the mount'" 2>&1 || true
     fi
     echo "--- end ---"
