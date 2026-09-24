@@ -56,6 +56,25 @@ BEGIN
 END
 $$;
 
+-- The login that runs this file must be a *member* of both roles, or the app
+-- cannot `SET ROLE` into them and the separation stays documentation. Creating
+-- a role used to make its creator a member implicitly; since PG16 a CREATEROLE
+-- creator gets ADMIN OPTION on the new role but neither INHERIT nor SET, so
+-- `SET ROLE fabulist_play` fails with "permission denied to set role". A plain
+-- GRANT (defaults: INHERIT per the grantee, SET TRUE) restores it.
+--
+-- Skipped for a superuser, who can SET ROLE to anything already, and tolerant
+-- of a login that may not grant itself (created by someone else, no ADMIN
+-- OPTION): that is an administrator's one-off step, not a reason to fail boot,
+-- and `assertRole` (src/db/pg.ts) reports it with the exact GRANT to run.
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+    EXECUTE format('GRANT fabulist_play, fabulist_ingest TO %I', current_user);
+  END IF;
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'fabulist: % cannot grant itself the roles; an administrator must', current_user;
+END $$;
+
 DO $$
 DECLARE
   sch TEXT := current_schema();
@@ -90,6 +109,9 @@ DECLARE
     'chron_sheets', 'relationships', 'facts', 'fact_knowledge', 'threads', 'events',
     'consequences', 'turns', 'scenes', 'chapters', 'directives', 'divergences',
     'style_anchors', 'prose_blocklist', 'illustrations', 'history_checkpoints', 'scene_segments',
+    -- Written on every scene advance (the play path), so omitting it broke the
+    -- first scene close under the play role.
+    'scene_metadata',
     -- User-scoped encryption key-wrap state. The key tables contain
     -- browser-produced ciphertext only; no role, including the operator's app
     -- process, can derive the plaintext key from them.

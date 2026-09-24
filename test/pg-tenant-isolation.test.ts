@@ -19,7 +19,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeWorld, withPg } from './pg-harness.ts';
+import { makeWorld, withPg, type RolePools } from './pg-harness.ts';
 import { PEOPLE, fakeAuth, listenSignedIn, sessionUser, type AsUser, type Who } from './signed-in.ts';
 import { World, createWorld, worldFor } from '../src/store/index-pg.ts';
 import { createStory, getStory } from '../src/store/world-pg.ts';
@@ -68,19 +68,26 @@ async function twoTenants(db: Db, sharedTitle = 'Shared') {
   return { shared, aliceStory: alice.id, bobStory: bob.id };
 }
 
+/**
+ * Wired the way `serve-pg.ts` wires it, on the role pools: requests on
+ * `fabulist_play`, authoring and system writes on `fabulist_ingest`. So every
+ * REST and MCP flow below also proves it stays inside the grants. Fixtures and
+ * assertions use the owner `db`.
+ */
 async function withSignedInServer(
-  db: Db,
+  roles: RolePools,
   fn: (as: AsUser) => Promise<void>,
   opts: { provider?: MockProvider } = {},
 ): Promise<void> {
-  const boot = loginOffResolver(db);
+  const boot = loginOffResolver(roles.play);
   const providers = new ProviderRegistry(opts.provider ?? new MockProvider());
   const { as, close } = await listenSignedIn(
     createApiServer({
       world: boot,
-      db,
-      engine: new Engine({ world: boot, db, providers }),
-      setup: new SetupService({ world: boot, db, providers }),
+      db: roles.play,
+      ingestDb: roles.ingest,
+      engine: new Engine({ world: boot, db: roles.play, ingestDb: roles.ingest, providers }),
+      setup: new SetupService({ world: boot, db: roles.ingest, providers }),
       authConfig: fakeAuth(),
     }),
   );
@@ -92,20 +99,21 @@ async function withSignedInServer(
 }
 
 function mcpContext(
-  db: Db,
+  roles: RolePools,
   who: Who,
   opts: { provider?: MockProvider; illustrations?: IllustrationService } = {},
 ): McpToolContext {
-  const boot = loginOffResolver(db);
+  const { play, ingest } = roles;
+  const boot = loginOffResolver(play);
   const user = sessionUser(who);
   const providers = new ProviderRegistry(opts.provider ?? new MockProvider());
   return {
-    db,
+    db: play,
     user,
-    world: () => worldFor(db, user),
+    world: () => worldFor(play, user),
     selectStory: () => {},
-    engine: new Engine({ world: boot, db, providers }),
-    setup: new SetupService({ world: boot, db, providers }),
+    engine: new Engine({ world: boot, db: play, ingestDb: ingest, providers }),
+    setup: new SetupService({ world: boot, db: ingest, providers }),
     ...(opts.illustrations ? { illustrations: opts.illustrations } : {}),
     dataRoot: 'data',
   };
@@ -119,9 +127,9 @@ async function canonCount(db: Db, worldId: number): Promise<number> {
 // ------------------------------------------------------------ story reset
 
 test('a signed-in reset replaces the caller’s own story, never the instance’s most recently played one', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     const { shared, aliceStory, bobStory } = await twoTenants(db);
-    await withSignedInServer(db, async (as) => {
+    await withSignedInServer(roles, async (as) => {
       const reset = await as('alice', 'POST', '/api/setup/reset');
       assert.equal(reset.status, 200, JSON.stringify(reset.body));
 
@@ -141,9 +149,9 @@ test('a signed-in reset replaces the caller’s own story, never the instance’
 });
 
 test('MCP reset_story replaces the connection’s own story, never the instance’s most recently played one', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     const { aliceStory, bobStory } = await twoTenants(db);
-    const result = await resetStoryTool(mcpContext(db, 'alice'));
+    const result = await resetStoryTool(mcpContext(roles, 'alice'));
 
     assert.ok(await getStory(db, bobStory), 'Bob’s book survives Alice’s reset_story');
     assert.equal(await getStory(db, aliceStory), undefined, 'Alice’s own book is the one replaced');
@@ -173,7 +181,7 @@ test('resetMyStory refuses a world resolved for a story the user does not own', 
 // ------------------------------------------------------- illustration prompts
 
 test('MCP compose_illustration_prompt reads the caller’s story, not the most recently played one', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     const { aliceStory, bobStory } = await twoTenants(db);
     const bobWorld = await World.forStory(db, bobStory);
     await bobWorld.graph.upsert(
@@ -220,7 +228,7 @@ test('MCP compose_illustration_prompt reads the caller’s story, not the most r
     });
 
     const illustrations = new IllustrationService({ world: loginOffResolver(db), providers: { get: () => null } });
-    const ctx = mcpContext(db, 'alice', { illustrations });
+    const ctx = mcpContext(roles, 'alice', { illustrations });
     await playedMostRecently(db, bobStory);
 
     await assert.rejects(
@@ -241,20 +249,20 @@ test('MCP compose_illustration_prompt reads the caller’s story, not the most r
 // ------------------------------------------------------------ canon rebuild
 
 test('MCP rebuild_canon is refused to a non-admin and leaves shared canon intact', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     const { shared, bobStory } = await twoTenants(db);
     await seedWorld(await World.forStory(db, bobStory));
     const before = await canonCount(db, shared);
     assert.ok(before > 10, 'fixture: the shared world has canon');
 
-    await assert.rejects(() => rebuildCanonTool(mcpContext(db, 'alice')), /administrator/);
+    await assert.rejects(() => rebuildCanonTool(mcpContext(roles, 'alice')), /administrator/);
     assert.equal(await canonCount(db, shared), before, 'no canon was deleted');
   });
   if (!ran) t.skip('no Postgres configured');
 });
 
 test('rebuild_canon empties the admin’s own world, not the most recently played story’s', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     const { shared, bobStory } = await twoTenants(db);
     const adminsWorld = await makeWorld(db, 'admins', 'Admin’s world');
     const adminStory = await createStory(db, {
@@ -267,13 +275,13 @@ test('rebuild_canon empties the admin’s own world, not the most recently playe
 
     await seedWorld(await World.forStory(db, adminStory.id));
     await playedMostRecently(db, bobStory);
-    const viaMcp = await rebuildCanonTool(mcpContext(db, 'admin'));
+    const viaMcp = await rebuildCanonTool(mcpContext(roles, 'admin'));
     assert.equal(viaMcp.worldId, adminsWorld, 'MCP rebuilt the world the admin’s own story reads');
     assert.equal(await canonCount(db, shared), sharedBefore, 'the world Bob is reading is untouched');
 
     await seedWorld(await World.forStory(db, adminStory.id));
     await playedMostRecently(db, bobStory);
-    await withSignedInServer(db, async (as) => {
+    await withSignedInServer(roles, async (as) => {
       const viaRest = await as('admin', 'POST', '/api/canon/rebuild');
       assert.equal(viaRest.status, 200, JSON.stringify(viaRest.body));
       assert.equal(viaRest.body.worldId, adminsWorld, 'REST rebuilt the world the admin’s own story reads');
@@ -302,14 +310,14 @@ async function worldTitle(db: Db, storyId: string): Promise<string> {
 }
 
 test('a signed-in reader cannot author canon into a shared world, over REST or MCP', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     const { shared, bobStory } = await sharedWorldWithCanon(db);
     const before = await canonCount(db, shared);
     // `MockProvider` records every call it answers, so a refusal can be shown to have cost nothing.
     const model = new MockProvider();
 
     await withSignedInServer(
-      db,
+      roles,
       async (as) => {
         const sample = await as('alice', 'POST', '/api/setup/sample');
         assert.equal(sample.status, 403, JSON.stringify(sample.body));
@@ -326,9 +334,9 @@ test('a signed-in reader cannot author canon into a shared world, over REST or M
       { provider: model },
     );
 
-    await assert.rejects(() => useSampleWorldTool(mcpContext(db, 'alice')), /requires ingest access/);
+    await assert.rejects(() => useSampleWorldTool(mcpContext(roles, 'alice')), /requires ingest access/);
     await assert.rejects(
-      () => createCustomWorldTool(mcpContext(db, 'alice', { provider: model }), { description: 'Anything at all.' }),
+      () => createCustomWorldTool(mcpContext(roles, 'alice', { provider: model }), { description: 'Anything at all.' }),
       /requires ingest access/,
     );
 
@@ -340,11 +348,11 @@ test('a signed-in reader cannot author canon into a shared world, over REST or M
 });
 
 test('an admin may still author into a shared world', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     const { shared } = await sharedWorldWithCanon(db);
     await createStory(db, { title: 'Admin’s book', worldIds: [shared], ownerUserId: PEOPLE.admin.id });
     const before = await canonCount(db, shared);
-    await withSignedInServer(db, async (as) => {
+    await withSignedInServer(roles, async (as) => {
       const sample = await as('admin', 'POST', '/api/setup/sample');
       assert.equal(sample.status, 200, JSON.stringify(sample.body));
     });
@@ -354,10 +362,10 @@ test('an admin may still author into a shared world', async (t) => {
 });
 
 test('a user who binds a fresh world owns it, and can keep authoring into it', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     const placeholder = await createWorld(db, '');
     await createStory(db, { title: '', ownerUserId: PEOPLE.alice.id });
-    await withSignedInServer(db, async (as) => {
+    await withSignedInServer(roles, async (as) => {
       const first = await as('alice', 'POST', '/api/setup/sample');
       assert.equal(first.status, 200, JSON.stringify(first.body));
       assert.equal(
@@ -381,9 +389,9 @@ test('a user who binds a fresh world owns it, and can keep authoring into it', a
 // ------------------------------------------------------------- setup jobs
 
 test('a setup job is visible and cancellable only by the user who started it, over REST', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     await createStory(db, { title: '', ownerUserId: PEOPLE.alice.id });
-    await withSignedInServer(db, async (as) => {
+    await withSignedInServer(roles, async (as) => {
       const started = await as('alice', 'POST', '/api/setup/custom', { description: 'A drowned city of bell-ringers.' });
       assert.equal(started.status, 200, JSON.stringify(started.body));
       const id = encodeURIComponent((started.body as { id: string }).id);
@@ -406,10 +414,10 @@ test('a setup job is visible and cancellable only by the user who started it, ov
 });
 
 test('a setup job is visible and cancellable only by the user who started it, over MCP', async (t) => {
-  const ran = await withPg(async (db) => {
+  const ran = await withPg(async (db, _schema, roles) => {
     await createStory(db, { title: '', ownerUserId: PEOPLE.alice.id });
-    const alice = mcpContext(db, 'alice');
-    const bob = { ...mcpContext(db, 'bob'), setup: alice.setup };
+    const alice = mcpContext(roles, 'alice');
+    const bob = { ...mcpContext(roles, 'bob'), setup: alice.setup };
     const job = await createCustomWorldTool(alice, { description: 'A drowned city of bell-ringers.' });
     assert.equal((await getSetupJobTool(alice, { id: job.id })).id, job.id);
     await assert.rejects(() => getSetupJobTool(bob, { id: job.id }), /no such job/);
