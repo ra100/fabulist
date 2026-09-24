@@ -12,6 +12,7 @@ import { ComfyUIProvider, comfyReachable } from './comfyui.ts';
 import type { ImageCapabilities, ImageProvider } from './image.ts';
 import { MockImageProvider } from './mockImage.ts';
 import { UnslothImageProvider, unslothImageStatus } from './unslothImage.ts';
+import { apiKeyFromEnv } from './http.ts';
 
 export type ImageProviderKind = 'mock' | 'comfyui' | 'bedrock-stability' | 'unsloth';
 
@@ -112,7 +113,7 @@ export function buildImageProvider(spec: ImageProviderSpec, env: Record<string, 
       // reason. A remote instance genuinely needs a key, and that failure now
       // surfaces at probe time with an accurate explanation instead of blocking
       // construction here.
-      const apiKey = spec.apiKeyEnv ? (env[spec.apiKeyEnv] ?? '') : '';
+      const apiKey = apiKeyFromEnv(env, spec.apiKeyEnv);
       return new UnslothImageProvider({
         baseUrl: spec.baseUrl,
         model: spec.model,
@@ -167,7 +168,7 @@ export async function probeImageProviders(
         // `apiKeyEnv` here would report "no key" for an instance that works
         // perfectly. `unslothImageStatus` resolves exactly as the provider does
         // and reports which credential it used.
-        const apiKey = spec.apiKeyEnv ? (env[spec.apiKeyEnv] ?? '') : '';
+        const apiKey = apiKeyFromEnv(env, spec.apiKeyEnv);
         const status = await unslothImageStatus(spec.baseUrl, apiKey, opts.fetcher ?? fetch);
         if (!status.up) {
           return { ...base, status: 'unavailable', detail: status.detail, fix: 'start it: unsloth studio' };

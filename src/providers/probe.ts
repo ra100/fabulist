@@ -10,7 +10,7 @@
 import { AwsCredentialProvider } from './aws.ts';
 import { GoogleAuth } from './google.ts';
 import { findCopilotOAuthToken, defaultCopilotEnvironment } from './copilot.ts';
-import { defaultAuth, PRESETS, type AuthMode, type ProviderSpec } from './http.ts';
+import { apiKeyFromEnv, defaultAuth, PRESETS, type AuthMode, type ProviderSpec } from './http.ts';
 
 export type ProbeStatus = 'ready' | 'unavailable' | 'unknown';
 
@@ -84,7 +84,7 @@ export async function probeProvider(key: string, spec: ProviderSpec, opts: Probe
     }
 
     case 'api-key': {
-      const present = !!(spec.apiKeyEnv && env[spec.apiKeyEnv]);
+      const present = !!apiKeyFromEnv(env, spec.apiKeyEnv);
       if (present) return { ...base, status: 'ready', detail: `${spec.apiKeyEnv} is set` };
       // A target with a local credential fallback is not unavailable just
       // because no key is exported: Unsloth's desktop secret authenticates a
