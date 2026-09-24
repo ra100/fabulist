@@ -1225,11 +1225,34 @@ let mcpDiagnosticSequence = 0;
 const mcpDiagnosticEvents: McpDiagnosticEvent[] = [];
 /**
  * The feed is public and anyone who can reach `/mcp` writes the method and tool
- * names in it, so they are kept to a prefix: enough to read, too little to store
- * or serve a megabyte of somebody else's text 30 times over.
+ * names in it. So only names shaped like the real thing are kept: an MCP method
+ * from the protocol, a tool name that is a short snake_case identifier. Anything
+ * else is `other`, which is enough to see that a request was malformed and too
+ * little to publish somebody else's text (a link, an insult) on this feed.
  */
-const MCP_DIAGNOSTIC_NAME_CHARS = 64;
-const clipName = (name: string): string => name.slice(0, MCP_DIAGNOSTIC_NAME_CHARS);
+const MCP_TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+const KNOWN_MCP_METHODS = new Set([
+  'initialize',
+  'ping',
+  'tools/list',
+  'tools/call',
+  'resources/list',
+  'resources/read',
+  'resources/templates/list',
+  'resources/subscribe',
+  'resources/unsubscribe',
+  'prompts/list',
+  'prompts/get',
+  'completion/complete',
+  'logging/setLevel',
+  'notifications/initialized',
+  'notifications/cancelled',
+  'notifications/progress',
+  'notifications/roots/list_changed',
+  'unknown',
+]);
+const diagnosticMethod = (name: string): string => (KNOWN_MCP_METHODS.has(name) ? name : 'other');
+const diagnosticTool = (name: string): string => (MCP_TOOL_NAME.test(name) ? name : 'other');
 
 function toolName(body: unknown): string | undefined {
   if (!body || typeof body !== 'object' || !('params' in body)) return undefined;
@@ -1249,8 +1272,8 @@ function recordMcpDiagnostic(
   mcpDiagnosticEvents.push({
     sequence: ++mcpDiagnosticSequence,
     at: new Date().toISOString(),
-    method: clipName(requestMethod(body) ?? 'unknown'),
-    ...(tool ? { tool: clipName(tool) } : {}),
+    method: diagnosticMethod(requestMethod(body) ?? 'unknown'),
+    ...(tool ? { tool: diagnosticTool(tool) } : {}),
     session,
     outcome,
     ...(detail ? { detail } : {}),
