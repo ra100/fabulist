@@ -83,7 +83,7 @@ import {
   privateMigrationStatus,
 } from '../store/private-story-migration-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
-import { HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
+import { errorBody, HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
 import { DEFAULT_PAID_CALL_LIMIT, RateLimiter, type PaidCallLimit } from './rate-limit.ts';
 import {
   createThreadBodySchema,
@@ -1557,7 +1557,7 @@ route('POST', '/api/stories/fork', async (_req, res, { world, db, body, user }) 
  * Stories tab's own switch handler) so a concurrent second tab is not
  * pulled along too.
  */
-route('POST', '/api/rollback', async (_req, res, { world, db, body, user }) => {
+route('POST', '/api/rollback', async (_req, res, { world, db, body, user, authConfig }) => {
   const { scene, chapter, turnId, mode } = parseBody(rollbackBodySchema, body);
   if (!(await ownsStoryOrRespond(res, db, world.storyId, user))) return;
   const effectiveMode = mode ?? 'fork';
@@ -1585,11 +1585,11 @@ route('POST', '/api/rollback', async (_req, res, { world, db, body, user }) => {
       ...(result.story ? { forkedStory: result.story } : {}),
     });
   } catch (err) {
-    send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
+    send(res, statusForError(err), errorBody(err, statusForError(err), authConfig !== undefined));
   }
 });
 
-route('POST', '/api/scene/split', async (_req, res, { world, db, body, user }) => {
+route('POST', '/api/scene/split', async (_req, res, { world, db, body, user, authConfig }) => {
   const { turnId } = parseBody(splitSceneBodySchema, body);
   if (!(await ownsStoryOrRespond(res, db, world.storyId, user))) return;
   try {
@@ -1603,7 +1603,7 @@ route('POST', '/api/scene/split', async (_req, res, { world, db, body, user }) =
       startsScene: target.startsScene,
     });
   } catch (err) {
-    send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
+    send(res, statusForError(err), errorBody(err, statusForError(err), authConfig !== undefined));
   }
 });
 
@@ -2887,8 +2887,9 @@ export function createApiServer(opts: ServerOptions) {
           ephemeralStoryKeys,
         });
       } catch (err) {
-        // Surface the message: this is a local single-user tool, and a silent
-        // 500 during a session is worse than a leaked stack trace.
+        // Surface the message when login is off: that is a local single-user
+        // tool, and a silent 500 during a session is worse than a leaked stack
+        // trace. Signed in, a 5xx message is an internal detail for the log only.
         //
         // `headersSent` guard: a route that has already replied and *then* throws
         // used to take the whole process down with ERR_HTTP_HEADERS_SENT, because
@@ -2900,7 +2901,8 @@ export function createApiServer(opts: ServerOptions) {
           console.error(`error after the response was sent for ${req.method} ${url.pathname}:`, err);
           res.end();
         } else {
-          send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });
+          const status = statusForError(err);
+          send(res, status, errorBody(err, status, authConfig !== undefined));
         }
       }
       return;

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { output, ZodTypeAny } from 'zod';
 import { RollbackTargetError, SceneSplitTargetError, WorldAccessError } from '../domain/types.ts';
@@ -55,6 +56,22 @@ export async function readJsonBody(req: IncomingMessage, limit = DEFAULT_JSON_LI
 
 export function readRawBody(req: IncomingMessage, limit = DEFAULT_RAW_LIMIT): Promise<Buffer> {
   return readBytes(req, limit);
+}
+
+/**
+ * The JSON body for a request that failed with `status`.
+ *
+ * A 4xx message is the caller's to read. A 5xx one is whatever an internal layer
+ * threw — SQL, file paths, a provider's response — so a server that `hides`
+ * internals (any signed-in, multi-user one) logs it under a short reference and
+ * answers with only that.
+ */
+export function errorBody(err: unknown, status: number, hide: boolean): { error: string } {
+  const message = err instanceof Error ? err.message : String(err);
+  if (status < 500 || !hide) return { error: message };
+  const ref = randomUUID().slice(0, 8);
+  console.error(`internal error ref ${ref}:`, err);
+  return { error: `internal error (ref ${ref})` };
 }
 
 export function statusForError(err: unknown): number {
