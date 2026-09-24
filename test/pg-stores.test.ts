@@ -980,6 +980,25 @@ test('epistemics: knowledge is per-entity, distortion only improves, revoking fo
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('epistemics are scoped to the story: another story cannot read, grant or revoke knowledge of a fact', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { storyId } = await setup(db);
+    const mine = new ChronicleStore({ db, storyId });
+    const fact = await mine.addFact('The abbot is dead', 3);
+    await mine.setKnowledge(fact.id, 'char:a', 'knows', 3);
+
+    const other = new ChronicleStore({ db, storyId: (await createStory(db, {})).id });
+    assert.deepEqual(await other.knowersOf(fact.id), [], 'who knows it is this story’s business');
+    assert.equal(await other.knows('char:a', fact.id), false);
+    await assert.rejects(() => other.setKnowledge(fact.id, 'char:z', 'knows', 3), /no fact/);
+    await other.revokeKnowledge(fact.id, 'char:a');
+
+    assert.deepEqual((await mine.knowersOf(fact.id)).map((k) => k.entityId), ['char:a'], 'untouched by the other story');
+    assert.equal(await mine.knows('char:a', fact.id), true);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('world meta resolves the story\u2019s world, and refuses to guess when there is none', async (t) => {
   const ran = await withPg(async (db) => {
     const w1 = await makeWorld(db, 'one');
