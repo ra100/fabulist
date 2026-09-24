@@ -43,7 +43,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { World } from '../store/index.ts';
 import { checkpoint, row, rows, tx } from '../db/db.ts';
 import { createStory, getStory } from '../store/world.ts';
@@ -611,6 +611,19 @@ export interface BranchOptions {
   /** The branch resumes at the start of this scene. */
   atScene: number;
   overwrite?: boolean;
+}
+
+/**
+ * Where a branch requested over HTTP or MCP is written: always
+ * `<dataRoot>/branches/<file name>`, whatever directory the request named.
+ * `branchSave` itself writes anywhere, because the CLI is run by the file's
+ * owner. A request is not, and an unconfined, overwritable path is an arbitrary
+ * file write (`~/.ssh/authorized_keys`).
+ */
+export function branchTargetIn(dataRoot: string, requested: string): string {
+  const name = basename(requested);
+  if (!name || name === '.' || name === '..') throw new Error(`not a file name: ${requested}`);
+  return join(resolve(dataRoot), 'branches', name);
 }
 
 /**

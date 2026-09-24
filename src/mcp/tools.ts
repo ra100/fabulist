@@ -15,7 +15,7 @@
  */
 import type { Engine } from '../loop/engine.ts';
 import { recordAuthoringCheckpoint, splitSceneAtTurn } from '../loop/history.ts';
-import { forkStory, branchSave, rollback, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
+import { forkStory, branchSave, branchTargetIn, rollback, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate.ts';
 import type { IllustrationService } from '../illustration/service.ts';
 import { NoImageProviderError } from '../illustration/service.ts';
@@ -1033,12 +1033,15 @@ export function branchStoryToFileTool(
   ctx: McpToolContext,
   args: { atScene: number; toPath: string; overwrite?: boolean },
 ) {
+  // A file on the server's disk: admin-only when signed in, and always under
+  // `<dataRoot>/branches` (see `branchTargetIn`).
+  if (ctx.user && !ctx.user.isAdmin) throw new Error('branch_story_to_file: restricted to administrators');
   const world = ctx.world();
   const fromPath = world.db.prepare(`PRAGMA database_list`).get() as { file?: string } | undefined;
   if (!fromPath?.file) throw new Error('branch_story_to_file: cannot branch an in-memory save');
   const opts: BranchOptions = {
     fromPath: fromPath.file,
-    toPath: args.toPath,
+    toPath: branchTargetIn(ctx.dataRoot, args.toPath),
     atScene: args.atScene,
     overwrite: args.overwrite === true,
   };

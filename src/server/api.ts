@@ -21,7 +21,7 @@ import { createStory, deleteStory, getStory, listStories, listStoriesForUser } f
 import { createWorldFile, deleteWorldFile, listWorlds, renameWorldFile, replaceWorldFile } from '../store/worlds.ts';
 import { tickConsequences, worldTick } from '../consequence/propagate.ts';
 import type { Entity, VisualStyle } from '../domain/types.ts';
-import { branchSave } from '../loop/branch.ts';
+import { branchSave, branchTargetIn } from '../loop/branch.ts';
 import { limitsFromWire, type SetupService } from '../setup/service.ts';
 import type { IngestLimits } from '../ingest/depth.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
@@ -39,6 +39,7 @@ import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
+import { applyCors, passesFetchSiteGuard, rejectsHost, requestOrigin } from './origin-guard.ts';
 import {
   createThreadBodySchema,
   createStoryBodySchema,
@@ -972,14 +973,17 @@ route('POST', '/api/scene/close', async (_req, res, { world, engine }) => {
  * consequence; branching gets most of the value for almost none of the cost, and
  * leaves the original playthrough intact.
  */
-route('POST', '/api/branch', (_req, res, { world, body }) => {
+route('POST', '/api/branch', (_req, res, { world, body, dataRoot, user, authConfig }) => {
+  // Writes a file on the server's disk, so it is a system operation when login is on.
+  if (!requireAdmin(res, authConfig, user)) return;
   const { atScene, toPath, overwrite } = parseBody(sqliteBranchBodySchema, body);
 
   const fromPath = world.db.prepare(`PRAGMA database_list`).get() as { file?: string } | undefined;
   if (!fromPath?.file) return send(res, 400, { error: 'cannot branch an in-memory save' });
 
   try {
-    send(res, 200, branchSave({ fromPath: fromPath.file, toPath, atScene, overwrite: overwrite === true }));
+    const target = branchTargetIn(dataRoot, toPath);
+    send(res, 200, branchSave({ fromPath: fromPath.file, toPath: target, atScene, overwrite: overwrite === true }));
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
@@ -1937,9 +1941,20 @@ export function createApiServer(opts: ServerOptions) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
-    res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('access-control-allow-headers', 'content-type,authorization');
+    // The same origin guard as the Postgres server. This one was `ACAO: *` with no
+    // guard at all, so any website open in the browser could read the local
+    // story and call every route, `/api/branch`'s file write included.
+    const isAuthCallback = authConfig !== undefined && req.method === 'GET' && url.pathname === '/auth/callback';
+    if (rejectsHost(req, authConfig, mcpResourceUrl)) {
+      return send(res, 403, { error: 'this server only answers to localhost or an IP address' });
+    }
+    const origin = requestOrigin(req);
+    if (!isAuthCallback && !applyCors(req, res, url, authConfig, mcpResourceUrl)) {
+      return send(res, 403, { error: 'cross-origin requests are not allowed from this origin' });
+    }
+    if (!isAuthCallback && !passesFetchSiteGuard(req, origin.origin !== null)) {
+      return send(res, 403, { error: 'cross-site browser requests are not allowed' });
+    }
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       return res.end();
