@@ -1206,6 +1206,7 @@ export async function discoverWorldTool(
     args.excludeCategories ?? [],
     args.title ?? '',
     limits,
+    ctx.user?.id,
   );
 }
 
@@ -1283,7 +1284,8 @@ export async function useWorldPackTool(ctx: McpToolContext, args: { packId: stri
 /** `get_setup_job`. Polls a job started by discover_world/commit_ingest/create_custom_world. The MCP-side counterpart of `GET /api/setup/job/:id`. */
 export async function getSetupJobTool(ctx: McpToolContext, args: { id: string }) {
   if (!ctx.setup) throw new Error('get_setup_job: this server has no setup service enabled');
-  const job = ctx.setup.jobs.get(args.id);
+  // Only this connection's user's own jobs (or any, for an admin).
+  const job = ctx.setup.jobs.get(args.id, ctx.user ?? null);
   if (!job) throw new Error(`get_setup_job: no such job ${args.id}`);
   return job;
 }
@@ -1291,7 +1293,9 @@ export async function getSetupJobTool(ctx: McpToolContext, args: { id: string })
 /** `cancel_setup_job`. The MCP-side counterpart of `POST /api/setup/job/:id/cancel` \u2014 cooperative cancellation; keeps whatever the job already wrote. */
 export async function cancelSetupJobTool(ctx: McpToolContext, args: { id: string }) {
   if (!ctx.setup) throw new Error('cancel_setup_job: this server has no setup service enabled');
-  return { cancelled: ctx.setup.jobs.cancel(args.id) };
+  const viewer = ctx.user ?? null;
+  if (!ctx.setup.jobs.get(args.id, viewer)) throw new Error(`cancel_setup_job: no such job ${args.id}`);
+  return { cancelled: ctx.setup.jobs.cancel(args.id, viewer) };
 }
 
 /**

@@ -11,6 +11,7 @@
  * worse than a real count.
  */
 import { randomUUID } from 'node:crypto';
+import type { SessionUser } from '../auth/config.ts';
 
 export type JobStatus = 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -45,9 +46,18 @@ export interface JobHandle {
   cancelled(): boolean;
 }
 
+/** Who is asking about a job: a signed-in user, or `null` with login off. */
+export type JobViewer = Pick<SessionUser, 'id' | 'isAdmin'> | null;
+
 export class JobRegistry {
   private jobs = new Map<string, Job>();
   private cancels = new Set<string>();
+  /**
+   * Who started each job, kept out of the job itself so it is never serialised to a
+   * poller. A job's log and result describe the starter's story and wiki, so
+   * another signed-in user must not be able to read or cancel it.
+   */
+  private owners = new Map<string, string>();
   /** Keep finished jobs briefly so a poll after completion still sees the result. */
   private maxKept: number;
 
@@ -55,8 +65,10 @@ export class JobRegistry {
     this.maxKept = maxKept;
   }
 
-  start<T>(kind: string, work: (handle: JobHandle) => Promise<T>): Job<T> {
+  /** `ownerUserId` is the signed-in user starting it; omitted with login off. */
+  start<T>(kind: string, work: (handle: JobHandle) => Promise<T>, ownerUserId?: string): Job<T> {
     const id = `job:${randomUUID()}`;
+    if (ownerUserId) this.owners.set(id, ownerUserId);
     const job: Job<T> = {
       id,
       kind,
@@ -113,7 +125,14 @@ export class JobRegistry {
     return job;
   }
 
-  get<T = unknown>(id: string): Job<T> | undefined {
+  /**
+   * The job, when `viewer` may see it: anyone with login off (`viewer` omitted or
+   * null), an admin, or the signed-in user who started it. Anyone else gets
+   * `undefined`, exactly as for a job that does not exist, and so does a signed-in
+   * non-admin asking about a job with no recorded owner.
+   */
+  get<T = unknown>(id: string, viewer?: JobViewer): Job<T> | undefined {
+    if (viewer && !viewer.isAdmin && this.owners.get(id) !== viewer.id) return undefined;
     return this.jobs.get(id) as Job<T> | undefined;
   }
 
@@ -126,8 +145,8 @@ export class JobRegistry {
    * `handle.cancelled()`, because there is no safe way to interrupt a crawl
    * mid-write and leave the graph consistent.
    */
-  cancel(id: string): boolean {
-    const job = this.jobs.get(id);
+  cancel(id: string, viewer?: JobViewer): boolean {
+    const job = this.get(id, viewer);
     if (job?.status !== 'running') return false;
     this.cancels.add(id);
     job.log.push('cancellation requested');
@@ -140,7 +159,10 @@ export class JobRegistry {
       .sort((a, b) => (a.finishedAt ?? '').localeCompare(b.finishedAt ?? ''));
     while (finished.length > this.maxKept) {
       const oldest = finished.shift();
-      if (oldest) this.jobs.delete(oldest.id);
+      if (oldest) {
+        this.jobs.delete(oldest.id);
+        this.owners.delete(oldest.id);
+      }
     }
   }
 }

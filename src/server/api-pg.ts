@@ -2219,7 +2219,7 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body, user }) => {
     send(
       res,
       200,
-      svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? '', limits),
+      svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? '', limits, user?.id),
     );
   } catch (e) {
     send(res, setupFailureStatus(e, 400), { error: e instanceof Error ? e.message : String(e) });
@@ -2329,18 +2329,21 @@ route('POST', '/api/setup/pack', async (_req, res, { setup, body, db, world, use
   }
 });
 
-route('GET', '/api/setup/job/:id', (_req, res, { setup, params }) => {
+/** Only the user who started a job (or an admin) sees it; anyone else gets the missing-job 404. */
+route('GET', '/api/setup/job/:id', (_req, res, { setup, params, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  const job = svc.jobs.get(decodeURIComponent(params.id ?? ''));
+  const job = svc.jobs.get(decodeURIComponent(params.id ?? ''), user);
   if (!job) return send(res, 404, { error: 'no such job' });
   send(res, 200, job);
 });
 
-route('POST', '/api/setup/job/:id/cancel', (_req, res, { setup, params }) => {
+route('POST', '/api/setup/job/:id/cancel', (_req, res, { setup, params, user }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
-  send(res, 200, { cancelled: svc.jobs.cancel(decodeURIComponent(params.id ?? '')) });
+  const id = decodeURIComponent(params.id ?? '');
+  if (!svc.jobs.get(id, user)) return send(res, 404, { error: 'no such job' });
+  send(res, 200, { cancelled: svc.jobs.cancel(id, user) });
 });
 
 /** Candidate protagonists, so the player can pick from what was actually ingested. */
