@@ -46,13 +46,13 @@ function fakeSession(opts: {
   return {
     authenticate: async () => {
       const r = await opts.authenticate();
-      return r.authenticated ? { authenticated: true as const, user: { ...r.user, firstName: null, lastName: null } } : r;
+      return r.authenticated ? { authenticated: true as const, user: { ...r.user, emailVerified: true, firstName: null, lastName: null } } : r;
     },
     refresh: async () => {
       if (!opts.refresh) throw new Error('refresh() called but no fake refresh was configured for this test');
       const r = await opts.refresh();
       return r.authenticated
-        ? { authenticated: true as const, user: { ...r.user, firstName: null, lastName: null }, sealedSession: r.sealedSession }
+        ? { authenticated: true as const, user: { ...r.user, emailVerified: true, firstName: null, lastName: null }, sealedSession: r.sealedSession }
         : r;
     },
   };

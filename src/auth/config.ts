@@ -513,8 +513,9 @@ export async function verifySession(auth: AuthConfig, req: IncomingMessage, res?
  * Adds the one thing no provider gets to decide: whether this person may
  * touch system-wide settings. Resolved against `AuthConfig.adminEmails` (see
  * its own doc comment), by email, case-insensitively — and `false` for an
- * identity carrying no email at all, which is the fail-closed direction and
- * the shape `mcpSessionUser` already uses on the connector side.
+ * identity carrying no email at all, or one the issuer has not verified, which
+ * is the fail-closed direction and the shape `mcpSessionUser` already uses on
+ * the connector side.
  */
 export function toSessionUser(auth: Pick<AuthConfig, 'adminEmails'>, identity: AuthIdentity): SessionUser {
   return {
@@ -522,6 +523,6 @@ export function toSessionUser(auth: Pick<AuthConfig, 'adminEmails'>, identity: A
     email: identity.email,
     firstName: identity.firstName,
     lastName: identity.lastName,
-    isAdmin: identity.email !== '' && auth.adminEmails.has(identity.email.toLowerCase()),
+    isAdmin: identity.emailVerified === true && identity.email !== '' && auth.adminEmails.has(identity.email.toLowerCase()),
   };
 }

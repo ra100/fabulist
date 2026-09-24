@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
-import { buildMcpAuth, buildOAuthAuth, InvalidTokenError, MissingTokenError } from '../src/mcp/auth.ts';
+import { buildMcpAuth, buildOAuthAuth, InvalidTokenError, mcpSessionUser, MissingTokenError } from '../src/mcp/auth.ts';
 
 interface IssuerOptions {
   /**
@@ -470,3 +470,12 @@ for (const kind of ['reset', 'unavailable'] as const) {
     }
   });
 }
+
+test('a connector token makes an admin only of a verified admin email', () => {
+  const admins = { adminEmails: new Set(['ada@example.com']) };
+  const user = (raw: Record<string, unknown>) => mcpSessionUser({ userId: 'user-42', raw }, admins);
+  assert.equal(user({ email: 'Ada@example.com', email_verified: true })?.isAdmin, true);
+  assert.equal(user({ email: 'ada@example.com', email_verified: 'true' })?.isAdmin, true, 'the string form some issuers send');
+  assert.equal(user({ email: 'ada@example.com', email_verified: false })?.isAdmin, false);
+  assert.equal(user({ email: 'ada@example.com' })?.isAdmin, false, 'no claim is not a verified email');
+});
