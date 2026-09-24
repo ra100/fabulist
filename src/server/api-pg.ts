@@ -2660,9 +2660,8 @@ export function createApiServer(opts: ServerOptions) {
       return;
     }
     if (authConfig && url.pathname === '/auth/logout' && req.method === 'POST') {
-      const user = await verifySession(authConfig, req, res);
-      if (user) ephemeralStoryKeys.lock(user.id);
-      handleLogout(res);
+      const userId = await handleLogout(authConfig, req, res);
+      if (userId) ephemeralStoryKeys.lock(userId);
       return;
     }
 

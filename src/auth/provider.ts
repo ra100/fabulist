@@ -106,6 +106,12 @@ export interface AuthProvider {
    * session take the process down.
    */
   resolveSession(sealed: string): Promise<ResolvedSession | null>;
+  /**
+   * On logout: ends the session this cookie holds at the provider itself, so a
+   * copy of the cookie (and the refresh token inside it) stops working rather
+   * than lasting until it expires. May throw; logout goes ahead regardless.
+   */
+  revoke?(sealed: string): Promise<void>;
   /** One line for the boot log, so a misconfiguration is visible at startup rather than on the first failed login. */
   describe(): string;
 }

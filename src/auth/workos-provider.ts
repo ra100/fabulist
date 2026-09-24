@@ -97,6 +97,14 @@ export function createWorkosProvider({ workos, clientId, cookiePassword }: Worko
       return { identity: toIdentity(result.user) };
     },
 
+    /** The session id is inside the sealed access token, so an expired one is refreshed first to read it. */
+    async revoke(sealed: string): Promise<void> {
+      const session = workos.userManagement.loadSealedSession({ sessionData: sealed, cookiePassword });
+      let result: { authenticated: boolean; sessionId?: string } = await session.authenticate();
+      if (!result.authenticated && 'reason' in result && result.reason === 'invalid_jwt') result = await session.refresh();
+      if (result.authenticated && result.sessionId) await workos.userManagement.revokeSession({ sessionId: result.sessionId });
+    },
+
     describe() {
       return `login required (WorkOS AuthKit, client ${clientId})`;
     },

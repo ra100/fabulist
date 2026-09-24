@@ -85,6 +85,8 @@ interface FakeIssuer {
   userinfoRequests: number;
   /** Rotated on each refresh, so a test can tell a renewed cookie from a stale one. */
   currentRefreshToken: string;
+  /** Every token the revocation endpoint was asked to revoke. */
+  revokedTokens: string[];
 }
 
 async function startIssuer(opts: IssuerOptions = {}): Promise<FakeIssuer> {
@@ -102,6 +104,7 @@ async function startIssuer(opts: IssuerOptions = {}): Promise<FakeIssuer> {
     tokenRequests: [],
     userinfoRequests: 0,
     currentRefreshToken: 'refresh-1',
+    revokedTokens: [],
     authorize(authorizationUrl: string): string {
       const parsed = new URL(authorizationUrl);
       assert.equal(`${parsed.origin}${parsed.pathname}`, `${url}/authorize`);
@@ -149,6 +152,7 @@ async function startIssuer(opts: IssuerOptions = {}): Promise<FakeIssuer> {
         authorization_endpoint: `${url}/authorize`,
         token_endpoint: `${url}/token`,
         userinfo_endpoint: `${url}/userinfo`,
+        revocation_endpoint: `${url}/revoke`,
         jwks_uri: `${url}/jwks.json`,
         response_types_supported: ['code'],
         code_challenge_methods_supported: ['S256'],
@@ -158,6 +162,18 @@ async function startIssuer(opts: IssuerOptions = {}): Promise<FakeIssuer> {
     }
     if (path === '/jwks.json') {
       json({ keys: [jwk] });
+      return;
+    }
+    if (path === '/revoke' && req.method === 'POST') {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        const body = new URLSearchParams(raw);
+        issuer.revokedTokens.push(body.get('token') ?? '');
+        if (body.get('token') === issuer.currentRefreshToken) issuer.currentRefreshToken = 'revoked';
+        res.writeHead(200);
+        res.end();
+      });
       return;
     }
     if (path === '/userinfo') {
@@ -434,6 +450,27 @@ test('an email the issuer has not verified never makes its holder an admin', asy
     } finally {
       issuer.close();
     }
+  }
+});
+
+test('logout revokes the refresh token, so a copied cookie cannot be renewed', async (t) => {
+  const issuer = await startIssuer({ refreshTokens: true, expiresIn: 60 });
+  try {
+    const provider = providerFor(issuer.url);
+    const sealed = await signIn(issuer, provider);
+    await provider.revoke!(sealed);
+    assert.deepEqual(issuer.revokedTokens, ['refresh-1']);
+    const real = Date.now();
+    t.mock.method(Date, 'now', () => real + 120_000);
+    const original = console.warn;
+    console.warn = () => {};
+    try {
+      assert.equal(await provider.resolveSession(sealed), null, 'the stale copy is refused at refresh');
+    } finally {
+      console.warn = original;
+    }
+  } finally {
+    issuer.close();
   }
 });
 
