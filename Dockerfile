@@ -6,15 +6,19 @@
 # Providers section and package.json's engines both assume 26) rather than
 # `-alpine`, because `node:sqlite` and native TLS behaviour are exactly the
 # kind of thing worth not second-guessing against a smaller libc.
+#
+# Both stages, and corepack, are pinned exactly (digest, version), so a build
+# runs only what was reviewed rather than whatever the tag or `latest` names
+# that day. Dependabot (.github/dependabot.yml) proposes the bumps.
 
-FROM node:26-slim AS build
+FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS build
 WORKDIR /app
 
 # Install first, from the lockfile alone, so an app-code-only change doesn't
 # invalidate this layer.
 # Node no longer ships corepack by default (removed from core as of Node 25),
 # so it has to be installed from npm before it can enable pnpm.
-RUN npm install -g corepack@latest && corepack enable
+RUN npm install -g corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
@@ -23,11 +27,11 @@ RUN pnpm build:web
 
 # ---------------------------------------------------------------------------
 
-FROM node:26-slim
+FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN npm install -g corepack@latest && corepack enable
+RUN npm install -g corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # --prod: the web UI is already built to static files in the stage above, so
 # vite/react/the dev toolchain have no reason to exist in the shipped image.
