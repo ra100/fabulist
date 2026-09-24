@@ -95,7 +95,11 @@ export function mcpSessionUser(
     email,
     firstName,
     lastName,
-    isAdmin: !!email && !!authConfig?.adminEmails.has(email.toLowerCase()),
+    // A verified email only, as for web sessions (`toSessionUser`).
+    isAdmin:
+      !!email &&
+      (claims.email_verified === true || claims.email_verified === 'true') &&
+      !!authConfig?.adminEmails.has(email.toLowerCase()),
   };
 }
 

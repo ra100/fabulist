@@ -75,6 +75,8 @@ interface SealedClaims {
   sub: string;
   /** Email, or absent if the issuer published none. */
   em?: string;
+  /** Present only when the issuer asserted `em` is verified. */
+  ev?: true;
   /** Given name. */
   gn?: string;
   /** Family name. */
@@ -137,7 +139,18 @@ function namesFrom(claims: Record<string, unknown>): { firstName: string | null;
 
 function identityFrom(claims: Record<string, unknown>): AuthIdentity {
   const { firstName, lastName } = namesFrom(claims);
-  return { id: String(claims.sub), email: claimString(claims, 'email') ?? '', firstName, lastName };
+  return {
+    id: String(claims.sub),
+    email: claimString(claims, 'email') ?? '',
+    emailVerified: isVerifiedClaim(claims.email_verified),
+    firstName,
+    lastName,
+  };
+}
+
+/** `email_verified` as issuers actually send it: a boolean, or (Cognito) the string "true". */
+function isVerifiedClaim(value: unknown): boolean {
+  return value === true || value === 'true';
 }
 
 export function createOidcProvider(options: OidcProviderOptions): AuthProvider {
@@ -318,7 +331,9 @@ export function createOidcProvider(options: OidcProviderOptions): AuthProvider {
       if (!body || typeof body !== 'object') return claims;
       const extra = body as Record<string, unknown>;
       if (extra.sub !== claims.sub) return claims;
-      return { ...extra, ...claims, email: claimString(extra, 'email') ?? claimString(claims, 'email') };
+      // The email and whether it is verified travel together, from the same source.
+      const email = claimString(extra, 'email');
+      return email ? { ...extra, ...claims, email, email_verified: extra.email_verified } : { ...extra, ...claims };
     } catch {
       // A userinfo failure is not a login failure: the ID token already proved
       // who this is, and the only thing missing is an email used for the admin
@@ -342,6 +357,7 @@ export function createOidcProvider(options: OidcProviderOptions): AuthProvider {
     const payload: SealedClaims = {
       sub: identity.id,
       em: identity.email || undefined,
+      ev: identity.email && identity.emailVerified ? true : undefined,
       gn: identity.firstName ?? undefined,
       fn: identity.lastName ?? undefined,
       vex: Math.floor(Date.now() / 1000) + ttl,
@@ -422,6 +438,7 @@ export function createOidcProvider(options: OidcProviderOptions): AuthProvider {
       const identity: AuthIdentity = {
         id: claims.sub,
         email: claims.em ?? '',
+        emailVerified: claims.ev === true,
         firstName: claims.gn ?? null,
         lastName: claims.fn ?? null,
       };
@@ -453,14 +470,17 @@ export function createOidcProvider(options: OidcProviderOptions): AuthProvider {
       // and `email` in particular is what the admin allowlist reads — so the
       // cookie's own values stand in wherever the new token is silent, rather
       // than a refresh quietly demoting an admin.
+      // Whether the email is verified comes from wherever the email itself does.
+      const refreshedEmail = refreshedClaims ? claimString(refreshedClaims, 'email') : undefined;
       const base: Record<string, unknown> = refreshedClaims
         ? {
             ...refreshedClaims,
-            email: claimString(refreshedClaims, 'email') ?? claims.em,
+            email: refreshedEmail ?? claims.em,
+            email_verified: refreshedEmail ? refreshedClaims.email_verified : claims.ev,
             given_name: claimString(refreshedClaims, 'given_name') ?? claims.gn,
             family_name: claimString(refreshedClaims, 'family_name') ?? claims.fn,
           }
-        : { sub: claims.sub, email: claims.em, given_name: claims.gn, family_name: claims.fn };
+        : { sub: claims.sub, email: claims.em, email_verified: claims.ev, given_name: claims.gn, family_name: claims.fn };
       const { sealed: resealed, identity: renewed } = await seal(base, tokens, claims);
       return { identity: renewed, resealed };
     },

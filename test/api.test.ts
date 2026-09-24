@@ -1128,7 +1128,10 @@ test('DELETE /api/stories/:id refuses to delete the last story in a world', asyn
  * that added `src/auth/`) — a real `sealData`/`unsealData` round trip would
  * only re-prove code this codebase doesn't own and already trusts.
  */
-function fakeAuthConfig(usersByCookie: Record<string, { id: string; email: string }>, adminEmails: string[] = []): AuthConfig {
+function fakeAuthConfig(
+  usersByCookie: Record<string, { id: string; email: string; emailVerified?: boolean }>,
+  adminEmails: string[] = [],
+): AuthConfig {
   return {
     requireLogin: true,
     adminEmails: new Set(adminEmails.map((e) => e.toLowerCase())),
@@ -1142,7 +1145,7 @@ function fakeAuthConfig(usersByCookie: Record<string, { id: string; email: strin
             authenticate: async () => {
               const found = usersByCookie[sessionData];
               if (!found) return { authenticated: false as const, reason: 'invalid_session_cookie' as const };
-              return { authenticated: true as const, user: { ...found, firstName: null, lastName: null } };
+              return { authenticated: true as const, user: { emailVerified: true, ...found, firstName: null, lastName: null } };
             },
           }),
         },
@@ -1156,7 +1159,7 @@ function cookieHeader(value: string): Record<string, string> {
 }
 
 async function withLoginServer(
-  usersByCookie: Record<string, { id: string; email: string }>,
+  usersByCookie: Record<string, { id: string; email: string; emailVerified?: boolean }>,
   fn: (base: string, world: World, currentStory: CurrentStory) => Promise<void>,
   adminEmails: string[] = [],
 ) {
@@ -1455,6 +1458,17 @@ test('the admin allowlist matches case-insensitively', async () => {
     async (base) => {
       const res = await fetch(`${base}/api/providers`, { headers: cookieHeader('admin-cookie') });
       assert.notEqual(res.status, 403, 'the allowlist entry "admin@x.com" must still match "Admin@X.com"');
+    },
+    ['admin@x.com'],
+  );
+});
+
+test('an admin-listed email the identity provider has not verified is an ordinary user', async () => {
+  await withLoginServer(
+    { 'squatter-cookie': { id: 'user_squatter', email: 'admin@x.com', emailVerified: false } },
+    async (base) => {
+      const res = await fetch(`${base}/api/providers`, { headers: cookieHeader('squatter-cookie') });
+      assert.equal(res.status, 403, 'signing up with the admin’s address must not be enough');
     },
     ['admin@x.com'],
   );

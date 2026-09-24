@@ -25,7 +25,7 @@ import http, { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { exportJWK, generateKeyPair, SignJWT, type KeyObject } from 'jose';
-import { resolveAuthConfig, resolveProviderKind, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, type AuthConfig } from '../src/auth/config.ts';
+import { resolveAuthConfig, resolveProviderKind, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, toSessionUser, type AuthConfig } from '../src/auth/config.ts';
 import { createOidcProvider } from '../src/auth/oidc-provider.ts';
 import type { Config } from '../src/config/config.ts';
 import { CurrentStory, World } from '../src/store/index.ts';
@@ -46,6 +46,8 @@ const cfg = { requireLogin: false } as Config;
 interface IssuerOptions {
   /** Leave `email` out of the ID token, so the userinfo fallback is what has to supply it. */
   emailOnlyInUserinfo?: boolean;
+  /** Assert `email_verified: false`, as an issuer with open, unconfirmed self-registration does. */
+  emailUnverified?: boolean;
   /** Grant a refresh token (what `offline_access` buys), enabling the renewal path. */
   refreshTokens?: boolean;
   /** Access-token lifetime the token endpoint advertises. Small values make the renewal path reachable with a mocked clock. */
@@ -122,7 +124,7 @@ async function startIssuer(opts: IssuerOptions = {}): Promise<FakeIssuer> {
     const claims: Record<string, unknown> = {
       sub: 'user-42',
       name: 'Ada Lovelace',
-      ...(opts.emailOnlyInUserinfo ? {} : { email: 'ada@example.com' }),
+      ...(opts.emailOnlyInUserinfo ? {} : { email: 'ada@example.com', email_verified: !opts.emailUnverified }),
       ...(nonce !== undefined ? { nonce: opts.forceNonce ?? nonce } : {}),
     };
     return await new SignJWT(claims)
@@ -161,7 +163,7 @@ async function startIssuer(opts: IssuerOptions = {}): Promise<FakeIssuer> {
     if (path === '/userinfo') {
       issuer.userinfoRequests += 1;
       if (req.headers.authorization !== 'Bearer access-token') return json({ error: 'invalid_token' }, 401);
-      json({ sub: 'user-42', email: 'ada@example.com' });
+      json({ sub: 'user-42', email: 'ada@example.com', email_verified: !opts.emailUnverified });
       return;
     }
     if (path === '/token' && req.method === 'POST') {
@@ -411,7 +413,43 @@ test('the email the admin allowlist needs is fetched from userinfo when the ID t
     const provider = providerFor(issuer.url);
     const resolved = await provider.resolveSession(await signIn(issuer, provider));
     assert.equal(resolved?.identity.email, 'ada@example.com');
+    assert.equal(resolved?.identity.emailVerified, true, 'userinfo’s own email_verified comes with its email');
     assert.equal(issuer.userinfoRequests, 1);
+  } finally {
+    issuer.close();
+  }
+});
+
+test('an email the issuer has not verified never makes its holder an admin', async () => {
+  for (const emailOnlyInUserinfo of [false, true]) {
+    const issuer = await startIssuer({ emailUnverified: true, emailOnlyInUserinfo, refreshTokens: true, expiresIn: 1 });
+    try {
+      const provider = providerFor(issuer.url);
+      const sealed = await signIn(issuer, provider);
+      const resolved = await provider.resolveSession(sealed);
+      assert.equal(resolved?.identity.email, 'ada@example.com');
+      assert.equal(resolved?.identity.emailVerified, false);
+      const user = toSessionUser({ adminEmails: new Set(['ada@example.com']) }, resolved!.identity);
+      assert.equal(user.isAdmin, false, `unverified admin email (userinfo: ${emailOnlyInUserinfo}) must not grant admin`);
+    } finally {
+      issuer.close();
+    }
+  }
+});
+
+test('a verified admin email survives the sealed cookie and a refresh', async (t) => {
+  const issuer = await startIssuer({ refreshTokens: true, expiresIn: 60 });
+  try {
+    const provider = providerFor(issuer.url);
+    const sealed = await signIn(issuer, provider);
+    const admins = { adminEmails: new Set(['ada@example.com']) };
+    const restored = await provider.resolveSession(sealed);
+    assert.equal(toSessionUser(admins, restored!.identity).isAdmin, true, 'read back from the cookie');
+    const real = Date.now();
+    t.mock.method(Date, 'now', () => real + 120_000);
+    const refreshed = await provider.resolveSession(sealed);
+    assert.ok(refreshed?.resealed, 'the stale cookie was renewed');
+    assert.equal(toSessionUser(admins, refreshed.identity).isAdmin, true, 'after a refresh');
   } finally {
     issuer.close();
   }

@@ -39,7 +39,7 @@ export function fakeAuth(): AuthConfig {
               return who
                 ? {
                     authenticated: true as const,
-                    user: { id: who.id, email: who.email, firstName: null, lastName: null },
+                    user: { id: who.id, email: who.email, emailVerified: true, firstName: null, lastName: null },
                   }
                 : { authenticated: false as const, reason: 'invalid_session_cookie' as const };
             },

@@ -36,6 +36,12 @@ export interface AuthIdentity {
   id: string;
   /** Empty when the issuer published no email claim. Only the admin allowlist reads it; ownership never does. */
   email: string;
+  /**
+   * True only when the issuer asserted that `email` is verified. The admin
+   * allowlist requires it: an issuer with open self-registration would otherwise
+   * make admin anyone who signs up with an admin's address.
+   */
+  emailVerified?: boolean;
   firstName: string | null;
   lastName: string | null;
 }

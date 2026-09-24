@@ -26,8 +26,20 @@ export interface WorkosProviderOptions {
   cookiePassword: string;
 }
 
-function toIdentity(user: { id: string; email: string; firstName: string | null; lastName: string | null }): AuthIdentity {
-  return { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName };
+function toIdentity(user: {
+  id: string;
+  email: string;
+  emailVerified?: boolean;
+  firstName: string | null;
+  lastName: string | null;
+}): AuthIdentity {
+  return {
+    id: user.id,
+    email: user.email,
+    emailVerified: user.emailVerified === true,
+    firstName: user.firstName,
+    lastName: user.lastName,
+  };
 }
 
 export function createWorkosProvider({ workos, clientId, cookiePassword }: WorkosProviderOptions): AuthProvider {

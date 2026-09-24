@@ -1274,7 +1274,7 @@ test('signed-in setup authors into the requester’s story, one job at a time', 
                 sessionData === 'alice'
                   ? {
                       authenticated: true as const,
-                      user: { id: 'user:alice', email: 'alice@example.com', firstName: null, lastName: null },
+                      user: { id: 'user:alice', email: 'alice@example.com', emailVerified: true, firstName: null, lastName: null },
                     }
                   : { authenticated: false as const, reason: 'invalid_session_cookie' as const },
             }),
