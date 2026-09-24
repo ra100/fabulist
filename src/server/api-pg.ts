@@ -2636,6 +2636,13 @@ export function createApiServer(opts: ServerOptions) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
+    // Baseline headers for every response, so they do not depend on the reverse
+    // proxy's config alone. HSTS and CSP stay with the proxy: HSTS means nothing
+    // over the loopback HTTP this listens on, and the CSP names the fonts host.
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('x-frame-options', 'DENY');
+    res.setHeader('referrer-policy', 'strict-origin-when-cross-origin');
+
     // The OAuth provider's redirect back to `/auth/callback` is *necessarily*
     // a cross-site top-level navigation — that is the entire mechanism of
     // the authorization-code flow, not an attack shape. Browsers typically
