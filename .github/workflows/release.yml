@@ -67,7 +67,7 @@ jobs:
       # `v0.1.0` tags the image `ra100/fabulist:v0.1.0` (github.ref_name keeps
       # the `v`, it only strips the leading `refs/tags/`) — alongside a
       # floating `latest`.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         id: build
         with:
           context: .
