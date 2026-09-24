@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { output, ZodTypeAny } from 'zod';
 import { RollbackTargetError, SceneSplitTargetError, WorldAccessError } from '../domain/types.ts';
+import { PrivateStoryLockedError } from '../store/private-story-access.ts';
 
 const DEFAULT_JSON_LIMIT = 1024 * 1024;
 const DEFAULT_RAW_LIMIT = 256 * 1024 * 1024;
@@ -76,6 +77,9 @@ export function errorBody(err: unknown, status: number, hide: boolean): { error:
 
 export function statusForError(err: unknown): number {
   if (err instanceof HttpError || err instanceof WorldAccessError) return err.status;
+  // The caller's own state, not a server fault: the story's key is not unlocked in
+  // this session. A 4xx keeps the message, which the UI matches to offer an unlock.
+  if (err instanceof PrivateStoryLockedError) return 423;
   return err instanceof SceneSplitTargetError || err instanceof RollbackTargetError ? 400 : 500;
 }
 
