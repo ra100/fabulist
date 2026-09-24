@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
+import { request as httpRequest } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,10 +62,10 @@ const get = async (base: string, path: string) => {
   const res = await fetch(`${base}${path}`);
   return { status: res.status, body: await res.json() };
 };
-const send = async (base: string, method: string, path: string, body?: unknown) => {
+const send = async (base: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   return { status: res.status, body: await res.json() };
@@ -590,6 +591,50 @@ test('branching an in-memory save is refused rather than silently doing nothing'
     const { status, body } = await send(base, 'POST', '/api/branch', { atScene: 2, toPath: '/tmp/nope.db' });
     assert.equal(status, 400);
     assert.match((body as { error: string }).error, /in-memory/);
+  });
+});
+
+test('the local server refuses other websites: no wildcard CORS, a foreign Origin or a cross-site fetch is 403', async () => {
+  await withServer(async (base) => {
+    const own = await fetch(`${base}/api/book`, { headers: { origin: base } });
+    assert.equal(own.status, 200);
+    assert.equal(own.headers.get('access-control-allow-origin'), base, 'its own origin, never *');
+    await own.arrayBuffer();
+
+    const foreign = await fetch(`${base}/api/book`, { headers: { origin: 'https://evil.example' } });
+    assert.equal(foreign.status, 403);
+    assert.equal(foreign.headers.get('access-control-allow-origin'), null);
+    await foreign.arrayBuffer();
+
+    const preflight = await fetch(`${base}/api/branch`, {
+      method: 'OPTIONS',
+      headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST' },
+    });
+    assert.equal(preflight.status, 403);
+    await preflight.arrayBuffer();
+
+    const crossSite = await send(base, 'POST', '/api/branch', { atScene: 1, toPath: 'x.db' }, { 'sec-fetch-site': 'cross-site' });
+    assert.equal(crossSite.status, 403);
+  });
+});
+
+test('a login-off server refuses a rebound DNS name but answers localhost and IP literals', async () => {
+  await withServer(async (base) => {
+    const { port } = new URL(base);
+    const statusFor = (host: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = httpRequest({ host: '127.0.0.1', port, path: '/api/book', headers: { host } }, (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        });
+        req.on('error', reject);
+        req.end();
+      });
+    assert.equal(await statusFor('attacker.example'), 403, 'DNS rebinding arrives with the attacker’s own name');
+    assert.equal(await statusFor(`attacker.example:${port}`), 403);
+    for (const ok of [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`, `192.168.1.5:${port}`]) {
+      assert.equal(await statusFor(ok), 200, ok);
+    }
   });
 });
 

@@ -83,6 +83,7 @@ import {
   privateMigrationStatus,
 } from '../store/private-story-migration-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
+import { applyCors, passesFetchSiteGuard, rejectsHost, requestOrigin } from './origin-guard.ts';
 import { errorBody, HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
 import { DEFAULT_PAID_CALL_LIMIT, RateLimiter, type PaidCallLimit } from './rate-limit.ts';
 import {
@@ -244,97 +245,6 @@ const MIME: Record<string, string> = {
 // ------------------------------------------------------------------- routes
 
 const routes: Array<{ method: string; path: string; pattern: RegExp; handler: Handler }> = [];
-
-const SAFE_FETCH_SITES = new Set(['same-origin', 'same-site', 'none']);
-
-function originOf(raw: string | undefined): string | null {
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && raw === url.origin ? url.origin : null;
-  } catch {
-    return null;
-  }
-}
-
-function requestOrigin(req: IncomingMessage): { present: boolean; origin: string | null } {
-  const raw = req.headers.origin;
-  if (raw === undefined) return { present: false, origin: null };
-  return { present: true, origin: typeof raw === 'string' ? originOf(raw) : null };
-}
-
-function allowedOriginsFor(
-  req: IncomingMessage,
-  url: URL,
-  authConfig: AuthConfig | undefined,
-  mcpResourceUrl: string | undefined,
-): Set<string> {
-  const allowed = new Set<string>();
-  if (authConfig) allowed.add(authConfig.callbackOrigin);
-  const mcpOrigin = originOf(mcpResourceUrl);
-  if (mcpOrigin) allowed.add(mcpOrigin);
-  if (!authConfig) {
-    const hostOrigin = originOf(`${url.protocol}//${req.headers.host ?? ''}`);
-    if (hostOrigin) allowed.add(hostOrigin);
-  }
-  return allowed;
-}
-
-function applyCors(
-  req: IncomingMessage,
-  res: ServerResponse,
-  url: URL,
-  authConfig: AuthConfig | undefined,
-  mcpResourceUrl: string | undefined,
-): boolean {
-  const { present, origin } = requestOrigin(req);
-  if (present) {
-    if (!origin) return false;
-    if (!allowedOriginsFor(req, url, authConfig, mcpResourceUrl).has(origin)) return false;
-    res.setHeader('access-control-allow-origin', origin);
-    res.setHeader('vary', 'origin');
-    if (authConfig) res.setHeader('access-control-allow-credentials', 'true');
-  }
-  res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  res.setHeader(
-    'access-control-allow-headers',
-    'content-type,authorization,mcp-protocol-version,mcp-session-id,last-event-id',
-  );
-  res.setHeader('access-control-expose-headers', 'mcp-session-id');
-  return true;
-}
-
-/**
- * A top-level page visit: `GET`/`HEAD`, mode `navigate`, destination
- * `document`. Every inbound link to the app has this shape — and when the
- * link (or an OAuth redirect chain, which keeps its initiator's site for the
- * whole chain) started on another origin, it arrives as
- * `Sec-Fetch-Site: cross-site` with no `Origin` header at all, because
- * browsers omit `Origin` on plain GET navigations. The fetch-site guard is
- * the wrong tool for that shape: an attacker cannot read a navigation's
- * response, only send the user to a page they could have typed themselves,
- * and every state-changing route is a POST that the guard still rejects.
- * Framing is not a loophole either — `frame-ancestors 'none'` plus
- * `X-Frame-Options: DENY` already kill nested document loads, and a framed
- * navigation would carry `dest: iframe` rather than `document` regardless.
- */
-function isTopLevelNavigation(req: IncomingMessage): boolean {
-  return (
-    (req.method === 'GET' || req.method === 'HEAD') &&
-    req.headers['sec-fetch-mode'] === 'navigate' &&
-    req.headers['sec-fetch-dest'] === 'document'
-  );
-}
-
-function passesFetchSiteGuard(req: IncomingMessage, crossSiteHasAllowedOrigin: boolean): boolean {
-  const fetchSite = req.headers['sec-fetch-site'];
-  if (typeof fetchSite !== 'string') return true;
-  const site = fetchSite.toLowerCase();
-  return (
-    SAFE_FETCH_SITES.has(site) ||
-    (site === 'cross-site' && (crossSiteHasAllowedOrigin || isTopLevelNavigation(req)))
-  );
-}
 
 /**
  * Routes whose body must reach the handler as raw bytes (`ctx.rawBody`)
@@ -2655,6 +2565,9 @@ export function createApiServer(opts: ServerOptions) {
     // inside `handleCallback` itself — the origin/fetch-site checks below
     // are simply the wrong tool for this one request shape.
     const isAuthCallback = authConfig !== undefined && req.method === 'GET' && url.pathname === '/auth/callback';
+    if (rejectsHost(req, authConfig, mcpResourceUrl)) {
+      return send(res, 403, { error: 'this server only answers to localhost or an IP address' });
+    }
     const origin = requestOrigin(req);
     const originAllowed = applyCors(req, res, url, authConfig, mcpResourceUrl);
     if (!isAuthCallback && !originAllowed) {

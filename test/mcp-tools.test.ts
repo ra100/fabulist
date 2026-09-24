@@ -921,12 +921,21 @@ test('branchStoryToFileTool forks the save file at a scene into a different path
     seedWorld(world);
     const mock = new MockProvider();
     const engine = new Engine({ world, providers: new ProviderRegistry(mock) });
-    const ctx: McpToolContext = { world: () => world, engine, dataRoot: 'data' };
+    const ctx: McpToolContext = { world: () => world, engine, dataRoot: dir };
 
-    const toPath = join(dir, 'branch.db');
-    const out = branchStoryToFileTool(ctx, { atScene: 1, toPath });
+    // Whatever directory is asked for, the branch lands under <dataRoot>/branches:
+    // an unconfined, overwritable path is an arbitrary file write.
+    const out = branchStoryToFileTool(ctx, { atScene: 1, toPath: '/home/u/.ssh/../../../tmp/branch.db', overwrite: true });
+    const toPath = join(dir, 'branches', 'branch.db');
     assert.equal(out.path, toPath);
     assert.ok(existsSync(toPath));
+
+    const signedIn = (isAdmin: boolean): McpToolContext => ({
+      ...ctx,
+      user: { id: 'u', email: 'u@example.com', firstName: null, lastName: null, isAdmin },
+    });
+    assert.throws(() => branchStoryToFileTool(signedIn(false), { atScene: 1, toPath: 'x.db' }), /administrators/);
+    assert.ok(existsSync(branchStoryToFileTool(signedIn(true), { atScene: 1, toPath: 'x.db' }).path));
     world.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
