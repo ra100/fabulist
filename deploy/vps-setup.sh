@@ -11,9 +11,9 @@
 # would just fight the existing setup. This script only does the
 # fabulist-specific part: Docker + the app container.
 #
-# Run this yourself, once, on the VPS (as a sudo-capable user, e.g. ra100):
-#   scp -P 25 deploy/vps-setup.sh deploy/docker-compose.yml deploy/deploy.sh ra100@omnius.rast.io:~/
-#   ssh -p 25 ra100@omnius.rast.io
+# Run this yourself, once, on the VPS (as a sudo-capable user):
+#   scp -P <ssh-port> deploy/vps-setup.sh deploy/docker-compose.yml deploy/deploy.sh <user>@<vps-host>:~/
+#   ssh -p <ssh-port> <user>@<vps-host>
 #   chmod +x vps-setup.sh && ./vps-setup.sh
 #
 # Restricting the GitHub Actions SSH key is a separate root-owned installation;
@@ -22,7 +22,7 @@
 # It is idempotent — safe to re-run if a step fails partway through.
 set -euo pipefail
 
-DEPLOY_PATH="${DEPLOY_PATH:-/home/ra100/Development/fabulist}"
+DEPLOY_PATH="${DEPLOY_PATH:-$HOME/Development/fabulist}"
 
 echo "== 1/3: Docker Engine + Compose plugin =="
 if ! command -v docker >/dev/null 2>&1; then

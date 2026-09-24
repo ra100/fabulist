@@ -13,12 +13,9 @@ config.
 
 **Reverse proxy: openresty**, already running on the VPS for other sites.
 
-**TLS: a `*.rast.io` wildcard cert via DNS-01** (HTTP-01 cannot issue
-wildcards at all — an ACME/CA-level rule). Issued with `certbot-dns-websupport`
-against Websupport's DNS API, in a dedicated venv at `/opt/certbot-venv` kept
-separate from the box's apt certbot (2.9.0 — too old for this plugin, and
-mixing pip into the apt install breaks). Renews unattended via its own
-`/etc/cron.d/certbot` entry.
+**TLS: a wildcard cert via DNS-01** (HTTP-01 cannot issue wildcards at all —
+an ACME/CA-level rule), issued with the certbot DNS plugin for the domain's DNS
+provider and renewed unattended by cron.
 
 ## What's here
 
@@ -67,7 +64,7 @@ Then replace the existing deploy key's line in `~/.ssh/authorized_keys`, preserv
 the complete `ssh-ed25519 ...` public key:
 
 ```text
-restrict,command="/usr/local/libexec/fabulist-deploy-command /home/ra100/Development/fabulist" ssh-ed25519 AAAA... github-actions-fabulist
+restrict,command="/usr/local/libexec/fabulist-deploy-command /home/<user>/Development/fabulist" ssh-ed25519 AAAA... github-actions-fabulist
 ```
 
 Substitute the real absolute deploy path in the forced command if it differs.
@@ -102,7 +99,7 @@ stopped so nothing is mid-write. Run this from `$DEPLOY_PATH` (wherever
 `FABULIST_DATA_DIR` if you set one:
 
 ```bash
-ssh -p 25 <your-user>@<your-host>
+ssh -p <ssh-port> <your-user>@<your-host>
 cd <deploy-path>   # wherever this compose file's copy actually lives
 docker compose down
 target="${FABULIST_DATA_DIR:-./fabulist-data}"
@@ -519,6 +516,6 @@ the container healthcheck no longer uses it.
 
 
 ```bash
-ssh -p 25 ra100@omnius.rast.io 'cd Development/fabulist && docker compose ps && docker compose logs --tail 20'
-curl -s https://fabulist.rast.io/api/meta
+ssh -p <ssh-port> <user>@<vps-host> 'cd <deploy-path> && docker compose ps && docker compose logs --tail 20'
+curl -s https://<public-origin>/api/health
 ```
