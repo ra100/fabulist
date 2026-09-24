@@ -267,13 +267,29 @@ test('the visibility and access routes require owner on that world', async (t) =
       assert.ok(listed.grants.some((g) => g.userId === bob.id && g.role === 'ingest'));
       assert.equal(await worldRoleFor(db, bob, owned.id), 'ingest');
 
-      // A world the caller has no owner grant on is refused. `not-mine` is private
-      // with no grant, so `assertWorldAccess` throws "no world" and the route
-      // answers 403 with that message — the caller learns they cannot act on it
-      // without being told whether it exists.
-      const denied = await fetch(`${base}/api/worlds/not-mine/access`);
-      assert.equal(denied.status, 403);
-      assert.match((await denied.json()).error, /no world/, 'must not confirm the world exists');
+      // A world the caller cannot see at all answers exactly as a missing slug does,
+      // on every route: a 403 here would confirm that the private slug exists.
+      const probes: Array<[string, string, unknown?]> = [
+        ['GET', 'access'],
+        ['POST', 'access', { userId: bob.id }],
+        ['PUT', 'visibility', { visibility: 'public' }],
+        ['DELETE', `access/${bob.id}`],
+      ];
+      for (const [method, path, payload] of probes) {
+        const ask = (slug: string) =>
+          fetch(`${base}/api/worlds/${slug}/${path}`, {
+            method,
+            headers: { 'content-type': 'application/json' },
+            ...(payload ? { body: JSON.stringify(payload) } : {}),
+          });
+        const hidden = await ask('not-mine');
+        const missing = await ask('never-was');
+        assert.equal(hidden.status, 404, `${method} ${path}: a private world must not answer 403`);
+        assert.equal(missing.status, 404);
+        assert.equal((await hidden.json()).error, 'no world "not-mine"', `${method} ${path}`);
+        assert.equal((await missing.json()).error, 'no world "never-was"');
+      }
+      assert.equal((await getWorldBySlug(db, 'not-mine'))!.visibility, 'private', 'unchanged by the probes');
 
       // A bad visibility value is rejected before anything is written.
       const bad = await fetch(`${base}/api/worlds/owned/visibility`, {

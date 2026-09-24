@@ -1791,6 +1791,16 @@ route('DELETE', '/api/worlds/:slug', async (_req, res, { db, params, user, authC
 });
 
 /**
+ * The answer when a world route's access check, or the write after it, throws.
+ * A caller with no role at all gets the very 404 a missing slug gets: a 403
+ * would confirm that a private world by that name exists.
+ */
+function sendWorldRefusal(res: ServerResponse, slug: string, err: unknown): void {
+  if (err instanceof WorldAccessError && err.status === 404) send(res, 404, { error: `no world "${slug}"` });
+  else send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+}
+
+/**
  * Makes a world public or private. Needs `owner` on that world.
  *
  * Deliberately not admin-only: the person who ingested a world is the one who knows
@@ -1809,7 +1819,7 @@ route('PUT', '/api/worlds/:slug/visibility', async (_req, res, { db, params, bod
     await setWorldVisibility(db, found.id, visibility);
     send(res, 200, { slug, visibility });
   } catch (err) {
-    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+    sendWorldRefusal(res, slug, err);
   }
 });
 
@@ -1822,7 +1832,7 @@ route('GET', '/api/worlds/:slug/access', async (_req, res, { db, params, user })
     await assertWorldAccess(db, user, found.id, 'owner');
     send(res, 200, { slug, visibility: found.visibility, grants: await worldGrants(db, found.id) });
   } catch (err) {
-    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+    sendWorldRefusal(res, slug, err);
   }
 });
 
@@ -1842,7 +1852,7 @@ route('POST', '/api/worlds/:slug/access', async (_req, res, { db, params, body, 
     await grantWorldAccess(db, found.id, userId, role ?? 'reader');
     send(res, 200, { slug, userId, role: role ?? 'reader' });
   } catch (err) {
-    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+    sendWorldRefusal(res, slug, err);
   }
 });
 
@@ -1856,7 +1866,7 @@ route('DELETE', '/api/worlds/:slug/access/:userId', async (_req, res, { db, para
     await revokeWorldAccess(db, found.id, decodeURIComponent(params.userId ?? ''));
     send(res, 200, { ok: true });
   } catch (err) {
-    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+    sendWorldRefusal(res, slug, err);
   }
 });
 
