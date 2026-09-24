@@ -200,10 +200,27 @@ CREATE USER fabulist WITH PASSWORD 'pick-something';
 CREATE DATABASE fabulist OWNER fabulist;
 \c fabulist
 GRANT ALL ON SCHEMA public TO fabulist;
+CREATE ROLE fabulist_play NOLOGIN;
+CREATE ROLE fabulist_ingest NOLOGIN;
+GRANT fabulist_play, fabulist_ingest TO fabulist;
 ```
 
-The app creates every table, index and role itself on first boot, so there is no
-migration to run — and no `psql` needed after those four lines.
+The app creates every table and index itself on first boot, so there is no
+migration to run. The two group roles are the exception: a login without
+`CREATEROLE` cannot create them, and the app's pools `SET ROLE` into them on
+every connection (see below), so boot refuses to start until `fabulist` is a
+member. For an existing deployment, run the last line (and the two
+`CREATE ROLE`s if they do not exist yet) as a superuser. To check first, as the
+app's login:
+
+```sql
+SELECT pg_has_role(session_user, 'fabulist_play', 'SET') AS play,
+       pg_has_role(session_user, 'fabulist_ingest', 'SET') AS ingest;
+```
+
+`FABULIST_DB_ROLES=off` (a repo variable, passed through to `app.env`) runs every
+query as the login instead, without the separation: the way back if a deploy
+refuses to boot for this reason.
 
 ⚠️ **A container cannot reach the host at `localhost`** — that is the container's own
 network namespace. `docker-compose.yml` maps `host.docker.internal` to
@@ -270,8 +287,9 @@ cannot supply what the pools want. Raise it to at least 300 on a shared instance
 
 Two roles enforce the user/system split (`src/db/schema-pg-roles.sql`):
 `fabulist_play` may write stories but only *read* canon, and `fabulist_ingest` may
-write both. That is why creating a world is an ingest operation, and why a bug in a
-play route cannot corrupt source material.
+write both. The play and ingest pools each `SET ROLE` into theirs on every
+connection, and boot verifies it. That is why creating a world is an ingest
+operation, and why a bug in a play route cannot corrupt source material.
 
 Verified at target scale — 20 worlds, 40,020 canon entities, 79,860 canon edges,
 100 users with stories (some crossovers), driven through the real stores and frame
