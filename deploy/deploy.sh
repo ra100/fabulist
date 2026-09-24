@@ -17,6 +17,15 @@ load_app_env() {
     case "$name" in
       ""|\#*)
         ;;
+      FABULIST_IMAGE)
+        # The digest the release workflow just pushed; docker-compose.yml runs it.
+        # Only this repository's image, only by digest, never a mutable tag.
+        if [[ ! "$value" =~ ^ra100/fabulist@sha256:[0-9a-f]{64}$ ]]; then
+          echo "deploy.sh: FABULIST_IMAGE must be ra100/fabulist@sha256:<digest>" >&2
+          exit 1
+        fi
+        export "$name=$value"
+        ;;
       MCP_OAUTH_ISSUER|MCP_OAUTH_AUDIENCE|MCP_RESOURCE_URL|\
       AUTH_REQUIRE_LOGIN|AUTH_PUBLIC_ORIGIN|AUTH_ADMIN_EMAILS|\
       WORKOS_API_KEY|WORKOS_CLIENT_ID|WORKOS_COOKIE_PASSWORD|\
@@ -49,7 +58,7 @@ case "$action" in
         MCP_OAUTH_ISSUER|MCP_OAUTH_AUDIENCE|MCP_RESOURCE_URL|\
         AUTH_REQUIRE_LOGIN|AUTH_PUBLIC_ORIGIN|AUTH_ADMIN_EMAILS|\
         WORKOS_API_KEY|WORKOS_CLIENT_ID|WORKOS_COOKIE_PASSWORD|\
-        FABULIST_PG|POSTGRES_PASSWORD|COMPOSE_PROFILES)
+        FABULIST_PG|POSTGRES_PASSWORD|COMPOSE_PROFILES|FABULIST_IMAGE)
           ;;
         *)
           rm -f app.env.tmp

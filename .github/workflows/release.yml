@@ -48,6 +48,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The digest just pushed, so the deploy runs exactly this image. Both tags
+    # are mutable on Docker Hub: deploying by tag would run whatever anyone with
+    # a push token put there last.
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +68,7 @@ jobs:
       # the `v`, it only strips the leading `refs/tags/`) — alongside a
       # floating `latest`.
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           push: true
@@ -117,6 +123,7 @@ jobs:
           COMPOSE_PROFILES: ${{ vars.COMPOSE_PROFILES }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           FABULIST_PG: ${{ secrets.FABULIST_PG }}
+          FABULIST_IMAGE: ra100/fabulist@${{ needs.docker.outputs.digest }}
         run: |
           set -euo pipefail
           install -m 600 -D /dev/null "$HOME/.ssh/deploy_key"
@@ -161,7 +168,7 @@ jobs:
             for name in MCP_OAUTH_ISSUER MCP_OAUTH_AUDIENCE MCP_RESOURCE_URL \
                         AUTH_REQUIRE_LOGIN AUTH_PUBLIC_ORIGIN AUTH_ADMIN_EMAILS \
                         WORKOS_API_KEY WORKOS_CLIENT_ID WORKOS_COOKIE_PASSWORD \
-                        FABULIST_PG POSTGRES_PASSWORD COMPOSE_PROFILES; do
+                        FABULIST_PG POSTGRES_PASSWORD COMPOSE_PROFILES FABULIST_IMAGE; do
               value="${!name:-}"
               [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
             done
