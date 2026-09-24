@@ -21,7 +21,7 @@ import {
   saveConfig,
   type Config,
 } from './config.ts';
-import { defaultAuth, PRESETS, profilesFor, type ProviderKind, type ProviderSpec } from '../providers/http.ts';
+import { defaultAuth, isApiKeyEnvName, PRESETS, profilesFor, type ProviderKind, type ProviderSpec } from '../providers/http.ts';
 import { IMAGE_PRESETS, type ImageProviderKind, type ImageProviderSpec } from '../providers/imageConfig.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
 import type { SwappableRegistry } from '../providers/provider.ts';
@@ -372,6 +372,16 @@ function normaliseBlocklist(raw: unknown): string[] {
  * Validates one provider spec. Errors are per-field so the UI can point at the
  * thing that is wrong rather than rejecting the whole form.
  */
+/** Rejects an `apiKeyEnv` the providers would refuse to read (see `isApiKeyEnvName`). */
+function apiKeyEnvIssue(key: string, name: string | undefined, issues: ValidationIssue[]): void {
+  if (name && !isApiKeyEnvName(name)) {
+    issues.push({
+      field: `${key}.apiKeyEnv`,
+      message: 'must be an UPPER_CASE name ending in _API_KEY, and not one of the server’s own (WORKOS_, AUTH_, MCP_, FABULIST_)',
+    });
+  }
+}
+
 export function validateSpec(key: string, raw: unknown): { spec: ProviderSpec | null; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = [];
   if (!raw || typeof raw !== 'object') {
@@ -413,6 +423,7 @@ export function validateSpec(key: string, raw: unknown): { spec: ProviderSpec | 
       (spec as unknown as Record<string, unknown>)[field] = String(value).trim();
     }
   }
+  apiKeyEnvIssue(key, spec.apiKeyEnv, issues);
 
   if (s.allowUnofficial === true) spec.allowUnofficial = true;
 
@@ -518,6 +529,7 @@ export function validateImageSpec(
       (spec as unknown as Record<string, unknown>)[field] = String(value).trim();
     }
   }
+  apiKeyEnvIssue(key, spec.apiKeyEnv, issues);
 
   if (s.capabilities && typeof s.capabilities === 'object') {
     spec.capabilities = s.capabilities as ImageProviderSpec['capabilities'];

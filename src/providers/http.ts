@@ -645,10 +645,27 @@ export const PRESETS: Record<string, ProviderSpec> = {
   },
 };
 
+/**
+ * Whether a spec may read its key from the variable `name`.
+ *
+ * The key is sent as a bearer token to the spec's own `baseUrl`, and both are
+ * editable from the admin config screen, so an unrestricted name would let one
+ * config edit post any server secret (`WORKOS_COOKIE_PASSWORD`, `FABULIST_PG`)
+ * to any host. Only `*_API_KEY` names qualify, and never the app's own.
+ */
+export function isApiKeyEnvName(name: string): boolean {
+  return /^[A-Z][A-Z0-9_]*_API_KEY$/.test(name) && !/^(WORKOS|AUTH|MCP|FABULIST)_/.test(name);
+}
+
+/** The key a spec's `apiKeyEnv` names, or '' when unset or not a permitted name. */
+export function apiKeyFromEnv(env: Record<string, string | undefined>, name: string | undefined): string {
+  return name && isApiKeyEnvName(name) ? (env[name] ?? '') : '';
+}
+
 export function buildProvider(spec: ProviderSpec, env: Record<string, string | undefined> = process.env): Provider {
   const capabilities = caps(spec.capabilities);
   const auth = spec.auth ?? defaultAuth(spec.kind);
-  const apiKey = auth === 'api-key' && spec.apiKeyEnv ? (env[spec.apiKeyEnv] ?? '') : '';
+  const apiKey = auth === 'api-key' ? apiKeyFromEnv(env, spec.apiKeyEnv) : '';
 
   // A spec may name its own local credential fallback. Unsloth is the case that
   // needs it: it requires a bearer token, but a desktop install can mint one
