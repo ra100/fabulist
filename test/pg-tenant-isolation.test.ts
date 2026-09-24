@@ -32,8 +32,10 @@ import { SetupService } from '../src/setup/service-pg.ts';
 import { IllustrationService } from '../src/illustration/service-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
 import {
+  cancelSetupJobTool,
   composeIllustrationPromptTool,
   createCustomWorldTool,
+  getSetupJobTool,
   rebuildCanonTool,
   resetStoryTool,
   useSampleWorldTool,
@@ -372,6 +374,46 @@ test('a user who binds a fresh world owns it, and can keep authoring into it', a
       'reader',
       'Bob may read it but not write it',
     );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+// ------------------------------------------------------------- setup jobs
+
+test('a setup job is visible and cancellable only by the user who started it, over REST', async (t) => {
+  const ran = await withPg(async (db) => {
+    await createStory(db, { title: '', ownerUserId: PEOPLE.alice.id });
+    await withSignedInServer(db, async (as) => {
+      const started = await as('alice', 'POST', '/api/setup/custom', { description: 'A drowned city of bell-ringers.' });
+      assert.equal(started.status, 200, JSON.stringify(started.body));
+      const id = encodeURIComponent((started.body as { id: string }).id);
+
+      assert.equal((await as('alice', 'GET', `/api/setup/job/${id}`)).status, 200);
+      const peek = await as('bob', 'GET', `/api/setup/job/${id}`);
+      assert.equal(peek.status, 404, 'another user’s job answers exactly as a missing one');
+      assert.deepEqual(peek.body, (await as('bob', 'GET', '/api/setup/job/job%3Anever')).body);
+      const cancel = await as('bob', 'POST', `/api/setup/job/${id}/cancel`);
+      assert.equal(cancel.status, 404);
+      assert.notEqual(
+        ((await as('alice', 'GET', `/api/setup/job/${id}`)).body as { status?: string }).status,
+        'cancelled',
+        'Bob’s cancel did nothing',
+      );
+      assert.equal((await as('admin', 'GET', `/api/setup/job/${id}`)).status, 200, 'an admin may still look');
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('a setup job is visible and cancellable only by the user who started it, over MCP', async (t) => {
+  const ran = await withPg(async (db) => {
+    await createStory(db, { title: '', ownerUserId: PEOPLE.alice.id });
+    const alice = mcpContext(db, 'alice');
+    const bob = { ...mcpContext(db, 'bob'), setup: alice.setup };
+    const job = await createCustomWorldTool(alice, { description: 'A drowned city of bell-ringers.' });
+    assert.equal((await getSetupJobTool(alice, { id: job.id })).id, job.id);
+    await assert.rejects(() => getSetupJobTool(bob, { id: job.id }), /no such job/);
+    await assert.rejects(() => cancelSetupJobTool(bob, { id: job.id }), /no such job/);
   });
   if (!ran) t.skip('no Postgres configured');
 });

@@ -514,6 +514,7 @@ export class SetupService {
     excludeCategories: string[] = [],
     title = '',
     limits: IngestLimits = {},
+    ownerUserId?: string,
   ): Job<PreviewResult & { previewKey: string; character: CharacterSketch }> {
     return this.jobs.start('discover', async (handle) => {
       handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
@@ -546,7 +547,7 @@ export class SetupService {
 
       handle.stage('done');
       return { ...result, character: refined };
-    });
+    }, ownerUserId);
   }
 
   /**
@@ -660,6 +661,7 @@ export class SetupService {
           warnings,
         };
       }),
+      target?.user?.id,
     );
   }
 
@@ -984,6 +986,7 @@ export class SetupService {
         handle.stage('done');
         return result;
       }),
+      target?.user?.id,
     );
   }
 
