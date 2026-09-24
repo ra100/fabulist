@@ -1,0 +1,25 @@
+# Version updates for everything this repository pins: the npm lockfile, the
+# digest-pinned base images in the Dockerfile, the bundled Postgres in the
+# deploy compose file, and the GitHub Actions the workflows use. Security
+# alerts and security updates are repository settings, not this file.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ['*']
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
