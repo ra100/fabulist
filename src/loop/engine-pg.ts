@@ -303,7 +303,10 @@ export class Engine {
   }
 
   private async deepeningWorldFor(world: World): Promise<World> {
-    return this.ingestDb === this.db ? world : await World.forStory(this.ingestDb, world.storyId);
+    // Same imagesDir and crypto: an encrypted story's emergent depth write needs its key.
+    return this.ingestDb === this.db
+      ? world
+      : await World.forStory(this.ingestDb, world.storyId, world.illustrations.imagesDir, world.crypto);
   }
 
   private async deepenLocationIfNeeded(

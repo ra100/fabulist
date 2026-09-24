@@ -41,7 +41,7 @@
  * startup and says so plainly rather than letting the failure surface as a
  * request error under load.
  */
-import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from 'pg';
+import { Pool, type ClientBase, type PoolClient, type QueryResult, type QueryResultRow } from 'pg';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,10 +61,20 @@ export interface Queryable {
   query<R extends QueryResultRow = QueryResultRow>(sql: string, params?: unknown[]): Promise<QueryResult<R>>;
 }
 
+/** The two NOLOGIN group roles `schema-pg-roles.sql` creates and grants. */
+export type DbRole = 'fabulist_play' | 'fabulist_ingest';
+
 export interface DbOptions {
   connectionString: string;
   /** Which role's pool this is; picks the size defaults and names it in errors. */
   kind?: 'play' | 'ingest';
+  /**
+   * The database role every connection in this pool assumes (`SET ROLE`) before
+   * its first query. Omitted means the login itself — the owner, which can do
+   * anything the schema allows — so the grants in `schema-pg-roles.sql` only
+   * constrain a pool that names a role here. `assertRole` checks it took.
+   */
+  role?: DbRole;
   max?: number;
   /** Statement timeout in ms. Guards the play pool against one pathological query pinning a connection. */
   statementTimeoutMs?: number;
@@ -135,10 +145,27 @@ const POOL_DEFAULTS = { play: 4, ingest: 2 } as const;
 export class Db implements Queryable {
   readonly pool: Pool;
   readonly kind: 'play' | 'ingest';
+  readonly role: DbRole | undefined;
 
   constructor(opts: DbOptions) {
     this.kind = opts.kind ?? 'play';
+    this.role = opts.role;
+    const role = opts.role;
     this.pool = new Pool({
+      // Per connection, not per query, and awaited: pg-pool (>= 3.14) holds the
+      // client back from its first checkout until `onConnect` settles, and a
+      // rejection discards the client and fails that checkout. So no statement
+      // ever runs as the login by racing the SET, and a login that is not a
+      // member of the role fails loudly on first use instead of silently
+      // running with the owner's privileges. `role` is a closed union, never
+      // user input, so interpolating it is safe.
+      ...(role
+        ? {
+            onConnect: async (client: ClientBase) => {
+              await client.query(`SET ROLE ${role}`);
+            },
+          }
+        : {}),
       connectionString: opts.connectionString,
       max: opts.max ?? POOL_DEFAULTS[this.kind],
       application_name: opts.applicationName ?? `fabulist-${this.kind}`,
@@ -317,6 +344,47 @@ export async function applySchemaAndMigrations(db: Db): Promise<void> {
  */
 export async function applyRoles(db: Queryable): Promise<void> {
   await db.query(readFileSync(join(here, 'schema-pg-roles.sql'), 'utf8'));
+}
+
+/**
+ * Proves a role pool is really running as its role, in the owner's schema.
+ *
+ * Two quiet failures this turns into boot errors. A login that is not a member
+ * of the role fails `SET ROLE` in `onConnect` — which would otherwise surface as
+ * the first player's request failing, with a message about roles nobody
+ * configured. And a role's `search_path` resolves `$user` to the *role* name, so
+ * a deployment relying on `"$user", public` (or a per-login schema) can land a
+ * role pool in a different schema than the one migrations just ran in, where
+ * every table is either missing or somebody else's.
+ *
+ * A no-op for a pool with no `role`: that is the login, and there is nothing to
+ * check.
+ */
+export async function assertRole(db: Db, owner: { login: string; schema: string }): Promise<void> {
+  if (!db.role) return;
+  let row: { current_user: string; current_schema: string | null } | undefined;
+  try {
+    row = await db.one<{ current_user: string; current_schema: string | null }>(
+      'SELECT current_user, current_schema() AS current_schema',
+    );
+  } catch (err) {
+    throw new Error(
+      `the ${db.kind} pool cannot assume role ${db.role}: ${err instanceof Error ? err.message : String(err)}. ` +
+        `The login needs membership: GRANT fabulist_play, fabulist_ingest TO "${owner.login}"; ` +
+        '(run as a superuser or the roles\' creator), or set FABULIST_DB_ROLES=off to connect as the login.',
+      { cause: err },
+    );
+  }
+  if (row?.current_user !== db.role) {
+    throw new Error(`the ${db.kind} pool is running as ${row?.current_user ?? 'nobody'}, expected ${db.role}`);
+  }
+  if (row.current_schema !== owner.schema) {
+    throw new Error(
+      `the ${db.kind} pool (role ${db.role}) resolves to schema ${row.current_schema ?? '(none)'}, but the schema ` +
+        `was applied in ${owner.schema}. Pin it on the connection string: add ` +
+        `?options=-csearch_path%3D${owner.schema} to FABULIST_PG.`,
+    );
+  }
 }
 
 /**

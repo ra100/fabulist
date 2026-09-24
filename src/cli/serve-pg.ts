@@ -29,7 +29,6 @@ import { Db, applyRoles, applySchemaAndMigrations, checkCapacity, connectionStri
 import { findSqliteWorlds, importSqliteWorlds } from '../db/import-sqlite.ts';
 import { createWorld, listWorlds, worldFor } from '../store/index-pg.ts';
 import { listStories } from '../store/world-pg.ts';
-import { seedWorld } from '../seed/verrow-pg.ts';
 import { Engine } from '../loop/engine-pg.ts';
 import { createApiServer } from '../server/api-pg.ts';
 import { DEFAULT_PAID_CALL_LIMIT, paidCallLimitFromEnv } from '../server/rate-limit.ts';
@@ -84,6 +83,15 @@ const INGEST_POOL = 2;
 // because silently importing into the wrong database is worse than an error.
 const connectionString = connectionStringFromEnv() ?? 'postgres://localhost:5432/fabulist';
 
+/**
+ * Three pools, one of them short-lived. `owner` connects as the login itself and
+ * exists only for boot: reachability, capacity, schema, migrations and grants —
+ * DDL that neither group role may run. It is closed before the server listens,
+ * so it costs one connection for a few seconds. `play` and `ingest` are the two
+ * the server keeps; both still connect as the login too, until they name their
+ * `role` (`DbOptions.role`) and boot checks it with `assertRole`.
+ */
+const owner = new Db({ connectionString, kind: 'ingest', max: 1, applicationName: 'fabulist-owner' });
 const play = new Db({ connectionString, kind: 'play', max: PLAY_POOL });
 const ingest = new Db({ connectionString, kind: 'ingest', max: INGEST_POOL });
 
@@ -104,12 +112,12 @@ const ingest = new Db({ connectionString, kind: 'ingest', max: INGEST_POOL });
  * failures are *not* retried — a wrong password will never become right by waiting,
  * and looping on it would bury the specific hint printed below.
  */
-async function waitForDatabase(timeoutMs = 120_000): Promise<void> {
+async function waitForDatabase(db: Db, timeoutMs = 120_000): Promise<void> {
   const started = Date.now();
   let announced = false;
   for (;;) {
     try {
-      await play.query('SELECT 1');
+      await db.query('SELECT 1');
       if (announced) console.log(`database ready after ${((Date.now() - started) / 1000).toFixed(0)}s`);
       return;
     } catch (err) {
@@ -133,8 +141,8 @@ async function boot(): Promise<void> {
   //    misconfiguration that would otherwise surface as a mid-turn failure for
   //    whichever player happens to exhaust the pool.
   try {
-    await waitForDatabase();
-    const warning = await checkCapacity(play, PLAY_POOL + INGEST_POOL);
+    await waitForDatabase(owner);
+    const warning = await checkCapacity(owner, PLAY_POOL + INGEST_POOL + 1);
     if (warning) console.warn(`warning: ${warning}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -159,8 +167,10 @@ async function boot(): Promise<void> {
 
   // 2. The current schema for fresh databases and ordered migrations for
   //    existing ones.
-  await applySchemaAndMigrations(ingest);
-  await applyRoles(ingest);
+  //    As the owner: DDL and GRANTs are the login's to issue, not a group role's.
+  await applySchemaAndMigrations(owner);
+  await applyRoles(owner);
+  await owner.close();
 
   // 3. The automatic first-boot import.
   //
@@ -240,11 +250,6 @@ async function boot(): Promise<void> {
    */
   const resolveWorld = () => worldFor(play, null, { imagesDir });
 
-  if (args.includes('--sample')) {
-    await seedWorld(await resolveWorld());
-    console.log('seeded the Saint Verrow sample');
-  }
-
   const { registry, notes } = buildSwappableRegistry(cfg);
   const { registry: imageRegistry, notes: imageNotes } = buildImageRegistry(cfg);
   const configService = new ConfigService({ registry, imageRegistry, path: configPath });
@@ -271,6 +276,16 @@ async function boot(): Promise<void> {
   // `canon_entities`, so a bug in a play route cannot corrupt source material even
   // if it tries.
   const setup = new SetupService({ world: resolveWorld, db: ingest, providers: registry });
+
+  // Through the setup service rather than `seedWorld(resolveWorld())`: that
+  // world is on the play pool, which may not write canon, and the service
+  // re-resolves it on the ingest pool (binding a canon world if the story has
+  // none yet, which the direct call could not do and failed on).
+  if (args.includes('--sample')) {
+    await setup.useSample();
+    console.log('seeded the Saint Verrow sample');
+  }
+
   if (await setup.isFresh()) console.log('no canon yet - the UI will open the setup wizard');
 
   const stories = await listStories(play);
@@ -319,6 +334,7 @@ async function boot(): Promise<void> {
   const server = createApiServer({
     world: resolveWorld,
     db: play,
+    ingestDb: ingest,
     engine,
     webRoot,
     setup,

@@ -6,7 +6,7 @@
  * silently pulls three thousand pages of a continuity nobody cares about is the
  * likeliest way this whole step goes wrong, so the preview is not skippable.
  */
-import { ensureCanonWorldFor, type World } from '../store/index-pg.ts';
+import { ensureCanonWorldFor, World } from '../store/index-pg.ts';
 import type { Db } from '../db/pg.ts';
 import type { SessionUser } from '../auth/config.ts';
 import { assertWorldAccess } from '../store/access-pg.ts';
@@ -849,7 +849,8 @@ export class SetupService {
   async continueIngest(
     overrides: { seeds?: string[]; mode?: DepthMode; excludeCategories?: string[]; limits?: IngestLimits } = {},
   ): Promise<Job<IngestJobResult>> {
-    const world = await this.getWorld();
+    // On this service's pool: everything below writes canon (see `onOwnPool`).
+    const world = await this.onOwnPool(await this.getWorld());
     const context = await loadIngestContext(world);
     if (!context)
       throw new Error(
@@ -892,7 +893,7 @@ export class SetupService {
         // Re-persist: a "read more" call may have widened seeds/mode/exclusions,
         // and the next resume should pick those up rather than the narrower
         // scope the very first ingest started from.
-        saveIngestContext(world, {
+        await saveIngestContext(world, {
           baseUrl,
           mode,
           seeds,
@@ -1247,10 +1248,25 @@ export class SetupService {
   private async authoringWorld(claim: AuthoringClaim, target: AuthoringTarget | undefined, title = ''): Promise<World> {
     const world = target?.world ?? (await this.getWorld());
     claim.take(world);
-    const worldId = await ensureCanonWorldFor(this.db, world.storyId, { title, user: target?.user ?? null });
-    const bound = world.worldId === worldId ? world : await world.withStory(world.storyId);
+    await ensureCanonWorldFor(this.db, world.storyId, { title, user: target?.user ?? null });
+    // Always re-resolved, now on this service's own pool: that also covers the
+    // "binding changed the sources" case above, and it is what puts the canon,
+    // `world_meta` and `ingest_pages` writes that follow on the ingest role.
+    const bound = await this.onOwnPool(world);
     // The story was claimed above; this adds the world it was just bound to.
     claim.take(bound);
     return bound;
+  }
+
+  /**
+   * The same story and crypto, with every store on this service's pool.
+   *
+   * The `World` a request hands in (or `getWorld()` returns) is built on the
+   * play pool, and `fabulist_play` has no write grant on canon, `world_meta`
+   * or `ingest_pages` — so authoring through it would be refused the moment
+   * roles are enforced. This service's `db` is the ingest pool (`serve-pg`).
+   */
+  private onOwnPool(world: World): Promise<World> {
+    return World.forStory(this.db, world.storyId, world.illustrations.imagesDir, world.crypto);
   }
 }

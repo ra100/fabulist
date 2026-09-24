@@ -66,7 +66,21 @@ let counter = 0;
  *       if (!ok) t.skip('no Postgres configured');
  *     });
  */
-export async function withPg(fn: (db: Db, schema: string) => Promise<void>): Promise<boolean> {
+/**
+ * Pools that connect to the same schema but `SET ROLE` to the two group roles,
+ * so a test can run application code under the grants production will enforce.
+ * Built on first access — most tests never touch them, and each pool is a
+ * connection per client. The owner `db` stays the place for fixtures and
+ * assertions: it can see and write everything.
+ */
+export interface RolePools {
+  readonly play: Db;
+  readonly ingest: Db;
+}
+
+export async function withPg(
+  fn: (db: Db, schema: string, roles: RolePools) => Promise<void>,
+): Promise<boolean> {
   const cs = testConnectionString();
   if (!cs) return false;
 
@@ -88,19 +102,34 @@ export async function withPg(fn: (db: Db, schema: string) => Promise<void>): Pro
   // test's schema on every pooled connection. Setting it per-query would be a
   // footgun: one forgotten SET and a test writes to `public`.
   const sep = cs.includes('?') ? '&' : '?';
+  const scoped = `${cs}${sep}options=-csearch_path%3D${schema}`;
   const db = new Db({
-    connectionString: `${cs}${sep}options=-csearch_path%3D${schema}`,
+    connectionString: scoped,
     kind: 'ingest',
     max: 4,
     applicationName: `fabulist-test-${schema}`,
   });
 
+  // `search_path` comes from the connection string, so it survives `SET ROLE`.
+  let play: Db | undefined;
+  let ingest: Db | undefined;
+  const roles: RolePools = {
+    get play() {
+      return (play ??= new Db({ connectionString: scoped, kind: 'play', role: 'fabulist_play', max: 4 }));
+    },
+    get ingest() {
+      return (ingest ??= new Db({ connectionString: scoped, kind: 'ingest', role: 'fabulist_ingest', max: 2 }));
+    },
+  };
+
   try {
     await db.query(SCHEMA_SQL);
     await applyMigrations(db);
     await db.query(ROLES_SQL);
-    await fn(db, schema);
+    await fn(db, schema, roles);
   } finally {
+    // Before the schema drop: an open role connection would hold it.
+    await Promise.all([play?.close(), ingest?.close()]);
     await db.close();
     const cleanup = new Db({ connectionString: cs, kind: 'ingest', max: 1 });
     try {

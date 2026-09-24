@@ -162,6 +162,15 @@ export interface ServerOptions {
    * now, from the session user, which makes that class of bug unrepresentable.
    */
   db: Db;
+  /**
+   * The pool for writes to system tables — creating, retitling and deleting a
+   * world, its visibility, and its access grants. Those are admin/owner actions
+   * that happen to arrive over HTTP, and `fabulist_play` (which `db` connects as
+   * once roles are enforced) has no write grant on `worlds` or `world_access`
+   * by design (`schema-pg-roles.sql`). Defaults to `db`, which is right only
+   * when both connect as the same login.
+   */
+  ingestDb?: Db;
   /** Where world directories live; defaults to `data`. */
   dataRoot?: string;
   /**
@@ -210,6 +219,12 @@ interface RouteContext {
    * transaction client, so it is deliberately not the same thing.
    */
   db: Db;
+  /**
+   * The ingest pool, for the few routes that write system tables (`worlds`,
+   * `world_access`) — see `ServerOptions.ingestDb`. Reads, including the access
+   * checks in front of those writes, stay on `db`.
+   */
+  ingestDb: Db;
   engine: Engine;
   setup: SetupService | undefined;
   registry: SwappableRegistry | undefined;
@@ -1622,11 +1637,11 @@ route('GET', '/api/worlds', async (_req, res, { world, db, user }) => {
  * Admin-only now, which the file-based version could not express: a world is
  * system data, and `fabulist_play` has no write grant on `worlds`.
  */
-route('POST', '/api/worlds', async (_req, res, { db, body, user, authConfig }) => {
+route('POST', '/api/worlds', async (_req, res, { ingestDb, body, user, authConfig }) => {
   if (!requireAdmin(res, authConfig, user)) return;
   const { title } = parseBody(createStoryBodySchema, body);
   try {
-    send(res, 201, await createWorld(db, title?.trim() ?? ''));
+    send(res, 201, await createWorld(ingestDb, title?.trim() ?? ''));
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
@@ -1666,12 +1681,12 @@ route('PUT', '/api/story/sources', async (_req, res, { world, db, body, user }) 
 });
 
 /** Retitles a world. Admin-only: a title is shared by every story reading it. */
-route('PUT', '/api/worlds/:slug/title', async (_req, res, { db, params, body, user, authConfig }) => {
+route('PUT', '/api/worlds/:slug/title', async (_req, res, { ingestDb, params, body, user, authConfig }) => {
   if (!requireAdmin(res, authConfig, user)) return;
   const slug = decodeURIComponent(params.slug ?? '');
   const { title } = parseBody(renameBodySchema, body);
   try {
-    send(res, 200, await renameWorld(db, slug, title));
+    send(res, 200, await renameWorld(ingestDb, slug, title));
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
@@ -1689,11 +1704,11 @@ route('PUT', '/api/worlds/:slug/title', async (_req, res, { db, params, body, us
  *
  * Emptying a world's canon while keeping its stories is `POST /api/canon/rebuild`.
  */
-route('DELETE', '/api/worlds/:slug', async (_req, res, { db, params, user, authConfig }) => {
+route('DELETE', '/api/worlds/:slug', async (_req, res, { ingestDb, params, user, authConfig }) => {
   if (!requireAdmin(res, authConfig, user)) return;
   const slug = decodeURIComponent(params.slug ?? '');
   try {
-    await deleteWorld(db, slug);
+    await deleteWorld(ingestDb, slug);
     send(res, 200, { ok: true });
   } catch (err) {
     send(res, 409, { error: err instanceof Error ? err.message : String(err) });
@@ -1717,7 +1732,7 @@ function sendWorldRefusal(res: ServerResponse, slug: string, err: unknown): void
  * whether its source material should be shared, and requiring an admin for that
  * would either bottleneck it or push everyone to be an admin.
  */
-route('PUT', '/api/worlds/:slug/visibility', async (_req, res, { db, params, body, user }) => {
+route('PUT', '/api/worlds/:slug/visibility', async (_req, res, { db, ingestDb, params, body, user }) => {
   const slug = decodeURIComponent(params.slug ?? '');
   const { visibility } = parseBody(visibilityBodySchema, body);
   const found = await getWorldBySlug(db, slug);
@@ -1726,7 +1741,7 @@ route('PUT', '/api/worlds/:slug/visibility', async (_req, res, { db, params, bod
   if (!found) return send(res, 404, { error: `no world "${slug}"` });
   try {
     await assertWorldAccess(db, user, found.id, 'owner');
-    await setWorldVisibility(db, found.id, visibility);
+    await setWorldVisibility(ingestDb, found.id, visibility);
     send(res, 200, { slug, visibility });
   } catch (err) {
     sendWorldRefusal(res, slug, err);
@@ -1752,14 +1767,14 @@ route('GET', '/api/worlds/:slug/access', async (_req, res, { db, params, user })
  * `role` is `reader` unless stated, because that is the grant that makes a private
  * world usable and the one with the least consequence if it is wrong.
  */
-route('POST', '/api/worlds/:slug/access', async (_req, res, { db, params, body, user }) => {
+route('POST', '/api/worlds/:slug/access', async (_req, res, { db, ingestDb, params, body, user }) => {
   const slug = decodeURIComponent(params.slug ?? '');
   const { userId, role } = parseBody(worldAccessBodySchema, body);
   const found = await getWorldBySlug(db, slug);
   if (!found) return send(res, 404, { error: `no world "${slug}"` });
   try {
     await assertWorldAccess(db, user, found.id, 'owner');
-    await grantWorldAccess(db, found.id, userId, role ?? 'reader');
+    await grantWorldAccess(ingestDb, found.id, userId, role ?? 'reader');
     send(res, 200, { slug, userId, role: role ?? 'reader' });
   } catch (err) {
     sendWorldRefusal(res, slug, err);
@@ -1767,13 +1782,13 @@ route('POST', '/api/worlds/:slug/access', async (_req, res, { db, params, body, 
 });
 
 /** Revokes an explicit grant. A public world stays readable; a private one does not. */
-route('DELETE', '/api/worlds/:slug/access/:userId', async (_req, res, { db, params, user }) => {
+route('DELETE', '/api/worlds/:slug/access/:userId', async (_req, res, { db, ingestDb, params, user }) => {
   const slug = decodeURIComponent(params.slug ?? '');
   const found = await getWorldBySlug(db, slug);
   if (!found) return send(res, 404, { error: `no world "${slug}"` });
   try {
     await assertWorldAccess(db, user, found.id, 'owner');
-    await revokeWorldAccess(db, found.id, decodeURIComponent(params.userId ?? ''));
+    await revokeWorldAccess(ingestDb, found.id, decodeURIComponent(params.userId ?? ''));
     send(res, 200, { ok: true });
   } catch (err) {
     sendWorldRefusal(res, slug, err);
@@ -2475,6 +2490,7 @@ export function createApiServer(opts: ServerOptions) {
   const ephemeralStoryKeys = opts.ephemeralStoryKeys ?? new EphemeralStoryKeyStore();
   const dataRoot = opts.dataRoot ?? 'data';
   const db = opts.db;
+  const ingestDb = opts.ingestDb ?? db;
   const paidCallLimit = opts.paidCallLimit === undefined ? (authConfig ? DEFAULT_PAID_CALL_LIMIT : null) : opts.paidCallLimit;
   const paidCalls = paidCallLimit ? new RateLimiter(paidCallLimit.burst, paidCallLimit.perMinute) : null;
   /** Null when `user` may make this paid call now, else the seconds until they may. Admins are not metered. */
@@ -2793,6 +2809,7 @@ export function createApiServer(opts: ServerOptions) {
         await match.handler(req, res, {
           world,
           db,
+          ingestDb,
           engine,
           setup,
           registry,
