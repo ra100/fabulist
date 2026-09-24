@@ -24,7 +24,7 @@ mixing pip into the apt install breaks). Renews unattended via its own
 
 | File | Purpose |
 |---|---|
-| `docker-compose.yml` | The one service, pinned to `ra100/fabulist:latest`, `/data` as a bind mount to an ordinary directory on the VPS's own disk (`scp`/`rsync`/`ls` work on it directly, no `docker cp` needed) — defaults to `./fabulist-data` next to this file, override with `FABULIST_DATA_DIR` if you want it elsewhere; deliberately relative so this repo never discloses the operator's real host layout — `app.env` as an optional (`required: false`) env file |
+| `docker-compose.yml` | The one service, running the exact image digest the release workflow pushed (`FABULIST_IMAGE` in `app.env`; `ra100/fabulist:latest` only for a manual run with none set), `/data` as a bind mount to an ordinary directory on the VPS's own disk (`scp`/`rsync`/`ls` work on it directly, no `docker cp` needed) — defaults to `./fabulist-data` next to this file, override with `FABULIST_DATA_DIR` if you want it elsewhere; deliberately relative so this repo never discloses the operator's real host layout — `app.env` as an optional (`required: false`) env file |
 | `nginx/fabulist.conf` | Reference openresty/nginx server block — **not necessarily the live config**; the operator manages that directly |
 | `vps-setup.sh` | One-time: installs Docker, copies the compose file + `deploy.sh`, starts the app. Does **not** touch openresty or certbot |
 | `deploy.sh` | Runs the existing `upload-env` and `deploy` actions on the VPS; direct operator use remains supported |

@@ -1,6 +1,10 @@
 services:
   fabulist:
-    image: ra100/fabulist:latest
+    # The release workflow deploys the exact digest it pushed (FABULIST_IMAGE,
+    # via app.env and deploy.sh): tags are mutable, so deploying one runs
+    # whatever was pushed there last. `latest` is only the fallback for a
+    # manual `docker compose up` with no release behind it.
+    image: ${FABULIST_IMAGE:-ra100/fabulist:latest}
     container_name: fabulist
     restart: unless-stopped
     # Runtime config rendered by CI from repo secrets/variables and uploaded
