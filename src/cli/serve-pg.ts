@@ -25,7 +25,7 @@
  */
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { Db, applyRoles, applySchemaAndMigrations, checkCapacity, connectionStringFromEnv } from '../db/pg.ts';
+import { Db, applyRoles, assertRole, applySchemaAndMigrations, checkCapacity, connectionStringFromEnv } from '../db/pg.ts';
 import { findSqliteWorlds, importSqliteWorlds } from '../db/import-sqlite.ts';
 import { createWorld, listWorlds, worldFor } from '../store/index-pg.ts';
 import { listStories } from '../store/world-pg.ts';
@@ -88,12 +88,19 @@ const connectionString = connectionStringFromEnv() ?? 'postgres://localhost:5432
  * exists only for boot: reachability, capacity, schema, migrations and grants —
  * DDL that neither group role may run. It is closed before the server listens,
  * so it costs one connection for a few seconds. `play` and `ingest` are the two
- * the server keeps; both still connect as the login too, until they name their
- * `role` (`DbOptions.role`) and boot checks it with `assertRole`.
+ * the server keeps, and each assumes its group role (`SET ROLE`) on every
+ * connection: `fabulist_play` cannot write canon, worlds or world access, so a
+ * bug on the play path cannot corrupt another reader's world. Boot proves the
+ * roles took (`assertRole`) and refuses to start otherwise.
+ *
+ * `FABULIST_DB_ROLES=off` (exactly that) runs both as the login instead, without
+ * the separation: the way out for a login an administrator has not yet granted
+ * the roles to.
  */
+const rolesOn = process.env.FABULIST_DB_ROLES !== 'off';
 const owner = new Db({ connectionString, kind: 'ingest', max: 1, applicationName: 'fabulist-owner' });
-const play = new Db({ connectionString, kind: 'play', max: PLAY_POOL });
-const ingest = new Db({ connectionString, kind: 'ingest', max: INGEST_POOL });
+const play = new Db({ connectionString, kind: 'play', max: PLAY_POOL, ...(rolesOn ? { role: 'fabulist_play' as const } : {}) });
+const ingest = new Db({ connectionString, kind: 'ingest', max: INGEST_POOL, ...(rolesOn ? { role: 'fabulist_ingest' as const } : {}) });
 
 /**
  * Waits for the database to accept connections, rather than exiting the moment it
@@ -170,7 +177,17 @@ async function boot(): Promise<void> {
   //    As the owner: DDL and GRANTs are the login's to issue, not a group role's.
   await applySchemaAndMigrations(owner);
   await applyRoles(owner);
+  const who = await owner.one<{ login: string; schema: string }>(
+    'SELECT session_user AS login, current_schema() AS schema',
+  );
   await owner.close();
+  if (rolesOn) {
+    await assertRole(play, who!);
+    await assertRole(ingest, who!);
+    console.log(`database roles: play pool as fabulist_play, ingest pool as fabulist_ingest (login ${who!.login})`);
+  } else {
+    console.warn(`database roles: FABULIST_DB_ROLES=off, every query runs as ${who!.login} without privilege separation`);
+  }
 
   // 3. The automatic first-boot import.
   //
