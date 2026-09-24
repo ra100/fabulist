@@ -2012,7 +2012,7 @@ export function createApiServer(opts: ServerOptions) {
       return;
     }
     if (authConfig && url.pathname === '/auth/logout' && req.method === 'POST') {
-      handleLogout(res);
+      await handleLogout(authConfig, req, res);
       return;
     }
 

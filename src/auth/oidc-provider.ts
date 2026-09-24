@@ -100,6 +100,8 @@ interface Endpoints {
   token: string;
   jwks: ReturnType<typeof createRemoteJWKSet>;
   userinfo?: string;
+  /** RFC 7009 `revocation_endpoint`, where logout revokes the refresh token. */
+  revocation?: string;
   /** From `token_endpoint_auth_methods_supported`; decides Basic vs. form-body client authentication. */
   authMethods: string[];
 }
@@ -232,11 +234,13 @@ export function createOidcProvider(options: OidcProviderOptions): AuthProvider {
       console.warn(`OIDC login: ${issuer} does not advertise PKCE S256 support (code_challenge_methods_supported: ${pkceMethods.join(', ')}); sending S256 regardless`);
     }
     const userinfo = claimString(doc, 'userinfo_endpoint');
+    const revocation = claimString(doc, 'revocation_endpoint');
     return {
       authorization: authorization!,
       token: token!,
       jwks: createRemoteJWKSet(new URL(jwksUri!)),
       userinfo: userinfo && isTrustedKeySource(userinfo) ? userinfo : undefined,
+      revocation: revocation && isTrustedKeySource(revocation) ? revocation : undefined,
       authMethods: methods,
     };
   }
@@ -420,6 +424,34 @@ export function createOidcProvider(options: OidcProviderOptions): AuthProvider {
      * in". The first case is why this is cheap enough to run on every request:
      * decrypting a cookie is local work.
      */
+    /**
+     * Revokes the cookie's refresh token, when it has one and the issuer
+     * publishes a revocation endpoint. That is what ends the session here: a
+     * copied cookie then lasts only until its identity next goes stale (`vex`),
+     * because the refresh that would renew it is refused.
+     */
+    async revoke(sealed: string): Promise<void> {
+      let claims: SealedClaims;
+      try {
+        claims = (await jwtDecrypt(sealed, key, { issuer, audience: clientId })).payload as unknown as SealedClaims;
+      } catch {
+        return;
+      }
+      if (!claims.rt) return;
+      const endpoints = await resolveEndpoints();
+      if (!endpoints.revocation) return;
+      const body = new URLSearchParams({ token: claims.rt, token_type_hint: 'refresh_token' });
+      const headers = { 'content-type': 'application/x-www-form-urlencoded', ...clientAuth(endpoints, body) };
+      const res = await fetch(endpoints.revocation, {
+        method: 'POST',
+        headers,
+        body: body.toString(),
+        redirect: 'manual',
+        signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`revocation endpoint ${endpoints.revocation} returned HTTP ${res.status}`);
+    },
+
     async resolveSession(sealed: string): Promise<ResolvedSession | null> {
       let claims: SealedClaims;
       try {

@@ -17,7 +17,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import type { AuthConfig } from './config.ts';
-import { clearSessionCookie, setSessionCookie, SESSION_MAX_AGE_SECONDS, parseCookies } from './config.ts';
+import { clearSessionCookie, setSessionCookie, SESSION_MAX_AGE_SECONDS, parseCookies, readSessionCookie } from './config.ts';
 
 const PKCE_COOKIE = 'fabulist_pkce';
 const LOGIN_ATTEMPT_MAX_AGE_SECONDS = 600;
@@ -194,9 +194,31 @@ export async function handleCallback(auth: AuthConfig, req: IncomingMessage, res
   }
 }
 
-/** `POST /auth/logout` — clears the session cookie. Does not call the provider's own session-revocation endpoint (WorkOS's `getLogoutUrl`, OIDC's `end_session_endpoint`), since a cleared cookie is sufficient for "this browser is signed out" and there is no server-side session store whose entry would otherwise linger. Note what that means with an SSO provider: the *provider's* session survives, so signing in again may not prompt for credentials. */
-export function handleLogout(res: ServerResponse): void {
+/**
+ * `POST /auth/logout` — revokes the session at the provider (`AuthProvider.revoke`),
+ * then clears the cookie. Clearing alone signed out this browser but left the
+ * provider session, and so any copy of the cookie, working until it expired.
+ * Revocation is best effort: a provider outage is logged, and the browser is
+ * signed out anyway.
+ *
+ * Returns the id of the user signed out, or null when there was no valid session.
+ */
+export async function handleLogout(auth: AuthConfig, req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+  const sealed = readSessionCookie(req);
+  let userId: string | null = null;
+  if (sealed) {
+    try {
+      // Resolved first: a stale session is refreshed here, and a refresh rotates
+      // the refresh token, so the revocation must use the renewed cookie.
+      const resolved = await auth.provider.resolveSession(sealed);
+      userId = resolved?.identity.id ?? null;
+      if (resolved) await auth.provider.revoke?.(resolved.resealed ?? sealed);
+    } catch (err) {
+      console.warn('logout: could not revoke the provider session:', err instanceof Error ? err.message : String(err));
+    }
+  }
   clearSessionCookie(res);
   res.writeHead(302, { location: '/' });
   res.end();
+  return userId;
 }
