@@ -980,14 +980,17 @@ export class ChronicleStore {
     scene: number,
     distortion = 0,
   ): Promise<void> {
-    await this.db.query(
+    // `fact_knowledge` has no story column of its own, so every query on it goes
+    // through `facts.story_id`: a fact id from another story is not this one's.
+    const { rowCount } = await this.db.query(
       `INSERT INTO fact_knowledge (fact_id, entity_id, level, since_scene, distortion)
-       VALUES ($1,$2,$3,$4,$5)
+       SELECT $1,$2,$3,$4,$5 WHERE EXISTS (SELECT 1 FROM facts WHERE id = $1 AND story_id = $6)
        ON CONFLICT (fact_id, entity_id) DO UPDATE SET
          level = EXCLUDED.level,
          distortion = LEAST(fact_knowledge.distortion, EXCLUDED.distortion)`,
-      [factId, entityId, level, scene, distortion],
+      [factId, entityId, level, scene, distortion, this.storyId],
     );
+    if (!rowCount) throw new Error(`no fact ${factId} in this story`);
   }
 
   async knowledgeOf(entityId: EntityId): Promise<Array<FactKnowledge & { text: string }>> {
@@ -1038,7 +1041,12 @@ export class ChronicleStore {
       level: KnowledgeLevel;
       since_scene: number;
       distortion: number;
-    }>(`SELECT fact_id, entity_id, level, since_scene, distortion FROM fact_knowledge WHERE fact_id = $1`, [factId]);
+    }>(
+      `SELECT k.fact_id, k.entity_id, k.level, k.since_scene, k.distortion
+         FROM fact_knowledge k JOIN facts f ON f.id = k.fact_id
+        WHERE k.fact_id = $1 AND f.story_id = $2`,
+      [factId, this.storyId],
+    );
     return rows.map((r) => ({
       factId: r.fact_id,
       entityId: r.entity_id,
@@ -1055,13 +1063,18 @@ export class ChronicleStore {
    * the extractor grants knowledge to the wrong NPC (DESIGN §11).
    */
   async revokeKnowledge(factId: FactId, entityId: EntityId): Promise<void> {
-    await this.db.query(`DELETE FROM fact_knowledge WHERE fact_id = $1 AND entity_id = $2`, [factId, entityId]);
+    await this.db.query(
+      `DELETE FROM fact_knowledge k USING facts f
+        WHERE k.fact_id = $1 AND k.entity_id = $2 AND f.id = k.fact_id AND f.story_id = $3`,
+      [factId, entityId, this.storyId],
+    );
   }
 
   async knows(entityId: EntityId, factId: FactId): Promise<boolean> {
     const { rows } = await this.db.query<{ level: string }>(
-      `SELECT level FROM fact_knowledge WHERE fact_id = $1 AND entity_id = $2`,
-      [factId, entityId],
+      `SELECT k.level FROM fact_knowledge k JOIN facts f ON f.id = k.fact_id
+        WHERE k.fact_id = $1 AND k.entity_id = $2 AND f.story_id = $3`,
+      [factId, entityId, this.storyId],
     );
     return rows[0]?.level === 'knows';
   }
