@@ -58,3 +58,7 @@ __pycache__/
 .run/
 .worktrees/
 .serena/
+.tokensave
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
