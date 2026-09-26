@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { providerSecretSchema } from '../../../src/server/contracts.ts';
 import { api, type CurrentUser } from '../api.ts';
 import { eraseUnlockedStoryKeys, unlockWithPassphrase, wrapProviderKey } from '../crypto/keys.ts';
-import { keyHintFor, providerStatusLine, TRUST_COPY, unlockHandoffNote } from '../my-provider.ts';
+import { effectiveTrust, keyHintFor, providerStatusLine, TRUST_COPY, unlockHandoffNote } from '../my-provider.ts';
 import {
   encryptionKeys,
   useDeleteProviderKeyMutation,
@@ -48,6 +48,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
 
   const endpoint = endpointId || state.key?.endpointId || state.endpoints[0]?.id || '';
   const enrolled = keyBundle?.enrolled === true;
+  const mode = keyBundle ? effectiveTrust(trust, enrolled, state.sealedAvailable) : trust;
   const modelSet = () => ({
     narrate: narrate.trim(),
     ...(mechanics.trim() ? { mechanics: mechanics.trim() } : {}),
@@ -90,7 +91,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
       const id = crypto.randomUUID();
       const base = { id, label: '', endpointId: endpoint, models: modelSet() };
       let saved = 'saved';
-      if (trust === 'sealed') {
+      if (mode === 'sealed') {
         await save.mutateAsync({ ...base, trust: 'sealed', key });
       } else {
         const bundle = await queryClient.fetchQuery({ queryKey: encryptionKeys.keys, queryFn: api.encryption.keys });
@@ -116,7 +117,23 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
     });
 
   const canSave =
-    !busy && !!apiKey && !!narrate.trim() && (trust === 'sealed' ? state.sealedAvailable : enrolled && passphrase.length >= 12);
+    !busy && !!apiKey && !!narrate.trim() && (mode === 'sealed' ? state.sealedAvailable : enrolled && passphrase.length >= 12);
+
+  if (mode === null) {
+    return (
+      <div className="card">
+        <h3>my provider</h3>
+        <p className="small">{providerStatusLine(state.status)}</p>
+        <p className="empty">Set up private storage to save a key.</p>
+        {state.key ? (
+          <button type="button" disabled={busy} onClick={() => void onDelete()}>
+            delete saved key
+          </button>
+        ) : null}
+        {note ? <p className="small dim" role="status">{note}</p> : null}
+      </div>
+    );
+  }
 
   return (
     <div className="card">
@@ -162,15 +179,15 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
       <fieldset className="field-row block">
         <legend>how your key is protected</legend>
         <label className="private-recovery-check">
-          <input type="radio" name="trust" checked={trust === 'unlock'} disabled={busy || !enrolled} onChange={() => setTrust('unlock')} />
+          <input type="radio" name="trust" checked={mode === 'unlock'} disabled={busy || !enrolled} onChange={() => setTrust('unlock')} />
           <span>with my passphrase — {TRUST_COPY.unlock}</span>
         </label>
         <label className="private-recovery-check">
-          <input type="radio" name="trust" checked={trust === 'sealed'} disabled={busy || !state.sealedAvailable} onChange={() => setTrust('sealed')} />
+          <input type="radio" name="trust" checked={mode === 'sealed'} disabled={busy || !state.sealedAvailable} onChange={() => setTrust('sealed')} />
           <span>by the server — {state.sealedAvailable ? TRUST_COPY.sealed : 'Not available on this server.'}</span>
         </label>
       </fieldset>
-      {trust === 'unlock' ? (
+      {mode === 'unlock' ? (
         <label className="field-row">
           <span>passphrase</span>
           <input type="password" autoComplete="current-password" value={passphrase} disabled={busy} onChange={(e) => setPassphrase(e.target.value)} />

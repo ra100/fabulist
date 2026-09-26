@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { keyHintFor, providerStatusLine, TRUST_COPY, unlockHandoffNote } from '../web/src/my-provider.ts';
+import { keyHintFor, providerStatusLine, TRUST_COPY, effectiveTrust, unlockHandoffNote } from '../web/src/my-provider.ts';
 
 test('every provider status reads as a plain-words line', () => {
   assert.equal(providerStatusLine('own'), 'Using your key.');
@@ -28,4 +28,11 @@ test('a failed unlock handoff after a save still reads as saved, with the reason
     }),
     'saved — key stays locked until you next unlock: too many key calls; try again in 30s',
   );
+});
+
+test('an unenrolled user saves sealed when the server offers it, and gets no form when it does not', () => {
+  assert.equal(effectiveTrust('unlock', false, true), 'sealed');
+  assert.equal(effectiveTrust('unlock', false, false), null);
+  assert.equal(effectiveTrust('unlock', true, false), 'unlock');
+  assert.equal(effectiveTrust('sealed', true, true), 'sealed');
 });

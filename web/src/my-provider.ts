@@ -24,6 +24,16 @@ export const TRUST_COPY = {
     'The server encrypts it with its own secret. Always usable, including MCP and background jobs, but whoever runs this server can decrypt it.',
 } as const;
 
+/** The protection a save will use: an unenrolled user cannot pick unlock, and null means neither mode is open. */
+export function effectiveTrust(
+  chosen: 'unlock' | 'sealed',
+  enrolled: boolean,
+  sealedAvailable: boolean,
+): 'unlock' | 'sealed' | null {
+  if (enrolled) return chosen;
+  return sealedAvailable ? 'sealed' : null;
+}
+
 /** The note after a saved unlock-mode key: the handoff can fail (e.g. the key-call limit) without undoing the save. */
 export async function unlockHandoffNote(handoff: () => Promise<unknown>): Promise<string> {
   try {
