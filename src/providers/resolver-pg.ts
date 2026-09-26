@@ -245,6 +245,14 @@ export class ProviderResolver {
   private build(userId: string, row: ProviderKeyRow): Registry | null {
     const endpoint = byokEndpoint(row.endpointId);
     if (!endpoint) return null;
+    if (row.trust === 'sealed' && this.secretsKey) {
+      // A wrong FABULIST_SECRETS_KEY must read as unavailable, not as 'own' with every call failing.
+      try {
+        openProviderKey(this.secretsKey, userId, row.id, row);
+      } catch {
+        return null;
+      }
+    }
     const secret = (): string => {
       // The cache entry is the liveness check, so a key deleted or replaced mid-turn is never sent again.
       if (this.cache.get(userId)?.row?.version !== row.version) throw new ProviderKeyLockedError('your provider key was removed or replaced');

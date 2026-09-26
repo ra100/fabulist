@@ -149,7 +149,8 @@ test('a user can neither see, unlock, use nor delete another user\'s key', async
       [keyId(8), bob.id, alice.id],
     );
     resolver.invalidate(bob.id);
-    await assert.rejects((await resolver.forRequest(bob)).get('narrate').complete(ask('narrate')), /cannot be decrypted/);
+    assert.equal((await resolver.forRequest(bob)).get('narrate').id, 'server-stub', 'a copied wrap is bound to its owner');
+    assert.equal(await resolver.status(bob), 'unavailable');
   });
   if (!ran) t.skip('no Postgres configured');
 });
@@ -326,6 +327,17 @@ test('a delete in another process is seen once the cached row is a minute old', 
     now += 1_000;
     assert.equal(await reader.status(alice), 'server');
     await assert.rejects(inFlight.get('narrate').complete(ask('narrate')), ProviderKeyLockedError);
+    assert.deepEqual(bearers, []);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('a sealed key the server secret cannot open reports unavailable and falls back instead of failing calls', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    await resolverFor(roles.play).resolver.save(alice, sealed(19));
+    const { resolver: rotated, bearers } = resolverFor(roles.play, { secretsKey: Buffer.alloc(32, 6) });
+    assert.equal(await rotated.status(alice), 'unavailable');
+    assert.equal((await rotated.forRequest(alice)).get('narrate').id, 'server-stub');
     assert.deepEqual(bearers, []);
   });
   if (!ran) t.skip('no Postgres configured');
