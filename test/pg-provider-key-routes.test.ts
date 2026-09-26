@@ -10,7 +10,9 @@ import { ProviderResolver, type ProviderResolverOptions } from '../src/providers
 import { Engine } from '../src/loop/engine-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
 import { SESSION_COOKIE } from '../src/auth/config.ts';
-import { getStateTool } from '../src/mcp/tools-pg.ts';
+import { getStateTool, proposeTurnTool } from '../src/mcp/tools-pg.ts';
+import { seedWorld } from '../src/seed/verrow-pg.ts';
+import { ProviderKeyRejectedError } from '../src/providers/byok.ts';
 import { createEncryptionEnrollment, storyKeyHandoff, unlockWithPassphrase } from '../web/src/crypto/keys.ts';
 import type { Db } from '../src/db/pg.ts';
 
@@ -193,6 +195,48 @@ test('a provider key in the unlock handoff spends a key call, and a refused one 
       assert.equal((body(both).grants as unknown[]).length, 1);
       assert.match(String(body(both).providerError), /too many provider-key requests/);
     }, { keyCallLimit: { burst: 2, perMinute: 1 } });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('a key the provider rejects is a clear 4xx on play, stream, model listing and MCP, never a 500', async (t) => {
+  const ran = await withPg(async (db, _schema, roles) => {
+    const stories = await storiesFor(db);
+    await seedWorld(await World.forStory(db, stories.alice));
+    const rejecting = (async () =>
+      ({ ok: false, status: 401, json: async () => ({}), text: async () => `{"error":"bad key ${ALICE_KEY}"}` }) as unknown as Response) as unknown as typeof fetch;
+    await withKeyServer(roles, async (as, resolver, base) => {
+      assert.equal((await as('alice', 'PUT', '/api/provider-key', { id: KEY1, endpointId: 'openai', models, trust: 'sealed', key: ALICE_KEY })).status, 200);
+      const expected = /Your provider rejected your API key \(401\)\. Check it in Settings → My provider\./;
+
+      const played = await as('alice', 'POST', '/api/play', { input: 'i trim the wick' });
+      assert.equal(played.status, 424, JSON.stringify(played.body));
+      assert.match(String(played.body.error), expected);
+      assert.equal(JSON.stringify(played.body).includes(ALICE_KEY), false);
+
+      const stream = await fetch(`${base}/api/play/stream`, {
+        method: 'POST',
+        headers: { cookie: `${SESSION_COOKIE}=alice`, 'content-type': 'application/json' },
+        body: JSON.stringify({ input: 'i trim the wick' }),
+      }).then((r) => r.text());
+      assert.match(stream, /event: error/);
+      assert.match(stream, expected);
+      assert.equal(stream.includes(ALICE_KEY), false);
+
+      const listed = await as('alice', 'POST', '/api/provider-key/models', { endpointId: 'openai', key: ALICE_KEY });
+      assert.equal(listed.status, 424, JSON.stringify(listed.body));
+      assert.match(String(listed.body.error), /rejected your API key \(401\)/);
+
+      const user = sessionUser('alice');
+      const engine = new Engine({ world: () => worldFor(roles.play, null), db: roles.play, providers: new ProviderRegistry(new MockProvider()) });
+      await assert.rejects(
+        proposeTurnTool(
+          { world: () => World.forStory(roles.play, stories.alice), db: roles.play, user, engine, dataRoot: 'data', providers: (id) => resolver.forRequest(user, id) },
+          { text: 'i trim the wick' },
+        ),
+        (err: Error) => err instanceof ProviderKeyRejectedError && expected.test(err.message),
+      );
+    }, { fetcher: rejecting });
   });
   if (!ran) t.skip('no Postgres configured');
 });

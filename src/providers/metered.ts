@@ -1,4 +1,4 @@
-import { ProviderKeyLockedError, scrubSecrets } from './byok.ts';
+import { ProviderKeyLockedError, ProviderKeyRejectedError, scrubSecrets } from './byok.ts';
 import type { CompletionRequest, CompletionResult, Provider, Registry } from './provider.ts';
 
 export type UsageSink = (call: {
@@ -19,7 +19,7 @@ function metered(inner: Provider, sink: UsageSink): Provider {
       try {
         result = await inner.complete(req);
       } catch (err) {
-        if (err instanceof ProviderKeyLockedError) throw err;
+        if (err instanceof ProviderKeyLockedError || err instanceof ProviderKeyRejectedError) throw err;
         throw new Error(scrubSecrets(err instanceof Error ? err.message : String(err)));
       }
       if (inner.id !== 'mock') {

@@ -25,6 +25,17 @@ interface HttpOptions {
   timeoutMs?: number;
 }
 
+/** A non-2xx provider answer; `status` lets a BYOK wrapper tell a rejected key from an outage. */
+export class ProviderHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ProviderHttpError';
+    this.status = status;
+  }
+}
+
 async function postJson(
   url: string,
   headers: Record<string, string>,
@@ -43,7 +54,7 @@ async function postJson(
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`${url} returned ${res.status}: ${text.slice(0, 300)}`);
+      throw new ProviderHttpError(res.status, `${url} returned ${res.status}: ${text.slice(0, 300)}`);
     }
     return await res.json();
   } finally {
@@ -176,7 +187,7 @@ export class OpenAICompatProvider implements Provider {
       });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        throw new Error(`${this.baseUrl} returned ${res.status}: ${text.slice(0, 300)}`);
+        throw new ProviderHttpError(res.status, `${this.baseUrl} returned ${res.status}: ${text.slice(0, 300)}`);
       }
 
       let text = '';
@@ -291,7 +302,7 @@ export class AnthropicProvider implements Provider {
       });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        throw new Error(`anthropic ${res.status}: ${text.slice(0, 300)}`);
+        throw new ProviderHttpError(res.status, `anthropic ${res.status}: ${text.slice(0, 300)}`);
       }
 
       let text = '';
