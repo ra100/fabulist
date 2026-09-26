@@ -2550,6 +2550,7 @@ export function createApiServer(opts: ServerOptions) {
       setup,
       illustrations,
       dataRoot,
+      lintBlocklist: () => config?.lintOptions().blocklist ?? [],
       // A tool error rather than an HTTP 429: the model reading the result is the
       // one who has to slow down, and it can only read a tool result.
       chargePaidCall: () => {

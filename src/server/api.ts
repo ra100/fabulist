@@ -1935,6 +1935,7 @@ export function createApiServer(opts: ServerOptions) {
       setup,
       illustrations,
       dataRoot,
+      lintBlocklist: () => config?.lintOptions().blocklist ?? [],
     };
   };
 
