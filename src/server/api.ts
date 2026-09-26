@@ -470,7 +470,6 @@ route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
   // left to the engine's own captured getter once two users can each be
   // mid-turn on their own story at the same time.
   const result = await playTurn(engine, world, input, { overrideIntegrity });
-  if (result.outcome.kind === 'narrated') recordAuthoringCheckpoint(world);
   send(res, 200, result);
 });
 
@@ -1395,7 +1394,7 @@ route('POST', '/api/play/stream', async (_req, res, { engine, world, body }) => 
       seeded = seedCons(world, outcome.delta, outcome.commit.events).length;
       tick = tickCons(world);
       wTick(world);
-      recordAuthoringCheckpoint(world);
+      recordAuthoringCheckpoint(world, 'tool:consequences');
     }
     emit('done', { outcome, seeded, tick });
   } catch (err) {

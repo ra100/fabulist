@@ -437,6 +437,8 @@ test('the streaming endpoint emits stages, tokens and a final done', async () =>
     assert.equal(outcome.kind, 'narrated');
     assert.equal(prose, outcome.prose, 'what was streamed is what was committed');
     assert.equal(world.chronicle.turns().length, 1);
+    const origins = (world.db.prepare('SELECT origin FROM history_checkpoints WHERE story_id = ? ORDER BY position').all(world.storyId) as Array<{ origin: string | null }>).map((row) => row.origin);
+    assert.deepEqual(origins, ['turn:server', 'tool:consequences']);
   });
 });
 
