@@ -236,6 +236,7 @@ export const rollbackBodySchema = z.object({
   chapter: z.number().int().positive().optional(),
   turnId: nonEmptyText.optional(),
   mode: z.enum(['fork', 'destructive']).optional(),
+  includeTarget: z.boolean().optional(),
 }).strict().refine((body) => [body.scene, body.chapter, body.turnId].filter((target) => target !== undefined).length === 1, {
   message: 'provide exactly one of scene, chapter, or turnId',
 });

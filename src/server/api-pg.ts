@@ -1620,7 +1620,7 @@ route('POST', '/api/stories/fork', async (_req, res, { world, db, body, user }) 
  * pulled along too.
  */
 route('POST', '/api/rollback', async (_req, res, { world, db, body, user, authConfig }) => {
-  const { scene, chapter, turnId, mode } = parseBody(rollbackBodySchema, body);
+  const { scene, chapter, turnId, mode, includeTarget } = parseBody(rollbackBodySchema, body);
   if (!(await ownsStoryOrRespond(res, db, world.storyId, user))) return;
   const effectiveMode = mode ?? 'fork';
   // No shared pointer to switch. `forkStory` stamps the new story's
@@ -1636,6 +1636,7 @@ route('POST', '/api/rollback', async (_req, res, { world, db, body, user, authCo
       ...(chapter === undefined ? {} : { toChapter: chapter }),
       ...(turnId === undefined ? {} : { turnId }),
       mode: effectiveMode,
+      includeTarget,
       ...(user ? { ownerUserId: user.id } : {}),
     });
     send(res, 200, {

@@ -232,6 +232,55 @@ export class HistoryStore {
     });
   }
 
+  /** Restores the checkpoint immediately before a turn and removes that turn too. */
+  async restoreBeforeTurn(turnId: string): Promise<HistoryCheckpoint> {
+    return this.transaction(async (queryable) => {
+      await queryable.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [this.storyId]);
+      const { rows: turns } = await queryable.query<{ history_position: number | null }>(
+        `SELECT history_position FROM turns WHERE id = $1 AND story_id = $2`,
+        [turnId, this.storyId],
+      );
+      const turn = turns[0];
+      if (!turn) throw new Error(`rollback: unknown turn ${turnId}`);
+      if (turn.history_position == null) throw new Error(`rollback: turn ${turnId} is legacy and has no exact history`);
+      const { rows: checkpoints } = await queryable.query<CheckpointRow>(
+        `SELECT * FROM history_checkpoints
+          WHERE story_id = $1 AND position < $2
+          ORDER BY position DESC LIMIT 1`,
+        [this.storyId, turn.history_position],
+      );
+      const checkpoint = checkpoints[0];
+      if (!checkpoint) throw new Error(`rollback: turn ${turnId} has no checkpoint before it`);
+
+      const key = await this.privateKey(queryable);
+      const retained = checkpointOf(checkpoint, await this.readState(queryable, checkpoint, key));
+      await this.restoreLayout(queryable, retained.state);
+      await queryable.query(`DELETE FROM turns WHERE story_id = $1 AND history_position > $2`, [
+        this.storyId,
+        retained.position,
+      ]);
+      await queryable.query(`DELETE FROM scene_segments WHERE story_id = $1 AND start_position > $2`, [
+        this.storyId,
+        retained.position,
+      ]);
+      await queryable.query(
+        `DELETE FROM encrypted_story_values
+          WHERE story_id = $1 AND table_name = 'history_checkpoints'
+            AND record_id IN (
+              SELECT id FROM history_checkpoints WHERE story_id = $1 AND position > $2
+            )`,
+        [this.storyId, retained.position],
+      );
+      await queryable.query(`DELETE FROM history_checkpoints WHERE story_id = $1 AND position > $2`, [
+        this.storyId,
+        retained.position,
+      ]);
+      await this.reconcileContinuation(queryable, retained.position);
+      await this.invalidateStaleSummaries(queryable, key);
+      return retained;
+    });
+  }
+
   /** Rewinds to just before the latest turn; refuses if later edits would be silently discarded. */
   async rewindBefore(turnId: string): Promise<void> {
     await this.transaction(async (queryable) => {

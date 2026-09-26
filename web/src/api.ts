@@ -839,7 +839,7 @@ export const api = {
    * `mode` defaults to `'fork'` server-side — the safe option — so an unset
    * mode here mirrors that rather than choosing a destructive default.
    */
-  rollback: async (target: RollbackTarget & { mode?: 'fork' | 'destructive' }): Promise<RollbackResult> => {
+  rollback: async (target: RollbackTarget & { mode?: 'fork' | 'destructive'; includeTarget?: boolean }): Promise<RollbackResult> => {
     const result = await post<RollbackResult | LegacyPostgresRollbackResult>('/rollback', target);
     if ('toScene' in result) return result;
     return {

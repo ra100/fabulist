@@ -1158,11 +1158,11 @@ function BookTab({
    * so it gets its own confirmation dialog on top of the panel already
    * having to be opened deliberately.
    */
-  async function doRollback(target: RollbackTarget, mode: 'fork' | 'destructive') {
+  async function doRollback(target: RollbackTarget & { includeTarget?: boolean }, mode: 'fork' | 'destructive') {
     if (rollbackBusy || mutationLock.current) return;
     if (mode === 'destructive') {
       const label = 'turnId' in target
-        ? 'the selected turn and every newer turn'
+        ? target.includeTarget ? 'the selected turn and every newer turn' : 'everything after the selected turn'
         : target.scene !== undefined ? `scene ${target.scene} and every later scene` : `chapter ${target.chapter} and every later chapter`;
       if (!window.confirm(`Discard ${label} permanently from this book? This cannot be undone.`)) return;
     }
@@ -1180,7 +1180,11 @@ function BookTab({
         onStorySelected(result.forkedStory.id);
         setNotes([`Rolled back to ${targetLabel} in a safe fork. This book is unchanged; the new book is "${result.forkedStory.title || 'untitled'}".`]);
       } else {
-        setNotes([`Rolled back to ${targetLabel}. The discarded history cannot be restored.`]);
+        setNotes([
+          'includeTarget' in target && target.includeTarget
+            ? `Discarded ${targetLabel} and everything after it. This cannot be undone.`
+            : `Kept ${targetLabel} and discarded everything after it. This cannot be undone.`,
+        ]);
       }
       setRollbackOpen(false);
       try {
@@ -1269,6 +1273,7 @@ function BookTab({
               // A scene opening earns the rubricated initial and, unless it is the
               // very first, a break above it.
               const opensScene = t.startsScene;
+              const isLastTurn = i === turns.length - 1;
               return (
               <Fragment key={t.id}>
                 {opensScene && i > 0 ? (
@@ -1316,6 +1321,49 @@ function BookTab({
                     <button disabled={mutationPending} onClick={() => void splitScene(t)}>
                       {splittingId === t.id ? 'splitting…' : 'split scene here'}
                     </button>
+                  ) : null}
+                  {t.eligible ? (
+                    <>
+                      <button
+                        className="branch-action"
+                        title="make a safe branch that keeps this turn and removes everything after it"
+                        disabled={mutationPending}
+                        onClick={() => void doRollback({ turnId: t.id }, 'fork')}
+                      >
+                        branch here
+                      </button>
+                      {isLastTurn ? (
+                        <button
+                          className="warn"
+                          title="remove this turn"
+                          disabled={mutationPending}
+                          onClick={() => void doRollback({ turnId: t.id, includeTarget: true }, 'destructive')}
+                        >
+                          remove turn
+                        </button>
+                      ) : (
+                        <details className="turn-discard">
+                          <summary>discard…</summary>
+                          <div className="turn-discard-menu">
+                            <button
+                              title="keep this turn and discard everything after it"
+                              disabled={mutationPending}
+                              onClick={() => void doRollback({ turnId: t.id }, 'destructive')}
+                            >
+                              discard after this turn
+                            </button>
+                            <button
+                              className="warn"
+                              title="discard this turn and everything after it"
+                              disabled={mutationPending}
+                              onClick={() => void doRollback({ turnId: t.id, includeTarget: true }, 'destructive')}
+                            >
+                              discard this turn too
+                            </button>
+                          </div>
+                        </details>
+                      )}
+                    </>
                   ) : null}
                   <button
                     title={t.pinned ? 'pinned passages are never rewritten' : 'different sentences, same events — what happened does not change'}
@@ -1427,7 +1475,7 @@ function BookTab({
                 // `useState` initializer.
                 <p className="empty">opening…</p>
               ) : (
-                <RollbackPanel state={state} chapters={chapters} turns={turns} busy={mutationPending} onRollback={doRollback} onCancel={() => setRollbackOpen(false)} />
+                <RollbackPanel state={state} chapters={chapters} busy={mutationPending} onRollback={doRollback} onCancel={() => setRollbackOpen(false)} />
               )
             ) : null}
 
@@ -1548,59 +1596,43 @@ function BookTab({
 
 /**
  * The backward move (GAPS.md 3.6): "undo the last chapter" or "back to a
- * specific scene or exact turn. Chapter is the default granularity since that
- * is the user-facing unit; scene and turn are available for finer control.
+ * specific scene or chapter. Exact-turn actions live beside each turn.
  * Always shows both outcomes side by side — fork (the safe default) and
  * destructive (behind its own confirm) — rather than a single button whose
  * behaviour depends on a mode nobody remembers they set.
  */
 function RollbackPanel({
-  state, chapters, turns, busy, onRollback, onCancel,
+  state, chapters, busy, onRollback, onCancel,
 }: {
   state: State | null;
   chapters: Array<{ chapter: number; title: string; summary: string }>;
-  turns: BookTurn[];
   busy: boolean;
   onRollback: (target: RollbackTarget, mode: 'fork' | 'destructive') => void;
   onCancel: () => void;
 }) {
-  const [unit, setUnit] = useState<'chapter' | 'scene' | 'turn'>(chapters.length ? 'chapter' : 'scene');
+  const [unit, setUnit] = useState<'chapter' | 'scene'>(chapters.length ? 'chapter' : 'scene');
   const [chapter, setChapter] = useState(chapters.length ? String(chapters[chapters.length - 1]!.chapter) : '');
   const currentScene = state?.session.scene ?? 1;
   const [scene, setScene] = useState(String(Math.max(1, currentScene - 1)));
-  const eligibleTurns = turns.filter((turn) => turn.eligible);
-  const [turnId, setTurnId] = useState(eligibleTurns.at(-1)?.id ?? '');
-  const hasIneligibleTurns = turns.some((turn) => !turn.eligible);
-
   const target = unit === 'chapter'
     ? (chapter.trim() ? { chapter: Number(chapter) } : null)
-    : unit === 'scene'
-      ? (scene.trim() ? { scene: Number(scene) } : null)
-      : (eligibleTurns.some((turn) => turn.id === turnId) ? { turnId } : null);
-  const valid = target !== null && (unit === 'turn' || Number.isFinite(unit === 'chapter' ? target.chapter : target.scene));
-  const retention = unit === 'turn'
-    ? 'A turn target is kept; only newer history is removed.'
-    : 'A scene or chapter target and all newer history are removed.';
+    : (scene.trim() ? { scene: Number(scene) } : null);
+  const valid = target !== null && Number.isFinite(unit === 'chapter' ? target.chapter : target.scene);
+  const retention = 'A scene or chapter target and all newer history are removed.';
 
   return (
     <section className="notice" aria-label="roll back">
       <b>Roll back</b>
       <p className="small dim" style={{ margin: '4px 0 var(--s3)' }}>
-        Currently at scene {currentScene}. Fork (safe) creates and switches to a shorter sibling while this book
-        remains untouched. Discard permanently changes this book and cannot be undone. {retention}
+        Currently at scene {currentScene}. Branch (safe) creates and switches to a shorter sibling while this book
+        remains untouched. Discard permanently changes this book and cannot be undone. {retention} Exact-turn actions live next to each turn.
       </p>
-      {hasIneligibleTurns ? (
-        <p className="small dim" style={{ margin: '0 0 var(--s2)' }}>
-          Turns without exact history are readable but unavailable here; choose an eligible turn instead.
-        </p>
-      ) : null}
       <div className="row" style={{ marginBottom: 'var(--s2)' }}>
         <label className="rollback-field">
           <span>target</span>
-          <select value={unit} onChange={(e) => setUnit(e.target.value as 'chapter' | 'scene' | 'turn')} disabled={busy}>
+          <select value={unit} onChange={(e) => setUnit(e.target.value as 'chapter' | 'scene')} disabled={busy}>
             <option value="chapter" disabled={!chapters.length}>chapter{chapters.length ? '' : ' (none recorded yet)'}</option>
             <option value="scene">scene</option>
-            <option value="turn" disabled={!eligibleTurns.length}>turn{eligibleTurns.length ? '' : ' (none with exact history)'}</option>
           </select>
         </label>
         {unit === 'chapter' ? (
@@ -1614,7 +1646,7 @@ function RollbackPanel({
               ))}
             </select>
           </label>
-        ) : unit === 'scene' ? (
+        ) : (
           <label className="rollback-field">
             <span>scene</span>
             <input
@@ -1623,17 +1655,6 @@ function RollbackPanel({
               disabled={busy}
               style={{ width: '5rem' }}
             />
-          </label>
-        ) : (
-          <label className="rollback-field">
-            <span>turn</span>
-            <select value={turnId} onChange={(e) => setTurnId(e.target.value)} disabled={busy || !eligibleTurns.length}>
-              {eligibleTurns.map((turn) => (
-                <option key={turn.id} value={turn.id}>
-                  {chapterTurnLabel(turn)} · scene {turn.scene}{turn.origin ? ` · ${turn.origin}` : ''}
-                </option>
-              ))}
-            </select>
           </label>
         )}
       </div>

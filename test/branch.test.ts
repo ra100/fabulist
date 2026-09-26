@@ -518,6 +518,21 @@ test('turn rollback preserves the selected turn and its exact checkpoint state',
   world.close();
 });
 
+test('turn rollback can discard the selected turn and everything after it', () => {
+  const world = World.open(':memory:');
+  const first = exactTurn(world, 1);
+  const second = exactTurn(world, 2);
+  const third = exactTurn(world, 3);
+
+  const result = rollback(world, { turnId: second.id, mode: 'destructive', includeTarget: true });
+
+  assert.equal(result.toTurnId, first.id, 'the response identifies the last retained turn');
+  assert.deepEqual(world.chronicle.turns().map(({ id }) => id), [first.id]);
+  assert.equal(world.history.checkpointForTurn(second.id), undefined);
+  assert.equal(world.history.checkpointForTurn(third.id), undefined);
+  world.close();
+});
+
 test('turn rollback forks only retained history and leaves the source untouched', () => {
   const world = World.open(':memory:');
   const first = exactTurn(world, 1);
