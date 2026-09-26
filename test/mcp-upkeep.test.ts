@@ -463,3 +463,16 @@ test('agent world deltas and between-turn tool inputs are size-capped', () => {
   assert.equal(triggerInput.safeParse({ kind: 'after-scenes', scenes: 3 }).success, true);
   assert.equal(triggerInput.safeParse({ kind: 'after-scenes', scenes: 51 }).success, false);
 });
+
+test('SQLite replace_turn_prose with world re-summarises the scene a recommitted turn closes', async () => {
+  const { world, ctx } = sqliteContext();
+  await sqliteAgentTurn(ctx, 'i warm the ink', {});
+  const closing = await sqliteAgentTurn(ctx, 'i leave the scriptorium', { sceneAdvance: true });
+  const summaryOf = (scene: number) => world.chronicle.scenes().find((s) => s.scene === scene)?.summary;
+  const scene = world.chronicle.getTurn(closing.turnId)!.scene;
+  assert.ok(summaryOf(scene), 'the first commit compacted the closed scene');
+  const out = await replaceTurnProseTool(ctx, { id: closing.turnId, prose: 'Anselm leaves at dusk.', world: { sceneAdvance: true } });
+  if (out.status !== 'replaced') throw new Error(`expected replaced, got ${out.status}`);
+  assert.ok(summaryOf(scene), 'the recommit compacts it again');
+  world.close();
+});

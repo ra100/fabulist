@@ -420,3 +420,18 @@ test('PostgreSQL commit_narration decides upkeep and extracts on one provider re
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('PostgreSQL replace_turn_prose with world re-summarises the scene a recommitted turn closes', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    await agentTurn(ctx, 'i warm the ink', {});
+    const closing = await agentTurn(ctx, 'i leave the scriptorium', { sceneAdvance: true });
+    const summaryOf = async (scene: number) => (await world.chronicle.scenes()).find((s) => s.scene === scene)?.summary;
+    const scene = (await world.chronicle.getTurn(closing.turnId))!.scene;
+    assert.ok(await summaryOf(scene), 'the first commit compacted the closed scene');
+    const out = await replaceTurnProseTool(ctx, { id: closing.turnId, prose: 'Anselm leaves at dusk.', world: { sceneAdvance: true } });
+    if (out.status !== 'replaced') throw new Error(`expected replaced, got ${out.status}`);
+    assert.ok(await summaryOf(scene), 'the recommit compacts it again');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});

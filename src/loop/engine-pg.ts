@@ -257,6 +257,11 @@ export class Engine {
     });
   }
 
+  /** The post-commit compaction of a turn, for a scene-closing commit made outside `takeTurn` (a recommit). */
+  async sceneClosed(world: World, scene: number, providers?: Registry): Promise<void> {
+    if (this.autoCompact) await this.compaction(providers).onSceneClosed(world, scene);
+  }
+
   /** Compatibility aggregate. Prefer `activity.isBusy(storyId)` for request-scoped status. */
   get busy(): boolean {
     return this.activity.busy;

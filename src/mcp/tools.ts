@@ -789,7 +789,7 @@ export async function replaceTurnProseTool(
     throw new Error('replace_turn_prose: only stateMode "preserve" is supported');
   const upkeep = upkeepOf(ctx);
   if (upkeep === 'agent' && args.world !== undefined) {
-    const { outcome: result, seeded, tick } = await recommitNarration(world, args.id, args.prose, args.world);
+    const { outcome: result, seeded, tick } = await recommitNarration(ctx.engine, world, args.id, args.prose, args.world);
     if (result.kind === 'blocked') {
       return {
         status: 'blocked' as const,
