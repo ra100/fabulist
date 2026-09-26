@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { providerSecretSchema } from '../../../src/server/contracts.ts';
 import { api, type CurrentUser } from '../api.ts';
 import { eraseUnlockedStoryKeys, unlockWithPassphrase, wrapProviderKey } from '../crypto/keys.ts';
-import { keyHintFor, providerStatusLine, TRUST_COPY } from '../my-provider.ts';
+import { keyHintFor, providerStatusLine, TRUST_COPY, unlockHandoffNote } from '../my-provider.ts';
 import {
   encryptionKeys,
   useDeleteProviderKeyMutation,
@@ -89,6 +89,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
       const key = checkedKey();
       const id = crypto.randomUUID();
       const base = { id, label: '', endpointId: endpoint, models: modelSet() };
+      let saved = 'saved';
       if (trust === 'sealed') {
         await save.mutateAsync({ ...base, trust: 'sealed', key });
       } else {
@@ -98,14 +99,14 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
         try {
           const wrap = await wrapProviderKey(user.id, unlocked.masterKey, id, key);
           await save.mutateAsync({ ...base, trust: 'unlock', wrap, keyHint: keyHintFor(key) });
-          await unlock.mutateAsync({ storyKeys: [], providerKeys: [{ keyId: id, key }] });
+          saved = await unlockHandoffNote(() => unlock.mutateAsync({ storyKeys: [], providerKeys: [{ keyId: id, key }] }));
         } finally {
           eraseUnlockedStoryKeys(unlocked);
         }
       }
       setApiKey('');
       setPassphrase('');
-      setNote('saved');
+      setNote(saved);
     });
 
   const onDelete = () =>
