@@ -55,6 +55,8 @@ export interface Config {
    * script actually sets.
    */
   requireLogin?: boolean;
+  /** Whether signed-in non-admins without their own key may use this server's provider. Absent means true. */
+  shareServerProvider?: boolean;
 }
 
 export function defaultConfig(): Config {

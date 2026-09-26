@@ -168,6 +168,14 @@ export class ConfigService {
       next.blocklist = normaliseBlocklist(partial.blocklist);
     }
 
+    if (partial.shareServerProvider !== undefined) {
+      if (typeof partial.shareServerProvider !== 'boolean') {
+        issues.push({ field: 'shareServerProvider', message: 'must be true or false' });
+      } else {
+        next.shareServerProvider = partial.shareServerProvider;
+      }
+    }
+
     if (partial.routes !== undefined) {
       const known = new Set(this.providerKeys());
       const routes: Record<string, string> = {};
