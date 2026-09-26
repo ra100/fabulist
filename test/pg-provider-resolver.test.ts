@@ -239,3 +239,55 @@ test('an unlock-mode wrap is capped at a 512-byte key in save and in the table',
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+/** Holds the first query matching `match` at the gate, before or after it runs. */
+function gatedDb(db: Queryable, match: (sql: string) => boolean, before = false) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const state = { held: false, release };
+  let armed = true;
+  const gated: Queryable = {
+    query: (async (sql: string, params?: unknown[]) => {
+      const hit = armed && match(sql);
+      if (hit) armed = false;
+      if (hit && before) {
+        state.held = true;
+        await gate;
+      }
+      const result = await db.query(sql, params);
+      if (hit && !before) {
+        state.held = true;
+        await gate;
+      }
+      return result;
+    }) as Queryable['query'],
+  };
+  return { gated, state };
+}
+
+test('an unlock racing a delete never leaves a plaintext grant for the removed row', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    await resolverFor(roles.play).resolver.save(alice, unlockMode(14));
+    const read = gatedDb(roles.play, (sql) => sql.includes('FROM user_provider_keys'));
+    const { resolver } = resolverFor(read.gated);
+    const pending = resolver.unlock(alice, [{ keyId: keyId(14), key: ALICE_KEY }]);
+    while (!read.state.held) await new Promise((r) => setTimeout(r, 1));
+    await resolver.remove(alice);
+    read.state.release();
+    await assert.rejects(pending, ProviderKeyForbiddenError);
+    assert.deepEqual(resolver.grants.list(alice.id), []);
+
+    await resolverFor(roles.play).resolver.save(alice, unlockMode(15));
+    const del = gatedDb(roles.play, (sql) => sql.startsWith('DELETE FROM user_provider_keys'), true);
+    const { resolver: racing } = resolverFor(del.gated);
+    const removing = racing.remove(alice);
+    while (!del.state.held) await new Promise((r) => setTimeout(r, 1));
+    await racing.unlock(alice, [{ keyId: keyId(15), key: ALICE_KEY }]);
+    del.state.release();
+    assert.equal(await removing, true);
+    assert.deepEqual(racing.grants.list(alice.id), [], 'the delete drops a grant that landed while it ran');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
