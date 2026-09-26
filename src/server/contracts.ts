@@ -181,12 +181,42 @@ export const encryptionEnrollmentBodySchema = z.object({
     wrap: encryptedKeyEnvelopeSchema,
   }).strict()).min(1),
 }).strict();
+const providerKeyIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'must be a UUID');
+const providerSecretSchema = z.string().min(8).max(512).regex(/^[\x21-\x7e]+$/, 'invalid API key');
+const providerModelIdSchema = z.string().trim().min(1).max(200).regex(/^[\w.:@+-][\w.:/@+-]*$/, 'invalid model id').refine((v) => !v.includes('..'), 'invalid model id');
+const providerEndpointIdSchema = z.string().min(1).max(40);
+const providerKeyFields = {
+  id: providerKeyIdSchema,
+  label: z.string().trim().max(80).default(''),
+  endpointId: providerEndpointIdSchema,
+  models: z.object({
+    narrate: providerModelIdSchema,
+    mechanics: providerModelIdSchema.optional(),
+    extract: providerModelIdSchema.optional(),
+  }).strict(),
+};
+export const providerKeyBodySchema = z.discriminatedUnion('trust', [
+  z.object({ ...providerKeyFields, trust: z.literal('sealed'), key: providerSecretSchema }).strict(),
+  z.object({
+    ...providerKeyFields,
+    trust: z.literal('unlock'),
+    wrap: encryptedKeyEnvelopeSchema,
+    keyHint: z.string().max(4).regex(/^[\x21-\x7e]*$/),
+  }).strict(),
+]);
+export const providerKeyTestBodySchema = z.object({
+  endpointId: providerEndpointIdSchema,
+  model: providerModelIdSchema,
+  key: providerSecretSchema,
+}).strict();
+export const providerModelsBodySchema = z.object({ endpointId: providerEndpointIdSchema, key: providerSecretSchema }).strict();
 export const encryptionUnlockBodySchema = z.object({
   storyKeys: z.array(z.object({
     storyId: nonEmptyText,
     key: base64BytesSchema,
-  }).strict()).min(1).max(100),
-}).strict();
+  }).strict()).max(100).default([]),
+  providerKeys: z.array(z.object({ keyId: providerKeyIdSchema, key: providerSecretSchema }).strict()).max(1).default([]),
+}).strict().refine((b) => b.storyKeys.length + b.providerKeys.length > 0, 'nothing to unlock');
 export const encryptionLockBodySchema = z.object({
   storyId: nonEmptyText.optional(),
 }).strict().default({});

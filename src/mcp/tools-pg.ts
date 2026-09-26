@@ -46,6 +46,7 @@ import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType
 import { commitNarration, playTurn, recommitNarration } from '../application/play-pg.ts';
 import { appliedCounts, buildGuide, upkeepFor } from './upkeep.ts';
 import type { Registry } from '../providers/provider.ts';
+import { usageForUser } from '../store/usage-pg.ts';
 
 export interface McpToolContext {
   /**
@@ -340,6 +341,7 @@ export async function getStateTool(ctx: McpToolContext) {
     pendingConsequences: (await world.consequences.pending()).length,
     hiddenFired: await world.consequences.hiddenFiredCount(),
     usage: await world.chronicle.usageTotals(),
+    myUsage: ctx.user ? await usageForUser(ctx.db, ctx.user.id, 30) : null,
     upkeep: await upkeepOf(ctx),
     recentHistory: await world.history.recent(),
   };

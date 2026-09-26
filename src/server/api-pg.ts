@@ -57,7 +57,9 @@ import {
 } from '../setup/service-pg.ts';
 import type { IngestLimits } from '../ingest/depth-pg.ts';
 import type { Registry, SwappableRegistry } from '../providers/provider.ts';
-import type { ProviderResolver } from '../providers/resolver-pg.ts';
+import { ProviderKeyForbiddenError, ProviderKeyInputError, type ProviderResolver } from '../providers/resolver-pg.ts';
+import { BYOK_ENDPOINTS } from '../providers/byok.ts';
+import { usageByUser, usageForUser } from '../store/usage-pg.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
 import { switchImageProfile, switchProfile } from '../config/config.ts';
 import { probeImageProviders } from '../providers/imageConfig.ts';
@@ -94,6 +96,9 @@ import {
   encryptionLockBodySchema,
   encryptionMigrationBodySchema,
   encryptionUnlockBodySchema,
+  providerKeyBodySchema,
+  providerKeyTestBodySchema,
+  providerModelsBodySchema,
   directiveBodySchema,
   forkStoryBodySchema,
   illustrationBodySchema,
@@ -413,10 +418,15 @@ route('GET', '/api/auth/me', (_req, res, { user }) => {
   send(res, 200, { user });
 });
 
-route('GET', '/api/encryption/keys', async (_req, res, { db, user, ephemeralStoryKeys }) => {
+route('GET', '/api/encryption/keys', async (_req, res, { db, user, ephemeralStoryKeys, providerResolver }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
   const keys = await encryptionKeysForUser(db, user.id);
-  send(res, 200, { enrolled: keys.userKey !== null, grants: ephemeralStoryKeys.list(user.id), ...keys });
+  send(res, 200, {
+    enrolled: keys.userKey !== null,
+    grants: ephemeralStoryKeys.list(user.id),
+    ...keys,
+    providerKey: providerResolver ? await providerResolver.unlockRecord(user) : null,
+  });
 });
 
 route('POST', '/api/encryption/enroll', async (_req, res, { body, db, user }) => {
@@ -432,9 +442,9 @@ route('POST', '/api/encryption/enroll', async (_req, res, { body, db, user }) =>
   send(res, 201, { enrolled: true });
 });
 
-route('POST', '/api/encryption/unlock', async (_req, res, { body, db, user, ephemeralStoryKeys }) => {
+route('POST', '/api/encryption/unlock', async (_req, res, { body, db, user, ephemeralStoryKeys, providerResolver }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
-  const { storyKeys } = parseBody(encryptionUnlockBodySchema, body);
+  const { storyKeys, providerKeys } = parseBody(encryptionUnlockBodySchema, body);
   if (new Set(storyKeys.map((item) => item.storyId)).size !== storyKeys.length) {
     return send(res, 400, { error: 'duplicate private-story key' });
   }
@@ -444,23 +454,35 @@ route('POST', '/api/encryption/unlock', async (_req, res, { body, db, user, ephe
   if (storyKeys.some((item) => !permittedStoryIds.has(item.storyId))) {
     return send(res, 403, { error: 'can only unlock your enrolled stories' });
   }
+  if (providerKeys.length && !providerResolver) {
+    return send(res, 409, { error: 'personal provider keys are not enabled on this server' });
+  }
+  let grants: ReturnType<EphemeralStoryKeyStore['unlock']>;
   try {
-    const grants = ephemeralStoryKeys.unlock(
+    grants = ephemeralStoryKeys.unlock(
       user.id,
       storyKeys.map((item) => ({ storyId: item.storyId, key: Buffer.from(item.key, 'base64') })),
     );
-    send(res, 200, { grants });
   } catch {
     // Key bytes are deliberately not returned, logged, or placed in an error.
-    send(res, 400, { error: 'invalid private-story key' });
+    return send(res, 400, { error: 'invalid private-story key' });
+  }
+  try {
+    const providerGrants = providerResolver ? await providerResolver.unlock(user, providerKeys) : [];
+    send(res, 200, { grants, providerGrants });
+  } catch (err) {
+    if (err instanceof ProviderKeyForbiddenError) return send(res, 403, { error: err.message });
+    throw err;
   }
 });
 
-route('POST', '/api/encryption/lock', async (_req, res, { body, user, ephemeralStoryKeys }) => {
+route('POST', '/api/encryption/lock', async (_req, res, { body, user, ephemeralStoryKeys, providerResolver }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
   const { storyId } = parseBody(encryptionLockBodySchema, body);
   const lockedStoryIds = ephemeralStoryKeys.lock(user.id, storyId);
-  send(res, 200, { lockedStoryIds });
+  // Locking everything includes the provider key: "locked" must mean nothing of theirs is usable here.
+  const providerLocked = storyId ? false : (providerResolver?.lock(user.id) ?? false);
+  send(res, 200, { lockedStoryIds, providerLocked });
 });
 
 route('GET', '/api/encryption/migration', async (_req, res, { db, user }) => {
@@ -490,6 +512,99 @@ route('POST', '/api/encryption/migration', async (_req, res, { body, db, user, e
       migration: await privateMigrationStatus(db, user.id),
     });
   }
+});
+
+function requireResolver(res: ServerResponse, resolver: ProviderResolver | undefined): ProviderResolver | null {
+  if (!resolver) {
+    send(res, 503, { error: 'personal provider keys are not enabled on this server' });
+    return null;
+  }
+  return resolver;
+}
+
+/** Spends one key-management call; answers 429 and returns false once the caller is out. */
+function takeKeyCall(res: ServerResponse, resolver: ProviderResolver, user: SessionUser): boolean {
+  const wait = resolver.takeKeyCall(user.id);
+  if (wait === null) return true;
+  res.setHeader('retry-after', String(wait));
+  send(res, 429, { error: `too many provider-key requests; try again in ${wait}s` });
+  return false;
+}
+
+function usageDays(url: URL): number {
+  const days = Number(url.searchParams.get('days'));
+  return Number.isInteger(days) && days >= 1 && days <= 365 ? days : 30;
+}
+
+route('GET', '/api/provider-key', async (_req, res, { user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver) return;
+  send(res, 200, {
+    key: await resolver.summary(user),
+    status: await resolver.status(user),
+    sealedAvailable: resolver.sealedAvailable,
+    endpoints: BYOK_ENDPOINTS.map(({ id, label }) => ({ id, label })),
+  });
+});
+
+route('PUT', '/api/provider-key', async (_req, res, { body, user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver || !takeKeyCall(res, resolver, user)) return;
+  const input = parseBody(providerKeyBodySchema, body);
+  try {
+    const key = await resolver.save(user, input);
+    send(res, 200, { key, status: await resolver.status(user) });
+  } catch (err) {
+    if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
+    if ((err as { code?: string }).code === '23505') return send(res, 409, { error: 'that key id is already in use' });
+    throw err;
+  }
+});
+
+route('DELETE', '/api/provider-key', async (_req, res, { user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver) return;
+  const removed = await resolver.remove(user);
+  send(res, 200, { removed, status: await resolver.status(user) });
+});
+
+route('POST', '/api/provider-key/test', async (_req, res, { body, user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver || !takeKeyCall(res, resolver, user)) return;
+  try {
+    send(res, 200, await resolver.test(user, parseBody(providerKeyTestBodySchema, body)));
+  } catch (err) {
+    if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
+    throw err;
+  }
+});
+
+route('POST', '/api/provider-key/models', async (_req, res, { body, user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver || !takeKeyCall(res, resolver, user)) return;
+  try {
+    send(res, 200, { models: await resolver.models(parseBody(providerModelsBodySchema, body)) });
+  } catch (err) {
+    if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
+    throw err;
+  }
+});
+
+route('GET', '/api/usage', async (_req, res, { db, user, url }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const days = usageDays(url);
+  send(res, 200, { days, rows: await usageForUser(db, user.id, days) });
+});
+
+route('GET', '/api/admin/usage', async (_req, res, { db, user, url, authConfig }) => {
+  if (!requireAdmin(res, authConfig, user)) return;
+  const days = usageDays(url);
+  send(res, 200, { days, rows: await usageByUser(db, days) });
 });
 
 route('GET', '/api/state', async (_req, res, { world }) => {
