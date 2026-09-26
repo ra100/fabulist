@@ -560,7 +560,7 @@ test('a turn plays over HTTP and persists', async (t) => {
         `SELECT count(*) AS count FROM history_checkpoints WHERE story_id = $1`,
         [world.storyId],
       );
-      assert.equal(Number(checkpoints?.count), 4, 'turn, post-play, REST style, and REST sheet writes each checkpoint exactly once');
+      assert.equal(Number(checkpoints?.count), 5, 'baseline, turn, post-play, REST style, and REST sheet writes each checkpoint exactly once');
       const book = await get(base, '/api/book?limit=5');
       assert.equal(book.body.turns.length, 1);
       assert.equal(book.body.turns[0].bookProse, played.body.outcome.prose);

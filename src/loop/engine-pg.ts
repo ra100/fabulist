@@ -592,6 +592,7 @@ export class Engine {
       integrity: integrityVerdict,
       referee: refereeVerdict,
       move: plan.move,
+      threadId: plan.threadId,
       frameLog: args.frames.narrate?.log ?? null,
       frames: Object.fromEntries(Object.entries(args.frames).map(([role, frame]) => [role, frame.log])),
       lint,

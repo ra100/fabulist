@@ -497,6 +497,8 @@ export interface TurnMeta {
   integrity: IntegrityVerdict | null;
   referee: RefereeVerdict | null;
   move: string | null;
+  /** The thread the director steered this turn toward; a re-commit bumps it again. */
+  threadId?: string | null;
   frameLog: FrameLog | null;
   /** Per-role frame budgets for this turn. Persisted so diagnostics stay story-scoped. */
   frames?: Record<string, FrameLog>;

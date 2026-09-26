@@ -86,7 +86,7 @@ test('committed turn checkpoint is retained when authoring checkpoints are recor
   const count = world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
     count: number;
   };
-  assert.equal(Number(count.count), 2);
+  assert.equal(Number(count.count), 3, 'baseline, turn, authoring');
   world.close();
 });
 

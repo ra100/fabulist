@@ -20,6 +20,7 @@ import {
   openThreadTool,
   addConsequenceTool,
   replaceTurnProseTool,
+  resolveInterruptTool,
   type McpToolContext,
 } from '../src/mcp/tools.ts';
 
@@ -233,7 +234,7 @@ test('SQLite commit_narration seeds consequences in its own checkpoint, like pla
   const checkpoints = world.db
     .prepare('SELECT count(*) AS n FROM history_checkpoints WHERE story_id = ?')
     .get(world.storyId) as { n: number };
-  assert.equal(Number(checkpoints.n), 2, 'the turn checkpoint, then the consequence checkpoint');
+  assert.equal(Number(checkpoints.n), 3, 'the baseline, the turn checkpoint, then the consequence checkpoint');
   world.close();
 });
 
@@ -256,16 +257,16 @@ async function sqliteAgentTurn(ctx: McpToolContext, text: string, world: Record<
 test('SQLite checkpoints record their origin, and a fork keeps it', async () => {
   const { world, ctx } = sqliteContext();
   const first = await sqliteAgentTurn(ctx, 'i warm the ink', { entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll' }] });
-  assert.deepEqual(sqliteOrigins(world), ['turn:agent', 'tool:consequences']);
+  assert.deepEqual(sqliteOrigins(world), ['story:start', 'turn:agent', 'tool:consequences']);
   const fork = rollbackTool(ctx, { turnId: first.turnId });
-  assert.deepEqual(sqliteOrigins(world.withStory(fork.forkedStory!.id)), ['turn:agent']);
+  assert.deepEqual(sqliteOrigins(world.withStory(fork.forkedStory!.id)), ['story:start', 'turn:agent']);
   world.close();
 
   const server = sqliteContext('stub-extractor');
   const proposal = await proposeTurnTool(server.ctx, { text: 'i check the door' });
   if (proposal.status !== 'awaiting-narration') throw new Error('expected awaiting-narration');
   await commitNarrationTool(server.ctx, { resumeToken: proposal.resumeToken, prose: 'The door holds.' });
-  assert.deepEqual(sqliteOrigins(server.world), ['turn:server', 'tool:consequences']);
+  assert.deepEqual(sqliteOrigins(server.world), ['story:start', 'turn:server', 'tool:consequences']);
   server.world.close();
 });
 
@@ -275,7 +276,7 @@ test('SQLite get_state lists recent checkpoints newest first with their origin',
   const state = getStateTool(ctx);
   assert.deepEqual(
     state.recentHistory.map(({ origin, turnId }) => [origin, turnId]),
-    [['tool:consequences', null], ['turn:agent', turn.turnId]],
+    [['tool:consequences', null], ['turn:agent', turn.turnId], ['story:start', null]],
   );
   world.close();
 });
@@ -310,7 +311,7 @@ test('SQLite granular tools write one checkpoint each, labelled by tool', async 
   const onLearn = addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'Brother Anselm', factId: recorded.fact.id } });
   assert.deepEqual(onLearn.trigger, { kind: 'on-learn', entityId: 'char:brother-anselm', factId: recorded.fact.id }, 'trigger names resolve to ids');
   assert.throws(() => recordFactTool(ctx, { text: 'x', knownBy: ['char:nobody'] }), /no entity/);
-  assert.deepEqual(sqliteOrigins(world), ['turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence', 'tool:add_consequence']);
+  assert.deepEqual(sqliteOrigins(world), ['story:start', 'turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence', 'tool:add_consequence']);
   assert.ok(turn.turnId);
   world.close();
 });
@@ -335,7 +336,7 @@ test('SQLite rollback and fork across an agent turn and a record_fact write rest
   assert.ok(world.graph.get('char:ferryman-oll'));
   assert.ok(!world.chronicle.facts().some((f) => f.text.startsWith('Oll takes coin')));
   assert.equal(world.graph.get('loc:far-bank'), undefined);
-  assert.deepEqual(sqliteOrigins(world), ['turn:agent']);
+  assert.deepEqual(sqliteOrigins(world), ['story:start', 'turn:agent']);
   world.close();
 });
 
@@ -343,12 +344,12 @@ test('SQLite replace_turn_prose with world re-applies the latest turn from the c
   const { world, ctx } = sqliteContext();
   await sqliteAgentTurn(ctx, 'i warm the ink', { entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll' }] });
   const second = await sqliteAgentTurn(ctx, 'i check the door', { entityUpserts: [{ id: 'item:brass-key', type: 'Item', name: 'A Brass Key' }] });
-  const out = replaceTurnProseTool(ctx, {
+  const out = await replaceTurnProseTool(ctx, {
     id: second.turnId,
     prose: 'Anselm checks the door and finds a lantern.',
     world: { entityUpserts: [{ id: 'item:lantern', type: 'Item', name: 'A Hooded Lantern' }] },
   });
-  if (out.status !== 'replaced') throw new Error(`expected replaced, got ${out.status}`);
+  if (out.status !== 'replaced' || out.stateMode !== 'reapplied') throw new Error(`expected reapplied, got ${out.status}`);
   assert.equal(out.stateMode, 'reapplied');
   assert.equal(out.replacedTurnId, second.turnId);
   assert.equal(world.graph.get('item:brass-key'), undefined, 'the old delta is gone');
@@ -357,7 +358,7 @@ test('SQLite replace_turn_prose with world re-applies the latest turn from the c
   const turns = world.chronicle.turns();
   assert.equal(turns.length, 2);
   assert.equal(turns.at(-1)!.bookProse, 'Anselm checks the door and finds a lantern.');
-  assert.deepEqual(sqliteOrigins(world), ['turn:agent', 'tool:consequences', 'turn:agent']);
+  assert.deepEqual(sqliteOrigins(world), ['story:start', 'turn:agent', 'tool:consequences', 'turn:agent', 'tool:consequences'], 'the re-commit seeds consequences in its own checkpoint');
   world.close();
 });
 
@@ -367,7 +368,7 @@ test('SQLite replace_turn_prose with world refuses when a later edit exists, and
   const second = await sqliteAgentTurn(ctx, 'i check the door', {});
   recordFactTool(ctx, { text: 'The latch sticks.' });
   const before = sqliteOrigins(world);
-  assert.throws(
+  await assert.rejects(
     () => replaceTurnProseTool(ctx, { id: second.turnId, prose: 'Other prose.', world: {} }),
     /later turns or edits/,
   );
@@ -379,9 +380,53 @@ test('SQLite replace_turn_prose with world refuses when a later edit exists, and
 test('SQLite replace_turn_prose without world keeps the delta and warns under agent upkeep', async () => {
   const { world, ctx } = sqliteContext();
   const turn = await sqliteAgentTurn(ctx, 'i warm the ink', {});
-  const out = replaceTurnProseTool(ctx, { id: turn.turnId, prose: 'New prose.' });
+  const out = await replaceTurnProseTool(ctx, { id: turn.turnId, prose: 'New prose.' });
   assert.equal(out.stateMode, 'preserve');
   assert.equal(out.upkeep, 'agent');
   assert.match(out.warning ?? '', /may no longer match/);
+  world.close();
+});
+
+test('SQLite replace_turn_prose with world re-applies the first turn, re-seeds its consequences and returns citable event ids', async () => {
+  const { world, ctx } = sqliteContext();
+  const first = await sqliteAgentTurn(ctx, 'i warm the ink', AGENT_WORLD);
+  assert.ok(first.events[0]?.id.startsWith('ev:'), 'commit_narration returns event ids');
+  const consequences = world.consequences.all().length;
+  const directed = world.chronicle.getTurn(first.turnId)!.meta.threadId;
+  assert.ok(directed, 'the director steered this turn toward a thread');
+  const tension = world.threads.all().find((thread) => thread.id === directed)!.tension;
+
+  const out = await replaceTurnProseTool(ctx, { id: first.turnId, prose: 'Anselm strikes a bargain with Oll.', world: AGENT_WORLD });
+  if (out.status !== 'replaced' || out.stateMode !== 'reapplied') throw new Error(`expected reapplied, got ${out.status}`);
+  assert.equal(world.chronicle.turns().length, 1);
+  assert.ok(out.consequencesSeeded > 0);
+  assert.equal(world.consequences.all().length, consequences, 'the old seeds are replaced, not lost');
+  assert.equal(world.threads.all().find((thread) => thread.id === directed)!.tension, tension, 'the director bump is re-applied');
+  const consequence = addConsequenceTool(ctx, {
+    causeEventId: out.events[0]!.id,
+    actorId: 'char:captain-sered',
+    action: 'Sered hears of the bargain.',
+    trigger: { kind: 'immediate' },
+    visibility: 'offscreen-discoverable',
+  });
+  assert.equal(consequence.causeEventId, out.events[0]!.id);
+  world.close();
+});
+
+test('SQLite replace_turn_prose with world keeps a vow break the player chose at an interrupt', async () => {
+  const { world, ctx } = sqliteContext();
+  const vow = () => world.cast.get('char:brother-anselm')!.contract.vows.find((v) => v.id === 'nonviolence')!;
+  const proposal = await proposeTurnTool(ctx, { text: 'i stab the captain' });
+  assert.equal(proposal.status, 'interrupted');
+  const resolved = await resolveInterruptTool(ctx, { originalText: 'i stab the captain', effect: 'establish-break' });
+  if (resolved.status !== 'awaiting-narration') throw new Error(`expected awaiting-narration, got ${resolved.status}`);
+  const committed = await commitNarrationTool(ctx, { resumeToken: resolved.resumeToken, prose: 'Anselm stabs the captain.', world: {} });
+  if (committed.status !== 'narrated') throw new Error(`expected narrated, got ${committed.status}`);
+  assert.equal(vow().broken, true);
+
+  const out = await replaceTurnProseTool(ctx, { id: committed.turnId, prose: 'The blade goes in.', world: {} });
+  if (out.status !== 'replaced' || out.stateMode !== 'reapplied') throw new Error(`expected reapplied, got ${out.status}`);
+  assert.equal(vow().broken, true, 'the prose fix does not un-break the vow');
+  assert.ok(out.brokenVows.some((v) => v.vowId === 'nonviolence'));
   world.close();
 });

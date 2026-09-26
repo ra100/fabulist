@@ -20,6 +20,7 @@ import {
   openThreadTool,
   addConsequenceTool,
   replaceTurnProseTool,
+  resolveInterruptTool,
   switchStoryTool,
   type McpToolContext,
 } from '../src/mcp/tools-pg.ts';
@@ -162,7 +163,7 @@ test('PostgreSQL commit_narration seeds consequences in its own checkpoint, like
       `SELECT count(*) AS count FROM history_checkpoints WHERE story_id = $1`,
       [world.storyId],
     );
-    assert.equal(Number(count?.count), 2);
+    assert.equal(Number(count?.count), 3, 'the baseline, the turn checkpoint, then the consequence checkpoint');
   });
   if (!ran) t.skip('no Postgres configured');
 });
@@ -202,10 +203,10 @@ test('PostgreSQL checkpoints record their origin, and a fork keeps it', async (t
   const ran = await withPg(async (db) => {
     const { world, ctx } = await pgContext(db);
     const first = await agentTurn(ctx, 'i warm the ink', { entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll' }] });
-    assert.deepEqual(await origins(db, world.storyId), ['turn:agent', 'tool:consequences']);
+    assert.deepEqual(await origins(db, world.storyId), ['story:start', 'turn:agent', 'tool:consequences']);
 
     const fork = await rollbackTool(ctx, { turnId: first.turnId });
-    assert.deepEqual(await origins(db, fork.story!.id), ['turn:agent'], 'the fork copies the retained checkpoint with its origin');
+    assert.deepEqual(await origins(db, fork.story!.id), ['story:start', 'turn:agent'], 'the fork copies the retained checkpoint with its origin');
   });
   if (!ran) return t.skip('no Postgres configured');
 
@@ -215,7 +216,7 @@ test('PostgreSQL checkpoints record their origin, and a fork keeps it', async (t
     const proposal = await proposeTurnTool(server.ctx, { text: 'i check the door' });
     if (proposal.status !== 'awaiting-narration') throw new Error('expected awaiting-narration');
     await commitNarrationTool(server.ctx, { resumeToken: proposal.resumeToken, prose: 'The door holds.' });
-    assert.deepEqual(await origins(db, server.world.storyId), ['turn:server', 'tool:consequences']);
+    assert.deepEqual(await origins(db, server.world.storyId), ['story:start', 'turn:server', 'tool:consequences']);
   });
 });
 
@@ -226,7 +227,7 @@ test('PostgreSQL get_state lists recent checkpoints newest first with their orig
     const state = await getStateTool(ctx);
     assert.deepEqual(
       state.recentHistory.map(({ origin, turnId }) => [origin, turnId]),
-      [['tool:consequences', null], ['turn:agent', turn.turnId]],
+      [['tool:consequences', null], ['turn:agent', turn.turnId], ['story:start', null]],
     );
   });
   if (!ran) t.skip('no Postgres configured');
@@ -260,7 +261,7 @@ test('PostgreSQL granular tools write one checkpoint each, labelled by tool', as
     await assert.rejects(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'char:nobody', factId: recorded.fact.id } }), /no entity "char:nobody"/);
     const onLearn = await addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'Brother Anselm', factId: recorded.fact.id } });
     assert.deepEqual(onLearn.trigger, { kind: 'on-learn', entityId: 'char:brother-anselm', factId: recorded.fact.id });
-    assert.deepEqual(await origins(db, world.storyId), ['turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence', 'tool:add_consequence']);
+    assert.deepEqual(await origins(db, world.storyId), ['story:start', 'turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence', 'tool:add_consequence']);
   });
   if (!ran) t.skip('no Postgres configured');
 });
@@ -286,7 +287,7 @@ test('PostgreSQL rollback and fork across an agent turn and a record_fact write 
     assert.ok(await world.graph.get('char:ferryman-oll'));
     assert.ok(!(await world.chronicle.facts()).some((f) => f.text.startsWith('Oll takes coin')));
     assert.equal(await world.graph.get('loc:far-bank'), undefined);
-    assert.deepEqual(await origins(db, world.storyId), ['turn:agent']);
+    assert.deepEqual(await origins(db, world.storyId), ['story:start', 'turn:agent']);
   });
   if (!ran) t.skip('no Postgres configured');
 });
@@ -301,14 +302,14 @@ test('PostgreSQL replace_turn_prose with world re-applies the latest turn from t
       prose: 'Anselm checks the door and finds a lantern.',
       world: { entityUpserts: [{ id: 'item:lantern', type: 'Item', name: 'A Hooded Lantern' }] },
     });
-    if (out.status !== 'replaced') throw new Error(`expected replaced, got ${out.status}`);
+    if (out.status !== 'replaced' || out.stateMode !== 'reapplied') throw new Error(`expected reapplied, got ${out.status}`);
     assert.equal(await world.graph.get('item:brass-key'), undefined);
     assert.ok(await world.graph.get('item:lantern'));
     assert.ok(await world.graph.get('char:ferryman-oll'));
     const turns = await world.chronicle.turns();
     assert.equal(turns.length, 2);
     assert.equal(turns.at(-1)!.bookProse, 'Anselm checks the door and finds a lantern.');
-    assert.deepEqual(await origins(db, world.storyId), ['turn:agent', 'tool:consequences', 'turn:agent']);
+    assert.deepEqual(await origins(db, world.storyId), ['story:start', 'turn:agent', 'tool:consequences', 'turn:agent', 'tool:consequences'], 'the re-commit seeds consequences in its own checkpoint');
   });
   if (!ran) t.skip('no Postgres configured');
 });
@@ -338,6 +339,54 @@ test('PostgreSQL eligible turns carry their checkpoint origin', async (t) => {
       (await world.history.eligibleTurns()).map(({ turnId, origin }) => [turnId, origin]),
       [[turn.turnId, 'turn:agent']],
     );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL replace_turn_prose with world re-applies the first turn, re-seeds its consequences and returns citable event ids', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    const first = await agentTurn(ctx, 'i warm the ink', AGENT_WORLD);
+    assert.ok(first.events[0]?.id.startsWith('ev:'), 'commit_narration returns event ids');
+    const consequences = (await world.consequences.all()).length;
+    const directed = (await world.chronicle.getTurn(first.turnId))!.meta.threadId;
+    assert.ok(directed, 'the director steered this turn toward a thread');
+    const tension = (await world.threads.all()).find((thread) => thread.id === directed)!.tension;
+
+    const out = await replaceTurnProseTool(ctx, { id: first.turnId, prose: 'Anselm strikes a bargain with Oll.', world: AGENT_WORLD });
+    if (out.status !== 'replaced' || out.stateMode !== 'reapplied') throw new Error(`expected reapplied, got ${out.status}`);
+    assert.equal((await world.chronicle.turns()).length, 1);
+    assert.ok(out.consequencesSeeded > 0);
+    assert.equal((await world.consequences.all()).length, consequences, 'the old seeds are replaced, not lost');
+    assert.equal((await world.threads.all()).find((thread) => thread.id === directed)!.tension, tension, 'the director bump is re-applied');
+    const consequence = await addConsequenceTool(ctx, {
+      causeEventId: out.events[0]!.id,
+      actorId: 'char:captain-sered',
+      action: 'Sered hears of the bargain.',
+      trigger: { kind: 'immediate' },
+      visibility: 'offscreen-discoverable',
+    });
+    assert.equal(consequence.causeEventId, out.events[0]!.id);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL replace_turn_prose with world keeps a vow break the player chose at an interrupt', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    const vow = async () => (await world.cast.get('char:brother-anselm'))!.contract.vows.find((v) => v.id === 'nonviolence')!;
+    const proposal = await proposeTurnTool(ctx, { text: 'i stab the captain' });
+    assert.equal(proposal.status, 'interrupted');
+    const resolved = await resolveInterruptTool(ctx, { originalText: 'i stab the captain', effect: 'establish-break' });
+    if (resolved.status !== 'awaiting-narration') throw new Error(`expected awaiting-narration, got ${resolved.status}`);
+    const committed = await commitNarrationTool(ctx, { resumeToken: resolved.resumeToken, prose: 'Anselm stabs the captain.', world: {} });
+    if (committed.status !== 'narrated') throw new Error(`expected narrated, got ${committed.status}`);
+    assert.equal((await vow()).broken, true);
+
+    const out = await replaceTurnProseTool(ctx, { id: committed.turnId, prose: 'The blade goes in.', world: {} });
+    if (out.status !== 'replaced' || out.stateMode !== 'reapplied') throw new Error(`expected reapplied, got ${out.status}`);
+    assert.equal((await vow()).broken, true, 'the prose fix does not un-break the vow');
+    assert.ok(out.brokenVows.some((v) => v.vowId === 'nonviolence'));
   });
   if (!ran) t.skip('no Postgres configured');
 });

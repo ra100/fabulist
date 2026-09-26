@@ -516,6 +516,7 @@ export class Engine {
       integrity: integrityVerdict,
       referee: refereeVerdict,
       move: plan.move,
+      threadId: plan.threadId,
       frameLog: this.lastFrames.narrate?.log ?? null,
       lint,
       providerCalls: args.calls,
