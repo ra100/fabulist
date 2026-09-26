@@ -2804,7 +2804,10 @@ export function createApiServer(opts: ServerOptions) {
     }
     if (authConfig && url.pathname === '/auth/logout' && req.method === 'POST') {
       const userId = await handleLogout(authConfig, req, res);
-      if (userId) ephemeralStoryKeys.lock(userId);
+      if (userId) {
+        ephemeralStoryKeys.lock(userId);
+        providerResolver?.lock(userId);
+      }
       return;
     }
 
