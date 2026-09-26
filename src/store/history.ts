@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { jsonGet, row, rows, tx, type Db } from '../db/db.ts';
-import { SceneSplitTargetError, type EligibleTurn, type HistoryCheckpoint, type SceneSplit, type StoryId, type StorySnapshot } from '../domain/types.ts';
+import { SceneSplitTargetError, type CheckpointSummary, type EligibleTurn, type HistoryCheckpoint, type SceneSplit, type StoryId, type StorySnapshot } from '../domain/types.ts';
 
 const TABLES = [
   'entities',
@@ -150,6 +150,17 @@ export class HistoryStore {
         .prepare(`SELECT * FROM history_checkpoints WHERE story_id = ? AND position <= ? ORDER BY position`)
         .all(this.storyId, position),
     ).map(toCheckpoint);
+  }
+
+  recent(limit = 10): CheckpointSummary[] {
+    return rows<Pick<CheckpointRow, 'position' | 'turn_id' | 'origin' | 'created_at'>>(
+      this.db
+        .prepare(
+          `SELECT position, turn_id, origin, created_at FROM history_checkpoints
+            WHERE story_id = ? ORDER BY position DESC LIMIT ?`,
+        )
+        .all(this.storyId, limit),
+    ).map((row) => ({ position: Number(row.position), turnId: row.turn_id, origin: row.origin, createdAt: row.created_at }));
   }
 
   eligibleTurn(turnId: string): EligibleTurn | undefined {

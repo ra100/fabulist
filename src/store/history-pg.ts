@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
 import { jsonGet, type Db, type Queryable } from '../db/pg.ts';
-import { SceneSplitTargetError, type EligibleTurn, type HistoryCheckpoint, type SceneSplit, type StoryId, type StorySnapshot } from '../domain/types.ts';
+import { SceneSplitTargetError, type CheckpointSummary, type EligibleTurn, type HistoryCheckpoint, type SceneSplit, type StoryId, type StorySnapshot } from '../domain/types.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
 
 const TABLES = [
@@ -94,6 +94,20 @@ export class HistoryStore {
       [this.storyId, position],
     );
     return Promise.all(rows.map(async (checkpoint) => checkpointOf(checkpoint, await this.readState(this.db, checkpoint, key))));
+  }
+
+  async recent(limit = 10): Promise<CheckpointSummary[]> {
+    const { rows } = await this.db.query<Pick<CheckpointRow, 'position' | 'turn_id' | 'origin' | 'created_at'>>(
+      `SELECT position, turn_id, origin, created_at FROM history_checkpoints
+        WHERE story_id = $1 ORDER BY position DESC LIMIT $2`,
+      [this.storyId, limit],
+    );
+    return rows.map((row) => ({
+      position: Number(row.position),
+      turnId: row.turn_id,
+      origin: row.origin,
+      createdAt: isoOf(row.created_at),
+    }));
   }
 
   async eligibleTurn(turnId: string): Promise<EligibleTurn | undefined> {
