@@ -167,11 +167,17 @@ export function useProviderKeyQuery(enabled: boolean) {
   return useQuery({ queryKey: providerKeyKeys.all, queryFn: api.providerKey.get, enabled, retry: false });
 }
 
+// `encryptionKeys.keys` carries the unlock-mode wrap, so a stale copy hands off a keyId the server no longer has.
+export function invalidateProviderKeyReads(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({ queryKey: providerKeyKeys.all });
+  void queryClient.invalidateQueries({ queryKey: encryptionKeys.keys });
+}
+
 export function useSaveProviderKeyMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: api.providerKey.save,
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: providerKeyKeys.all }),
+    onSuccess: () => invalidateProviderKeyReads(queryClient),
   });
 }
 
@@ -179,7 +185,7 @@ export function useDeleteProviderKeyMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: api.providerKey.remove,
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: providerKeyKeys.all }),
+    onSuccess: () => invalidateProviderKeyReads(queryClient),
   });
 }
 
