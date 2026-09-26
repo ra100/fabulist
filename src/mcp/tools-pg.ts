@@ -962,6 +962,22 @@ export async function openThreadTool(
   );
 }
 
+// isReady matches trigger ids exactly, so an unresolved name or foreign fact id would leave the consequence pending forever.
+async function consequenceTrigger(world: World, trigger: Trigger): Promise<Trigger> {
+  if (trigger.kind === 'on-enter') {
+    const locationId = await entityReference(world, trigger.locationId, 'add_consequence');
+    const type = (await world.graph.get(locationId))!.type;
+    if (type !== 'Location') throw new Error(`add_consequence: ${locationId} is a ${type}, not a Location`);
+    return { kind: 'on-enter', locationId };
+  }
+  if (trigger.kind === 'on-learn') {
+    const { rowCount } = await world.db.query(`SELECT 1 FROM facts WHERE story_id = $1 AND id = $2`, [world.storyId, trigger.factId]);
+    if (!rowCount) throw new Error(`add_consequence: no fact ${JSON.stringify(trigger.factId)} in this story`);
+    return { kind: 'on-learn', entityId: await entityReference(world, trigger.entityId, 'add_consequence'), factId: trigger.factId };
+  }
+  return trigger;
+}
+
 /** `add_consequence`. A reaction the prose sets up that propagation over the graph cannot infer. */
 export async function addConsequenceTool(
   ctx: McpToolContext,
@@ -980,9 +996,10 @@ export async function addConsequenceTool(
       ]);
       if (!rowCount) throw new Error(`add_consequence: no event ${JSON.stringify(args.causeEventId)} in this story`);
       const actorId = await entityReference(transactionWorld, args.actorId, 'add_consequence');
+      const trigger = await consequenceTrigger(transactionWorld, args.trigger);
       return transactionWorld.consequences.enqueue({
         causeEventId: args.causeEventId,
-        trigger: args.trigger,
+        trigger,
         actorId,
         action,
         visibility: args.visibility,

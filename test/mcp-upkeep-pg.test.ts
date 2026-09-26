@@ -252,7 +252,14 @@ test('PostgreSQL granular tools write one checkpoint each, labelled by tool', as
       () => addConsequenceTool(ctx, { causeEventId: 'ev:missing', actorId: 'char:captain-sered', action: 'x', trigger: { kind: 'immediate' }, visibility: 'onscreen' }),
       /no event "ev:missing"/,
     );
-    assert.deepEqual(await origins(db, world.storyId), ['turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence']);
+    const base = { causeEventId: event.id, actorId: 'char:captain-sered', action: 'x', visibility: 'onscreen' as const };
+    await assert.rejects(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-enter', locationId: 'The Far Bank' } }), /no entity "The Far Bank"/);
+    await assert.rejects(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-enter', locationId: 'char:captain-sered' } }), /not a Location/);
+    await assert.rejects(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'Brother Anselm', factId: 'fact:missing' } }), /no fact "fact:missing"/);
+    await assert.rejects(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'char:nobody', factId: recorded.fact.id } }), /no entity "char:nobody"/);
+    const onLearn = await addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'Brother Anselm', factId: recorded.fact.id } });
+    assert.deepEqual(onLearn.trigger, { kind: 'on-learn', entityId: 'char:brother-anselm', factId: recorded.fact.id });
+    assert.deepEqual(await origins(db, world.storyId), ['turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence', 'tool:add_consequence']);
   });
   if (!ran) t.skip('no Postgres configured');
 });

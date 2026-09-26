@@ -301,8 +301,15 @@ test('SQLite granular tools write one checkpoint each, labelled by tool', async 
     () => addConsequenceTool(ctx, { causeEventId: 'ev:missing', actorId: 'char:captain-sered', action: 'x', trigger: { kind: 'immediate' }, visibility: 'onscreen' }),
     /no event "ev:missing"/,
   );
+  const base = { causeEventId: event.id, actorId: 'char:captain-sered', action: 'x', visibility: 'onscreen' as const };
+  assert.throws(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-enter', locationId: 'The Far Bank' } }), /no entity "The Far Bank"/);
+  assert.throws(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-enter', locationId: 'char:captain-sered' } }), /not a Location/);
+  assert.throws(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'Brother Anselm', factId: 'fact:missing' } }), /no fact "fact:missing"/);
+  assert.throws(() => addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'char:nobody', factId: recorded.fact.id } }), /no entity "char:nobody"/);
+  const onLearn = addConsequenceTool(ctx, { ...base, trigger: { kind: 'on-learn', entityId: 'Brother Anselm', factId: recorded.fact.id } });
+  assert.deepEqual(onLearn.trigger, { kind: 'on-learn', entityId: 'char:brother-anselm', factId: recorded.fact.id }, 'trigger names resolve to ids');
   assert.throws(() => recordFactTool(ctx, { text: 'x', knownBy: ['char:nobody'] }), /no entity/);
-  assert.deepEqual(sqliteOrigins(world), ['turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence']);
+  assert.deepEqual(sqliteOrigins(world), ['turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence', 'tool:add_consequence']);
   assert.ok(turn.turnId);
   world.close();
 });
