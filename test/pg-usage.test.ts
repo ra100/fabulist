@@ -77,7 +77,12 @@ test('one statement records a call and stamps the key it used', async (t) => {
       [keyId, Buffer.alloc(12, 1), Buffer.alloc(40, 2)],
     );
     let statements = 0;
-    const counting = { query: (sql: string, params?: unknown[]) => (statements++, roles.play.query(sql, params)) } as typeof roles.play;
+    const counting = {
+      query: (sql: string, params?: unknown[]) => {
+        statements++;
+        return roles.play.query(sql, params);
+      },
+    } as typeof roles.play;
     await recordUsage(counting, {
       userId: 'user:alice',
       storyId: null,
