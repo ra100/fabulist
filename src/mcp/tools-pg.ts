@@ -45,6 +45,7 @@ import type { SessionUser } from '../auth/config.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType, Trigger, Visibility } from '../domain/types.ts';
 import { commitNarration, playTurn, recommitNarration } from '../application/play-pg.ts';
 import { appliedCounts, buildGuide, upkeepFor } from './upkeep.ts';
+import type { Registry } from '../providers/provider.ts';
 
 export interface McpToolContext {
   /**
@@ -96,9 +97,16 @@ export interface McpToolContext {
   chargePaidCall?: () => void;
   /** The prose-lint blocklist the gate enforces, for `get_guide`; absent means none. */
   lintBlocklist?: () => string[];
+  /** This connection's text providers (own key, shared server, or mock); absent uses the engine's. */
+  providers?: (storyId?: string) => Promise<Registry>;
 }
 
-const upkeepOf = (ctx: McpToolContext) => upkeepFor(ctx.engine.registry);
+export async function requestRegistry(ctx: McpToolContext, world: World): Promise<Registry> {
+  return ctx.providers ? ctx.providers(world.storyId) : ctx.engine.registry;
+}
+
+/** Per request, so upkeep follows the caller's key, lock state and the sharing toggle. */
+export const upkeepOf = async (ctx: McpToolContext) => upkeepFor(ctx.providers ? await ctx.providers() : ctx.engine.registry);
 
 const VISUAL_STYLES: VisualStyle[] = ['realistic', 'drawing', 'sketch', 'draft', 'animation'];
 function parseVisualStyle(v: unknown): VisualStyle | undefined {
@@ -213,7 +221,7 @@ export async function createStoryTool(ctx: McpToolContext, args: { title?: strin
   });
   // Scene 1 comes with the story now — see `createStory`, which opens it for
   // every creation path rather than leaving each one to remember.
-  return { story, upkeep: upkeepOf(ctx) };
+  return { story, upkeep: await upkeepOf(ctx) };
 }
 
 /**
@@ -313,7 +321,7 @@ export async function switchStoryTool(ctx: McpToolContext, args: { id: string })
   // Touched so the *next* connection with no explicit selection resolves here too,
   // which is what "most recently played" means for a returning client.
   await ctx.db.query(`UPDATE stories SET last_played_at = now() WHERE id = $1`, [args.id]);
-  return { current: args.id, scope: 'this connection' as const, upkeep: upkeepOf(ctx) };
+  return { current: args.id, scope: 'this connection' as const, upkeep: await upkeepOf(ctx) };
 }
 
 export async function getStateTool(ctx: McpToolContext) {
@@ -332,7 +340,7 @@ export async function getStateTool(ctx: McpToolContext) {
     pendingConsequences: (await world.consequences.pending()).length,
     hiddenFired: await world.consequences.hiddenFiredCount(),
     usage: await world.chronicle.usageTotals(),
-    upkeep: upkeepOf(ctx),
+    upkeep: await upkeepOf(ctx),
     recentHistory: await world.history.recent(),
   };
 }
@@ -342,7 +350,7 @@ export async function getGuideTool(ctx: McpToolContext) {
   const world = await ctx.world();
   const session = await world.session.get();
   return buildGuide({
-    upkeep: upkeepOf(ctx),
+    upkeep: await upkeepOf(ctx),
     writingRules: narratorSystem(session.style, false),
     style: session.style,
     knobs: session.knobs,
@@ -582,7 +590,7 @@ export async function startStoryTool(
   });
   return {
     ...assigned,
-    upkeep: upkeepOf(ctx),
+    upkeep: await upkeepOf(ctx),
     opening: await proposeOpening(world),
     nextStep: assigned.playerCharacterId
       ? 'The book is playable now. Offer the opening to the player, then take their first turn with propose_turn.'
@@ -614,16 +622,18 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   // that getter is the process-wide shared pointer, so without this an
   // identified caller's turn would be gated and committed against whichever
   // story happened to be current server-wide instead of their own.
+  const world = await ctx.world();
   const outcome = await ctx.engine.takeTurn(args.text, {
     narrateExternally: true,
-    world: await ctx.world(),
+    world,
+    providers: await requestRegistry(ctx, world),
     ...(args.actorId ? { actorId: args.actorId } : {}),
   });
 
   if (outcome.kind === 'awaiting-narration') {
     return {
       status: 'awaiting-narration' as const,
-      upkeep: upkeepOf(ctx),
+      upkeep: await upkeepOf(ctx),
       // Stated in the payload, not only in the tool description and the server
       // instructions: a client that ignored both still gets told, at the exact
       // moment it matters, that stopping here throws the turn away.
@@ -638,7 +648,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'interrupted') {
     return {
       status: 'interrupted' as const,
-      upkeep: upkeepOf(ctx),
+      upkeep: await upkeepOf(ctx),
       nextStep:
         'Show the player these options and call resolve_interrupt with the one they pick and this originalText. Do not call commit_narration — no turn is pending.',
       message: outcome.interrupt.message,
@@ -654,7 +664,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'answered') {
     return {
       status: 'answered' as const,
-      upkeep: upkeepOf(ctx),
+      upkeep: await upkeepOf(ctx),
       nextStep:
         'This was a question about the world, not an action. Relay the answer; there is nothing to narrate or commit.',
       text: outcome.text,
@@ -683,7 +693,7 @@ export async function commitNarrationTool(
   args: { resumeToken: string; prose: string; world?: unknown },
 ) {
   ctx.chargePaidCall?.();
-  const upkeep = upkeepOf(ctx);
+  const upkeep = await upkeepOf(ctx);
   const agentWorld = upkeep === 'agent' ? args.world : undefined;
   const warning =
     upkeep === 'agent' && args.world === undefined
@@ -695,13 +705,15 @@ export async function commitNarrationTool(
   // story, and `commitExternalNarration` refuses a story mismatch — which,
   // resolved through the shared pointer, is what any other reader's switch
   // would have looked like.
+  const world = await ctx.world();
   const { outcome, seeded, tick } = await commitNarration(
     ctx.db,
     ctx.engine,
-    await ctx.world(),
+    world,
     args.resumeToken,
     args.prose,
     agentWorld,
+    await requestRegistry(ctx, world),
   );
   if (outcome.kind === 'narrated') {
     return {
@@ -774,10 +786,12 @@ export async function resolveInterruptTool(
   // level (see engine.ts's own comment on `overrideIntegrity`) — the
   // distinction is authorial intent the divergence ledger records, not a
   // different code path.
+  const world = await ctx.world();
   const outcome = await ctx.engine.takeTurn(args.originalText, {
     narrateExternally: true,
     overrideIntegrity: true,
-    world: await ctx.world(),
+    world,
+    providers: await requestRegistry(ctx, world),
     ...(args.actorId ? { actorId: args.actorId } : {}),
   });
   if (outcome.kind === 'awaiting-narration') {
@@ -810,7 +824,10 @@ export async function resolveInterruptTool(
 export async function playTool(ctx: McpToolContext, args: { input: string; overrideIntegrity?: boolean }) {
   ctx.chargePaidCall?.();
   const world = await ctx.world();
-  return playTurn(ctx.db, ctx.engine, world, args.input, { overrideIntegrity: args.overrideIntegrity });
+  return playTurn(ctx.db, ctx.engine, world, args.input, {
+    overrideIntegrity: args.overrideIntegrity,
+    providers: await requestRegistry(ctx, world),
+  });
 }
 
 /** `pin_turn`. The MCP-side counterpart of `POST /api/turn/:id/pin` \u2014 a pinned turn's prose survives `regenerate_turn`/compaction untouched. */
@@ -833,6 +850,7 @@ export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string
   const world = await ctx.world();
   return regenerateProseWithCheckpoint(ctx.db, world, ctx.engine, args.id, {
     ...(args.note?.trim() ? { note: args.note.trim() } : {}),
+    providers: await requestRegistry(ctx, world),
   });
 }
 
@@ -845,7 +863,7 @@ export async function replaceTurnProseTool(
   if (!args.prose.trim()) throw new Error('replace_turn_prose: prose is required');
   if (args.stateMode && args.stateMode !== 'preserve')
     throw new Error('replace_turn_prose: only stateMode "preserve" is supported');
-  const upkeep = upkeepOf(ctx);
+  const upkeep = await upkeepOf(ctx);
   if (upkeep === 'agent' && args.world !== undefined) {
     const { outcome: result, seeded, tick } = await recommitNarration(ctx.db, world, args.id, args.prose, args.world);
     if (result.kind === 'blocked') {
@@ -1266,7 +1284,7 @@ export async function tickTool(ctx: McpToolContext) {
 export async function compactTool(ctx: McpToolContext, args: { scene?: number; force?: boolean }) {
   ctx.chargePaidCall?.();
   const world = await ctx.world();
-  const compactor = ctx.engine.compaction();
+  const compactor = ctx.engine.compaction(await requestRegistry(ctx, world));
   if (typeof args.scene === 'number') {
     const summary = await compactor.summariseScene(world, args.scene, args.force === true);
     return { scene: args.scene, summary };
@@ -1283,11 +1301,12 @@ export async function compactTool(ctx: McpToolContext, args: { scene?: number; f
 export async function closeSceneTool(ctx: McpToolContext) {
   ctx.chargePaidCall?.();
   const world = await ctx.world();
+  const compactor = ctx.engine.compaction(await requestRegistry(ctx, world));
   return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
     const before = await transactionWorld.session.get();
-    const result = await ctx.engine.compaction().onSceneClosed(transactionWorld, before.scene);
+    const result = await compactor.onSceneClosed(transactionWorld, before.scene);
     await transactionWorld.session.set({ scene: before.scene + 1, turn: 0 });
-    await transactionWorld.chronicle.upsertScene(before.scene + 1, { chapter: ctx.engine.compaction().chapterOf(before.scene + 1) });
+    await transactionWorld.chronicle.upsertScene(before.scene + 1, { chapter: compactor.chapterOf(before.scene + 1) });
     const summary = (await transactionWorld.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
     return {
       closedScene: before.scene,
@@ -1330,7 +1349,8 @@ export async function resolveWikiTool(ctx: McpToolContext, args: { query: string
 export async function planWorldTool(ctx: McpToolContext, args: { wish: string; wiki: WikiCandidate }) {
   ctx.chargePaidCall?.();
   if (!ctx.setup) throw new Error('plan_world: this server has no setup service enabled');
-  return ctx.setup.plan(args.wish.trim(), args.wiki);
+  const world = await ctx.world();
+  return ctx.setup.plan(args.wish.trim(), args.wiki, await requestRegistry(ctx, world));
 }
 
 /**
@@ -1398,6 +1418,7 @@ export async function discoverWorldTool(
   const sketch = args.character ?? { existing: null, name: '', role: '', goals: [], vows: [] };
   const limits = limitsFromWire(args);
   assertIngestBudgetFor(ctx.user, args.mode ?? 'mid', limits);
+  const world = await ctx.world();
   return ctx.setup.startDiscover(
     args.baseUrl,
     args.seeds,
@@ -1407,6 +1428,7 @@ export async function discoverWorldTool(
     args.title ?? '',
     limits,
     ctx.user?.id,
+    await requestRegistry(ctx, world),
   );
 }
 
@@ -1425,7 +1447,8 @@ export async function commitIngestTool(
   // Authored into this connection's own story, not the setup service's
   // process-wide one — see `AuthoringTarget` — and refused up front when that
   // story reads a world this user may not write.
-  const target = { world: await ctx.world(), user: ctx.user ?? null };
+  const world = await ctx.world();
+  const target = { world, user: ctx.user ?? null, providers: await requestRegistry(ctx, world) };
   await ctx.setup.assertMayAuthor(target);
   return ctx.setup.startIngest(
     args.previewKey,
@@ -1445,7 +1468,8 @@ export async function createCustomWorldTool(
 ): Promise<Job<ApplyCustomResult>> {
   ctx.chargePaidCall?.();
   if (!ctx.setup) throw new Error('create_custom_world: this server has no setup service enabled');
-  const target = { world: await ctx.world(), user: ctx.user ?? null };
+  const world = await ctx.world();
+  const target = { world, user: ctx.user ?? null, providers: await requestRegistry(ctx, world) };
   // Before the job, because the job pays for a model call before it writes.
   await ctx.setup.assertMayAuthor(target);
   return ctx.setup.startCustomWorld(args.description.trim(), args.style, target);

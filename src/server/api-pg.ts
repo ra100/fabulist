@@ -56,7 +56,8 @@ import {
   type SetupService,
 } from '../setup/service-pg.ts';
 import type { IngestLimits } from '../ingest/depth-pg.ts';
-import type { SwappableRegistry } from '../providers/provider.ts';
+import type { Registry, SwappableRegistry } from '../providers/provider.ts';
+import type { ProviderResolver } from '../providers/resolver-pg.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
 import { switchImageProfile, switchProfile } from '../config/config.ts';
 import { probeImageProviders } from '../providers/imageConfig.ts';
@@ -204,6 +205,8 @@ export interface ServerOptions {
    * it is their bill.
    */
   paidCallLimit?: PaidCallLimit | null;
+  /** Resolves each request's text providers from the signed-in user's own key; absent means the engine's own. */
+  providerResolver?: ProviderResolver;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext) => Promise<void> | void;
@@ -242,6 +245,9 @@ interface RouteContext {
   /** Present whenever login is configured at all — `undefined` in login-off mode. `requireAdmin` reads this alongside `user` to distinguish "login is off" from "login is on, but not an admin." */
   authConfig: AuthConfig | undefined;
   ephemeralStoryKeys: EphemeralStoryKeyStore;
+  /** This request's text-provider registry: the caller's own key, the shared server one, or mock. */
+  providers: Registry;
+  providerResolver: ProviderResolver | undefined;
 }
 
 const MIME: Record<string, string> = {
@@ -697,12 +703,13 @@ route('POST', '/api/turn/:id/pin', async (_req, res, { db, world, params, body }
  * so the UI has something concrete to show instead of a passage that just
  * didn't move.
  */
-route('POST', '/api/turn/:id/regenerate', async (_req, res, { db, engine, world, params, body }) => {
+route('POST', '/api/turn/:id/regenerate', async (_req, res, { db, engine, world, params, body, providers }) => {
   const id = decodeURIComponent(params.id ?? '');
   const { note } = parseBody(regenerateBodySchema, body);
   try {
     const turn = await regenerateProseWithCheckpoint(db, world, engine, id, {
       ...(note?.trim() ? { note: note.trim() } : {}),
+      providers,
     });
     send(res, 200, turn);
   } catch (err) {
@@ -713,14 +720,14 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { db, engine, world,
   }
 });
 
-route('POST', '/api/play', async (_req, res, { db, engine, world, body }) => {
+route('POST', '/api/play', async (_req, res, { db, engine, world, body, providers }) => {
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
 
   // `world` explicit: the per-request (per-user, when login is on) world —
   // see `TakeTurnOptions.world`'s own doc comment for why this must not be
   // left to the engine's own captured getter once two users can each be
   // mid-turn on their own story at the same time.
-  const result = await playTurn(db, engine, world, input, { overrideIntegrity });
+  const result = await playTurn(db, engine, world, input, { overrideIntegrity, providers });
   send(res, 200, result);
 });
 
@@ -1238,9 +1245,9 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
 });
 
 /** Summarise a closed scene on demand, or catch up everything that closed unsummarised. */
-route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
+route('POST', '/api/compact', async (_req, res, { world, engine, body, providers }) => {
   const { scene, force } = (body ?? {}) as { scene?: number; force?: boolean };
-  const compactor = engine.compaction();
+  const compactor = engine.compaction(providers);
   if (typeof scene === 'number') {
     const summary = await compactor.summariseScene(world, scene, force === true);
     return send(res, 200, { scene, summary });
@@ -1254,12 +1261,13 @@ route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
  * Without this, scene stays 1 forever unless the extractor happens to set
  * `sceneAdvance`, and hierarchical compaction never runs.
  */
-route('POST', '/api/scene/close', async (_req, res, { db, world, engine }) => {
+route('POST', '/api/scene/close', async (_req, res, { db, world, engine, providers }) => {
+  const compactor = engine.compaction(providers);
   const result = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
     const before = await transactionWorld.session.get();
-    const compaction = await engine.compaction().onSceneClosed(transactionWorld, before.scene);
+    const compaction = await compactor.onSceneClosed(transactionWorld, before.scene);
     await transactionWorld.session.set({ scene: before.scene + 1, turn: 0 });
-    await transactionWorld.chronicle.upsertScene(before.scene + 1, { chapter: engine.compaction().chapterOf(before.scene + 1) });
+    await transactionWorld.chronicle.upsertScene(before.scene + 1, { chapter: compactor.chapterOf(before.scene + 1) });
     const summary = (await transactionWorld.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
     return { before, compaction, summary };
   });
@@ -1852,7 +1860,7 @@ route('GET', '/api/providers', async (_req, res, ctx) => {
  * Server-sent events rather than a websocket: the traffic is one-directional and
  * short-lived, and SSE reconnects itself.
  */
-route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body }) => {
+route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body, providers }) => {
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
 
   res.writeHead(200, {
@@ -1868,6 +1876,7 @@ route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body })
   try {
     const result = await playTurn(db, engine, world, input, {
       overrideIntegrity,
+      providers,
       onStage: (stage) => emit('stage', { stage }),
       onToken: (chunk) => emit('token', { chunk }),
     });
@@ -2089,11 +2098,11 @@ route('POST', '/api/setup/resolve', async (_req, res, { setup, body }) => {
 });
 
 /** Free text plus a chosen wiki becomes an editable plan. */
-route('POST', '/api/setup/plan', async (_req, res, { setup, body }) => {
+route('POST', '/api/setup/plan', async (_req, res, { setup, body, providers }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { wish, wiki } = parseBody(setupPlanBodySchema, body);
-  send(res, 200, await svc.plan(wish.trim(), wiki));
+  send(res, 200, await svc.plan(wish.trim(), wiki, providers));
 });
 
 /** What it would cost, before anything is spent. */
@@ -2132,7 +2141,7 @@ route('POST', '/api/setup/preview', async (_req, res, { setup, body, user }) => 
  * the wizard and was, until now, the one with no progress reporting at all.
  * Also returns a character sketch refined against what was actually found.
  */
-route('POST', '/api/setup/discover', (_req, res, { setup, body, user }) => {
+route('POST', '/api/setup/discover', (_req, res, { setup, body, user, providers }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const parsed = parseBody(setupDiscoverBodySchema, body);
@@ -2144,7 +2153,7 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body, user }) => {
     send(
       res,
       200,
-      svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? '', limits, user?.id),
+      svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? '', limits, user?.id, providers),
     );
   } catch (e) {
     send(res, setupFailureStatus(e, 400), { error: e instanceof Error ? e.message : String(e) });
@@ -2175,7 +2184,7 @@ function setupFailureStatus(err: unknown, otherwise: number): number {
  * `ensureCanonWorldFor`). `assertMayAuthor` asks before a job or a model call is
  * started, so a refusal costs nothing.
  */
-route('POST', '/api/setup/ingest', async (_req, res, { setup, body, world, user }) => {
+route('POST', '/api/setup/ingest', async (_req, res, { setup, body, world, user, providers }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { previewKey, character, style, opening } = parseBody(setupIngestBodySchema, body);
@@ -2188,7 +2197,7 @@ route('POST', '/api/setup/ingest', async (_req, res, { setup, body, world, user 
         style: style ?? {},
         opening: opening ?? '',
       },
-      { world, user },
+      { world, user, providers },
     );
     send(res, 200, job);
   } catch (err) {
@@ -2196,13 +2205,13 @@ route('POST', '/api/setup/ingest', async (_req, res, { setup, body, world, user 
   }
 });
 
-route('POST', '/api/setup/custom', async (_req, res, { setup, body, world, user }) => {
+route('POST', '/api/setup/custom', async (_req, res, { setup, body, world, user, providers }) => {
   const svc = requireSetup(res, setup);
   if (!svc) return;
   const { description, style } = parseBody(setupCustomBodySchema, body);
   await svc.assertMayAuthor({ world, user });
   try {
-    send(res, 200, svc.startCustomWorld(description.trim(), style, { world, user }));
+    send(res, 200, svc.startCustomWorld(description.trim(), style, { world, user, providers }));
   } catch (err) {
     if (!(err instanceof SetupBusyError)) throw err;
     send(res, 409, { error: err.message });
@@ -2331,7 +2340,7 @@ route('GET', '/api/setup/ingest-health', async (_req, res, { setup, user, authCo
  * fields exist only to widen the scope for "read more". Admin-only, same
  * reasoning as `GET /api/setup/ingest-health` above.
  */
-route('POST', '/api/setup/continue', async (_req, res, { setup, body, user, authConfig }) => {
+route('POST', '/api/setup/continue', async (_req, res, { setup, body, user, authConfig, providers }) => {
   if (!requireAdmin(res, authConfig, user)) return;
   const svc = requireSetup(res, setup);
   if (!svc) return;
@@ -2347,7 +2356,7 @@ route('POST', '/api/setup/continue', async (_req, res, { setup, body, user, auth
     // persisted ingest context from the database before it can start a job),
     // so serialising the promise sent `{}` — a job with no `id` and no
     // `progress` — and the panel polling it died on the first render.
-    const job = await svc.continueIngest({ seeds, mode, excludeCategories, limits });
+    const job = await svc.continueIngest({ seeds, mode, excludeCategories, limits }, providers);
     send(res, 200, job);
   } catch (err) {
     send(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -2486,6 +2495,7 @@ export function createApiServer(opts: ServerOptions) {
     mcpAuth,
     mcpResourceUrl,
     authConfig,
+    providerResolver,
   } = opts;
   const ephemeralStoryKeys = opts.ephemeralStoryKeys ?? new EphemeralStoryKeyStore();
   const dataRoot = opts.dataRoot ?? 'data';
@@ -2547,6 +2557,7 @@ export function createApiServer(opts: ServerOptions) {
         selected = storyId;
       },
       engine,
+      ...(providerResolver ? { providers: (storyId?: string) => providerResolver.forRequest(user, storyId) } : {}),
       setup,
       illustrations,
       dataRoot,
@@ -2807,6 +2818,7 @@ export function createApiServer(opts: ServerOptions) {
             throw error;
           }
         }
+        const providers = providerResolver ? await providerResolver.forRequest(user, world.storyId) : engine.registry;
         await match.handler(req, res, {
           world,
           db,
@@ -2825,6 +2837,8 @@ export function createApiServer(opts: ServerOptions) {
           user,
           authConfig,
           ephemeralStoryKeys,
+          providers,
+          providerResolver,
         });
       } catch (err) {
         // Surface the message when login is off: that is a local single-user
