@@ -30,7 +30,7 @@ export function storyLayout(world: World, chapterSize = DEFAULT_CHAPTER_SIZE): S
     layoutTurns.push({
       turnId: source.id, scene, metadataKey: segmentId ? `segment:${segmentId}` : `raw:${source.scene}`,
       chapter: Math.floor((scene - 1) / chapterSize) + 1, turn: source.turn,
-      startsScene, eligible: Boolean(history), position: history?.position ?? null, source,
+      startsScene, eligible: Boolean(history), position: history?.position ?? null, origin: history?.origin ?? null, source,
     });
     previousRawScene = source.scene;
   }

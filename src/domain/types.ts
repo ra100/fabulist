@@ -386,6 +386,7 @@ export interface StoryLayoutTurn {
   startsScene: boolean;
   eligible: boolean;
   position: number | null;
+  origin: string | null;
   source: Turn;
 }
 
@@ -421,6 +422,7 @@ export interface EligibleTurn {
   scene: number;
   turn: number;
   position: number;
+  origin: string | null;
 }
 
 /** The durable boundary created immediately before an eligible turn. */

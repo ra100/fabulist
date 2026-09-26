@@ -634,8 +634,8 @@ route('GET', '/api/book', async (req, res, { world }) => {
       scene: derived,
     }];
     }),
-    turns: layout.turns.slice(offset, offset + limit).map(({ source: t, scene, chapter, eligible, position, startsScene }) => ({
-      id: t.id, scene, chapter, turn: t.turn, historyPosition: position, eligible, startsScene,
+    turns: layout.turns.slice(offset, offset + limit).map(({ source: t, scene, chapter, eligible, position, origin, startsScene }) => ({
+      id: t.id, scene, chapter, turn: t.turn, historyPosition: position, origin, eligible, startsScene,
       rawInput: t.rawInput, bookProse: t.bookProse, pinned: t.pinned, move: t.meta.move,
       integrity: t.meta.integrity?.distance ?? null, lintScore: t.meta.lint?.score ?? null,
     })),

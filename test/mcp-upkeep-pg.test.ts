@@ -329,3 +329,15 @@ test('PostgreSQL replace_turn_prose with world refuses when a later edit exists,
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('PostgreSQL eligible turns carry their checkpoint origin', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    const turn = await agentTurn(ctx, 'i warm the ink', {});
+    assert.deepEqual(
+      (await world.history.eligibleTurns()).map(({ turnId, origin }) => [turnId, origin]),
+      [[turn.turnId, 'turn:agent']],
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
