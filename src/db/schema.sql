@@ -275,6 +275,7 @@ CREATE TABLE IF NOT EXISTS history_checkpoints (
   position   INTEGER NOT NULL,
   state      TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  origin     TEXT,
   UNIQUE (story_id, turn_id),
   UNIQUE (story_id, position),
   FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE

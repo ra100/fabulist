@@ -621,6 +621,7 @@ CREATE TABLE IF NOT EXISTS history_checkpoints (
   position   INTEGER NOT NULL,
   state      JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  origin     TEXT,
   UNIQUE (story_id, turn_id),
   UNIQUE (story_id, position)
 );

@@ -33,6 +33,7 @@ interface CheckpointRow {
   position: number;
   state: unknown;
   created_at: Date | string;
+  origin: string | null;
 }
 
 interface EncryptedRow {
@@ -58,6 +59,7 @@ function checkpointOf(value: CheckpointRow, state: HistoryLayout): HistoryCheckp
     position: value.position,
     state,
     createdAt: isoOf(value.created_at),
+    origin: value.origin ?? null,
   };
 }
 
@@ -72,8 +74,8 @@ export class HistoryStore {
     this.crypto = crypto;
   }
 
-  async capture(turnId?: string): Promise<HistoryCheckpoint> {
-    return this.transaction((queryable) => this.captureIn(queryable, turnId));
+  async capture(turnId?: string, origin?: string): Promise<HistoryCheckpoint> {
+    return this.transaction((queryable) => this.captureIn(queryable, turnId, origin));
   }
 
   async checkpointForTurn(turnId: string): Promise<HistoryCheckpoint | undefined> {
@@ -319,7 +321,7 @@ export class HistoryStore {
     });
   }
 
-  private async captureIn(queryable: Queryable, turnId?: string): Promise<HistoryCheckpoint> {
+  private async captureIn(queryable: Queryable, turnId?: string, origin?: string): Promise<HistoryCheckpoint> {
     await queryable.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [this.storyId]);
     const key = await this.privateKey(queryable);
     if (turnId) {
@@ -342,10 +344,11 @@ export class HistoryStore {
       position,
       state: await this.layout(queryable, key),
       createdAt: new Date().toISOString(),
+      origin: origin ?? null,
     };
     await queryable.query(
-      `INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at)
-       VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
+      `INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at, origin)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)`,
       [
         checkpoint.id,
         this.storyId,
@@ -353,6 +356,7 @@ export class HistoryStore {
         checkpoint.position,
         key ? '{}' : JSON.stringify(checkpoint.state),
         checkpoint.createdAt,
+        checkpoint.origin,
       ],
     );
     if (key) {

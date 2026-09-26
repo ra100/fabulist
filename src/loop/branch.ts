@@ -558,8 +558,8 @@ function copyRetainedCheckpoints(
     const state = remapCheckpointState(checkpoint.state, storyId, idMaps, segmentIds);
     const turnId = checkpoint.turnId ? idMaps.get('turns')?.get(checkpoint.turnId) ?? null : null;
     db
-      .prepare(`INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at) VALUES (?,?,?,?,?,?)`)
-      .run(`checkpoint:${randomUUID()}`, storyId, turnId, checkpoint.position, JSON.stringify(state), checkpoint.createdAt);
+      .prepare(`INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at, origin) VALUES (?,?,?,?,?,?,?)`)
+      .run(`checkpoint:${randomUUID()}`, storyId, turnId, checkpoint.position, JSON.stringify(state), checkpoint.createdAt, checkpoint.origin);
   }
 }
 

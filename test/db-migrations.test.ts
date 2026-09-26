@@ -28,6 +28,32 @@ test('openDb migrates a world created before turn-history columns existed', () =
     rmSync(dir, { recursive: true, force: true });
   }
 });
+test('openDb adds history_checkpoints.origin to a save created before it existed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fabulist-legacy-origin-'));
+  try {
+    const path = join(dir, 'world.db');
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE history_checkpoints (
+      id TEXT PRIMARY KEY, story_id TEXT NOT NULL, turn_id TEXT, position INTEGER NOT NULL,
+      state TEXT NOT NULL, created_at TEXT NOT NULL)`);
+    legacy.exec(`INSERT INTO history_checkpoints VALUES ('checkpoint:legacy', 'story:x', NULL, 1, '{}', '2026-01-01T00:00:00.000Z')`);
+    legacy.close();
+
+    const db = openDb(path);
+    try {
+      const columns = rows<{ name: string }>(db.prepare(`SELECT name FROM pragma_table_info('history_checkpoints')`).all());
+      assert.ok(columns.some((column) => column.name === 'origin'));
+      const legacyRow = db.prepare(`SELECT origin FROM history_checkpoints WHERE id = 'checkpoint:legacy'`).get() as {
+        origin: string | null;
+      };
+      assert.equal(legacyRow.origin, null, 'legacy rows stay unlabelled rather than guessed');
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 test('Postgres migration failures retain rollback diagnostics without masking the migration error', async () => {
   const migrationError = new Error('duplicate column');
   const rollbackError = new Error('connection terminated');
