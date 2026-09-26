@@ -284,7 +284,7 @@ function renderStyle(session: SessionState): string {
  * the story, which is why it reads `cast.list()` — chronicle-only, so it is one
  * indexed query rather than a scan of canon.
  */
-async function resolvePresentIds(world: World, session: SessionState): Promise<EntityId[]> {
+export async function resolvePresentIds(world: World, session: SessionState): Promise<EntityId[]> {
   const ids = new Set<EntityId>();
   if (session.playerCharacterId) ids.add(session.playerCharacterId);
   const player = await world.cast.get(session.playerCharacterId);

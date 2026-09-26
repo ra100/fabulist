@@ -224,7 +224,7 @@ function renderStyle(session: SessionState): string {
 
 // ----------------------------------------------------------------- helpers
 
-function presentIds(ctx: FrameContext): EntityId[] {
+function presentIds(ctx: Pick<FrameContext, 'world' | 'session'>): EntityId[] {
   const { world, session } = ctx;
   const ids = new Set<EntityId>();
   if (session.playerCharacterId) ids.add(session.playerCharacterId);

@@ -22,11 +22,13 @@ import {
   buildIntegrityFrame,
   buildNarratorFrame,
   buildRefereeFrame,
+  presentIds,
   type FrameContext,
 } from '../frame/builders.ts';
 import { adaptRequest, extractJson, type Provider } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
 import {
+  coerceAgentDelta,
   coerceDelta,
   deltaSchema,
   directorSchema,
@@ -445,6 +447,20 @@ export async function extract(
 
   const { delta, issues } = coerceDelta(raw);
   const validation = validateDelta(deps.world, delta);
+  validation.issues = [...issues, ...validation.issues];
+  validation.ok = validation.issues.filter((i) => !i.repaired).length === 0;
+  return { delta, validation };
+}
+
+/** The agent-kept counterpart of `extract`: same validation, no model call. */
+export function agentDelta(
+  world: World,
+  raw: unknown,
+  prose: string,
+): { delta: Delta; validation: ValidationResult } {
+  const session = world.session.get();
+  const { delta, issues } = coerceAgentDelta(raw, prose, presentIds({ world, session }), session.currentLocationId);
+  const validation = validateDelta(world, delta);
   validation.issues = [...issues, ...validation.issues];
   validation.ok = validation.issues.filter((i) => !i.repaired).length === 0;
   return { delta, validation };

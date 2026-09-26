@@ -32,6 +32,7 @@ import type { Entity } from '../domain/types.ts';
 import type { ValidationIssue, ValidationResult } from './validate.ts';
 
 export {
+  coerceAgentDelta,
   coerceDelta,
   deltaSchema,
   directorSchema,

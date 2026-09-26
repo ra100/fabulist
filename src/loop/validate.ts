@@ -294,6 +294,26 @@ export function coerceDelta(raw: unknown): { delta: Delta; issues: ValidationIss
 }
 
 /**
+ * The agent's `world` argument as a delta. With no usable event, the turn gets
+ * one from the prose, since an agent-kept turn must not block on bookkeeping.
+ */
+export function coerceAgentDelta(
+  raw: unknown,
+  prose: string,
+  participants: EntityId[],
+  locationId: EntityId | null,
+): { delta: Delta; issues: ValidationIssue[] } {
+  const o = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const usable = asArray(o.events).some(
+    (e) => typeof e === 'object' && e !== null && asString((e as Record<string, unknown>).text).trim() !== '',
+  );
+  const events = usable
+    ? o.events
+    : [{ text: prose.replace(/\s+/g, ' ').trim().slice(0, 160), participants, locationId, significance: 0.5 }];
+  return coerceDelta({ ...o, events });
+}
+
+/**
  * Tiers 2 and 3. Unknown entity references are repaired by name resolution when
  * possible and dropped when not, because a dangling edge is worse than a missing
  * one — it makes the Referee confidently wrong later.
