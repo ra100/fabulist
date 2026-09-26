@@ -1488,6 +1488,34 @@ hr {
 .turn:hover .turn-tools button,
 .turn-tools button:focus-visible { opacity: 1; }
 .turn.pinned .turn-tools button { opacity: 1; }
+/* Editing the timeline should be discoverable: branch/discard controls stay visible. */
+.turn-tools .branch-action,
+.turn-tools .warn,
+.turn-tools .turn-discard summary { opacity: 1; }
+.turn-discard { position: relative; }
+.turn-discard summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--ink-2);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+}
+.turn-discard summary::-webkit-details-marker { display: none; }
+.turn-discard-menu {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  display: flex;
+  gap: var(--s1);
+  padding: var(--s1);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  box-shadow: var(--elev-raised);
+  white-space: nowrap;
+}
+.turn-discard-menu button { opacity: 1; }
 .turn-position {
   font-family: var(--mono);
   font-size: 10px;

@@ -172,6 +172,8 @@ export interface RollbackOptions {
   toChapter?: number;
   /** Retain this exact committed turn and discard only subsequent history. */
   turnId?: string;
+  /** With destructive exact-turn rollback, remove the target turn as well. */
+  includeTarget?: boolean;
   /**
    * `'fork'` (the default) leaves the long version completely untouched as a
    * story you can switch back to, so "I want it back" means "open the other
@@ -196,7 +198,7 @@ export async function rollback(db: Db, world: World, opts: RollbackOptions): Pro
   const targets = [opts.toScene, opts.toChapter, opts.turnId].filter((target) => target !== undefined);
   if (targets.length !== 1) throw new RollbackTargetError('rollback: pass exactly one of toScene, toChapter, or turnId');
   const mode = opts.mode ?? 'fork';
-  if (opts.turnId !== undefined) return rollbackToTurn(db, world, opts.turnId, mode, opts.ownerUserId);
+  if (opts.turnId !== undefined) return rollbackToTurn(db, world, opts.turnId, mode, opts.ownerUserId, opts.includeTarget);
   let scene = opts.toScene;
   if (scene === undefined && opts.toChapter !== undefined) {
     scene = await firstSceneOfChapter(world, opts.toChapter);
@@ -229,12 +231,19 @@ export async function rollbackToTurn(
   turnId: string,
   mode: 'fork' | 'destructive',
   ownerUserId?: string,
+  includeTarget = false,
 ): Promise<RollbackResult> {
   const checkpoint = await exactTurnCheckpoint(world, turnId, 'rollback', (message) => new RollbackTargetError(message));
   if (mode === 'destructive') {
-    await world.history.restoreTurn(turnId);
+    const retained = includeTarget ? await world.history.restoreBeforeTurn(turnId) : await world.history.restoreTurn(turnId);
     await reconcileContinuation(world);
-    return { mode, atScene: (await world.session.get()).scene, toTurnId: turnId, story: null, removed: null };
+    return {
+      mode,
+      atScene: (await world.session.get()).scene,
+      ...(retained.turnId ? { toTurnId: retained.turnId } : {}),
+      story: null,
+      removed: null,
+    };
   }
   const forked = await forkStory(db, world, {
     fromStoryId: world.storyId,

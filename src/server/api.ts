@@ -1110,7 +1110,7 @@ route('POST', '/api/stories/fork', (_req, res, { world, body, user }) => {
  * pulled along too.
  */
 route('POST', '/api/rollback', (_req, res, { world, currentStory, body, user }) => {
-  const { scene, chapter, turnId, mode } = parseBody(rollbackBodySchema, body);
+  const { scene, chapter, turnId, mode, includeTarget } = parseBody(rollbackBodySchema, body);
   if (!ownsStoryOrRespond(res, world, world.storyId, user)) return;
   const effectiveMode = mode ?? 'fork';
   // The switch below only runs in login-off mode (see this route's own doc
@@ -1120,7 +1120,7 @@ route('POST', '/api/rollback', (_req, res, { world, currentStory, body, user }) 
     return send(res, 503, { error: 'rollback in fork mode needs story management enabled on this server' });
   }
   try {
-    const result = rollback(world, { scene, chapter, turnId, mode: effectiveMode, ownerUserId: user?.id });
+    const result = rollback(world, { scene, chapter, turnId, mode: effectiveMode, includeTarget, ownerUserId: user?.id });
     if (result.mode === 'fork' && result.forkedStory && !user) currentStory!.switchTo(result.forkedStory.id);
     send(res, 200, result);
   } catch (err) {

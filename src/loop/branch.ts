@@ -184,6 +184,8 @@ export interface RollbackOptions {
   chapter?: number;
   /** Retain this exact committed turn and discard only subsequent history. */
   turnId?: string;
+  /** With destructive exact-turn rollback, remove the target turn as well. */
+  includeTarget?: boolean;
   /**
    * `'fork'` (the default): the safer option GAPS.md's §3.6 left open.
    * Forks the current story at the target scene into a new sibling —
@@ -223,7 +225,7 @@ export function rollback(world: World, opts: RollbackOptions): RollbackResult {
     throw new RollbackTargetError('rollback: pass exactly one of scene, chapter, or turnId');
   }
   const mode = opts.mode ?? 'fork';
-  if (opts.turnId !== undefined) return rollbackToTurn(world, opts.turnId, mode, opts.ownerUserId);
+  if (opts.turnId !== undefined) return rollbackToTurn(world, opts.turnId, mode, opts.ownerUserId, opts.includeTarget);
 
   let scene = opts.scene;
   if (opts.chapter !== undefined) {
@@ -249,12 +251,13 @@ export function rollbackToTurn(
   turnId: string,
   mode: 'fork' | 'destructive',
   ownerUserId?: string,
+  includeTarget = false,
 ): RollbackResult {
   const checkpoint = exactTurnCheckpoint(world, turnId, 'rollback', (message) => new RollbackTargetError(message));
   if (mode === 'destructive') {
-    world.history.restoreTurn(turnId);
+    const retained = includeTarget ? world.history.restoreBeforeTurn(turnId) : world.history.restoreTurn(turnId);
     reconcileContinuation(world);
-    return { mode, toScene: world.session.get().scene, toTurnId: turnId };
+    return { mode, toScene: world.session.get().scene, ...(retained.turnId ? { toTurnId: retained.turnId } : {}) };
   }
   const fork = forkStory(world, { fromStoryId: world.storyId, atTurnId: turnId, ownerUserId });
   return { mode, toScene: checkpoint.state.session.scene, toTurnId: turnId, forkedStory: fork.story };
