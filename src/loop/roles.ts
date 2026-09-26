@@ -412,9 +412,24 @@ export async function narrate(
     },
     provider.capabilities,
   );
-  const res = await provider.complete(req);
+  let res = await provider.complete(req);
+  let prose = res.text.trim();
+
+  // A broken or provider-specific streaming response can finish successfully
+  // without yielding any text. Never let that empty result reach finishTurn:
+  // the referee may already have written spawned metadata, making the story
+  // look updated even though the turn has no prose. Retry once through the
+  // provider's ordinary completion path, then fail loudly if it is still empty.
+  if (!prose && onToken) {
+    const { onToken: _stream, ...nonStreamingReq } = req;
+    res = await provider.complete(nonStreamingReq);
+    prose = res.text.trim();
+    if (prose) onToken(prose);
+  }
+
   deps.log('narrate', provider.id, res.model, res.tokensIn, res.tokensOut);
-  return res.text.trim();
+  if (!prose) throw new Error('narrator returned no prose; nothing was committed');
+  return prose;
 }
 
 // ------------------------------------------------------------------- extract
