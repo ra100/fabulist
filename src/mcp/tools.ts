@@ -13,6 +13,7 @@
  * drive the engine's `narrateExternally` split (`src/loop/engine.ts`) rather
  * than reimplementing any part of the turn loop here.
  */
+import { commitNarration } from '../application/play.ts';
 import type { Engine } from '../loop/engine.ts';
 import { narratorSystem } from '../loop/roles.ts';
 import { recordAuthoringCheckpoint, splitSceneAtTurn } from '../loop/history.ts';
@@ -632,7 +633,7 @@ export async function commitNarrationTool(
   // story, and `commitExternalNarration` refuses a story mismatch — which,
   // resolved through the shared pointer, is what any other reader's switch
   // would have looked like.
-  const outcome = await ctx.engine.commitExternalNarration(args.resumeToken, args.prose, ctx.world(), agentWorld);
+  const { outcome, seeded, tick } = await commitNarration(ctx.engine, ctx.world(), args.resumeToken, args.prose, agentWorld);
   if (outcome.kind === 'narrated') {
     return {
       status: 'narrated' as const,
@@ -646,6 +647,8 @@ export async function commitNarrationTool(
       newThreads: outcome.commit.newThreadIds,
       applied: appliedCounts(outcome.delta),
       dropped: agentWorld === undefined ? [] : outcome.validation.issues.filter((i) => i.repaired),
+      consequencesSeeded: seeded,
+      consequencesFired: tick?.fired.length ?? 0,
       ...(warning ? { warning } : {}),
     };
   }
