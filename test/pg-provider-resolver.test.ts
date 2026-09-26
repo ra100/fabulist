@@ -224,3 +224,18 @@ test('Test is a metered live call whose failure text never carries the key, and 
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('an unlock-mode wrap is capped at a 512-byte key in save and in the table', async (t) => {
+  const ran = await withPg(async (db, _schema, roles) => {
+    const { resolver } = resolverFor(roles.play);
+    const wrapOf = (bytes: number) => ({ ...fakeWrap, ciphertext: Buffer.alloc(bytes, 2).toString('base64') });
+    await resolver.save(alice, { ...unlockMode(11), wrap: wrapOf(528) });
+    await assert.rejects(resolver.save(alice, { ...unlockMode(12), wrap: wrapOf(529) }), ProviderKeyInputError);
+    await assert.rejects(db.query(
+      `INSERT INTO user_provider_keys (id, user_id, endpoint_id, models, trust, nonce, ciphertext, key_hint)
+       VALUES ($1, 'bob', 'openai', '{}', 'unlock', $2, $3, '')`,
+      [keyId(13), Buffer.alloc(12), Buffer.alloc(529)],
+    ), /check constraint/);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
