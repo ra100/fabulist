@@ -102,6 +102,7 @@ import {
 import {
   createEncryptionEnrollment,
   eraseUnlockedStoryKeys,
+  providerKeyHandoff,
   storyKeyHandoff,
   unlockWithPassphrase,
   unlockWithRecoveryCode,
@@ -639,8 +640,11 @@ function PrivateStoragePanel({
       unlocked = unlockWithRecovery
         ? await unlockWithRecoveryCode(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret)
         : await unlockWithPassphrase(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret);
-      const result = await unlockMutation.mutateAsync(storyKeyHandoff(unlocked.storyKeys));
-      if (!result.grants.length) throw new Error('no private stories were unlocked');
+      const providerKeys = keyBundle.providerKey
+        ? await providerKeyHandoff(user.id, unlocked.masterKey, [keyBundle.providerKey])
+        : [];
+      const result = await unlockMutation.mutateAsync({ storyKeys: storyKeyHandoff(unlocked.storyKeys), providerKeys });
+      if (!result.grants.length && !result.providerGrants.length) throw new Error('no private stories were unlocked');
       setUnlockSecret('');
       await onChanged();
       if (unlocked.failedStoryKeys.length) {
