@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS user_provider_keys (
   nonce         BYTEA NOT NULL CHECK (octet_length(nonce) = 12),
   ciphertext    BYTEA NOT NULL CHECK (octet_length(ciphertext) BETWEEN 17 AND 528),
   key_hint      TEXT NOT NULL CHECK (char_length(key_hint) <= 4),
+  -- Server-minted per write: `id` is client-chosen, so it cannot tell a replace from the original.
+  version       UUID NOT NULL DEFAULT gen_random_uuid(),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_used_at  TIMESTAMPTZ
 );
