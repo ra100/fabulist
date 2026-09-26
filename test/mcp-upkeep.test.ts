@@ -147,6 +147,17 @@ test('SQLite agentDelta validates an agent world and records the present cast on
   world.close();
 });
 
+test('SQLite agentDelta leaves the dead out of the fallback event instead of blocking the turn', () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const anselm = world.graph.get('char:brother-anselm')!;
+  world.graph.upsert({ ...anselm, props: { ...anselm.props, status: 'dead' } }, 'chronicle');
+  const { delta, validation } = agentDelta(world, {}, 'The candle burns down.');
+  assert.equal(validation.ok, true, JSON.stringify(validation.issues));
+  assert.equal(delta.events[0]!.participants.includes('char:brother-anselm'), false);
+  world.close();
+});
+
 function sqliteContext(extractId = 'mock') {
   const world = World.open(':memory:');
   seedWorld(world);
