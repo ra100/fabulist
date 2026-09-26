@@ -291,3 +291,23 @@ test('an unlock racing a delete never leaves a plaintext grant for the removed r
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('replacing a key under the same client id still stops in-flight registries and grants', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    const { resolver, bearers } = resolverFor(roles.play);
+    await resolver.save(alice, sealed(16));
+    const beforeReplace = await resolver.forRequest(alice);
+    await resolver.save(alice, { ...sealed(16), key: 'sk-alice-rotated-0123456789' });
+    await resolver.forRequest(alice);
+    await assert.rejects(beforeReplace.get('narrate').complete(ask('narrate')), ProviderKeyLockedError);
+    assert.deepEqual(bearers, []);
+
+    const other = resolverFor(roles.play).resolver;
+    await resolver.save(alice, unlockMode(17));
+    await resolver.unlock(alice, [{ keyId: keyId(17), key: ALICE_KEY }]);
+    await other.save(alice, unlockMode(17));
+    resolver.invalidate(alice.id);
+    assert.equal(await resolver.status(alice), 'locked', 'a grant is bound to the row version, not the client id');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});

@@ -19,12 +19,13 @@ export interface ProviderKeyRow {
   nonce: Buffer;
   ciphertext: Buffer;
   keyHint: string;
+  version: string;
   createdAt: string;
   lastUsedAt: string | null;
 }
 
-export type NewProviderKey = Omit<ProviderKeyRow, 'createdAt' | 'lastUsedAt'>;
-export type ProviderKeySummary = Omit<ProviderKeyRow, 'userId' | 'nonce' | 'ciphertext'>;
+export type NewProviderKey = Omit<ProviderKeyRow, 'version' | 'createdAt' | 'lastUsedAt'>;
+export type ProviderKeySummary = Omit<ProviderKeyRow, 'userId' | 'nonce' | 'ciphertext' | 'version'>;
 
 interface Row extends QueryResultRow {
   id: string;
@@ -36,6 +37,7 @@ interface Row extends QueryResultRow {
   nonce: Buffer;
   ciphertext: Buffer;
   key_hint: string;
+  version: string;
   created_at: Date;
   last_used_at: Date | null;
 }
@@ -51,6 +53,7 @@ function fromRow(r: Row): ProviderKeyRow {
     nonce: r.nonce,
     ciphertext: r.ciphertext,
     keyHint: r.key_hint,
+    version: r.version,
     createdAt: r.created_at.toISOString(),
     lastUsedAt: r.last_used_at ? r.last_used_at.toISOString() : null,
   };
@@ -59,7 +62,7 @@ function fromRow(r: Row): ProviderKeyRow {
 // Every statement filters by user_id: this module is the owner-only boundary (the schema has no RLS).
 export async function providerKeyFor(db: Queryable, userId: string): Promise<ProviderKeyRow | null> {
   const { rows } = await db.query<Row>(
-    `SELECT id, user_id, label, endpoint_id, models, trust, nonce, ciphertext, key_hint, created_at, last_used_at
+    `SELECT id, user_id, label, endpoint_id, models, trust, nonce, ciphertext, key_hint, version, created_at, last_used_at
        FROM user_provider_keys
       WHERE user_id = $1`,
     [userId],
@@ -74,7 +77,7 @@ export async function saveProviderKey(db: Queryable, key: NewProviderKey): Promi
      ON CONFLICT (user_id) DO UPDATE SET
        id = EXCLUDED.id, label = EXCLUDED.label, endpoint_id = EXCLUDED.endpoint_id, models = EXCLUDED.models,
        trust = EXCLUDED.trust, nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext,
-       key_hint = EXCLUDED.key_hint, created_at = now(), last_used_at = NULL`,
+       key_hint = EXCLUDED.key_hint, version = gen_random_uuid(), created_at = now(), last_used_at = NULL`,
     [key.id, key.userId, key.label, key.endpointId, JSON.stringify(key.models), key.trust, key.nonce, key.ciphertext, key.keyHint],
   );
 }
@@ -89,6 +92,6 @@ export async function touchProviderKey(db: Queryable, userId: string, keyId: str
 }
 
 export function summarizeProviderKey(row: ProviderKeyRow): ProviderKeySummary {
-  const { userId: _userId, nonce: _nonce, ciphertext: _ciphertext, ...summary } = row;
+  const { userId: _userId, nonce: _nonce, ciphertext: _ciphertext, version: _version, ...summary } = row;
   return summary;
 }

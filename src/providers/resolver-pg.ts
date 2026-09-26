@@ -164,7 +164,8 @@ export class ProviderResolver {
     // A save or delete during the read means `row` may be gone; granting it would outlive the change.
     const stale = (this.generation.get(user.id) ?? 0) !== before;
     if (stale || rest.length || row?.trust !== 'unlock' || row.id !== first.keyId) throw new ProviderKeyForbiddenError();
-    return [this.grants.unlock(user.id, row.id, first.key)];
+    // Keyed by version so a same-id replace in another process cannot inherit this plaintext.
+    return [{ ...this.grants.unlock(user.id, row.version, first.key), keyId: row.id }];
   }
 
   async test(
@@ -218,7 +219,7 @@ export class ProviderResolver {
   }
 
   private usable(userId: string, row: ProviderKeyRow): boolean {
-    return row.trust === 'sealed' ? this.secretsKey !== null : this.grants.get(userId, row.id) !== null;
+    return row.trust === 'sealed' ? this.secretsKey !== null : this.grants.get(userId, row.version) !== null;
   }
 
   private async cached(userId: string): Promise<Cached> {
@@ -238,12 +239,12 @@ export class ProviderResolver {
     if (!endpoint) return null;
     const secret = (): string => {
       // The cache entry is the liveness check, so a key deleted or replaced mid-turn is never sent again.
-      if (this.cache.get(userId)?.row?.id !== row.id) throw new ProviderKeyLockedError('your provider key was removed or replaced');
+      if (this.cache.get(userId)?.row?.version !== row.version) throw new ProviderKeyLockedError('your provider key was removed or replaced');
       if (row.trust === 'sealed') {
         if (!this.secretsKey) throw new ProviderKeyLockedError('sealed provider keys are disabled on this server');
         return openProviderKey(this.secretsKey, userId, row.id, row);
       }
-      const key = this.grants.get(userId, row.id);
+      const key = this.grants.get(userId, row.version);
       if (key === null) throw new ProviderKeyLockedError();
       return key;
     };
