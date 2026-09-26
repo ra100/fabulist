@@ -294,6 +294,9 @@ test('the server tells a client how to use it before any tool is called', async 
       assert.match(instructions!, /NOTHING IS SAVED UNTIL THIS CALL/, 'and says so unmissably');
       assert.match(instructions!, /start_story/, 'and how a canon-rich book with no protagonist gets one');
       assert.match(instructions!, /close_scene/);
+      assert.match(instructions!, /get_guide/, 'points at the guide for the loop and the writing rules');
+      const { tools } = await client.listTools();
+      assert.ok(tools.some((tool) => tool.name === 'get_guide'), 'get_guide is registered');
 
       // A prompt, so "play this world" is a one-click entry point rather than
       // something the user has to phrase correctly.
@@ -304,6 +307,9 @@ test('the server tells a client how to use it before any tool is called', async 
       const text = got.messages.map((m) => (m.content.type === 'text' ? m.content.text : '')).join('\n');
       assert.match(text, /a heist/, 'the wish is threaded in');
       assert.match(text, /commit_narration/);
+      assert.match(text, /get_guide/);
+      assert.match(text, /You keep the world/, 'the mock-only e2e server tells the agent it keeps the world');
+      assert.doesNotMatch(text, /Relationships record themselves/);
     } finally {
       await transport.close();
     }

@@ -21,6 +21,7 @@ import type { McpAuth, VerifiedUser } from './auth.ts';
 import { addDefaultOutputSchema } from './output-schema.ts';
 import {
   addAnchorTool,
+  getGuideTool,
   addDirectiveTool,
   branchStoryToFileTool,
   cancelSetupJobTool,
@@ -80,6 +81,7 @@ import {
   useWorldPackTool,
   type McpToolContext,
 } from './tools.ts';
+import { upkeepFor } from './upkeep.ts';
 
 /** Every tool's result, JSON-stringified into the one `content` block every MCP client already knows how to render, plus the same value as `structuredContent` for a client that reads that instead — the dual-encoding OpenAI's own MCP compatibility guide documents (see `.design/MCP-CONNECTOR.md` §4). */
 function toolResult(value: unknown) {
@@ -112,7 +114,8 @@ function toolResult(value: unknown) {
  * say only what those cannot.
  */
 const INSTRUCTIONS = `Fabulist is a state-first fiction engine: the world is a graph in a database, and
-prose is a view over it. Your job is to write the prose; the server owns the world model.
+prose is a view over it. You write the prose. Whether the server or you keep the world model depends
+on this server's configuration; every story tool reports it as \`upkeep\`.
 
 Getting oriented
 1. \`list_worlds\`, then \`switch_world\` to pick one. Worlds hold canon (a wiki ingest or an authored
@@ -122,27 +125,12 @@ Getting oriented
 3. \`get_state\` tells you where you are. If it reports no player character, the book is not
    playable yet: \`list_characters\` to see who is available, then \`start_story\` to become one of
    them (or to place an original). \`start_story\` returns a proposed opening line to play from.
+4. \`get_guide\` before the first turn, and again whenever \`upkeep\` changes. It holds the turn loop,
+   the writing rules, what validation repairs or blocks, and the world checklist when \`upkeep\` is "agent".
 
-Playing a turn — the part worth reading twice
-The normal loop is two calls, and skipping the second one loses the turn:
-  a. \`propose_turn\` with what the player does, in their words. The server runs its gates
-     (does this fit the character, does it fit the world, what happens next) and stops before any
-     prose exists. It returns \`narratorSystemPrompt\` + \`sceneFrame\`.
-  b. You write the prose from that frame, then call \`commit_narration\` with it and the
-     \`resumeToken\`. NOTHING IS SAVED UNTIL THIS CALL. Prose you only put in the chat is not in
-     the book; the world model never sees it, and the next turn will not know it happened.
-Two other outcomes from (a): \`interrupted\` means the action breaks something the character has
-established about themselves — show the player the options and call \`resolve_interrupt\`, not
-\`commit_narration\`. \`answered\` means the input was a question about the world, not an action;
-there is nothing to narrate.
-Prefer \`play\` instead of (a)+(b) only if you want this server's own model to write the prose.
-
-Keeping the book shaped
-• \`close_scene\` at a real scene break. Otherwise the whole book stays scene 1 forever, and the
-  summarisation that keeps long stories coherent never runs.
-• \`get_book\` is the committed text. Read it back if you are unsure whether a turn landed.
-• \`update_style\`/\`update_knobs\` change how it is written; \`add_directive\` steers what happens
-  next; \`add_anchor\` pins a passage as a style reference.
+The one rule worth repeating here: a turn is \`propose_turn\` then \`commit_narration\`.
+NOTHING IS SAVED UNTIL THIS CALL; prose you only put in the chat is not in the book. \`close_scene\` at
+real scene breaks.
 
 Ingesting a world
 \`resolve_wiki\` → \`plan_world\` → \`preview_ingest\` (or \`discover_world\` for progress) →
@@ -306,6 +294,17 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => toolResult(getStateTool(ctx)),
+  );
+
+  server.registerTool(
+    'get_guide',
+    {
+      description:
+        'How to play this story: the propose/commit loop, the writing contract (style, knobs, anchors, lint blocklist), what validation repairs or blocks, ' +
+        'and, when upkeep is "agent", the per-turn checklist for keeping the world yourself. Call it before the first turn.',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () => toolResult(getGuideTool(ctx)),
   );
 
   server.registerTool(
@@ -1112,7 +1111,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
                 ? `1. switch_world to "${world}".`
                 : '1. list_worlds, and ask which one — or use the one already open.',
               '2. list_stories. Open an existing book with switch_story, or create_story for a new one.',
-              '3. get_state. If there is no player character, list_characters and then start_story.',
+              '3. get_state, then get_guide. If there is no player character, list_characters and then start_story.',
               '4. Play turns: propose_turn, write the prose from the frame it returns, then commit_narration',
               '   with that prose and the resumeToken. The turn is not saved until commit_narration returns —',
               '   prose that only appears in this conversation is not in the book.',
@@ -1136,10 +1135,18 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
               '  a revealed allegiance, a broken vow — call update_sheet (identity/contract/voice/condition/',
               '  appearance) rather than letting the prose drift ahead of the sheet. appearance.referenceImagePath',
               '  and .seed are read-only through update_sheet; only generate_portrait writes those.',
-              '- Relationships record themselves: commit_narration\u2019s extraction step reads what the prose',
-              '  actually depicts and creates the connections — there is no separate "create a connection"',
-              '  call. Write the relationship plainly enough in the prose for extraction to catch it, then',
-              '  spot-check with get_entity (its neighbours field) that the edge actually landed.',
+              ...(upkeepFor(ctx.engine.registry) === 'server'
+                ? [
+                    '- Relationships record themselves: commit_narration’s extraction step reads what the prose',
+                    '  actually depicts and creates the connections — there is no separate "create a connection"',
+                    '  call. Write the relationship plainly enough in the prose for extraction to catch it, then',
+                    '  spot-check with get_entity (its neighbours field) that the edge actually landed.',
+                  ]
+                : [
+                    '- You keep the world: this server has no extraction model, so pass commit_narration a world',
+                    '  delta every turn (get_guide lists what goes in it). Relationships, facts and threads you leave',
+                    '  out are not recorded; spot-check with get_entity (its neighbours field) that an edge landed.',
+                  ]),
               '- Respect pace and stakes: before improvising tone or intensity, check get_state\u2019s knobs',
               '  (danger, pacing, characterStrictness, canonFidelity, propagationDepth, ignoranceBudget,',
               '  proseDensity) and get_threads\u2019 stakes/tension for every open thread. Follow those dials —',
