@@ -9,6 +9,7 @@ import { ProviderRegistry } from '../src/providers/provider.ts';
 import { ProviderResolver, type ProviderResolverOptions } from '../src/providers/resolver-pg.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
+import { SESSION_COOKIE } from '../src/auth/config.ts';
 import { getStateTool } from '../src/mcp/tools-pg.ts';
 import { createEncryptionEnrollment } from '../web/src/crypto/keys.ts';
 import type { Db } from '../src/db/pg.ts';
@@ -41,7 +42,7 @@ async function storiesFor(db: Db): Promise<Record<'alice' | 'bob' | 'admin', str
 
 async function withKeyServer(
   roles: RolePools,
-  fn: (as: AsUser, resolver: ProviderResolver) => Promise<void>,
+  fn: (as: AsUser, resolver: ProviderResolver, base: string) => Promise<void>,
   over: Partial<ProviderResolverOptions> = {},
 ): Promise<void> {
   const boot = () => worldFor(roles.play, null);
@@ -55,11 +56,11 @@ async function withKeyServer(
     ...over,
   });
   const engine = new Engine({ world: boot, db: roles.play, ingestDb: roles.ingest, providers: new ProviderRegistry(new MockProvider()) });
-  const { as, close } = await listenSignedIn(
+  const { as, base, close } = await listenSignedIn(
     createApiServer({ world: boot, db: roles.play, ingestDb: roles.ingest, engine, authConfig: fakeAuth(), providerResolver: resolver }),
   );
   try {
-    await fn(as, resolver);
+    await fn(as, resolver, base);
   } finally {
     await close();
   }
@@ -101,10 +102,10 @@ test('a sealed key is saved behind an allowlist and only its hint ever comes bac
   if (!ran) t.skip('no Postgres configured');
 });
 
-test('an unlock-mode key is granted by the unlock handoff and revoked by lock, only for its owner', async (t) => {
+test('an unlock-mode key is granted by the unlock handoff and revoked by lock or sign-out, only for its owner', async (t) => {
   const ran = await withPg(async (db, _schema, roles) => {
     const stories = await storiesFor(db);
-    await withKeyServer(roles, async (as, resolver) => {
+    await withKeyServer(roles, async (as, resolver, base) => {
       for (const who of ['alice', 'bob'] as const) {
         const { recoveryCode: _code, ...enrollment } = await createEncryptionEnrollment(PEOPLE[who].id, 'a durable private passphrase', [stories[who]]);
         assert.equal((await as(who, 'POST', '/api/encryption/enroll', enrollment)).status, 201);
@@ -122,6 +123,12 @@ test('an unlock-mode key is granted by the unlock handoff and revoked by lock, o
       assert.equal(await resolver.status(sessionUser('alice')), 'own');
 
       assert.equal(body(await as('alice', 'POST', '/api/encryption/lock', {})).providerLocked, true);
+      assert.equal(await resolver.status(sessionUser('alice')), 'locked');
+
+      assert.equal((await as('alice', 'POST', '/api/encryption/unlock', { providerKeys: [{ keyId: KEY1, key: ALICE_KEY }] })).status, 200);
+      assert.equal(await resolver.status(sessionUser('alice')), 'own');
+      const out = await fetch(`${base}/auth/logout`, { method: 'POST', redirect: 'manual', headers: { cookie: `${SESSION_COOKIE}=alice` } });
+      assert.equal(out.status, 302);
       assert.equal(await resolver.status(sessionUser('alice')), 'locked');
     });
   });
