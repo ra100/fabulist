@@ -625,17 +625,19 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   // identified caller's turn would be gated and committed against whichever
   // story happened to be current server-wide instead of their own.
   const world = await ctx.world();
+  const providers = await requestRegistry(ctx, world);
+  const upkeep = upkeepFor(providers);
   const outcome = await ctx.engine.takeTurn(args.text, {
     narrateExternally: true,
     world,
-    providers: await requestRegistry(ctx, world),
+    providers,
     ...(args.actorId ? { actorId: args.actorId } : {}),
   });
 
   if (outcome.kind === 'awaiting-narration') {
     return {
       status: 'awaiting-narration' as const,
-      upkeep: await upkeepOf(ctx),
+      upkeep,
       // Stated in the payload, not only in the tool description and the server
       // instructions: a client that ignored both still gets told, at the exact
       // moment it matters, that stopping here throws the turn away.
@@ -650,7 +652,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'interrupted') {
     return {
       status: 'interrupted' as const,
-      upkeep: await upkeepOf(ctx),
+      upkeep,
       nextStep:
         'Show the player these options and call resolve_interrupt with the one they pick and this originalText. Do not call commit_narration — no turn is pending.',
       message: outcome.interrupt.message,
@@ -666,7 +668,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'answered') {
     return {
       status: 'answered' as const,
-      upkeep: await upkeepOf(ctx),
+      upkeep,
       nextStep:
         'This was a question about the world, not an action. Relay the answer; there is nothing to narrate or commit.',
       text: outcome.text,
@@ -695,7 +697,14 @@ export async function commitNarrationTool(
   args: { resumeToken: string; prose: string; world?: unknown },
 ) {
   ctx.chargePaidCall?.();
-  const upkeep = await upkeepOf(ctx);
+  // Same reason as `proposeTurnTool`: the pending turn belongs to this user's
+  // story, and `commitExternalNarration` refuses a story mismatch — which,
+  // resolved through the shared pointer, is what any other reader's switch
+  // would have looked like.
+  const world = await ctx.world();
+  // One resolution: a second could see another key state and apply a world the first said to ignore.
+  const providers = await requestRegistry(ctx, world);
+  const upkeep = upkeepFor(providers);
   const agentWorld = upkeep === 'agent' ? args.world : undefined;
   const warning =
     upkeep === 'agent' && args.world === undefined
@@ -703,20 +712,7 @@ export async function commitNarrationTool(
       : upkeep === 'server' && args.world !== undefined
         ? 'upkeep is "server": the server extracted this turn from your prose and ignored world.'
         : undefined;
-  // Same reason as `proposeTurnTool`: the pending turn belongs to this user's
-  // story, and `commitExternalNarration` refuses a story mismatch — which,
-  // resolved through the shared pointer, is what any other reader's switch
-  // would have looked like.
-  const world = await ctx.world();
-  const { outcome, seeded, tick } = await commitNarration(
-    ctx.db,
-    ctx.engine,
-    world,
-    args.resumeToken,
-    args.prose,
-    agentWorld,
-    await requestRegistry(ctx, world),
-  );
+  const { outcome, seeded, tick } = await commitNarration(ctx.db, ctx.engine, world, args.resumeToken, args.prose, agentWorld, providers);
   if (outcome.kind === 'narrated') {
     return {
       status: 'narrated' as const,
