@@ -16,6 +16,9 @@ import {
   getStateTool,
   proposeTurnTool,
   rollbackTool,
+  recordFactTool,
+  openThreadTool,
+  addConsequenceTool,
   type McpToolContext,
 } from '../src/mcp/tools.ts';
 
@@ -273,5 +276,57 @@ test('SQLite get_state lists recent checkpoints newest first with their origin',
     state.recentHistory.map(({ origin, turnId }) => [origin, turnId]),
     [['tool:consequences', null], ['turn:agent', turn.turnId]],
   );
+  world.close();
+});
+
+test('SQLite granular tools write one checkpoint each, labelled by tool', async () => {
+  const { world, ctx } = sqliteContext();
+  const turn = await sqliteAgentTurn(ctx, 'i warm the ink', {});
+  const recorded = recordFactTool(ctx, { text: 'Oll takes coin from the garrison.', knownBy: ['Brother Anselm'], suspectedBy: ['char:sister-oria'] });
+  assert.deepEqual(recorded.knownBy, ['char:brother-anselm'], 'names resolve like the other authoring tools');
+  assert.ok(world.chronicle.knowledgeOf('char:sister-oria').some((k) => k.level === 'suspects' && /takes coin/.test(k.text)));
+  const thread = openThreadTool(ctx, { title: 'The garrison purse', parties: ['char:captain-sered'], tension: 2 });
+  assert.equal(thread.tension, 1, 'tension is clamped to 0..1');
+  assert.deepEqual(thread.resolutions, ['unresolved', 'escalates', 'fades']);
+  const event = world.chronicle.events({ limit: 1 })[0]!;
+  const consequence = addConsequenceTool(ctx, {
+    causeEventId: event.id,
+    actorId: 'char:captain-sered',
+    action: 'Sered audits the ferry tolls.',
+    trigger: { kind: 'after-scenes', scenes: 1 },
+    visibility: 'offscreen-discoverable',
+  });
+  assert.equal(consequence.maturity, 'pending');
+  assert.throws(
+    () => addConsequenceTool(ctx, { causeEventId: 'ev:missing', actorId: 'char:captain-sered', action: 'x', trigger: { kind: 'immediate' }, visibility: 'onscreen' }),
+    /no event "ev:missing"/,
+  );
+  assert.throws(() => recordFactTool(ctx, { text: 'x', knownBy: ['char:nobody'] }), /no entity/);
+  assert.deepEqual(sqliteOrigins(world), ['turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence']);
+  assert.ok(turn.turnId);
+  world.close();
+});
+
+test('SQLite rollback and fork across an agent turn and a record_fact write restore exactly', async () => {
+  const { world, ctx } = sqliteContext();
+  const first = await sqliteAgentTurn(ctx, 'i warm the ink', {
+    entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll the Ferryman' }],
+    factsLearned: [{ text: 'The ferry runs at night.', knownBy: ['char:brother-anselm'] }],
+  });
+  recordFactTool(ctx, { text: 'Oll takes coin from the garrison.', knownBy: ['char:brother-anselm'] });
+  await sqliteAgentTurn(ctx, 'i check the door', { entityUpserts: [{ id: 'loc:far-bank', type: 'Location', name: 'The Far Bank' }] });
+
+  const fork = rollbackTool(ctx, { turnId: first.turnId });
+  const forked = world.withStory(fork.forkedStory!.id);
+  assert.ok(forked.graph.get('char:ferryman-oll'));
+  assert.ok(forked.chronicle.facts().some((f) => f.text === 'The ferry runs at night.'));
+  assert.ok(!forked.chronicle.facts().some((f) => f.text.startsWith('Oll takes coin')), 'the later tool write is not in the fork');
+  assert.equal(forked.graph.get('loc:far-bank'), undefined);
+
+  rollbackTool(ctx, { turnId: first.turnId, mode: 'destructive' });
+  assert.ok(world.graph.get('char:ferryman-oll'));
+  assert.ok(!world.chronicle.facts().some((f) => f.text.startsWith('Oll takes coin')));
+  assert.equal(world.graph.get('loc:far-bank'), undefined);
+  assert.deepEqual(sqliteOrigins(world), ['turn:agent']);
   world.close();
 });

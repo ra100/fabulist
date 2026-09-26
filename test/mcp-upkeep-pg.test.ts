@@ -16,6 +16,9 @@ import {
   getStateTool,
   proposeTurnTool,
   rollbackTool,
+  recordFactTool,
+  openThreadTool,
+  addConsequenceTool,
   switchStoryTool,
   type McpToolContext,
 } from '../src/mcp/tools-pg.ts';
@@ -224,6 +227,58 @@ test('PostgreSQL get_state lists recent checkpoints newest first with their orig
       state.recentHistory.map(({ origin, turnId }) => [origin, turnId]),
       [['tool:consequences', null], ['turn:agent', turn.turnId]],
     );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL granular tools write one checkpoint each, labelled by tool', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    await agentTurn(ctx, 'i warm the ink', {});
+    const recorded = await recordFactTool(ctx, { text: 'Oll takes coin from the garrison.', knownBy: ['Brother Anselm'], suspectedBy: ['char:sister-oria'] });
+    assert.deepEqual(recorded.knownBy, ['char:brother-anselm']);
+    const thread = await openThreadTool(ctx, { title: 'The garrison purse', parties: ['char:captain-sered'], tension: 2 });
+    assert.equal(thread.tension, 1);
+    const event = (await world.chronicle.events({ limit: 1 }))[0]!;
+    const consequence = await addConsequenceTool(ctx, {
+      causeEventId: event.id,
+      actorId: 'char:captain-sered',
+      action: 'Sered audits the ferry tolls.',
+      trigger: { kind: 'after-scenes', scenes: 1 },
+      visibility: 'offscreen-discoverable',
+    });
+    assert.equal(consequence.maturity, 'pending');
+    await assert.rejects(
+      () => addConsequenceTool(ctx, { causeEventId: 'ev:missing', actorId: 'char:captain-sered', action: 'x', trigger: { kind: 'immediate' }, visibility: 'onscreen' }),
+      /no event "ev:missing"/,
+    );
+    assert.deepEqual(await origins(db, world.storyId), ['turn:agent', 'tool:consequences', 'tool:record_fact', 'tool:open_thread', 'tool:add_consequence']);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL rollback and fork across an agent turn and a record_fact write restore exactly', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    const first = await agentTurn(ctx, 'i warm the ink', {
+      entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll the Ferryman' }],
+      factsLearned: [{ text: 'The ferry runs at night.', knownBy: ['char:brother-anselm'] }],
+    });
+    await recordFactTool(ctx, { text: 'Oll takes coin from the garrison.', knownBy: ['char:brother-anselm'] });
+    await agentTurn(ctx, 'i check the door', { entityUpserts: [{ id: 'loc:far-bank', type: 'Location', name: 'The Far Bank' }] });
+
+    const fork = await rollbackTool(ctx, { turnId: first.turnId });
+    const forked = await World.forStory(db, fork.story!.id);
+    assert.ok(await forked.graph.get('char:ferryman-oll'));
+    assert.ok((await forked.chronicle.facts()).some((f) => f.text === 'The ferry runs at night.'));
+    assert.ok(!(await forked.chronicle.facts()).some((f) => f.text.startsWith('Oll takes coin')));
+    assert.equal(await forked.graph.get('loc:far-bank'), undefined);
+
+    await rollbackTool(ctx, { turnId: first.turnId, mode: 'destructive' });
+    assert.ok(await world.graph.get('char:ferryman-oll'));
+    assert.ok(!(await world.chronicle.facts()).some((f) => f.text.startsWith('Oll takes coin')));
+    assert.equal(await world.graph.get('loc:far-bank'), undefined);
+    assert.deepEqual(await origins(db, world.storyId), ['turn:agent']);
   });
   if (!ran) t.skip('no Postgres configured');
 });

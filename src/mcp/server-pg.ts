@@ -80,9 +80,12 @@ import {
   useSampleWorldTool,
   listWorldPacksTool,
   useWorldPackTool,
+  recordFactTool,
+  openThreadTool,
+  addConsequenceTool,
   type McpToolContext,
 } from './tools-pg.ts';
-import { upkeepFor, worldDeltaInput } from './upkeep.ts';
+import { triggerInput, upkeepFor, worldDeltaInput } from './upkeep.ts';
 
 /** Every tool's result, JSON-stringified into the one `content` block every MCP client already knows how to render, plus the same value as `structuredContent` for a client that reads that instead — the dual-encoding OpenAI's own MCP compatibility guide documents (see `.design/MCP-CONNECTOR.md` §4). */
 function toolResult(value: unknown) {
@@ -646,6 +649,57 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     },
     async ({ id, tension, status, title, stakes }) =>
       toolResult(await updateThreadTool(ctx, { id, tension, status, title, stakes })),
+  );
+
+  server.registerTool(
+    'record_fact',
+    {
+      description:
+        'Record a fact between turns and exactly who knows it and who only suspects it. For correcting what a turn missed; a turn\u2019s own facts go in commit_narration\u2019s world.',
+      inputSchema: {
+        text: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
+        knownBy: z.array(z.string()).optional().describe('Entity ids or exact names of who knows it.'),
+        suspectedBy: z.array(z.string()).optional().describe('Entity ids or exact names of who only suspects it.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ text, knownBy, suspectedBy }) => toolResult(await recordFactTool(ctx, { text, knownBy, suspectedBy })),
+  );
+
+  server.registerTool(
+    'open_thread',
+    {
+      description: 'Open a narrative thread between turns: a question the story has raised and not yet answered.',
+      inputSchema: {
+        title: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
+        stakes: z.string().max(MAX_FREE_TEXT_CHARS).optional(),
+        parties: z.array(z.string()).describe('Entity ids or exact names of who it involves.'),
+        tension: z.number().min(0).max(1).optional(),
+        resolutions: z.array(z.string()).optional().describe('Possible outcomes; defaults to unresolved/escalates/fades.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ title, stakes, parties, tension, resolutions }) =>
+      toolResult(await openThreadTool(ctx, { title, stakes, parties, tension, resolutions })),
+  );
+
+  server.registerTool(
+    'add_consequence',
+    {
+      description:
+        'Queue a reaction to a recorded event that graph propagation would not infer. Most consequences are seeded automatically after each commit.',
+      inputSchema: {
+        causeEventId: z.string().describe('An event id from this story (get_book / fetch).'),
+        actorId: z.string().describe('Entity id or exact name of who reacts.'),
+        action: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
+        trigger: triggerInput,
+        visibility: z.enum(['onscreen', 'offscreen-discoverable', 'offscreen-hidden']),
+        significance: z.number().min(0).max(1).optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ causeEventId, actorId, action, trigger, visibility, significance }) =>
+      toolResult(await addConsequenceTool(ctx, { causeEventId, actorId, action, trigger, visibility, significance })),
   );
 
   server.registerTool(

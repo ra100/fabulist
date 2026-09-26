@@ -34,7 +34,8 @@ import type { CurrentStory, CurrentWorld, World } from '../store/index.ts';
 import { createStory, getStory, listStories, listStoriesForUser } from '../store/world.ts';
 import type { SessionUser } from '../auth/config.ts';
 import { listWorlds } from '../store/worlds.ts';
-import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType } from '../domain/types.ts';
+import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType, Trigger, Visibility } from '../domain/types.ts';
+import { tx } from '../db/db.ts';
 import { appliedCounts, buildGuide, upkeepFor } from './upkeep.ts';
 
 export interface McpToolContext {
@@ -845,6 +846,74 @@ export function updateThreadTool(
   world.threads.update(id, patch as never);
   recordAuthoringCheckpoint(world);
   return world.threads.get(id);
+}
+
+/** `record_fact`. A fact and exactly who knows or suspects it, for corrections between turns. */
+export function recordFactTool(ctx: McpToolContext, args: { text: string; knownBy?: string[]; suspectedBy?: string[] }) {
+  const text = args.text.trim();
+  if (!text) throw new Error('record_fact: text is required');
+  const world = ctx.world();
+  return tx(world.db, () => {
+    const knownBy = (args.knownBy ?? []).map((value) => entityReference(world, value, 'record_fact'));
+    const suspectedBy = (args.suspectedBy ?? []).map((value) => entityReference(world, value, 'record_fact'));
+    const { scene } = world.session.get();
+    const fact = world.chronicle.addFact(text, scene);
+    for (const id of knownBy) world.chronicle.setKnowledge(fact.id, id, 'knows', scene);
+    for (const id of suspectedBy) world.chronicle.setKnowledge(fact.id, id, 'suspects', scene);
+    recordAuthoringCheckpoint(world, 'tool:record_fact');
+    return { fact, knownBy, suspectedBy };
+  });
+}
+
+/** `open_thread`. Opens a narrative thread the prose set up but no turn recorded. */
+export function openThreadTool(
+  ctx: McpToolContext,
+  args: { title: string; stakes?: string; parties: string[]; tension?: number; resolutions?: string[] },
+) {
+  const title = args.title.trim();
+  if (!title) throw new Error('open_thread: title is required');
+  const world = ctx.world();
+  return tx(world.db, () => {
+    const parties = args.parties.map((value) => entityReference(world, value, 'open_thread'));
+    const thread = world.threads.create({
+      title,
+      stakes: args.stakes ?? '',
+      tension: Math.max(0, Math.min(1, args.tension ?? 0.4)),
+      parties,
+      resolutions: args.resolutions?.length ? args.resolutions : ['unresolved', 'escalates', 'fades'],
+      status: 'open',
+      createdScene: world.session.get().scene,
+    });
+    recordAuthoringCheckpoint(world, 'tool:open_thread');
+    return thread;
+  });
+}
+
+/** `add_consequence`. A reaction the prose sets up that propagation over the graph cannot infer. */
+export function addConsequenceTool(
+  ctx: McpToolContext,
+  args: { causeEventId: string; actorId: string; action: string; trigger: Trigger; visibility: Visibility; significance?: number },
+) {
+  const action = args.action.trim();
+  if (!action) throw new Error('add_consequence: action is required');
+  const world = ctx.world();
+  return tx(world.db, () => {
+    const cause = world.db.prepare(`SELECT 1 FROM events WHERE story_id = ? AND id = ?`).get(world.storyId, args.causeEventId);
+    if (!cause) throw new Error(`add_consequence: no event ${JSON.stringify(args.causeEventId)} in this story`);
+    const consequence = world.consequences.enqueue({
+      causeEventId: args.causeEventId,
+      trigger: args.trigger,
+      actorId: entityReference(world, args.actorId, 'add_consequence'),
+      action,
+      visibility: args.visibility,
+      maturity: args.trigger.kind === 'immediate' ? 'ripening' : 'pending',
+      depth: 1,
+      significance: Math.max(0, Math.min(1, args.significance ?? 0.5)),
+      createdScene: world.session.get().scene,
+    });
+    recordAuthoringCheckpoint(world, 'tool:add_consequence');
+    return consequence;
+  });
 }
 
 /**
