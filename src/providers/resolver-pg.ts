@@ -120,7 +120,7 @@ export class ProviderResolver {
       keyHint = input.key.slice(-4);
     } else {
       wrapped = { nonce: Buffer.from(input.wrap.nonce, 'base64'), ciphertext: Buffer.from(input.wrap.ciphertext, 'base64') };
-      if (wrapped.nonce.length !== 12 || wrapped.ciphertext.length <= 16) throw new ProviderKeyInputError('invalid provider key wrap');
+      if (wrapped.nonce.length !== 12 || wrapped.ciphertext.length <= 16 || wrapped.ciphertext.length > 528) throw new ProviderKeyInputError('invalid provider key wrap');
       keyHint = input.keyHint;
     }
     this.grants.lock(user.id);

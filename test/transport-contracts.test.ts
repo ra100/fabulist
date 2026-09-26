@@ -205,4 +205,13 @@ test('provider-key contracts reject custom base URLs and accept a provider-only 
   assert.equal(providerKeyBodySchema.safeParse({ ...sealed, models: { narrate: '../../etc' } }).success, false);
   assert.equal(encryptionUnlockBodySchema.safeParse({ providerKeys: [{ keyId: id, key: 'sk-test-0123456789' }] }).success, true);
   assert.equal(encryptionUnlockBodySchema.safeParse({}).success, false, 'nothing to unlock');
+  const unlock = { id, endpointId: 'openai', models: { narrate: 'gpt-test' }, trust: 'unlock', keyHint: 'abcd' };
+  const wrap = (nonceBytes: number, ciphertextBytes: number) => ({
+    nonce: Buffer.alloc(nonceBytes).toString('base64'),
+    ciphertext: Buffer.alloc(ciphertextBytes).toString('base64'),
+  });
+  assert.equal(providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(12, 528) }).success, true);
+  assert.equal(providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(12, 529) }).success, false, 'wrap larger than a 512-byte key');
+  assert.equal(providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(12, 750_000) }).success, false);
+  assert.equal(providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(24, 48) }).success, false, 'nonce must be 12 bytes');
 });

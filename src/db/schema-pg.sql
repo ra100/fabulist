@@ -384,7 +384,7 @@ CREATE TABLE IF NOT EXISTS user_provider_keys (
   models        JSONB NOT NULL,
   trust         TEXT NOT NULL CHECK (trust IN ('unlock', 'sealed')),
   nonce         BYTEA NOT NULL CHECK (octet_length(nonce) = 12),
-  ciphertext    BYTEA NOT NULL CHECK (octet_length(ciphertext) > 16),
+  ciphertext    BYTEA NOT NULL CHECK (octet_length(ciphertext) BETWEEN 17 AND 528),
   key_hint      TEXT NOT NULL CHECK (char_length(key_hint) <= 4),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_used_at  TIMESTAMPTZ

@@ -182,7 +182,7 @@ export const encryptionEnrollmentBodySchema = z.object({
   }).strict()).min(1),
 }).strict();
 const providerKeyIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'must be a UUID');
-const providerSecretSchema = z.string().min(8).max(512).regex(/^[\x21-\x7e]+$/, 'invalid API key');
+export const providerSecretSchema = z.string().min(8).max(512).regex(/^[\x21-\x7e]+$/, 'invalid API key');
 const providerModelIdSchema = z.string().trim().min(1).max(200).regex(/^[\w.:@+-][\w.:/@+-]*$/, 'invalid model id').refine((v) => !v.includes('..'), 'invalid model id');
 const providerEndpointIdSchema = z.string().min(1).max(40);
 const providerKeyFields = {
@@ -200,7 +200,11 @@ export const providerKeyBodySchema = z.discriminatedUnion('trust', [
   z.object({
     ...providerKeyFields,
     trust: z.literal('unlock'),
-    wrap: encryptedKeyEnvelopeSchema,
+    // A 512-byte key plus the 16-byte GCM tag; unbounded wraps would be stored and cached per user.
+    wrap: z.object({
+      nonce: z.string().regex(/^[A-Za-z0-9+/]{16}$/, 'invalid nonce'),
+      ciphertext: z.string().max(704).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64'),
+    }).strict(),
     keyHint: z.string().max(4).regex(/^[\x21-\x7e]*$/),
   }).strict(),
 ]);
