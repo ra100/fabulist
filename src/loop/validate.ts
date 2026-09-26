@@ -10,7 +10,7 @@
  * Silently discarding a delta is how the graph and the prose drift apart, so
  * the validator's job is to report precisely, not to quietly clean up.
  */
-import type { Delta, EntityId } from '../domain/types.ts';
+import type { Delta, EntityId, Turn } from '../domain/types.ts';
 import { emptyDelta } from '../domain/types.ts';
 import type { JsonSchema } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
@@ -431,4 +431,12 @@ export function validateDelta(world: World, delta: Delta): ValidationResult {
 
   const blocking = issues.filter((i) => !i.repaired);
   return { ok: blocking.length === 0, delta, issues };
+}
+
+/** Vow breaks the integrity check flagged were authorised by the player, not the agent's world, so a re-commit keeps them. */
+export function carryAuthorisedVowBreaks(old: Turn, delta: Delta): void {
+  const flagged = old.meta.integrity?.violatedVows ?? [];
+  for (const v of old.delta?.vowBreaks ?? []) {
+    if (flagged.includes(v.vowId) && !delta.vowBreaks.some((b) => b.vowId === v.vowId)) delta.vowBreaks.push(v);
+  }
 }

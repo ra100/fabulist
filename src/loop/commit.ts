@@ -11,7 +11,7 @@ import { tx } from '../db/db.ts';
 import type { World } from '../store/index.ts';
 import { storyLayout } from './history.ts';
 import { agentDelta } from './roles.ts';
-import type { ValidationResult } from './validate.ts';
+import { carryAuthorisedVowBreaks, type ValidationResult } from './validate.ts';
 
 export interface CommitResult {
   events: StoryEvent[];
@@ -176,6 +176,8 @@ export function commitDelta(world: World, delta: Delta, visibility: Visibility =
 /** Commits prose, its delta, session state, and its exact rollback checkpoint atomically. */
 export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResult {
   return tx(world.db, () => {
+    // A baseline before the first turn gives rewindBefore something to restore for it.
+    if (!world.history.recent(1).length) world.history.capture(undefined, 'story:start');
     const session = world.session.get();
     const layout = storyLayout(world);
     const previous = layout.turns.at(-1)?.source;
@@ -207,7 +209,7 @@ export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResu
 }
 
 export type RecommitResult =
-  | { kind: 'committed'; commit: CommitResult; turn: Turn; delta: Delta; validation: ValidationResult }
+  | { kind: 'narrated'; commit: CommitResult; turn: Turn; delta: Delta; validation: ValidationResult }
   | { kind: 'blocked'; validation: ValidationResult };
 
 /** Re-commits the latest turn with new prose and an agent delta, as if rolled back one turn and committed again. */
@@ -224,16 +226,18 @@ export function recommitTurn(world: World, turnId: string, bookProse: string, ag
         rejected.validation = validation;
         throw new Error('delta failed validation');
       }
+      carryAuthorisedVowBreaks(old, delta);
       const { commit, turn } = commitTurn(world, {
         rawInput: old.rawInput,
         intent: old.intent,
         delta,
         bookProse,
         meta: old.meta,
+        threadId: old.meta.threadId ?? null,
         origin: 'turn:agent',
       });
       if (old.pinned) world.chronicle.setPinned(turn.id, true);
-      return { kind: 'committed' as const, commit, turn, delta, validation };
+      return { kind: 'narrated' as const, commit, turn, delta, validation };
     });
   } catch (error) {
     if (rejected.validation) return { kind: 'blocked', validation: rejected.validation };

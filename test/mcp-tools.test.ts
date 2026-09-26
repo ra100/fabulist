@@ -300,7 +300,7 @@ test('authoring checkpoints preserve the committed turn checkpoint', async () =>
   const count = world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
     count: number;
   };
-  assert.equal(Number(count.count), 13, 'one turn checkpoint plus one checkpoint for each authoring mutation');
+  assert.equal(Number(count.count), 14, 'a baseline, one turn checkpoint, plus one checkpoint for each authoring mutation');
   world.close();
 });
 
@@ -322,7 +322,7 @@ test('regenerate rolls back prose when SQLite checkpoint capture fails', async (
   const count = world.db.prepare(`SELECT COUNT(*) AS count FROM history_checkpoints WHERE story_id = ?`).get(world.storyId) as {
     count: number;
   };
-  assert.equal(Number(count.count), 1, 'the failed reroll does not write a mutation checkpoint');
+  assert.equal(Number(count.count), 2, 'the failed reroll does not write a mutation checkpoint beyond the baseline and turn');
   world.close();
 });
 
@@ -680,7 +680,7 @@ test('replaceTurnProseTool commits exact prose, including for a pinned turn, wit
   const before = world.chronicle.getTurn(committed.turnId)!;
   pinTurnTool(ctx, { id: before.id });
 
-  const out = replaceTurnProseTool(ctx, { id: before.id, prose: 'Exact author correction.' });
+  const out = await replaceTurnProseTool(ctx, { id: before.id, prose: 'Exact author correction.' });
   assert.equal(out.stateMode, 'preserve');
   assert.equal(out.turn.bookProse, 'Exact author correction.');
   assert.deepEqual(out.turn.delta, before.delta);

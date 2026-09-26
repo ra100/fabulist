@@ -696,7 +696,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       description:
         'Queue a reaction to a recorded event that graph propagation would not infer. Most consequences are seeded automatically after each commit.',
       inputSchema: {
-        causeEventId: z.string().describe('An event id from this story (get_book / fetch).'),
+        causeEventId: z.string().describe('An event id from this story: events[].id in a commit_narration or replace_turn_prose result.'),
         actorId: z.string().describe('Entity id or exact name of who reacts.'),
         action: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
         trigger: triggerInput,

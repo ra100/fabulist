@@ -1,8 +1,9 @@
 import { seedConsequences, tickConsequences, worldTick, type TickResult } from '../consequence/propagate.ts';
 import type { Engine, TakeTurnOptions, TurnOutcome } from '../loop/engine.ts';
+import { recommitTurn } from '../loop/commit.ts';
 import { recordAuthoringCheckpointTx } from '../loop/history.ts';
 import type { World } from '../store/index.ts';
-import { runPlayTurn, type PlayWorkflowAdapter } from './play-workflow.ts';
+import { runPlayTurn, type NarratedOutcome, type PlayWorkflowAdapter } from './play-workflow.ts';
 
 export interface PlayTurnOptions {
   overrideIntegrity?: boolean;
@@ -10,9 +11,11 @@ export interface PlayTurnOptions {
   onToken?: TakeTurnOptions['onToken'];
 }
 
-type Adapter = PlayWorkflowAdapter<World, TurnOutcome, TickResult>;
+type Adapter<Outcome extends NarratedOutcome = TurnOutcome> = PlayWorkflowAdapter<World, Outcome, TickResult>;
 
-function postCommit(takeTurn: Adapter['takeTurn']): Adapter {
+function postCommit<Outcome extends NarratedOutcome = TurnOutcome>(
+  takeTurn: Adapter<Outcome>['takeTurn'],
+): Adapter<Outcome> {
   return {
     takeTurn,
     seedConsequences: (resolvedWorld, delta, events) =>
@@ -47,6 +50,15 @@ export function playTurn(engine: Engine, world: World, input: string, options: P
 export function commitNarration(engine: Engine, world: World, resumeToken: string, prose: string, agentWorld?: unknown) {
   return runPlayTurn(
     postCommit((resolvedWorld) => engine.commitExternalNarration(resumeToken, prose, resolvedWorld, agentWorld)),
+    world,
+    '',
+  );
+}
+
+/** `replace_turn_prose` with a world: the re-commit gets the same consequence workflow as any commit. */
+export function recommitNarration(world: World, turnId: string, prose: string, agentWorld: unknown) {
+  return runPlayTurn(
+    postCommit(async (resolvedWorld) => recommitTurn(resolvedWorld, turnId, prose, agentWorld)),
     world,
     '',
   );

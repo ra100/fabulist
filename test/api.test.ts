@@ -152,7 +152,7 @@ test('playing a turn through the api commits and reports what it set in motion',
     const checkpoint = world.history.checkpointForTurn(turn.id);
     assert.ok(checkpoint, 'a committed turn receives an exact history checkpoint');
     const origins = (world.db.prepare('SELECT origin FROM history_checkpoints WHERE story_id = ? ORDER BY position').all(world.storyId) as Array<{ origin: string | null }>).map((row) => row.origin);
-    assert.deepEqual(origins, ['turn:server', 'tool:consequences']);
+    assert.deepEqual(origins, ['story:start', 'turn:server', 'tool:consequences']);
 
     const style = await send(base, 'PUT', '/api/style', { register: 'plain' });
     assert.equal(style.status, 200);

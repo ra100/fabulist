@@ -32,6 +32,7 @@ import type { Db } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
 import { storyLayout } from './history-pg.ts';
 import { agentDelta } from './roles-pg.ts';
+import { carryAuthorisedVowBreaks } from './validate.ts';
 import type { ValidationResult } from './validate-pg.ts';
 
 export interface CommitResult {
@@ -227,6 +228,8 @@ export async function commitTurn(db: Db, world: World, input: CommitTurnInput): 
 
 /** `commitTurn`'s body, for a caller already holding the story lock on a transaction world. */
 async function commitTurnOn(w: World, input: CommitTurnInput): Promise<CommitTurnResult> {
+  // A baseline before the first turn gives rewindBefore something to restore for it.
+  if (!(await w.history.recent(1)).length) await w.history.capture(undefined, 'story:start');
   const session = await w.session.get();
   const layout = await storyLayout(w);
   const previous = layout.turns.at(-1)?.source;
@@ -257,7 +260,7 @@ async function commitTurnOn(w: World, input: CommitTurnInput): Promise<CommitTur
 }
 
 export type RecommitResult =
-  | { kind: 'committed'; commit: CommitResult; turn: Turn; delta: Delta; validation: ValidationResult }
+  | { kind: 'narrated'; commit: CommitResult; turn: Turn; delta: Delta; validation: ValidationResult }
   | { kind: 'blocked'; validation: ValidationResult };
 
 /** Re-commits the latest turn with new prose and an agent delta, as if rolled back one turn and committed again. */
@@ -288,16 +291,18 @@ export async function recommitTurn(
         rejected.validation = validation;
         throw new Error('delta failed validation');
       }
+      carryAuthorisedVowBreaks(old, delta);
       const { commit, turn } = await commitTurnOn(w, {
         rawInput: old.rawInput,
         intent: old.intent,
         delta,
         bookProse,
         meta: old.meta,
+        threadId: old.meta.threadId ?? null,
         origin: 'turn:agent',
       });
       if (old.pinned) await w.chronicle.setPinned(turn.id, true);
-      return { kind: 'committed' as const, commit, turn, delta, validation };
+      return { kind: 'narrated' as const, commit, turn, delta, validation };
     });
   } catch (error) {
     if (rejected.validation) return { kind: 'blocked', validation: rejected.validation };

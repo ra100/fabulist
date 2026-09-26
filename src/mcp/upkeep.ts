@@ -72,7 +72,7 @@ const UPKEEP_CHECKLIST = [
   'Conditions: conditionUpdates for mood, injuries, location or presentWith of anyone the prose changes.',
   'Vows: vowBreaks when a character breaks a vow they hold.',
   'Events: events with participants and significance 0..1; omit to record one event from the prose with the present cast. sceneAdvance: true only when place or time changes.',
-  'Consequences are seeded automatically from significant events after each commit. Use add_consequence only for a reaction the prose sets up that the graph cannot infer.',
+  'Consequences are seeded automatically from significant events after each commit. Use add_consequence only for a reaction the prose sets up that the graph cannot infer; its causeEventId is an events[].id from the commit result.',
 ];
 
 export function buildGuide(input: GuideInput): Guide {

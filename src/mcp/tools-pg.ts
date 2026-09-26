@@ -43,8 +43,7 @@ import { createStory, getStory, listStories, listStoriesForUserWithPrivateValues
 import { assertPrivateStoryCreationReady } from '../store/private-story-migration-pg.ts';
 import type { SessionUser } from '../auth/config.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType, Trigger, Visibility } from '../domain/types.ts';
-import { commitNarration, playTurn } from '../application/play-pg.ts';
-import { recommitTurn } from '../loop/commit-pg.ts';
+import { commitNarration, playTurn, recommitNarration } from '../application/play-pg.ts';
 import { appliedCounts, buildGuide, upkeepFor } from './upkeep.ts';
 
 export interface McpToolContext {
@@ -667,6 +666,11 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   throw new Error(`propose_turn: unexpected outcome kind ${(outcome as { kind: string }).kind}`);
 }
 
+/** Event ids an agent can cite as add_consequence's causeEventId. */
+function eventRefs(events: Array<{ id: string; text: string }>) {
+  return events.map(({ id, text }) => ({ id, text }));
+}
+
 /**
  * `commit_narration`. Resumes a `propose_turn` that returned
  * `awaiting-narration`, given the prose the calling model wrote from the
@@ -708,6 +712,7 @@ export async function commitNarrationTool(
       turnId: outcome.turn.id,
       prose: outcome.prose,
       eventsRecorded: outcome.commit.events.length,
+      events: eventRefs(outcome.commit.events),
       brokenVows: outcome.commit.brokenVows,
       newThreads: outcome.commit.newThreadIds,
       applied: appliedCounts(outcome.delta),
@@ -842,7 +847,7 @@ export async function replaceTurnProseTool(
     throw new Error('replace_turn_prose: only stateMode "preserve" is supported');
   const upkeep = upkeepOf(ctx);
   if (upkeep === 'agent' && args.world !== undefined) {
-    const result = await recommitTurn(ctx.db, world, args.id, args.prose, args.world);
+    const { outcome: result, seeded, tick } = await recommitNarration(ctx.db, world, args.id, args.prose, args.world);
     if (result.kind === 'blocked') {
       return {
         status: 'blocked' as const,
@@ -859,7 +864,11 @@ export async function replaceTurnProseTool(
       turn: result.turn,
       applied: appliedCounts(result.delta),
       dropped: result.validation.issues.filter((i) => i.repaired),
+      events: eventRefs(result.commit.events),
+      brokenVows: result.commit.brokenVows,
       newThreads: result.commit.newThreadIds,
+      consequencesSeeded: seeded,
+      consequencesFired: tick?.fired.length ?? 0,
     };
   }
   if (!(await world.chronicle.replaceProse(args.id, args.prose)))
