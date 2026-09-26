@@ -1,4 +1,4 @@
-import { AnthropicProvider, OpenAICompatProvider, caps } from './http.ts';
+import { AnthropicProvider, OpenAICompatProvider, ProviderHttpError, caps } from './http.ts';
 import type { CompletionRequest, CompletionResult, Provider } from './provider.ts';
 
 export interface ByokEndpoint {
@@ -37,6 +37,25 @@ export class ProviderKeyLockedError extends Error {
   constructor(message = 'your provider key is locked; unlock private storage to use it') {
     super(message);
     this.name = 'ProviderKeyLockedError';
+  }
+}
+
+const REJECTED_COPY: Record<number, string> = {
+  401: 'Your provider rejected your API key',
+  403: 'Your provider rejected your API key',
+  402: 'Your provider refused your API key for lack of credit or quota',
+  429: 'Your provider is rate-limiting your API key or it is out of quota',
+};
+
+/** The provider refused the user's own key; the message is fixed copy, never provider text, so it cannot carry key material. */
+export class ProviderKeyRejectedError extends Error {
+  readonly status: number;
+  readonly keySource = 'own' as const;
+
+  constructor(status: number) {
+    super(`${REJECTED_COPY[status] ?? 'Your provider refused the request made with your API key'} (${status}). Check it in Settings → My provider.`);
+    this.name = 'ProviderKeyRejectedError';
+    this.status = status;
   }
 }
 
@@ -81,6 +100,7 @@ export function byokProvider(
       try {
         return await inner.complete(req);
       } catch (err) {
+        if (err instanceof ProviderHttpError && err.status in REJECTED_COPY) throw new ProviderKeyRejectedError(err.status);
         throw new Error(scrubSecrets(err instanceof Error ? err.message : String(err), [apiKey]));
       }
     },
@@ -97,9 +117,16 @@ export async function listModels(
   const headers: Record<string, string> = anthropic
     ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
     : { authorization: `Bearer ${apiKey}` };
+  let res: Response;
   try {
-    const res = await noRedirects(fetcher)(url, { headers, signal: AbortSignal.timeout(5_000) });
-    if (!res.ok) return [];
+    res = await noRedirects(fetcher)(url, { headers, signal: AbortSignal.timeout(5_000) });
+  } catch {
+    return [];
+  }
+  // 404/405 means this provider has no listing endpoint; anything else non-2xx is about the key.
+  if (res.status === 404 || res.status === 405) return [];
+  if (!res.ok) throw new ProviderKeyRejectedError(res.status);
+  try {
     const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
     return (body.data ?? [])
       .map((m) => m.id)

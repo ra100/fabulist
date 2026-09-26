@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import {
   BYOK_ENDPOINTS,
   ProviderKeyLockedError,
+  ProviderKeyRejectedError,
   byokEndpoint,
   byokProvider,
   listModels,
   scrubSecrets,
 } from '../src/providers/byok.ts';
-import type { CompletionRequest } from '../src/providers/provider.ts';
+import { ProviderRegistry, type CompletionRequest } from '../src/providers/provider.ts';
+import { MeteredRegistry } from '../src/providers/metered.ts';
+import { errorBody, statusForError } from '../src/server/http.ts';
 
 const ask: CompletionRequest = { role: 'narrate', messages: [{ role: 'user', content: 'hello' }] };
 
@@ -75,14 +78,14 @@ test('an Anthropic key goes in x-api-key to the Messages API', async () => {
 test('a provider error body echoing the key is scrubbed before it surfaces', async () => {
   const key = 'zz-custom-secret-value-42';
   const { fetcher } = spyFetch(
-    401,
+    400,
     {},
     `{"error":"invalid key ${key}","hint":"Bearer ${key}","other":"sk-proj-abcdefghijklmnop1234"}`,
   );
   const provider = byokProvider(byokEndpoint('openai')!, 'gpt-test', () => key, fetcher);
   await assert.rejects(provider.complete(ask), (err: Error) => {
     assert.doesNotMatch(err.message, /zz-custom-secret-value-42|sk-proj-/);
-    assert.match(err.message, /returned 401/);
+    assert.match(err.message, /returned 400/);
     return true;
   });
 });
@@ -117,7 +120,35 @@ test('model listing returns sorted ids and degrades to an empty list', async () 
   const anthropic = spyFetch(200, { data: [{ id: 'claude-x' }] });
   await listModels(byokEndpoint('anthropic')!, 'sk-ant-0123456789abcdef', anthropic.fetcher);
   assert.equal(anthropic.seen[0]?.url, 'https://api.anthropic.com/v1/models');
-  assert.deepEqual(await listModels(byokEndpoint('openai')!, 'bad', spyFetch(401, {}).fetcher), []);
+  assert.deepEqual(await listModels(byokEndpoint('openai')!, 'k', spyFetch(404, {}).fetcher), []);
+  assert.deepEqual(await listModels(byokEndpoint('openai')!, 'k', spyFetch(405, {}).fetcher), []);
+});
+
+test('model listing with a rejected key is an error, not an empty list', async () => {
+  await assert.rejects(
+    listModels(byokEndpoint('openai')!, 'bad', spyFetch(401, {}).fetcher),
+    (err: unknown) => err instanceof ProviderKeyRejectedError && err.status === 401 && /rejected your API key \(401\)/.test(err.message),
+  );
+});
+
+test('a key the provider rejects on a turn is a scrubbed 4xx naming the status, through the meter', async () => {
+  const key = 'sk-live-0123456789abcdefghij';
+  for (const [id, status] of [['openai', 401], ['anthropic', 403], ['groq', 429]] as const) {
+    const provider = byokProvider(byokEndpoint(id)!, 'm', () => key, spyFetch(status, {}, `{"error":"bad key ${key}"}`).fetcher);
+    const metered = new MeteredRegistry(new ProviderRegistry(provider), async () => {}).get('narrate');
+    for (const req of [ask, { ...ask, onToken: () => {} }]) {
+      const err = await metered.complete(req).then(() => null, (e: unknown) => e);
+      assert.ok(err instanceof ProviderKeyRejectedError, `${id} ${status}`);
+      assert.equal(err.status, status);
+      assert.equal(err.keySource, 'own');
+      const httpStatus = statusForError(err);
+      assert.ok(httpStatus >= 400 && httpStatus < 500);
+      const body = errorBody(err, httpStatus, true).error;
+      assert.match(body, new RegExp(`\\(${status}\\)`));
+      assert.match(body, /Settings/);
+      assert.doesNotMatch(body, /sk-live|internal error/);
+    }
+  }
 });
 
 test('byok calls refuse redirects so the key and prompt never follow one cross-origin', async () => {
