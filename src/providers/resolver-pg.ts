@@ -5,7 +5,6 @@ import {
   providerKeyFor,
   saveProviderKey,
   summarizeProviderKey,
-  touchProviderKey,
   type ProviderKeyRow,
   type ProviderKeySummary,
   type ProviderModels,
@@ -275,9 +274,6 @@ export class ProviderResolver {
   }
 
   private sink(userId: string, storyId: string | undefined, keySource: KeySource, keyId?: string): UsageSink {
-    return async (call) => {
-      await recordUsage(this.db, { userId, storyId: storyId ?? null, keySource, ...call });
-      if (keyId) await touchProviderKey(this.db, userId, keyId);
-    };
+    return (call) => recordUsage(this.db, { userId, storyId: storyId ?? null, keySource, ...call, keyId });
   }
 }

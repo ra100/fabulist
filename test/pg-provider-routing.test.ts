@@ -8,6 +8,7 @@ import { seedWorld } from '../src/seed/verrow-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { ProviderKeyLockedError } from '../src/providers/byok.ts';
+import { usageSettled } from '../src/providers/metered.ts';
 import { ProviderResolver } from '../src/providers/resolver-pg.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
@@ -59,6 +60,7 @@ test('HTTP turns, scene close and MCP proposals run on the per-request registry 
       await close();
     }
     assert.equal(fallback.calls.length, 0, 'the engine default registry was never used');
+    await usageSettled();
     const seen = new Set(shared.calls.map((c) => c.role));
     assert.ok(seen.has('referee') && seen.has('extract') && seen.has('summarize'), [...seen].join(','));
     const metered = await db.query<{ role: string; key_source: string; story_id: string }>(

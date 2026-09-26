@@ -5,6 +5,7 @@ import { sessionUser } from './signed-in.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry, type CompletionRequest } from '../src/providers/provider.ts';
 import { ProviderKeyLockedError } from '../src/providers/byok.ts';
+import { usageSettled } from '../src/providers/metered.ts';
 import { EphemeralProviderKeyStore } from '../src/auth/ephemeral-provider-keys.ts';
 import {
   ProviderKeyForbiddenError,
@@ -86,6 +87,7 @@ test('a sealed key reaches the provider and meters as own usage without storing 
 
     await (await resolver.forRequest(alice, 'story-1')).get('referee').complete(ask('referee'));
     assert.deepEqual(bearers, [`Bearer ${ALICE_KEY}`]);
+    await usageSettled();
     const usage = await db.query(`SELECT role, key_source, story_id, tokens_in FROM usage_events WHERE user_id = $1`, [alice.id]);
     assert.deepEqual(usage.rows, [{ role: 'referee', key_source: 'own', story_id: 'story-1', tokens_in: 7 }]);
     const touched = await db.one<{ last_used_at: Date | null }>(`SELECT last_used_at FROM user_provider_keys WHERE user_id = $1`, [alice.id]);
@@ -209,6 +211,7 @@ test('Test is a metered live call whose failure text never carries the key, and 
   const ran = await withPg(async (db, _schema, roles) => {
     const ok = resolverFor(roles.play, { keyCallLimit: { burst: 2, perMinute: 1 } }).resolver;
     assert.deepEqual(await ok.test(alice, { endpointId: 'openai', model: 'gpt-test', key: ALICE_KEY }), { ok: true, model: 'gpt-test' });
+    await usageSettled();
     const probe = await db.query(`SELECT role, key_source FROM usage_events WHERE user_id = $1`, [alice.id]);
     assert.deepEqual(probe.rows, [{ role: 'probe', key_source: 'own' }]);
     await assert.rejects(ok.test(alice, { endpointId: 'localhost', model: 'm', key: ALICE_KEY }), ProviderKeyInputError);
