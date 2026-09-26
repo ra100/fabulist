@@ -1,5 +1,6 @@
 import type { Db } from '../db/pg.ts';
 import type { Engine } from './engine-pg.ts';
+import type { Registry } from '../providers/provider.ts';
 import type { SceneSplitResult, StoryLayout, StoryLayoutTurn } from '../domain/types.ts';
 import { World } from '../store/index-pg.ts';
 
@@ -123,7 +124,7 @@ export async function regenerateProseWithCheckpoint(
   world: World,
   engine: Engine,
   turnId: string,
-  opts: { note?: string; onToken?: (chunk: string) => void } = {},
+  opts: { note?: string; onToken?: (chunk: string) => void; providers?: Registry } = {},
 ) {
   const rendered = await engine.renderProseRegeneration(turnId, { ...opts, world });
   return recordAuthoringCheckpoint(db, world, (transactionWorld) => engine.persistProseRegeneration(rendered, transactionWorld));
