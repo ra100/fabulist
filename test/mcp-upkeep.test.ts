@@ -7,6 +7,8 @@ import { buildGuide, upkeepFor } from '../src/mcp/upkeep.ts';
 import { World } from '../src/store/index.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { Engine } from '../src/loop/engine.ts';
+import { coerceAgentDelta } from '../src/loop/validate.ts';
+import { agentDelta } from '../src/loop/roles.ts';
 import {
   createStoryTool,
   getGuideTool,
@@ -88,5 +90,52 @@ test('SQLite MCP story tools report upkeep and follow a mid-session provider swa
   registry.swap(new ProviderRegistry(new MockProvider({ id: 'stub-extractor' })), 'stub');
   assert.equal(getStateTool(ctx).upkeep, 'server', 'no reconnect needed');
   assert.equal(getGuideTool(ctx).upkeepChecklist, undefined);
+  world.close();
+});
+
+test('coerceAgentDelta falls back to one prose event when every supplied event is blank', () => {
+  const { delta, issues } = coerceAgentDelta(
+    { events: [{ text: '   ' }, 'junk'], factsLearned: [{ text: 'The bell is cracked.', knownBy: ['char:a'] }] },
+    'Rain  on the\nroof.',
+    ['char:a', 'char:b'],
+    'loc:roof',
+  );
+  assert.equal(delta.events.length, 1);
+  assert.deepEqual(delta.events[0], {
+    text: 'Rain on the roof.',
+    participants: ['char:a', 'char:b'],
+    locationId: 'loc:roof',
+    significance: 0.5,
+  });
+  assert.equal(delta.factsLearned.length, 1, 'the other fields are kept');
+  assert.equal(issues.filter((i) => !i.repaired).length, 0, 'a missing event list never blocks an agent turn');
+});
+
+test('coerceAgentDelta keeps agent events when at least one has text', () => {
+  const { delta } = coerceAgentDelta(
+    { events: [{ text: 'Anselm bars the door.', participants: ['char:a'], significance: 0.8 }] },
+    'prose',
+    ['char:z'],
+    null,
+  );
+  assert.equal(delta.events.length, 1);
+  assert.equal(delta.events[0]!.text, 'Anselm bars the door.');
+  assert.deepEqual(delta.events[0]!.participants, ['char:a']);
+});
+
+test('SQLite agentDelta validates an agent world and records the present cast on the fallback event', () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const { delta, validation } = agentDelta(
+    world,
+    { edgeAsserts: [{ subject: 'char:brother-anselm', predicate: 'DISTRUSTS', object: 'char:nobody' }] },
+    'Anselm waits by the door.',
+  );
+  assert.equal(validation.ok, true);
+  assert.equal(delta.events.length, 1);
+  assert.ok(delta.events[0]!.participants.includes('char:brother-anselm'));
+  assert.equal(delta.events[0]!.locationId, 'loc:the-scriptorium');
+  assert.equal(delta.edgeAsserts.length, 0, 'an edge to an unknown id is dropped');
+  assert.ok(validation.issues.some((i) => i.repaired && /char:nobody/.test(i.message)));
   world.close();
 });

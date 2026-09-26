@@ -30,12 +30,14 @@ import {
   buildIntegrityFrame,
   buildNarratorFrame,
   buildRefereeFrame,
+  resolvePresentIds,
   type FrameData,
   type FrameContext,
 } from '../frame/builders-pg.ts';
 import { adaptRequest, extractJson, type Provider } from '../providers/provider.ts';
 import type { World } from '../store/index-pg.ts';
 import {
+  coerceAgentDelta,
   coerceDelta,
   deltaSchema,
   directorSchema,
@@ -479,6 +481,21 @@ export async function extract(
 
   const { delta, issues } = coerceDelta(raw);
   const validation = await validateDelta(deps.world, delta);
+  validation.issues = [...issues, ...validation.issues];
+  validation.ok = validation.issues.filter((i) => !i.repaired).length === 0;
+  return { delta, validation };
+}
+
+/** The agent-kept counterpart of `extract`: same validation, no model call. */
+export async function agentDelta(
+  world: World,
+  raw: unknown,
+  prose: string,
+): Promise<{ delta: Delta; validation: ValidationResult }> {
+  const session = await world.session.get();
+  const participants = await resolvePresentIds(world, session);
+  const { delta, issues } = coerceAgentDelta(raw, prose, participants, session.currentLocationId);
+  const validation = await validateDelta(world, delta);
   validation.issues = [...issues, ...validation.issues];
   validation.ok = validation.issues.filter((i) => !i.repaired).length === 0;
   return { delta, validation };

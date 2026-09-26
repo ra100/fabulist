@@ -8,6 +8,7 @@ import { seedWorld } from '../src/seed/verrow-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry, SwappableRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
+import { agentDelta } from '../src/loop/roles-pg.ts';
 import {
   createStoryTool,
   getGuideTool,
@@ -52,6 +53,24 @@ test('PostgreSQL MCP story tools report upkeep and follow a mid-session provider
     registry.swap(new ProviderRegistry(new MockProvider({ id: 'stub-extractor' })), 'stub');
     assert.equal((await getStateTool(ctx)).upkeep, 'server', 'no reconnect needed');
     assert.equal((await getGuideTool(ctx)).upkeepChecklist, undefined);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL agentDelta validates an agent world and records the present cast on the fallback event', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await seededStory(db);
+    const { delta, validation } = await agentDelta(
+      world,
+      { edgeAsserts: [{ subject: 'char:brother-anselm', predicate: 'DISTRUSTS', object: 'char:nobody' }] },
+      'Anselm waits by the door.',
+    );
+    assert.equal(validation.ok, true);
+    assert.equal(delta.events.length, 1);
+    assert.ok(delta.events[0]!.participants.includes('char:brother-anselm'));
+    assert.equal(delta.events[0]!.locationId, 'loc:the-scriptorium');
+    assert.equal(delta.edgeAsserts.length, 0);
+    assert.ok(validation.issues.some((i) => i.repaired && /char:nobody/.test(i.message)));
   });
   if (!ran) t.skip('no Postgres configured');
 });
