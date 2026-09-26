@@ -77,9 +77,22 @@ export async function commitNarration(
 }
 
 /** `replace_turn_prose` with a world: the re-commit gets the same consequence workflow as any commit. */
-export async function recommitNarration(db: Db, world: World, turnId: string, prose: string, agentWorld: unknown) {
+export async function recommitNarration(
+  db: Db,
+  engine: Engine,
+  world: World,
+  turnId: string,
+  prose: string,
+  agentWorld: unknown,
+  providers?: Registry,
+) {
   return runPlayTurn(
-    postCommit(db, (resolvedWorld) => recommitTurn(db, resolvedWorld, turnId, prose, agentWorld)),
+    postCommit(db, async (resolvedWorld) => {
+      const outcome = await recommitTurn(db, resolvedWorld, turnId, prose, agentWorld);
+      // The rewind dropped what compaction wrote when this turn first closed its scene.
+      if (outcome.kind === 'narrated' && outcome.delta.sceneAdvance) await engine.sceneClosed(resolvedWorld, outcome.turn.scene, providers);
+      return outcome;
+    }),
     world,
     '',
   );

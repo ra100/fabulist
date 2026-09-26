@@ -861,9 +861,10 @@ export async function replaceTurnProseTool(
   if (!args.prose.trim()) throw new Error('replace_turn_prose: prose is required');
   if (args.stateMode && args.stateMode !== 'preserve')
     throw new Error('replace_turn_prose: only stateMode "preserve" is supported');
-  const upkeep = await upkeepOf(ctx);
+  const providers = await requestRegistry(ctx, world);
+  const upkeep = upkeepFor(providers);
   if (upkeep === 'agent' && args.world !== undefined) {
-    const { outcome: result, seeded, tick } = await recommitNarration(ctx.db, world, args.id, args.prose, args.world);
+    const { outcome: result, seeded, tick } = await recommitNarration(ctx.db, ctx.engine, world, args.id, args.prose, args.world, providers);
     if (result.kind === 'blocked') {
       return {
         status: 'blocked' as const,

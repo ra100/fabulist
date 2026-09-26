@@ -215,6 +215,11 @@ export class Engine {
     return this.compactor;
   }
 
+  /** The post-commit compaction of a turn, for a scene-closing commit made outside `takeTurn` (a recommit). */
+  async sceneClosed(scene: number): Promise<void> {
+    if (this.autoCompact) await this.compactor.onSceneClosed(scene);
+  }
+
   /** The registry roles resolve from; MCP reads it per request to report who keeps the world. */
   get registry(): Registry {
     return this.providers;
