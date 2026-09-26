@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry, type CompletionRequest, type Provider } from '../src/providers/provider.ts';
-import { MeteredRegistry, type UsageSink } from '../src/providers/metered.ts';
+import { MeteredRegistry, usageSettled, type UsageSink } from '../src/providers/metered.ts';
 import { ProviderKeyLockedError } from '../src/providers/byok.ts';
 
 const ask = (role: string): CompletionRequest => ({ role, messages: [{ role: 'user', content: 'hello' }] });
@@ -72,4 +72,19 @@ test('a failing usage sink never fails the call it measures', async () => {
     throw new Error('db down');
   });
   assert.equal(typeof (await registry.get('narrate').complete(ask('narrate'))).text, 'string');
+});
+
+test('a call returns without waiting on its usage write, so a busy pool cannot stall it', async () => {
+  let resolveSink!: () => void;
+  const registry = new MeteredRegistry(
+    new ProviderRegistry(new MockProvider({ id: 'stub' })),
+    () => new Promise<void>((r) => (resolveSink = r)),
+  );
+  const outcome = await Promise.race([
+    registry.get('narrate').complete(ask('narrate')).then(() => 'returned'),
+    new Promise((r) => setTimeout(() => r('blocked'), 200)),
+  ]);
+  resolveSink();
+  await usageSettled();
+  assert.equal(outcome, 'returned');
 });

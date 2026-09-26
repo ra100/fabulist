@@ -9,6 +9,13 @@ export type UsageSink = (call: {
   tokensOut: number;
 }) => Promise<void>;
 
+const pending = new Set<Promise<void>>();
+
+/** Resolves once every usage write started so far has landed (tests and shutdown). */
+export async function usageSettled(): Promise<void> {
+  await Promise.allSettled([...pending]);
+}
+
 function metered(inner: Provider, sink: UsageSink): Provider {
   return {
     id: inner.id,
@@ -23,15 +30,19 @@ function metered(inner: Provider, sink: UsageSink): Provider {
         throw new Error(scrubSecrets(err instanceof Error ? err.message : String(err)));
       }
       if (inner.id !== 'mock') {
-        await sink({
+        // Not awaited: the caller may hold a pooled connection in a tx, and waiting on a second one can deadlock the pool.
+        const write = sink({
           role: req.role,
           providerId: inner.id,
           model: result.model,
           tokensIn: result.tokensIn,
           tokensOut: result.tokensOut,
-        }).catch((err: unknown) =>
-          console.error('[usage] could not record a provider call:', err instanceof Error ? err.message : err),
-        );
+        })
+          .catch((err: unknown) =>
+            console.error('[usage] could not record a provider call:', err instanceof Error ? err.message : err),
+          )
+          .finally(() => pending.delete(write));
+        pending.add(write);
       }
       return result;
     },

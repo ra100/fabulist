@@ -67,3 +67,36 @@ test("usage groups a user's calls by day, model and key source, and never mixes 
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('one statement records a call and stamps the key it used', async (t) => {
+  const ran = await withPg(async (db, _schema, roles) => {
+    const keyId = '00000000-0000-4000-8000-000000000001';
+    await db.query(
+      `INSERT INTO user_provider_keys (id, user_id, endpoint_id, models, trust, nonce, ciphertext, key_hint)
+       VALUES ($1, 'user:alice', 'openai', '{"narrate":"gpt-test"}', 'sealed', $2, $3, 'abcd')`,
+      [keyId, Buffer.alloc(12, 1), Buffer.alloc(40, 2)],
+    );
+    let statements = 0;
+    const counting = { query: (sql: string, params?: unknown[]) => (statements++, roles.play.query(sql, params)) } as typeof roles.play;
+    await recordUsage(counting, {
+      userId: 'user:alice',
+      storyId: null,
+      role: 'narrate',
+      providerId: 'openai',
+      model: 'gpt-test',
+      keySource: 'own',
+      tokensIn: 4,
+      tokensOut: 2,
+      keyId,
+    });
+    assert.equal(statements, 1);
+    const row = await db.one<{ calls: string; last_used_at: Date | null }>(
+      `SELECT (SELECT count(*) FROM usage_events WHERE user_id = 'user:alice') AS calls, last_used_at
+         FROM user_provider_keys WHERE id = $1`,
+      [keyId],
+    );
+    assert.equal(row?.calls, '1');
+    assert.ok(row?.last_used_at);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});

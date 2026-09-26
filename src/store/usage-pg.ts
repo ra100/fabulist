@@ -11,6 +11,8 @@ export interface UsageEvent {
   keySource: KeySource;
   tokensIn: number;
   tokensOut: number;
+  /** The own key the call used; stamped in the same statement so metering costs one connection. */
+  keyId?: string;
 }
 
 export interface UsageRow {
@@ -34,9 +36,12 @@ const tokens = (n: number): number => (Number.isFinite(n) && n > 0 ? Math.floor(
 
 export async function recordUsage(db: Queryable, e: UsageEvent): Promise<void> {
   await db.query(
-    `INSERT INTO usage_events (user_id, story_id, role, provider_id, model, key_source, tokens_in, tokens_out)
+    `WITH touched AS (
+       UPDATE user_provider_keys SET last_used_at = now() WHERE user_id = $1 AND id = $9::text
+     )
+     INSERT INTO usage_events (user_id, story_id, role, provider_id, model, key_source, tokens_in, tokens_out)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [e.userId, e.storyId, e.role, e.providerId, e.model, e.keySource, tokens(e.tokensIn), tokens(e.tokensOut)],
+    [e.userId, e.storyId, e.role, e.providerId, e.model, e.keySource, tokens(e.tokensIn), tokens(e.tokensOut), e.keyId ?? null],
   );
 }
 

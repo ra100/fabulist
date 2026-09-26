@@ -25,6 +25,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Db, applyMigrations } from '../src/db/pg.ts';
+import { usageSettled } from '../src/providers/metered.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_SQL = readFileSync(join(here, '..', 'src', 'db', 'schema-pg.sql'), 'utf8');
@@ -128,6 +129,8 @@ export async function withPg(
     await db.query(ROLES_SQL);
     await fn(db, schema, roles);
   } finally {
+    // Metering is fire-and-forget; a write still queued when its pool ends would never settle.
+    await usageSettled();
     // Before the schema drop: an open role connection would hold it.
     await Promise.all([play?.close(), ingest?.close()]);
     await db.close();
