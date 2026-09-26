@@ -373,6 +373,40 @@ CREATE TABLE IF NOT EXISTS encrypted_story_values (
   PRIMARY KEY (story_id, table_name, record_id, field_name)
 );
 
+-- A user's own model-provider key. Plaintext never lands here: `unlock` rows hold
+-- a browser wrap under the user's master key, `sealed` rows a server wrap under
+-- FABULIST_SECRETS_KEY. One key per user; a save replaces the row with a new id.
+CREATE TABLE IF NOT EXISTS user_provider_keys (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL UNIQUE,
+  label         TEXT NOT NULL DEFAULT '',
+  endpoint_id   TEXT NOT NULL,
+  models        JSONB NOT NULL,
+  trust         TEXT NOT NULL CHECK (trust IN ('unlock', 'sealed')),
+  nonce         BYTEA NOT NULL CHECK (octet_length(nonce) = 12),
+  ciphertext    BYTEA NOT NULL CHECK (octet_length(ciphertext) > 16),
+  key_hint      TEXT NOT NULL CHECK (char_length(key_hint) <= 4),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at  TIMESTAMPTZ
+);
+
+-- One row per provider call made for a signed-in user. `story_id` has no FK on
+-- purpose: spent tokens stay spent when a story is deleted or rolled back.
+CREATE TABLE IF NOT EXISTS usage_events (
+  id           BIGSERIAL PRIMARY KEY,
+  user_id      TEXT NOT NULL,
+  story_id     TEXT,
+  role         TEXT NOT NULL,
+  provider_id  TEXT NOT NULL,
+  model        TEXT NOT NULL,
+  key_source   TEXT NOT NULL CHECK (key_source IN ('own', 'server')),
+  tokens_in    INTEGER NOT NULL CHECK (tokens_in >= 0),
+  tokens_out   INTEGER NOT NULL CHECK (tokens_out >= 0),
+  at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_events_user_at ON usage_events (user_id, at);
+
 -- Which canon worlds a story reads, in precedence order. THE crossover table.
 --
 -- One row per source. `ordinal` 1 is the primary world, 2 the next, and so on;
