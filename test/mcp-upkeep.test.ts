@@ -264,3 +264,14 @@ test('SQLite checkpoints record their origin, and a fork keeps it', async () => 
   assert.deepEqual(sqliteOrigins(server.world), ['turn:server', 'tool:consequences']);
   server.world.close();
 });
+
+test('SQLite get_state lists recent checkpoints newest first with their origin', async () => {
+  const { world, ctx } = sqliteContext();
+  const turn = await sqliteAgentTurn(ctx, 'i warm the ink', {});
+  const state = getStateTool(ctx);
+  assert.deepEqual(
+    state.recentHistory.map(({ origin, turnId }) => [origin, turnId]),
+    [['tool:consequences', null], ['turn:agent', turn.turnId]],
+  );
+  world.close();
+});

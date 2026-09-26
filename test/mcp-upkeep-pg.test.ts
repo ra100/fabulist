@@ -214,3 +214,16 @@ test('PostgreSQL checkpoints record their origin, and a fork keeps it', async (t
     assert.deepEqual(await origins(db, server.world.storyId), ['turn:server', 'tool:consequences']);
   });
 });
+
+test('PostgreSQL get_state lists recent checkpoints newest first with their origin', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { ctx } = await pgContext(db);
+    const turn = await agentTurn(ctx, 'i warm the ink', {});
+    const state = await getStateTool(ctx);
+    assert.deepEqual(
+      state.recentHistory.map(({ origin, turnId }) => [origin, turnId]),
+      [['tool:consequences', null], ['turn:agent', turn.turnId]],
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});

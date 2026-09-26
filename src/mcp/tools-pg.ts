@@ -333,6 +333,7 @@ export async function getStateTool(ctx: McpToolContext) {
     hiddenFired: await world.consequences.hiddenFiredCount(),
     usage: await world.chronicle.usageTotals(),
     upkeep: upkeepOf(ctx),
+    recentHistory: await world.history.recent(),
   };
 }
 

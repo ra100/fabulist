@@ -290,7 +290,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     'get_state',
     {
       description:
-        'Session position (scene/turn), entity/edge counts, pending consequences, and token usage for the current story.',
+        'Session position (scene/turn), entity/edge counts, pending consequences, token usage, upkeep, and recent history checkpoints with their origin for the current story.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => toolResult(getStateTool(ctx)),

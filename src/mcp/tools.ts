@@ -293,6 +293,7 @@ export function getStateTool(ctx: McpToolContext) {
     hiddenFired: world.consequences.hiddenFiredCount(),
     usage: world.chronicle.usageTotals(),
     upkeep: upkeepOf(ctx),
+    recentHistory: world.history.recent(),
   };
 }
 

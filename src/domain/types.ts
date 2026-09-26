@@ -407,6 +407,14 @@ export interface HistoryCheckpoint {
   origin: string | null;
 }
 
+/** Checkpoint metadata without its state, for "when did what change". */
+export interface CheckpointSummary {
+  position: number;
+  turnId: string | null;
+  origin: string | null;
+  createdAt: string;
+}
+
 /** A committed turn with the exact checkpoint needed for turn-level operations. */
 export interface EligibleTurn {
   turnId: string;
