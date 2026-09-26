@@ -498,6 +498,37 @@ test('Postgres MCP update_knobs schema bounds propagationDepth like the REST API
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('Postgres MCP instructions name get_guide and never the unregistered switch_world', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(
+      db,
+      async (base) => {
+        const { client, transport } = connectMcp(base);
+        await client.connect(transport);
+        try {
+          const instructions = client.getInstructions() ?? '';
+          assert.match(instructions, /get_guide/);
+          assert.match(instructions, /NOTHING IS SAVED UNTIL THIS CALL/);
+          assert.doesNotMatch(instructions, /switch_world/);
+          const { tools } = await client.listTools();
+          assert.ok(tools.some((tool) => tool.name === 'get_guide'));
+          const guide = mcpPayload(await client.callTool({ name: 'get_guide', arguments: {} }));
+          assert.equal(guide.upkeep, 'agent');
+          const prompt = await client.getPrompt({ name: 'play', arguments: { world: 'verrow' } });
+          const text = prompt.messages.map((m) => (m.content.type === 'text' ? m.content.text : '')).join('\n');
+          assert.doesNotMatch(text, /switch_world/);
+          assert.match(text, /set_story_sources/);
+          assert.match(text, /You keep the world/);
+        } finally {
+          await client.close();
+        }
+      },
+      { mcp: true },
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('a turn plays over HTTP and persists', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(db, async (base, world) => {
