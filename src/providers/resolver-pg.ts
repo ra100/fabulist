@@ -55,11 +55,16 @@ export interface ProviderResolverOptions {
   grants?: EphemeralProviderKeyStore;
   fetcher?: typeof fetch;
   keyCallLimit?: { burst: number; perMinute: number };
+  now?: () => number;
 }
+
+// Short enough that a delete or replace made by another server process is seen within a minute.
+const CACHE_TTL_MS = 60_000;
 
 interface Cached {
   row: ProviderKeyRow | null;
   registry: Registry | null;
+  at: number;
 }
 
 type Resolution = { registry: Registry; source: 'own' | 'server' | 'none'; row: ProviderKeyRow | null };
@@ -74,6 +79,7 @@ export class ProviderResolver {
   private readonly keyCalls: RateLimiter;
   private readonly cache = new Map<string, Cached>();
   private readonly generation = new Map<string, number>();
+  private readonly now: () => number;
 
   constructor(opts: ProviderResolverOptions) {
     this.db = opts.db;
@@ -82,6 +88,7 @@ export class ProviderResolver {
     this.secretsKey = opts.secretsKey;
     this.grants = opts.grants ?? new EphemeralProviderKeyStore();
     this.fetcher = opts.fetcher;
+    this.now = opts.now ?? Date.now;
     this.keyCalls = new RateLimiter(opts.keyCallLimit?.burst ?? 5, opts.keyCallLimit?.perMinute ?? 5);
   }
 
@@ -223,13 +230,14 @@ export class ProviderResolver {
   }
 
   private async cached(userId: string): Promise<Cached> {
+    // An expired entry stays until the refill replaces it, so in-flight liveness checks keep passing meanwhile.
     const hit = this.cache.get(userId);
-    if (hit) return hit;
+    if (hit && this.now() - hit.at < CACHE_TTL_MS) return hit;
     const before = this.generation.get(userId) ?? 0;
     const row = await providerKeyFor(this.db, userId);
-    const entry: Cached = { row, registry: row ? this.build(userId, row) : null };
+    const entry: Cached = { row, registry: row ? this.build(userId, row) : null, at: this.now() };
     // A save or delete that landed during this read wins; caching the older row would outlive it.
-    // ponytail: one entry per user, never evicted; add an LRU if the user count makes it matter.
+    // ponytail: one entry per user, evicted only by save/delete; add an LRU if the user count makes it matter.
     if ((this.generation.get(userId) ?? 0) === before) this.cache.set(userId, entry);
     return entry;
   }
