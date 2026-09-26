@@ -14,6 +14,7 @@ import type { Queryable } from '../db/pg.ts';
 import { RateLimiter } from '../server/rate-limit.ts';
 import { recordUsage, type KeySource } from '../store/usage-pg.ts';
 import { byokEndpoint, byokProvider, listModels, ProviderKeyLockedError, scrubSecrets } from './byok.ts';
+export { ProviderKeyLockedError };
 import { MECHANIC_ROLES } from './http.ts';
 import { MeteredRegistry, type UsageSink } from './metered.ts';
 import { MockProvider } from './mock.ts';
@@ -203,6 +204,63 @@ export class ProviderResolver {
     return listModels(endpoint, input.key, this.fetcher);
   }
 
+  /**
+   * List models for the caller's *saved* key — no plaintext in the request.
+   *
+   * Reuses the same liveness check as `build()`: a sealed key reads from the
+   * server secret, an unlock key from the current grant. If the key was
+   * deleted/replaced or the grant expired, this throws `ProviderKeyLockedError`
+   * rather than silently falling back to the server provider.
+   */
+  async modelsForSaved(user: SessionUser): Promise<string[]> {
+    const { row } = await this.cached(user.id);
+    if (!row) return [];
+    const registry = this.build(user.id, row);
+    if (!registry) throw new ProviderKeyInputError('your saved key cannot be used on this server right now');
+    const endpoint = byokEndpoint(row.endpointId);
+    if (!endpoint) throw new ProviderKeyInputError('that provider endpoint is not allowed');
+    return listModels(endpoint, this.secretFor(user.id, row), this.fetcher);
+  }
+
+  /**
+   * Probe the caller's *saved* key against a model — no plaintext in the request.
+   */
+  async testForSaved(user: SessionUser, model: string): Promise<{ ok: true; model: string } | { ok: false; error: string }> {
+    const { row } = await this.cached(user.id);
+    if (!row) throw new ProviderKeyInputError('no saved provider key to test');
+    const registry = this.build(user.id, row);
+    if (!registry) throw new ProviderKeyInputError('your saved key cannot be used on this server right now');
+    const endpoint = byokEndpoint(row.endpointId);
+    if (!endpoint) throw new ProviderKeyInputError('that provider endpoint is not allowed');
+    const probe = new MeteredRegistry(
+      new ProviderRegistry(byokProvider(endpoint, model, () => this.secretFor(user.id, row), this.fetcher)),
+      this.sink(user.id, undefined, 'own'),
+    ).get('probe');
+    try {
+      const result = await probe.complete({
+        role: 'probe',
+        messages: [{ role: 'user', content: 'Reply with the single word: ready' }],
+        maxTokens: 8,
+        temperature: 0,
+      });
+      return { ok: true, model: result.model };
+    } catch (err) {
+      return { ok: false, error: scrubSecrets(err instanceof Error ? err.message : String(err), []) };
+    }
+  }
+
+  /** The live secret for a cached row, or throws if the key is no longer usable. */
+  private secretFor(userId: string, row: ProviderKeyRow): string {
+    if (this.cache.get(userId)?.row?.version !== row.version) throw new ProviderKeyLockedError('your provider key was removed or replaced');
+    if (row.trust === 'sealed') {
+      if (!this.secretsKey) throw new ProviderKeyLockedError('sealed provider keys are disabled on this server');
+      return openProviderKey(this.secretsKey, userId, row.id, row);
+    }
+    const key = this.grants.get(userId, row.version);
+    if (key === null) throw new ProviderKeyLockedError();
+    return key;
+  }
+
   takeKeyCall(userId: string): number | null {
     return this.keyCalls.take(userId);
   }
@@ -252,18 +310,7 @@ export class ProviderResolver {
         return null;
       }
     }
-    const secret = (): string => {
-      // The cache entry is the liveness check, so a key deleted or replaced mid-turn is never sent again.
-      if (this.cache.get(userId)?.row?.version !== row.version) throw new ProviderKeyLockedError('your provider key was removed or replaced');
-      if (row.trust === 'sealed') {
-        if (!this.secretsKey) throw new ProviderKeyLockedError('sealed provider keys are disabled on this server');
-        return openProviderKey(this.secretsKey, userId, row.id, row);
-      }
-      const key = this.grants.get(userId, row.version);
-      if (key === null) throw new ProviderKeyLockedError();
-      return key;
-    };
-    const provider = (model: string) => byokProvider(endpoint, model, secret, this.fetcher);
+    const provider = (model: string) => byokProvider(endpoint, model, () => this.secretFor(userId, row), this.fetcher);
     const registry = new ProviderRegistry(provider(row.models.narrate));
     const mechanic = provider(row.models.mechanics ?? row.models.narrate);
     for (const role of MECHANIC_ROLES) registry.route(role, mechanic);

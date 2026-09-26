@@ -765,6 +765,10 @@ export const api = {
     test: (input: { endpointId: string; model: string; key: string }) =>
       post<{ ok: true; model: string } | { ok: false; error: string }>('/provider-key/test', input),
     models: (input: { endpointId: string; key: string }) => post<{ models: string[] }>('/provider-key/models', input),
+    // Saved-key variants: no plaintext in the request, the server decrypts the caller's own key.
+    modelsSaved: () => req<{ models: string[] }>('/provider-key/models'),
+    testSaved: (model: string) =>
+      req<{ ok: true; model: string } | { ok: false; error: string }>(`/provider-key/test?model=${encodeURIComponent(model)}`),
   },
   usage: {
     mine: (days = 30) => req<{ days: number; rows: UsageRow[] }>(`/usage?days=${days}`),

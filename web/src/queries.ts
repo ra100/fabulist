@@ -114,7 +114,10 @@ export const encryptionKeys = {
   migration: ['encryption', 'migration'] as const,
 };
 
-export const providerKeyKeys = { all: ['provider-key'] as const };
+export const providerKeyKeys = {
+  all: ['provider-key'] as const,
+  models: ['provider-key', 'models'] as const,
+};
 export const usageKeys = {
   all: ['usage'] as const,
   mine: (days: number) => ['usage', 'mine', days] as const,
@@ -199,6 +202,21 @@ export function useTestProviderKeyMutation() {
 
 export function useProviderModelsMutation() {
   return useMutation({ mutationFn: api.providerKey.models });
+}
+
+/** Models listed by the caller's *saved* key (no plaintext in the request). */
+export function useProviderModelsSavedQuery(enabled: boolean) {
+  return useQuery({
+    queryKey: providerKeyKeys.models,
+    queryFn: api.providerKey.modelsSaved,
+    enabled,
+    retry: false,
+  });
+}
+
+/** Probe the caller's *saved* key against a model (no plaintext in the request). */
+export function useTestProviderKeySavedMutation() {
+  return useMutation({ mutationFn: api.providerKey.testSaved });
 }
 
 export function useMyUsageQuery(days: number, enabled: boolean) {
