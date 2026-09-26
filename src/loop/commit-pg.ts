@@ -32,7 +32,7 @@ import type { Db } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
 import { storyLayout } from './history-pg.ts';
 import { agentDelta } from './roles-pg.ts';
-import { carryAuthorisedVowBreaks } from './validate.ts';
+import { carryAuthorisedVowBreaks, legacySteeredThread, STEER_BUMP } from './validate.ts';
 import type { ValidationResult } from './validate-pg.ts';
 
 export interface CommitResult {
@@ -248,7 +248,7 @@ async function commitTurnOn(w: World, input: CommitTurnInput): Promise<CommitTur
     pinned: false,
     meta: input.meta,
   });
-  if (input.threadId) await w.threads.adjustTension(input.threadId, 0.05);
+  if (input.threadId) await w.threads.adjustTension(input.threadId, STEER_BUMP);
   if (input.delta.sceneAdvance) {
     await w.session.set({ scene: activeScene + 1, turn: 0 });
     await w.chronicle.upsertScene(activeScene + 1, {}, `raw:${scene + 1}`);
@@ -284,7 +284,12 @@ export async function recommitTurn(
       });
       const old = await w.chronicle.getTurn(turnId);
       if (!old) throw new Error(`replace_turn_prose: no turn ${turnId}`);
+      // Read before the rewind deletes the turn's checkpoint.
+      const legacy = old.meta.threadId === undefined ? ((await w.history.checkpointForTurn(turnId))?.state.tables.threads ?? []) : null;
       await w.history.rewindBefore(turnId);
+      const threadId = legacy
+        ? legacySteeredThread(old, legacy, new Map((await w.threads.all()).map((t) => [t.id, t.tension])))
+        : (old.meta.threadId ?? null);
       // Validated after the rewind so ids only the replaced delta introduced do not count as known.
       const { delta, validation } = await agentDelta(w, agentWorld, bookProse);
       if (!validation.ok) {
@@ -298,7 +303,7 @@ export async function recommitTurn(
         delta,
         bookProse,
         meta: old.meta,
-        threadId: old.meta.threadId ?? null,
+        threadId,
         origin: 'turn:agent',
       });
       if (old.pinned) await w.chronicle.setPinned(turn.id, true);

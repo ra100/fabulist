@@ -435,3 +435,20 @@ test('PostgreSQL replace_turn_prose with world re-summarises the scene a recommi
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('PostgreSQL replace_turn_prose re-applies the director bump for a turn recorded before meta.threadId', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    const first = await agentTurn(ctx, 'i warm the ink', AGENT_WORLD);
+    const directed = (await world.chronicle.getTurn(first.turnId))!.meta.threadId;
+    assert.ok(directed, 'the director steered this turn toward a thread');
+    const tension = (await world.threads.get(directed))!.tension;
+    await db.query(`UPDATE turns SET meta = meta - 'threadId' WHERE id = $1`, [first.turnId]);
+    assert.equal((await world.chronicle.getTurn(first.turnId))!.meta.threadId, undefined);
+
+    const out = await replaceTurnProseTool(ctx, { id: first.turnId, prose: 'Anselm strikes a bargain with Oll.', world: AGENT_WORLD });
+    if (out.status !== 'replaced') throw new Error(`expected replaced, got ${out.status}`);
+    assert.equal((await world.threads.get(directed))!.tension, tension);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
