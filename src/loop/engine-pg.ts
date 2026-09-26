@@ -36,6 +36,7 @@ import { commitTurn, type CommitResult } from './commit-pg.ts';
 import { Compactor } from './compact-pg.ts';
 import { fingerprintFrameInput } from './frame-fingerprint.ts';
 import {
+  agentDelta,
   buildNarratorPrompt,
   classify,
   type DirectorPlan,
@@ -536,6 +537,7 @@ export class Engine {
     frames: Record<string, Frame>;
     deps: RoleDeps;
     onStage?: (stage: string) => void;
+    agentWorld?: unknown;
   }): Promise<TurnOutcome> {
     const {
       world,
@@ -563,7 +565,10 @@ export class Engine {
 
     // 7-8. EXTRACT + VALIDATE
     args.onStage?.('recording what changed');
-    const { delta, validation } = await extract(deps, prose, rawInput);
+    const { delta, validation } =
+      args.agentWorld === undefined
+        ? await extract(deps, prose, rawInput)
+        : await agentDelta(world, args.agentWorld, prose);
     if (!validation.ok) {
       // Surfaced, not silently dropped: a discarded delta is how the graph and
       // the prose drift apart.
@@ -645,7 +650,12 @@ export class Engine {
    * commit and lost the turn — the guard firing on an unrelated user's switch
    * rather than on a real mismatch.
    */
-  async commitExternalNarration(resumeToken: string, prose: string, worldOverride?: World): Promise<TurnOutcome> {
+  async commitExternalNarration(
+    resumeToken: string,
+    prose: string,
+    worldOverride?: World,
+    agentWorld?: unknown,
+  ): Promise<TurnOutcome> {
     const pending = this.pending.get(resumeToken);
     if (!pending) throw new Error(`no pending narration for token ${resumeToken} (expired or already resolved)`);
     this.pending.delete(resumeToken);
@@ -680,6 +690,7 @@ export class Engine {
         calls: pending.calls,
         frames: pending.frames,
         deps,
+        agentWorld,
       });
     } finally {
       activity.end();
