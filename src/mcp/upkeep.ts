@@ -165,3 +165,10 @@ export const worldDeltaInput = z.object({
   vowBreaks: z.array(z.object({ entityId: z.string(), vowId: z.string() })).optional(),
   sceneAdvance: z.boolean().optional(),
 });
+
+export const triggerInput = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('immediate') }),
+  z.object({ kind: z.literal('after-scenes'), scenes: z.number().int().min(1) }),
+  z.object({ kind: z.literal('on-enter'), locationId: z.string() }),
+  z.object({ kind: z.literal('on-learn'), entityId: z.string(), factId: z.string() }),
+]);

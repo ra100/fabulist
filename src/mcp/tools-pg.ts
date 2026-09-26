@@ -42,7 +42,7 @@ import type { Db } from '../db/pg.ts';
 import { createStory, getStory, listStories, listStoriesForUserWithPrivateValues } from '../store/world-pg.ts';
 import { assertPrivateStoryCreationReady } from '../store/private-story-migration-pg.ts';
 import type { SessionUser } from '../auth/config.ts';
-import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType } from '../domain/types.ts';
+import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType, Trigger, Visibility } from '../domain/types.ts';
 import { commitNarration, playTurn } from '../application/play-pg.ts';
 import { appliedCounts, buildGuide, upkeepFor } from './upkeep.ts';
 
@@ -906,6 +906,94 @@ export async function updateThreadTool(
     await transactionWorld.threads.update(id, patch as never);
     return transactionWorld.threads.get(id);
   });
+}
+
+/** `record_fact`. A fact and exactly who knows or suspects it, for corrections between turns. */
+export async function recordFactTool(
+  ctx: McpToolContext,
+  args: { text: string; knownBy?: string[]; suspectedBy?: string[] },
+) {
+  const text = args.text.trim();
+  if (!text) throw new Error('record_fact: text is required');
+  const world = await ctx.world();
+  return recordAuthoringCheckpoint(
+    ctx.db,
+    world,
+    async (transactionWorld) => {
+      const knownBy: EntityId[] = [];
+      for (const value of args.knownBy ?? []) knownBy.push(await entityReference(transactionWorld, value, 'record_fact'));
+      const suspectedBy: EntityId[] = [];
+      for (const value of args.suspectedBy ?? []) suspectedBy.push(await entityReference(transactionWorld, value, 'record_fact'));
+      const { scene } = await transactionWorld.session.get();
+      const fact = await transactionWorld.chronicle.addFact(text, scene);
+      for (const id of knownBy) await transactionWorld.chronicle.setKnowledge(fact.id, id, 'knows', scene);
+      for (const id of suspectedBy) await transactionWorld.chronicle.setKnowledge(fact.id, id, 'suspects', scene);
+      return { fact, knownBy, suspectedBy };
+    },
+    'tool:record_fact',
+  );
+}
+
+/** `open_thread`. Opens a narrative thread the prose set up but no turn recorded. */
+export async function openThreadTool(
+  ctx: McpToolContext,
+  args: { title: string; stakes?: string; parties: string[]; tension?: number; resolutions?: string[] },
+) {
+  const title = args.title.trim();
+  if (!title) throw new Error('open_thread: title is required');
+  const world = await ctx.world();
+  return recordAuthoringCheckpoint(
+    ctx.db,
+    world,
+    async (transactionWorld) => {
+      const parties: EntityId[] = [];
+      for (const value of args.parties) parties.push(await entityReference(transactionWorld, value, 'open_thread'));
+      return transactionWorld.threads.create({
+        title,
+        stakes: args.stakes ?? '',
+        tension: Math.max(0, Math.min(1, args.tension ?? 0.4)),
+        parties,
+        resolutions: args.resolutions?.length ? args.resolutions : ['unresolved', 'escalates', 'fades'],
+        status: 'open',
+        createdScene: (await transactionWorld.session.get()).scene,
+      });
+    },
+    'tool:open_thread',
+  );
+}
+
+/** `add_consequence`. A reaction the prose sets up that propagation over the graph cannot infer. */
+export async function addConsequenceTool(
+  ctx: McpToolContext,
+  args: { causeEventId: string; actorId: string; action: string; trigger: Trigger; visibility: Visibility; significance?: number },
+) {
+  const action = args.action.trim();
+  if (!action) throw new Error('add_consequence: action is required');
+  const world = await ctx.world();
+  return recordAuthoringCheckpoint(
+    ctx.db,
+    world,
+    async (transactionWorld) => {
+      const { rowCount } = await transactionWorld.db.query(`SELECT 1 FROM events WHERE story_id = $1 AND id = $2`, [
+        transactionWorld.storyId,
+        args.causeEventId,
+      ]);
+      if (!rowCount) throw new Error(`add_consequence: no event ${JSON.stringify(args.causeEventId)} in this story`);
+      const actorId = await entityReference(transactionWorld, args.actorId, 'add_consequence');
+      return transactionWorld.consequences.enqueue({
+        causeEventId: args.causeEventId,
+        trigger: args.trigger,
+        actorId,
+        action,
+        visibility: args.visibility,
+        maturity: args.trigger.kind === 'immediate' ? 'ripening' : 'pending',
+        depth: 1,
+        significance: Math.max(0, Math.min(1, args.significance ?? 0.5)),
+        createdScene: (await transactionWorld.session.get()).scene,
+      });
+    },
+    'tool:add_consequence',
+  );
 }
 
 /**
