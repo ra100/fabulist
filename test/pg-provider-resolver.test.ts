@@ -311,3 +311,22 @@ test('replacing a key under the same client id still stops in-flight registries 
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('a delete in another process is seen once the cached row is a minute old', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    let now = Date.parse('2026-09-26T10:00:00.000Z');
+    const writer = resolverFor(roles.play).resolver;
+    const { resolver: reader, bearers } = resolverFor(roles.play, { now: () => now });
+    await writer.save(alice, sealed(18));
+    const inFlight = await reader.forRequest(alice);
+    assert.equal(await reader.status(alice), 'own');
+    await writer.remove(alice);
+    now += 59_000;
+    assert.equal(await reader.status(alice), 'own', 'still cached');
+    now += 1_000;
+    assert.equal(await reader.status(alice), 'server');
+    await assert.rejects(inFlight.get('narrate').complete(ask('narrate')), ProviderKeyLockedError);
+    assert.deepEqual(bearers, []);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
