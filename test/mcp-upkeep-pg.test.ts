@@ -19,6 +19,7 @@ import {
   recordFactTool,
   openThreadTool,
   addConsequenceTool,
+  replaceTurnProseTool,
   switchStoryTool,
   type McpToolContext,
 } from '../src/mcp/tools-pg.ts';
@@ -286,6 +287,45 @@ test('PostgreSQL rollback and fork across an agent turn and a record_fact write 
     assert.ok(!(await world.chronicle.facts()).some((f) => f.text.startsWith('Oll takes coin')));
     assert.equal(await world.graph.get('loc:far-bank'), undefined);
     assert.deepEqual(await origins(db, world.storyId), ['turn:agent']);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL replace_turn_prose with world re-applies the latest turn from the checkpoint before it', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    await agentTurn(ctx, 'i warm the ink', { entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll' }] });
+    const second = await agentTurn(ctx, 'i check the door', { entityUpserts: [{ id: 'item:brass-key', type: 'Item', name: 'A Brass Key' }] });
+    const out = await replaceTurnProseTool(ctx, {
+      id: second.turnId,
+      prose: 'Anselm checks the door and finds a lantern.',
+      world: { entityUpserts: [{ id: 'item:lantern', type: 'Item', name: 'A Hooded Lantern' }] },
+    });
+    if (out.status !== 'replaced') throw new Error(`expected replaced, got ${out.status}`);
+    assert.equal(await world.graph.get('item:brass-key'), undefined);
+    assert.ok(await world.graph.get('item:lantern'));
+    assert.ok(await world.graph.get('char:ferryman-oll'));
+    const turns = await world.chronicle.turns();
+    assert.equal(turns.length, 2);
+    assert.equal(turns.at(-1)!.bookProse, 'Anselm checks the door and finds a lantern.');
+    assert.deepEqual(await origins(db, world.storyId), ['turn:agent', 'tool:consequences', 'turn:agent']);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL replace_turn_prose with world refuses when a later edit exists, and changes nothing', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    await agentTurn(ctx, 'i warm the ink', {});
+    const second = await agentTurn(ctx, 'i check the door', {});
+    await recordFactTool(ctx, { text: 'The latch sticks.' });
+    const before = await origins(db, world.storyId);
+    await assert.rejects(
+      () => replaceTurnProseTool(ctx, { id: second.turnId, prose: 'Other prose.', world: {} }),
+      /later turns or edits/,
+    );
+    assert.deepEqual(await origins(db, world.storyId), before);
+    assert.notEqual((await world.chronicle.getTurn(second.turnId))?.bookProse, 'Other prose.');
   });
   if (!ran) t.skip('no Postgres configured');
 });

@@ -10,6 +10,8 @@ import type { Delta, EntityId, StoryEvent, Turn, Visibility } from '../domain/ty
 import { tx } from '../db/db.ts';
 import type { World } from '../store/index.ts';
 import { storyLayout } from './history.ts';
+import { agentDelta } from './roles.ts';
+import type { ValidationResult } from './validate.ts';
 
 export interface CommitResult {
   events: StoryEvent[];
@@ -202,6 +204,41 @@ export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResu
     world.history.capture(turn.id, input.origin ?? 'turn:server');
     return { commit, turn };
   });
+}
+
+export type RecommitResult =
+  | { kind: 'committed'; commit: CommitResult; turn: Turn; delta: Delta; validation: ValidationResult }
+  | { kind: 'blocked'; validation: ValidationResult };
+
+/** Re-commits the latest turn with new prose and an agent delta, as if rolled back one turn and committed again. */
+export function recommitTurn(world: World, turnId: string, bookProse: string, agentWorld: unknown): RecommitResult {
+  const rejected: { validation?: ValidationResult } = {};
+  try {
+    return tx(world.db, () => {
+      const old = world.chronicle.getTurn(turnId);
+      if (!old) throw new Error(`replace_turn_prose: no turn ${turnId}`);
+      world.history.rewindBefore(turnId);
+      // Validated after the rewind so ids only the replaced delta introduced do not count as known.
+      const { delta, validation } = agentDelta(world, agentWorld, bookProse);
+      if (!validation.ok) {
+        rejected.validation = validation;
+        throw new Error('delta failed validation');
+      }
+      const { commit, turn } = commitTurn(world, {
+        rawInput: old.rawInput,
+        intent: old.intent,
+        delta,
+        bookProse,
+        meta: old.meta,
+        origin: 'turn:agent',
+      });
+      if (old.pinned) world.chronicle.setPinned(turn.id, true);
+      return { kind: 'committed' as const, commit, turn, delta, validation };
+    });
+  } catch (error) {
+    if (rejected.validation) return { kind: 'blocked', validation: rejected.validation };
+    throw error;
+  }
 }
 
 /** Used by the consequence tick to record something that happened offscreen. */

@@ -19,6 +19,7 @@ import {
   recordFactTool,
   openThreadTool,
   addConsequenceTool,
+  replaceTurnProseTool,
   type McpToolContext,
 } from '../src/mcp/tools.ts';
 
@@ -335,5 +336,52 @@ test('SQLite rollback and fork across an agent turn and a record_fact write rest
   assert.ok(!world.chronicle.facts().some((f) => f.text.startsWith('Oll takes coin')));
   assert.equal(world.graph.get('loc:far-bank'), undefined);
   assert.deepEqual(sqliteOrigins(world), ['turn:agent']);
+  world.close();
+});
+
+test('SQLite replace_turn_prose with world re-applies the latest turn from the checkpoint before it', async () => {
+  const { world, ctx } = sqliteContext();
+  await sqliteAgentTurn(ctx, 'i warm the ink', { entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll' }] });
+  const second = await sqliteAgentTurn(ctx, 'i check the door', { entityUpserts: [{ id: 'item:brass-key', type: 'Item', name: 'A Brass Key' }] });
+  const out = replaceTurnProseTool(ctx, {
+    id: second.turnId,
+    prose: 'Anselm checks the door and finds a lantern.',
+    world: { entityUpserts: [{ id: 'item:lantern', type: 'Item', name: 'A Hooded Lantern' }] },
+  });
+  if (out.status !== 'replaced') throw new Error(`expected replaced, got ${out.status}`);
+  assert.equal(out.stateMode, 'reapplied');
+  assert.equal(out.replacedTurnId, second.turnId);
+  assert.equal(world.graph.get('item:brass-key'), undefined, 'the old delta is gone');
+  assert.ok(world.graph.get('item:lantern'));
+  assert.ok(world.graph.get('char:ferryman-oll'), 'the earlier turn stands');
+  const turns = world.chronicle.turns();
+  assert.equal(turns.length, 2);
+  assert.equal(turns.at(-1)!.bookProse, 'Anselm checks the door and finds a lantern.');
+  assert.deepEqual(sqliteOrigins(world), ['turn:agent', 'tool:consequences', 'turn:agent']);
+  world.close();
+});
+
+test('SQLite replace_turn_prose with world refuses when a later edit exists, and changes nothing', async () => {
+  const { world, ctx } = sqliteContext();
+  await sqliteAgentTurn(ctx, 'i warm the ink', {});
+  const second = await sqliteAgentTurn(ctx, 'i check the door', {});
+  recordFactTool(ctx, { text: 'The latch sticks.' });
+  const before = sqliteOrigins(world);
+  assert.throws(
+    () => replaceTurnProseTool(ctx, { id: second.turnId, prose: 'Other prose.', world: {} }),
+    /later turns or edits/,
+  );
+  assert.deepEqual(sqliteOrigins(world), before);
+  assert.notEqual(world.chronicle.getTurn(second.turnId)?.bookProse, 'Other prose.');
+  world.close();
+});
+
+test('SQLite replace_turn_prose without world keeps the delta and warns under agent upkeep', async () => {
+  const { world, ctx } = sqliteContext();
+  const turn = await sqliteAgentTurn(ctx, 'i warm the ink', {});
+  const out = replaceTurnProseTool(ctx, { id: turn.turnId, prose: 'New prose.' });
+  assert.equal(out.stateMode, 'preserve');
+  assert.equal(out.upkeep, 'agent');
+  assert.match(out.warning ?? '', /may no longer match/);
   world.close();
 });
