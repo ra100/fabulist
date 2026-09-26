@@ -44,7 +44,7 @@ import { assertPrivateStoryCreationReady } from '../store/private-story-migratio
 import type { SessionUser } from '../auth/config.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType } from '../domain/types.ts';
 import { playTurn } from '../application/play-pg.ts';
-import { buildGuide, upkeepFor } from './upkeep.ts';
+import { appliedCounts, buildGuide, upkeepFor } from './upkeep.ts';
 
 export interface McpToolContext {
   /**
@@ -672,23 +672,38 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
  * runs (prose gate, extract, validate, commit — the same steps a normal
  * turn runs after its own Narrator role, shared code either way).
  */
-export async function commitNarrationTool(ctx: McpToolContext, args: { resumeToken: string; prose: string }) {
+export async function commitNarrationTool(
+  ctx: McpToolContext,
+  args: { resumeToken: string; prose: string; world?: unknown },
+) {
   ctx.chargePaidCall?.();
+  const upkeep = upkeepOf(ctx);
+  const agentWorld = upkeep === 'agent' ? args.world : undefined;
+  const warning =
+    upkeep === 'agent' && args.world === undefined
+      ? 'upkeep is "agent" but no world was given, so only the mock extractor’s placeholder event was recorded. Pass world on every commit (see get_guide).'
+      : upkeep === 'server' && args.world !== undefined
+        ? 'upkeep is "server": the server extracted this turn from your prose and ignored world.'
+        : undefined;
   // Same reason as `proposeTurnTool`: the pending turn belongs to this user's
   // story, and `commitExternalNarration` refuses a story mismatch — which,
   // resolved through the shared pointer, is what any other reader's switch
   // would have looked like.
-  const outcome = await ctx.engine.commitExternalNarration(args.resumeToken, args.prose, await ctx.world());
+  const outcome = await ctx.engine.commitExternalNarration(args.resumeToken, args.prose, await ctx.world(), agentWorld);
   if (outcome.kind === 'narrated') {
     return {
       status: 'narrated' as const,
       nextStep:
         'Committed. Show the prose to the player and take the next turn with propose_turn, or close_scene at a scene break.',
+      upkeep,
       turnId: outcome.turn.id,
       prose: outcome.prose,
       eventsRecorded: outcome.commit.events.length,
       brokenVows: outcome.commit.brokenVows,
       newThreads: outcome.commit.newThreadIds,
+      applied: appliedCounts(outcome.delta),
+      dropped: agentWorld === undefined ? [] : outcome.validation.issues.filter((i) => i.repaired),
+      ...(warning ? { warning } : {}),
     };
   }
   if (outcome.kind === 'blocked') {
@@ -696,7 +711,8 @@ export async function commitNarrationTool(ctx: McpToolContext, args: { resumeTok
     return {
       status: 'blocked' as const,
       nextStep:
-        'Nothing was committed. Rewrite the prose so it does not imply the rejected change, then call propose_turn again for a fresh token.',
+        'Nothing was committed. Fix what the issues name (the prose, or the world you passed), then call propose_turn again for a fresh token.',
+      upkeep,
       reason: outcome.reason,
       issues: outcome.validation.issues.filter((i) => !i.repaired),
     };

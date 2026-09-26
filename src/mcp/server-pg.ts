@@ -82,7 +82,7 @@ import {
   useWorldPackTool,
   type McpToolContext,
 } from './tools-pg.ts';
-import { upkeepFor } from './upkeep.ts';
+import { upkeepFor, worldDeltaInput } from './upkeep.ts';
 
 /** Every tool's result, JSON-stringified into the one `content` block every MCP client already knows how to render, plus the same value as `structuredContent` for a client that reads that instead — the dual-encoding OpenAI's own MCP compatibility guide documents (see `.design/MCP-CONNECTOR.md` §4). */
 function toolResult(value: unknown) {
@@ -515,7 +515,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     {
       description:
         'Finish a turn started by propose_turn (status "awaiting-narration") or resolve_interrupt, given the prose you wrote from its returned frame. ' +
-        'Runs the prose gate, extracts the state delta, and commits it \u2014 the same steps a turn always runs after its prose exists, regardless of who wrote it.',
+        'Runs the prose gate, extracts the state delta, and commits it \u2014 the same steps a turn always runs after its prose exists, regardless of who wrote it.' +
+        ' With upkeep "agent", pass world: the turn’s changes to cast, relationships, facts and threads.',
       inputSchema: {
         resumeToken: z.string().describe('The resumeToken from the awaiting-narration response this completes.'),
         prose: z
@@ -523,10 +524,13 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
           .describe(
             'The finished prose for this turn, written from the narratorSystemPrompt and sceneFrame you were given.',
           ),
+        world: worldDeltaInput
+          .optional()
+          .describe('With upkeep "agent": what this turn changed (see get_guide). Ignored with upkeep "server".'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ resumeToken, prose }) => toolResult(await commitNarrationTool(ctx, { resumeToken, prose })),
+    async ({ resumeToken, prose, world }) => toolResult(await commitNarrationTool(ctx, { resumeToken, prose, world })),
   );
 
   server.registerTool(

@@ -1,4 +1,5 @@
-import type { Knobs, StyleContract } from '../domain/types.ts';
+import { z } from 'zod';
+import type { Delta, Knobs, StyleContract } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
 
 export type Upkeep = 'server' | 'agent';
@@ -89,3 +90,78 @@ export function buildGuide(input: GuideInput): Guide {
     ...(input.upkeep === 'agent' ? { upkeepChecklist: UPKEEP_CHECKLIST } : {}),
   };
 }
+
+export function appliedCounts(delta: Delta): Record<string, number> {
+  return {
+    events: delta.events.length,
+    entityUpserts: delta.entityUpserts.length,
+    edgeAsserts: delta.edgeAsserts.length,
+    edgeRetires: delta.edgeRetires.length,
+    conditionUpdates: delta.conditionUpdates.length,
+    relationshipUpdates: delta.relationshipUpdates.length,
+    factsLearned: delta.factsLearned.length,
+    threadUpdates: delta.threadUpdates.length,
+    vowBreaks: delta.vowBreaks.length,
+    sceneAdvance: delta.sceneAdvance ? 1 : 0,
+  };
+}
+
+export const worldDeltaInput = z.object({
+  events: z
+    .array(
+      z.object({
+        text: z.string(),
+        participants: z.array(z.string()).optional(),
+        locationId: z.string().nullable().optional(),
+        significance: z.number().min(0).max(1).optional(),
+      }),
+    )
+    .optional()
+    .describe('What happened. Omit to record one event from the prose with the present cast.'),
+  entityUpserts: z
+    .array(
+      z.object({
+        id: z.string().describe('type:kebab-name'),
+        type: z.enum(['Character', 'Location', 'Faction', 'Item', 'Concept', 'Event']),
+        name: z.string(),
+        summary: z.string().optional(),
+        props: z.record(z.string(), z.unknown()).optional(),
+      }),
+    )
+    .optional(),
+  edgeAsserts: z
+    .array(z.object({ subject: z.string(), predicate: z.string(), object: z.string(), weight: z.number().min(0).max(1).optional() }))
+    .optional(),
+  edgeRetires: z.array(z.object({ subject: z.string(), predicate: z.string(), object: z.string() })).optional(),
+  conditionUpdates: z.array(z.object({ entityId: z.string(), patch: z.record(z.string(), z.unknown()) })).optional(),
+  relationshipUpdates: z
+    .array(
+      z.object({
+        fromId: z.string(),
+        toId: z.string(),
+        trustDelta: z.number().optional(),
+        affectionDelta: z.number().optional(),
+        respectDelta: z.number().optional(),
+        note: z.string().optional(),
+      }),
+    )
+    .optional(),
+  factsLearned: z
+    .array(z.object({ text: z.string(), knownBy: z.array(z.string()).optional(), suspectedBy: z.array(z.string()).optional() }))
+    .optional(),
+  threadUpdates: z
+    .array(
+      z.object({
+        id: z.string().optional(),
+        title: z.string().optional(),
+        stakes: z.string().optional(),
+        tensionDelta: z.number().optional(),
+        parties: z.array(z.string()).optional(),
+        resolutions: z.array(z.string()).optional(),
+        status: z.enum(['open', 'resolved', 'abandoned']).optional(),
+      }),
+    )
+    .optional(),
+  vowBreaks: z.array(z.object({ entityId: z.string(), vowId: z.string() })).optional(),
+  sceneAdvance: z.boolean().optional(),
+});

@@ -226,6 +226,32 @@ test('a full turn end to end: propose_turn, then commit_narration, over real MCP
   });
 });
 
+test('commit_narration accepts a world delta over real MCP calls', async () => {
+  await withServer(async (baseUrl) => {
+    const { client, transport } = connect(baseUrl);
+    await client.connect(transport);
+    try {
+      const proposal = payload(await client.callTool({ name: 'propose_turn', arguments: { text: 'i look around the cell' } }));
+      const committed = payload(
+        await client.callTool({
+          name: 'commit_narration',
+          arguments: {
+            resumeToken: proposal.resumeToken,
+            prose: 'A ferryman waits at the grate.',
+            world: { entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll the Ferryman' }] },
+          },
+        }),
+      );
+      assert.equal(committed.status, 'narrated');
+      assert.equal(committed.upkeep, 'agent');
+      const entity = payload(await client.callTool({ name: 'get_entity', arguments: { id: 'char:ferryman-oll' } }));
+      assert.match(JSON.stringify(entity), /Oll the Ferryman/);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 test('propose_turn on a vow-breaching action surfaces status interrupted, resolvable over MCP', async () => {
   await withServer(async (baseUrl) => {
     const { client, transport } = connect(baseUrl);
