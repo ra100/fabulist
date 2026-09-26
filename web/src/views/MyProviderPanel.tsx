@@ -160,13 +160,13 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
       ))}
       <fieldset className="field-row block">
         <legend>how your key is protected</legend>
-        <label>
-          <input type="radio" name="trust" checked={trust === 'unlock'} disabled={busy || !enrolled} onChange={() => setTrust('unlock')} />{' '}
-          with my passphrase — {TRUST_COPY.unlock}
+        <label className="private-recovery-check">
+          <input type="radio" name="trust" checked={trust === 'unlock'} disabled={busy || !enrolled} onChange={() => setTrust('unlock')} />
+          <span>with my passphrase — {TRUST_COPY.unlock}</span>
         </label>
-        <label>
-          <input type="radio" name="trust" checked={trust === 'sealed'} disabled={busy || !state.sealedAvailable} onChange={() => setTrust('sealed')} />{' '}
-          by the server — {state.sealedAvailable ? TRUST_COPY.sealed : 'Not available on this server.'}
+        <label className="private-recovery-check">
+          <input type="radio" name="trust" checked={trust === 'sealed'} disabled={busy || !state.sealedAvailable} onChange={() => setTrust('sealed')} />
+          <span>by the server — {state.sealedAvailable ? TRUST_COPY.sealed : 'Not available on this server.'}</span>
         </label>
       </fieldset>
       {trust === 'unlock' ? (
