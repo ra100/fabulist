@@ -31,6 +31,8 @@ import type { Delta, EntityId, StoryEvent, Turn, Visibility } from '../domain/ty
 import type { Db } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
 import { storyLayout } from './history-pg.ts';
+import { agentDelta } from './roles-pg.ts';
+import type { ValidationResult } from './validate-pg.ts';
 
 export interface CommitResult {
   events: StoryEvent[];
@@ -219,34 +221,88 @@ export async function commitTurn(db: Db, world: World, input: CommitTurnInput): 
       imagesDir: world.illustrations.imagesDir,
       crypto: world.crypto,
     });
-    const session = await w.session.get();
-    const layout = await storyLayout(w);
-    const previous = layout.turns.at(-1)?.source;
-    const activeScene = layout.turns.at(-1)?.scene ?? layout.currentScene;
-    const advancingFromEmptyScene = previous && session.scene > activeScene;
-    const scene = advancingFromEmptyScene ? previous.scene + 1 : (previous?.scene ?? session.scene);
-    const turnNo = advancingFromEmptyScene ? 1 : (previous?.turn ?? session.turn) + 1;
-    const commit = await applyDelta(w, input.delta, scene, turnNo, 'onscreen');
-    const turn = await w.chronicle.addTurn({
-      scene,
-      turn: turnNo,
-      rawInput: input.rawInput,
-      intent: input.intent,
-      delta: input.delta,
-      bookProse: input.bookProse,
-      pinned: false,
-      meta: input.meta,
-    });
-    if (input.threadId) await w.threads.adjustTension(input.threadId, 0.05);
-    if (input.delta.sceneAdvance) {
-      await w.session.set({ scene: activeScene + 1, turn: 0 });
-      await w.chronicle.upsertScene(activeScene + 1, {}, `raw:${scene + 1}`);
-    } else {
-      await w.session.set({ turn: turnNo });
-    }
-    await w.history.capture(turn.id, input.origin ?? 'turn:server');
-    return { commit, turn };
+    return commitTurnOn(w, input);
   });
+}
+
+/** `commitTurn`'s body, for a caller already holding the story lock on a transaction world. */
+async function commitTurnOn(w: World, input: CommitTurnInput): Promise<CommitTurnResult> {
+  const session = await w.session.get();
+  const layout = await storyLayout(w);
+  const previous = layout.turns.at(-1)?.source;
+  const activeScene = layout.turns.at(-1)?.scene ?? layout.currentScene;
+  const advancingFromEmptyScene = previous && session.scene > activeScene;
+  const scene = advancingFromEmptyScene ? previous.scene + 1 : (previous?.scene ?? session.scene);
+  const turnNo = advancingFromEmptyScene ? 1 : (previous?.turn ?? session.turn) + 1;
+  const commit = await applyDelta(w, input.delta, scene, turnNo, 'onscreen');
+  const turn = await w.chronicle.addTurn({
+    scene,
+    turn: turnNo,
+    rawInput: input.rawInput,
+    intent: input.intent,
+    delta: input.delta,
+    bookProse: input.bookProse,
+    pinned: false,
+    meta: input.meta,
+  });
+  if (input.threadId) await w.threads.adjustTension(input.threadId, 0.05);
+  if (input.delta.sceneAdvance) {
+    await w.session.set({ scene: activeScene + 1, turn: 0 });
+    await w.chronicle.upsertScene(activeScene + 1, {}, `raw:${scene + 1}`);
+  } else {
+    await w.session.set({ turn: turnNo });
+  }
+  await w.history.capture(turn.id, input.origin ?? 'turn:server');
+  return { commit, turn };
+}
+
+export type RecommitResult =
+  | { kind: 'committed'; commit: CommitResult; turn: Turn; delta: Delta; validation: ValidationResult }
+  | { kind: 'blocked'; validation: ValidationResult };
+
+/** Re-commits the latest turn with new prose and an agent delta, as if rolled back one turn and committed again. */
+export async function recommitTurn(
+  db: Db,
+  world: World,
+  turnId: string,
+  bookProse: string,
+  agentWorld: unknown,
+): Promise<RecommitResult> {
+  const rejected: { validation?: ValidationResult } = {};
+  try {
+    return await db.tx(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [world.storyId]);
+      const w = new World({
+        db: client,
+        storyId: world.storyId,
+        sources: world.sources,
+        imagesDir: world.illustrations.imagesDir,
+        crypto: world.crypto,
+      });
+      const old = await w.chronicle.getTurn(turnId);
+      if (!old) throw new Error(`replace_turn_prose: no turn ${turnId}`);
+      await w.history.rewindBefore(turnId);
+      // Validated after the rewind so ids only the replaced delta introduced do not count as known.
+      const { delta, validation } = await agentDelta(w, agentWorld, bookProse);
+      if (!validation.ok) {
+        rejected.validation = validation;
+        throw new Error('delta failed validation');
+      }
+      const { commit, turn } = await commitTurnOn(w, {
+        rawInput: old.rawInput,
+        intent: old.intent,
+        delta,
+        bookProse,
+        meta: old.meta,
+        origin: 'turn:agent',
+      });
+      if (old.pinned) await w.chronicle.setPinned(turn.id, true);
+      return { kind: 'committed' as const, commit, turn, delta, validation };
+    });
+  } catch (error) {
+    if (rejected.validation) return { kind: 'blocked', validation: rejected.validation };
+    throw error;
+  }
 }
 
 /** Used by the consequence tick to record something that happened offscreen. */

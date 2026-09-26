@@ -14,6 +14,7 @@
  * than reimplementing any part of the turn loop here.
  */
 import { commitNarration } from '../application/play.ts';
+import { recommitTurn } from '../loop/commit.ts';
 import type { Engine } from '../loop/engine.ts';
 import { narratorSystem } from '../loop/roles.ts';
 import { recordAuthoringCheckpoint, splitSceneAtTurn } from '../loop/history.ts';
@@ -772,14 +773,51 @@ export async function regenerateTurnTool(ctx: McpToolContext, args: { id: string
   return ctx.engine.regenerateProse(args.id, { ...(args.note?.trim() ? { note: args.note.trim() } : {}), world });
 }
 
-/** Author-controlled exact prose replacement; it never re-extracts state. */
-export function replaceTurnProseTool(ctx: McpToolContext, args: { id: string; prose: string; stateMode?: 'preserve' }) {
+/** Author-controlled exact prose replacement; with agent upkeep and `world`, re-applies the turn's delta too. */
+export function replaceTurnProseTool(
+  ctx: McpToolContext,
+  args: { id: string; prose: string; stateMode?: 'preserve'; world?: unknown },
+) {
   const world = ctx.world();
   if (!args.prose.trim()) throw new Error('replace_turn_prose: prose is required');
   if (args.stateMode && args.stateMode !== 'preserve')
     throw new Error('replace_turn_prose: only stateMode "preserve" is supported');
+  const upkeep = upkeepOf(ctx);
+  if (upkeep === 'agent' && args.world !== undefined) {
+    const result = recommitTurn(world, args.id, args.prose, args.world);
+    if (result.kind === 'blocked') {
+      return {
+        status: 'blocked' as const,
+        upkeep,
+        nextStep: 'Nothing was changed. Fix what the issues name, then call replace_turn_prose again.',
+        issues: result.validation.issues.filter((i) => !i.repaired),
+      };
+    }
+    return {
+      status: 'replaced' as const,
+      stateMode: 'reapplied' as const,
+      upkeep,
+      replacedTurnId: args.id,
+      turn: result.turn,
+      applied: appliedCounts(result.delta),
+      dropped: result.validation.issues.filter((i) => i.repaired),
+      newThreads: result.commit.newThreadIds,
+    };
+  }
   if (!world.chronicle.replaceProse(args.id, args.prose)) throw new Error(`replace_turn_prose: no turn ${args.id}`);
-  return { stateMode: 'preserve' as const, turn: world.chronicle.getTurn(args.id)! };
+  const warning =
+    upkeep === 'agent'
+      ? 'The turn’s recorded world delta was kept and may no longer match this prose; pass world to re-apply it.'
+      : args.world !== undefined
+        ? 'upkeep is "server": world was ignored and the recorded delta was kept.'
+        : undefined;
+  return {
+    status: 'replaced' as const,
+    stateMode: 'preserve' as const,
+    upkeep,
+    turn: world.chronicle.getTurn(args.id)!,
+    ...(warning ? { warning } : {}),
+  };
 }
 
 /**

@@ -263,6 +263,35 @@ export class HistoryStore {
     });
   }
 
+  /** Rewinds to just before the latest turn; refuses if later edits would be silently discarded. */
+  rewindBefore(turnId: string): void {
+    tx(this.db, () => {
+      const turn = row<{ history_position: number | null }>(
+        this.db.prepare(`SELECT history_position FROM turns WHERE id = ? AND story_id = ?`).get(turnId, this.storyId),
+      );
+      const position = turn?.history_position;
+      if (position == null) throw new Error(`rewind: turn ${turnId} has no exact history`);
+      const later = rows<{ origin: string | null }>(
+        this.db.prepare(`SELECT origin FROM history_checkpoints WHERE story_id = ? AND position > ?`).all(this.storyId, position),
+      );
+      if (later.some((checkpoint) => checkpoint.origin !== 'tool:consequences'))
+        throw new Error(`rewind: turn ${turnId} has later turns or edits; roll back to it first`);
+      const base = row<CheckpointRow>(
+        this.db
+          .prepare(`SELECT * FROM history_checkpoints WHERE story_id = ? AND position < ? ORDER BY position DESC LIMIT 1`)
+          .get(this.storyId, position),
+      );
+      if (!base) throw new Error(`rewind: turn ${turnId} has no earlier checkpoint to rewind to`);
+
+      this.restoreLayout(toCheckpoint(base).state);
+      this.db.prepare(`DELETE FROM turns WHERE story_id = ? AND history_position >= ?`).run(this.storyId, position);
+      this.db.prepare(`DELETE FROM scene_segments WHERE story_id = ? AND start_position > ?`).run(this.storyId, position);
+      this.db.prepare(`DELETE FROM history_checkpoints WHERE story_id = ? AND position >= ?`).run(this.storyId, position);
+      this.reconcileContinuation(position);
+      this.invalidateStaleSummaries();
+    });
+  }
+
   /**
    * A checkpoint predating a split contains a raw-scene summary which may
    * span the new child scene. Segments intentionally survive restoration, so

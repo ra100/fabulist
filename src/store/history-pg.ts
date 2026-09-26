@@ -232,6 +232,50 @@ export class HistoryStore {
     });
   }
 
+  /** Rewinds to just before the latest turn; refuses if later edits would be silently discarded. */
+  async rewindBefore(turnId: string): Promise<void> {
+    await this.transaction(async (queryable) => {
+      await queryable.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [this.storyId]);
+      const { rows: turns } = await queryable.query<{ history_position: number | null }>(
+        `SELECT history_position FROM turns WHERE id = $1 AND story_id = $2`,
+        [turnId, this.storyId],
+      );
+      const position = turns[0]?.history_position;
+      if (position == null) throw new Error(`rewind: turn ${turnId} has no exact history`);
+      const { rows: later } = await queryable.query<{ origin: string | null }>(
+        `SELECT origin FROM history_checkpoints WHERE story_id = $1 AND position > $2`,
+        [this.storyId, position],
+      );
+      if (later.some((checkpoint) => checkpoint.origin !== 'tool:consequences'))
+        throw new Error(`rewind: turn ${turnId} has later turns or edits; roll back to it first`);
+      const { rows: bases } = await queryable.query<CheckpointRow>(
+        `SELECT * FROM history_checkpoints WHERE story_id = $1 AND position < $2 ORDER BY position DESC LIMIT 1`,
+        [this.storyId, position],
+      );
+      if (!bases[0]) throw new Error(`rewind: turn ${turnId} has no earlier checkpoint to rewind to`);
+
+      const key = await this.privateKey(queryable);
+      await this.restoreLayout(queryable, await this.readState(queryable, bases[0], key));
+      await queryable.query(`DELETE FROM turns WHERE story_id = $1 AND history_position >= $2`, [this.storyId, position]);
+      await queryable.query(`DELETE FROM scene_segments WHERE story_id = $1 AND start_position > $2`, [
+        this.storyId,
+        position,
+      ]);
+      await queryable.query(
+        `DELETE FROM encrypted_story_values
+          WHERE story_id = $1 AND table_name = 'history_checkpoints'
+            AND record_id IN (SELECT id FROM history_checkpoints WHERE story_id = $1 AND position >= $2)`,
+        [this.storyId, position],
+      );
+      await queryable.query(`DELETE FROM history_checkpoints WHERE story_id = $1 AND position >= $2`, [
+        this.storyId,
+        position,
+      ]);
+      await this.reconcileContinuation(queryable, position);
+      await this.invalidateStaleSummaries(queryable, key);
+    });
+  }
+
   /**
    * Segments are durable layout state rather than checkpoint state. A
    * checkpoint from before a split can therefore restore its parent summary

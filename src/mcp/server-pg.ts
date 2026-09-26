@@ -590,11 +590,18 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
     'replace_turn_prose',
     {
       description:
-        'Commit exact author-supplied prose for a turn while preserving its existing state delta. This is not regenerate_turn.',
-      inputSchema: { id: z.string(), prose: z.string(), stateMode: z.literal('preserve').optional() },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+        'Commit exact author-supplied prose for a turn. By default the turn’s state delta is preserved. With upkeep "agent" and world, ' +
+        'the latest turn is re-committed from the checkpoint before it with that delta (its id changes; later edits must be rolled back first). This is not regenerate_turn.',
+      inputSchema: {
+        id: z.string(),
+        prose: z.string(),
+        stateMode: z.literal('preserve').optional(),
+        world: worldDeltaInput.optional().describe('With upkeep "agent": the corrected world delta for this turn.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ id, prose, stateMode }) => toolResult(await replaceTurnProseTool(ctx, { id, prose, stateMode })),
+    async ({ id, prose, stateMode, world }) =>
+      toolResult(await replaceTurnProseTool(ctx, { id, prose, stateMode, world })),
   );
 
   server.registerTool(
