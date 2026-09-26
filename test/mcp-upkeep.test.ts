@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry, SwappableRegistry } from '../src/providers/provider.ts';
 import { defaultKnobs, defaultStyleContract } from '../src/domain/types.ts';
-import { buildGuide, upkeepFor } from '../src/mcp/upkeep.ts';
+import { buildGuide, peopleInput, triggerInput, upkeepFor, worldDeltaInput } from '../src/mcp/upkeep.ts';
 import { World } from '../src/store/index.ts';
 import { seedWorld } from '../src/seed/verrow.ts';
 import { Engine } from '../src/loop/engine.ts';
@@ -429,4 +429,26 @@ test('SQLite replace_turn_prose with world keeps a vow break the player chose at
   assert.equal(vow().broken, true, 'the prose fix does not un-break the vow');
   assert.ok(out.brokenVows.some((v) => v.vowId === 'nonviolence'));
   world.close();
+});
+
+test('agent world deltas and between-turn tool inputs are size-capped', () => {
+  const event = { text: 'The lamp gutters.', participants: ['character:iris'] };
+  assert.equal(worldDeltaInput.safeParse({ events: [event], entityUpserts: [{ id: 'item:lamp', type: 'Item', name: 'Lamp', props: { lit: false } }] }).success, true);
+  assert.equal(worldDeltaInput.safeParse({ events: Array(51).fill(event) }).success, false, 'too many events');
+  assert.equal(worldDeltaInput.safeParse({ events: [{ text: 'x'.repeat(10_001) }] }).success, false, 'event text');
+  assert.equal(worldDeltaInput.safeParse({ events: [{ text: 'x', participants: Array(21).fill('a') }] }).success, false, 'participants');
+  assert.equal(
+    worldDeltaInput.safeParse({ entityUpserts: [{ id: 'x'.repeat(201), type: 'Item', name: 'Lamp' }] }).success,
+    false,
+    'id length',
+  );
+  assert.equal(
+    worldDeltaInput.safeParse({ conditionUpdates: [{ entityId: 'item:lamp', patch: { blob: 'x'.repeat(10_001) } }] }).success,
+    false,
+    'patch size',
+  );
+  assert.equal(peopleInput.safeParse(Array(20).fill('character:iris')).success, true);
+  assert.equal(peopleInput.safeParse(Array(21).fill('character:iris')).success, false);
+  assert.equal(triggerInput.safeParse({ kind: 'after-scenes', scenes: 3 }).success, true);
+  assert.equal(triggerInput.safeParse({ kind: 'after-scenes', scenes: 51 }).success, false);
 });
