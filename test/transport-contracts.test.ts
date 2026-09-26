@@ -6,6 +6,7 @@ import {
   encryptionLockBodySchema,
   encryptionUnlockBodySchema,
   illustrationBodySchema,
+  providerKeyBodySchema,
   knowledgeBodySchema,
   playResponseSchema,
   rollbackBodySchema,
@@ -192,4 +193,16 @@ test('browser streaming play aborts in-flight fetches without stale callbacks', 
 
   assert.equal(sawSignal, true);
   assert.deepEqual(callbacks, []);
+});
+
+test('provider-key contracts reject custom base URLs and accept a provider-only unlock', () => {
+  const id = '00000000-0000-4000-8000-000000000001';
+  const sealed = { id, endpointId: 'openai', models: { narrate: 'gpt-test' }, trust: 'sealed', key: 'sk-test-0123456789' };
+  assert.equal(providerKeyBodySchema.safeParse(sealed).success, true);
+  assert.equal(providerKeyBodySchema.safeParse({ ...sealed, baseUrl: 'http://169.254.169.254/v1' }).success, false);
+  assert.equal(providerKeyBodySchema.safeParse({ ...sealed, id: 'not-a-uuid' }).success, false);
+  assert.equal(providerKeyBodySchema.safeParse({ ...sealed, key: 'has space in it' }).success, false);
+  assert.equal(providerKeyBodySchema.safeParse({ ...sealed, models: { narrate: '../../etc' } }).success, false);
+  assert.equal(encryptionUnlockBodySchema.safeParse({ providerKeys: [{ keyId: id, key: 'sk-test-0123456789' }] }).success, true);
+  assert.equal(encryptionUnlockBodySchema.safeParse({}).success, false, 'nothing to unlock');
 });
