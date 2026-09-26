@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Delta, Knobs, StyleContract } from '../domain/types.ts';
 import type { Registry } from '../providers/provider.ts';
+import { MAX_FREE_TEXT_CHARS } from '../server/contracts.ts';
 
 export type Upkeep = 'server' | 'agent';
 
@@ -106,69 +107,76 @@ export function appliedCounts(delta: Delta): Record<string, number> {
   };
 }
 
+const MAX_ITEMS = 50;
+const MAX_PEOPLE = 20;
+const MAX_ID_CHARS = 200;
+
+const id = () => z.string().max(MAX_ID_CHARS);
+const text = () => z.string().max(MAX_FREE_TEXT_CHARS);
+const list = <T extends z.ZodTypeAny>(item: T) => z.array(item).max(MAX_ITEMS);
+// Values are unknown JSON, so the cap is on the serialized size rather than the key count.
+const bag = () =>
+  z.record(z.string(), z.unknown()).refine((o) => JSON.stringify(o).length <= MAX_FREE_TEXT_CHARS, {
+    message: `must serialize to at most ${MAX_FREE_TEXT_CHARS} characters`,
+  });
+
+/** Entity ids or exact names, shared by the world delta and the between-turn tools of both builds. */
+export const peopleInput = z.array(id()).max(MAX_PEOPLE);
+export const resolutionsInput = z.array(text()).max(MAX_PEOPLE);
+export const idInput = id;
+
 export const worldDeltaInput = z.object({
-  events: z
-    .array(
-      z.object({
-        text: z.string(),
-        participants: z.array(z.string()).optional(),
-        locationId: z.string().nullable().optional(),
-        significance: z.number().min(0).max(1).optional(),
-      }),
-    )
+  events: list(
+    z.object({
+      text: text(),
+      participants: peopleInput.optional(),
+      locationId: id().nullable().optional(),
+      significance: z.number().min(0).max(1).optional(),
+    }),
+  )
     .optional()
     .describe('What happened. Omit to record one event from the prose with the present cast.'),
-  entityUpserts: z
-    .array(
-      z.object({
-        id: z.string().describe('type:kebab-name'),
-        type: z.enum(['Character', 'Location', 'Faction', 'Item', 'Concept', 'Event']),
-        name: z.string(),
-        summary: z.string().optional(),
-        props: z.record(z.string(), z.unknown()).optional(),
-      }),
-    )
-    .optional(),
-  edgeAsserts: z
-    .array(z.object({ subject: z.string(), predicate: z.string(), object: z.string(), weight: z.number().min(0).max(1).optional() }))
-    .optional(),
-  edgeRetires: z.array(z.object({ subject: z.string(), predicate: z.string(), object: z.string() })).optional(),
-  conditionUpdates: z.array(z.object({ entityId: z.string(), patch: z.record(z.string(), z.unknown()) })).optional(),
-  relationshipUpdates: z
-    .array(
-      z.object({
-        fromId: z.string(),
-        toId: z.string(),
-        trustDelta: z.number().optional(),
-        affectionDelta: z.number().optional(),
-        respectDelta: z.number().optional(),
-        note: z.string().optional(),
-      }),
-    )
-    .optional(),
-  factsLearned: z
-    .array(z.object({ text: z.string(), knownBy: z.array(z.string()).optional(), suspectedBy: z.array(z.string()).optional() }))
-    .optional(),
-  threadUpdates: z
-    .array(
-      z.object({
-        id: z.string().optional(),
-        title: z.string().optional(),
-        stakes: z.string().optional(),
-        tensionDelta: z.number().optional(),
-        parties: z.array(z.string()).optional(),
-        resolutions: z.array(z.string()).optional(),
-        status: z.enum(['open', 'resolved', 'abandoned']).optional(),
-      }),
-    )
-    .optional(),
-  vowBreaks: z.array(z.object({ entityId: z.string(), vowId: z.string() })).optional(),
+  entityUpserts: list(
+    z.object({
+      id: id().describe('type:kebab-name'),
+      type: z.enum(['Character', 'Location', 'Faction', 'Item', 'Concept', 'Event']),
+      name: id(),
+      summary: text().optional(),
+      props: bag().optional(),
+    }),
+  ).optional(),
+  edgeAsserts: list(z.object({ subject: id(), predicate: id(), object: id(), weight: z.number().min(0).max(1).optional() })).optional(),
+  edgeRetires: list(z.object({ subject: id(), predicate: id(), object: id() })).optional(),
+  conditionUpdates: list(z.object({ entityId: id(), patch: bag() })).optional(),
+  relationshipUpdates: list(
+    z.object({
+      fromId: id(),
+      toId: id(),
+      trustDelta: z.number().optional(),
+      affectionDelta: z.number().optional(),
+      respectDelta: z.number().optional(),
+      note: text().optional(),
+    }),
+  ).optional(),
+  factsLearned: list(z.object({ text: text(), knownBy: peopleInput.optional(), suspectedBy: peopleInput.optional() })).optional(),
+  threadUpdates: list(
+    z.object({
+      id: id().optional(),
+      title: text().optional(),
+      stakes: text().optional(),
+      tensionDelta: z.number().optional(),
+      parties: peopleInput.optional(),
+      resolutions: resolutionsInput.optional(),
+      status: z.enum(['open', 'resolved', 'abandoned']).optional(),
+    }),
+  ).optional(),
+  vowBreaks: list(z.object({ entityId: id(), vowId: id() })).optional(),
   sceneAdvance: z.boolean().optional(),
 });
 
 export const triggerInput = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('immediate') }),
-  z.object({ kind: z.literal('after-scenes'), scenes: z.number().int().min(1) }),
-  z.object({ kind: z.literal('on-enter'), locationId: z.string() }),
-  z.object({ kind: z.literal('on-learn'), entityId: z.string(), factId: z.string() }),
+  z.object({ kind: z.literal('after-scenes'), scenes: z.number().int().min(1).max(MAX_ITEMS) }),
+  z.object({ kind: z.literal('on-enter'), locationId: id() }),
+  z.object({ kind: z.literal('on-learn'), entityId: id(), factId: id() }),
 ]);

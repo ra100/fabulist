@@ -85,7 +85,7 @@ import {
   addConsequenceTool,
   type McpToolContext,
 } from './tools.ts';
-import { triggerInput, upkeepFor, worldDeltaInput } from './upkeep.ts';
+import { idInput, peopleInput, resolutionsInput, triggerInput, upkeepFor, worldDeltaInput } from './upkeep.ts';
 
 /** Every tool's result, JSON-stringified into the one `content` block every MCP client already knows how to render, plus the same value as `structuredContent` for a client that reads that instead — the dual-encoding OpenAI's own MCP compatibility guide documents (see `.design/MCP-CONNECTOR.md` §4). */
 function toolResult(value: unknown) {
@@ -656,8 +656,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         'Record a fact between turns and exactly who knows it and who only suspects it. For correcting what a turn missed; a turn\u2019s own facts go in commit_narration\u2019s world.',
       inputSchema: {
         text: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
-        knownBy: z.array(z.string()).optional().describe('Entity ids or exact names of who knows it.'),
-        suspectedBy: z.array(z.string()).optional().describe('Entity ids or exact names of who only suspects it.'),
+        knownBy: peopleInput.optional().describe('Entity ids or exact names of who knows it.'),
+        suspectedBy: peopleInput.optional().describe('Entity ids or exact names of who only suspects it.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -671,9 +671,9 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       inputSchema: {
         title: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
         stakes: z.string().max(MAX_FREE_TEXT_CHARS).optional(),
-        parties: z.array(z.string()).describe('Entity ids or exact names of who it involves.'),
+        parties: peopleInput.describe('Entity ids or exact names of who it involves.'),
         tension: z.number().min(0).max(1).optional(),
-        resolutions: z.array(z.string()).optional().describe('Possible outcomes; defaults to unresolved/escalates/fades.'),
+        resolutions: resolutionsInput.optional().describe('Possible outcomes; defaults to unresolved/escalates/fades.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -687,8 +687,8 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
       description:
         'Queue a reaction to a recorded event that graph propagation would not infer. Most consequences are seeded automatically after each commit.',
       inputSchema: {
-        causeEventId: z.string().describe('An event id from this story: events[].id in a commit_narration or replace_turn_prose result.'),
-        actorId: z.string().describe('Entity id or exact name of who reacts.'),
+        causeEventId: idInput().describe('An event id from this story: events[].id in a commit_narration or replace_turn_prose result.'),
+        actorId: idInput().describe('Entity id or exact name of who reacts.'),
         action: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
         trigger: triggerInput,
         visibility: z.enum(['onscreen', 'offscreen-discoverable', 'offscreen-hidden']),
