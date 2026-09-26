@@ -155,6 +155,8 @@ export interface TakeTurnOptions {
    * in `test/engine.test.ts`.
    */
   world?: World;
+  /** This call's text providers (the caller's key, the server's, or mock); omitted uses the engine's own. */
+  providers?: Registry;
 }
 
 export interface RenderedProseRegeneration {
@@ -219,7 +221,7 @@ export class Engine {
   private deepening: DeepeningResolver | undefined;
   private proseGate: ProseGate | undefined;
   private onInterrupt: ((i: Interrupt) => void) | undefined;
-  private compactor: Compactor;
+  private chapterSize: number | undefined;
   private autoCompact: boolean;
   /** See `PendingNarration`. Keyed by `resumeToken`, a random id — not the turn's own eventual id, which does not exist until commit. */
   private pending = new Map<string, PendingNarration>();
@@ -234,20 +236,25 @@ export class Engine {
     this.proseGate = opts.proseGate;
     this.onInterrupt = opts.onInterrupt;
     this.autoCompact = opts.autoCompact !== false;
-    this.compactor = new Compactor({
-      provider: opts.providers.get('summarize'),
-      ...(opts.chapterSize === undefined ? {} : { chapterSize: opts.chapterSize }),
-    });
-  }
-
-  /** Exposed so the CLI and API can compact on demand. */
-  compaction(): Compactor {
-    return this.compactor;
+    this.chapterSize = opts.chapterSize;
   }
 
   /** The registry roles resolve from; MCP reads it per request to report who keeps the world. */
   get registry(): Registry {
     return this.providers;
+  }
+
+  /** The registry a call runs on: the caller's, else this engine's default. */
+  registryFor(providers?: Registry): Registry {
+    return providers ?? this.registry;
+  }
+
+  /** Built per call so a per-request registry, and a live profile swap, reach compaction. */
+  compaction(providers?: Registry): Compactor {
+    return new Compactor({
+      provider: this.registryFor(providers).get('summarize'),
+      ...(this.chapterSize === undefined ? {} : { chapterSize: this.chapterSize }),
+    });
   }
 
   /** Compatibility aggregate. Prefer `activity.isBusy(storyId)` for request-scoped status. */
@@ -269,8 +276,8 @@ export class Engine {
     data: FrameData,
     calls: TurnMeta['providerCalls'],
     frames: Record<string, Frame>,
+    providers: Registry,
   ): RoleDeps {
-    const providers = this.providers;
     return {
       world,
       data,
@@ -394,7 +401,8 @@ export class Engine {
     const session = await world.session.get();
     await this.deepenLocationIfNeeded(world, session.currentLocationId, opts.onStage);
     const data = await loadFrameData(world, session);
-    const deps = this.deps(world, session, data, calls, frames);
+    const providers = this.registryFor(opts.providers);
+    const deps = this.deps(world, session, data, calls, frames, providers);
     const actorId = opts.actorId ?? session.playerCharacterId;
 
     // 1. CLASSIFY
@@ -510,6 +518,7 @@ export class Engine {
       calls,
       frames,
       deps,
+      providers,
       onStage: opts.onStage,
     });
   }
@@ -536,6 +545,7 @@ export class Engine {
     calls: TurnMeta['providerCalls'];
     frames: Record<string, Frame>;
     deps: RoleDeps;
+    providers: Registry;
     onStage?: (stage: string) => void;
     agentWorld?: unknown;
   }): Promise<TurnOutcome> {
@@ -614,7 +624,7 @@ export class Engine {
     // Compaction is derived data and runs only after the authoritative turn
     // transaction succeeds.
     if (this.autoCompact && delta.sceneAdvance) {
-      await this.compactor.onSceneClosed(world, session.scene);
+      await this.compaction(args.providers).onSceneClosed(world, session.scene);
     }
 
     return { kind: 'narrated', turn, prose, delta, commit, validation };
@@ -657,6 +667,7 @@ export class Engine {
     prose: string,
     worldOverride?: World,
     agentWorld?: unknown,
+    providers?: Registry,
   ): Promise<TurnOutcome> {
     const pending = this.pending.get(resumeToken);
     if (!pending) throw new Error(`no pending narration for token ${resumeToken} (expired or already resolved)`);
@@ -677,7 +688,8 @@ export class Engine {
       // stale view of the world would be worse than paying for one more read.
       const session = await world.session.get();
       const data = await loadFrameData(world, session);
-      const deps = this.deps(world, session, data, pending.calls, pending.frames);
+      const registry = this.registryFor(providers);
+      const deps = this.deps(world, session, data, pending.calls, pending.frames, registry);
       return await this.finishTurn({
         world,
         session,
@@ -692,6 +704,7 @@ export class Engine {
         calls: pending.calls,
         frames: pending.frames,
         deps,
+        providers: registry,
         agentWorld,
       });
     } finally {
@@ -716,7 +729,7 @@ export class Engine {
    */
   async renderProseRegeneration(
     turnId: string,
-    opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
+    opts: { note?: string; onToken?: (chunk: string) => void; world?: World; providers?: Registry } = {},
   ): Promise<RenderedProseRegeneration> {
     const world = opts.world ?? (await this.getWorld());
     const { turn, session, data, fingerprint } = await this.proseRegenerationFrame(world, turnId);
@@ -726,7 +739,7 @@ export class Engine {
     // fresh turn: the narrator frame is built from present cast, location and
     // recent prose exactly as before.
     const frames: Record<string, Frame> = {};
-    const deps = this.deps(world, session, data, calls, frames);
+    const deps = this.deps(world, session, data, calls, frames, this.registryFor(opts.providers));
 
     const agreedBeat = [
       turn.meta.referee
@@ -776,7 +789,7 @@ export class Engine {
 
   async regenerateProse(
     turnId: string,
-    opts: { note?: string; onToken?: (chunk: string) => void; world?: World } = {},
+    opts: { note?: string; onToken?: (chunk: string) => void; world?: World; providers?: Registry } = {},
   ): Promise<Turn> {
     const world = opts.world ?? (await this.getWorld());
     const rendered = await this.renderProseRegeneration(turnId, { ...opts, world });

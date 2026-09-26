@@ -3,6 +3,7 @@ import type { Db } from '../db/pg.ts';
 import type { Engine, TakeTurnOptions, TurnOutcome } from '../loop/engine-pg.ts';
 import { recommitTurn } from '../loop/commit-pg.ts';
 import { recordAuthoringCheckpoint } from '../loop/history-pg.ts';
+import type { Registry } from '../providers/provider.ts';
 import type { World } from '../store/index-pg.ts';
 import { runPlayTurn, type NarratedOutcome, type PlayWorkflowAdapter } from './play-workflow.ts';
 
@@ -10,6 +11,7 @@ export interface PlayTurnOptions {
   overrideIntegrity?: boolean;
   onStage?: TakeTurnOptions['onStage'];
   onToken?: TakeTurnOptions['onToken'];
+  providers?: Registry;
 }
 
 type Adapter<Outcome extends NarratedOutcome = TurnOutcome> = PlayWorkflowAdapter<World, Outcome, TickResult>;
@@ -46,6 +48,7 @@ export async function playTurn(db: Db, engine: Engine, world: World, input: stri
       engine.takeTurn(text, {
         world: resolvedWorld,
         overrideIntegrity: options.overrideIntegrity,
+        ...(opts.providers ? { providers: opts.providers } : {}),
         ...(options.onStage ? { onStage: options.onStage } : {}),
         ...(options.onToken ? { onToken: options.onToken } : {}),
       }),
@@ -64,9 +67,10 @@ export async function commitNarration(
   resumeToken: string,
   prose: string,
   agentWorld?: unknown,
+  providers?: Registry,
 ) {
   return runPlayTurn(
-    postCommit(db, (resolvedWorld) => engine.commitExternalNarration(resumeToken, prose, resolvedWorld, agentWorld)),
+    postCommit(db, (resolvedWorld) => engine.commitExternalNarration(resumeToken, prose, resolvedWorld, agentWorld, providers)),
     world,
     '',
   );

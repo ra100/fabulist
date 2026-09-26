@@ -91,6 +91,8 @@ export interface AuthoringTarget {
   world: World;
   /** Checked against the story's owner before anything is bound or written. */
   user: SessionUser | null;
+  /** This call's text providers; omitted uses the service's own. */
+  providers?: Registry;
 }
 
 /**
@@ -389,6 +391,10 @@ export class SetupService {
     this.jobs = opts.jobs ?? new JobRegistry();
   }
 
+  private plannerFor(providers?: Registry): SetupPlanner {
+    return providers ? new SetupPlanner(() => providers.get('setup')) : this.planner;
+  }
+
   /**
    * True when this save has no canon yet, which is what the UI gates the wizard
    * on. An existence check rather than a count: see `GraphStore.isEmpty` for
@@ -425,9 +431,10 @@ export class SetupService {
   async plan(
     wish: string,
     wiki: WikiCandidate,
+    providers?: Registry,
   ): Promise<IngestPlan & { startingPoints: Array<{ title: string; kind: string; members: number }> }> {
     const startingPoints = await this.startingPoints(wiki.baseUrl, wish);
-    const plan = await this.planner.plan({ wish, wiki, startingPoints });
+    const plan = await this.plannerFor(providers).plan({ wish, wiki, startingPoints });
     return { ...plan, startingPoints };
   }
 
@@ -515,6 +522,7 @@ export class SetupService {
     title = '',
     limits: IngestLimits = {},
     ownerUserId?: string,
+    providers?: Registry,
   ): Job<PreviewResult & { previewKey: string; character: CharacterSketch }> {
     return this.jobs.start('discover', async (handle) => {
       handle.stage('reading the wiki\u2019s map', 'finding pages in scope');
@@ -539,7 +547,7 @@ export class SetupService {
       );
 
       handle.stage('sharpening your character', 'matching it against what was actually found');
-      const refined = await this.planner.refineCharacter(character, {
+      const refined = await this.plannerFor(providers).refineCharacter(character, {
         characters: result.preview.characters,
         factions: result.preview.factions,
         locations: result.preview.locations,
@@ -632,7 +640,7 @@ export class SetupService {
         }
         if (passA.skipped.length) handle.log(`skipped ${passA.skipped.length} thin or malformed page(s)`);
 
-        const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
+        const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName, target?.providers);
         warnings.push(...passBWarnings);
 
         handle.stage('placing your character');
@@ -685,12 +693,13 @@ export class SetupService {
     scoped: CrawlResult,
     spec: DepthSpec,
     wikiName: string,
+    providers: Registry = this.providers,
   ): Promise<{ passB: IngestJobResult['passB']; warnings: string[] }> {
     const warnings: string[] = [];
     if (spec.passB === 'none') return { passB: null, warnings };
 
     const extractor = new LlmPassBExtractor({
-      provider: this.providers.get('passb'),
+      provider: providers.get('passb'),
       world,
       onError: (title, err) =>
         handle.log(`pass B failed on ${title}: ${err instanceof Error ? err.message : String(err)}`),
@@ -848,6 +857,7 @@ export class SetupService {
    */
   async continueIngest(
     overrides: { seeds?: string[]; mode?: DepthMode; excludeCategories?: string[]; limits?: IngestLimits } = {},
+    providers?: Registry,
   ): Promise<Job<IngestJobResult>> {
     // On this service's pool: everything below writes canon (see `onOwnPool`).
     const world = await this.onOwnPool(await this.getWorld());
@@ -937,7 +947,7 @@ export class SetupService {
           );
         }
 
-        const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName);
+        const { passB, warnings: passBWarnings } = await this.runResumablePassB(world, handle, scoped, spec, wikiName, providers);
         warnings.push(...passBWarnings);
 
         handle.stage('done');
@@ -960,7 +970,7 @@ export class SetupService {
     style?: Partial<IngestPlan['style']>,
     target?: AuthoringTarget,
   ): Job<ApplyCustomResult> {
-    const planner = this.planner;
+    const planner = this.plannerFor(target?.providers);
     // Claimed before the model is called, not after: a second request for the
     // same story is refused up front instead of paying to invent a world it
     // could never have written down.
