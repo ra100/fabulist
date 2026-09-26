@@ -143,3 +143,21 @@ test('PostgreSQL commit_narration with server upkeep ignores world and says so',
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('PostgreSQL commit_narration seeds consequences in its own checkpoint, like play', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    const proposal = await proposeTurnTool(ctx, { text: 'i warm the ink' });
+    if (proposal.status !== 'awaiting-narration') throw new Error('expected awaiting-narration');
+    const out = await commitNarrationTool(ctx, { resumeToken: proposal.resumeToken, prose: 'A bargain.', world: AGENT_WORLD });
+    if (out.status !== 'narrated') throw new Error('expected narrated');
+    assert.ok(out.consequencesSeeded > 0);
+    assert.ok((await world.consequences.all()).length >= out.consequencesSeeded);
+    const count = await db.one<{ count: string }>(
+      `SELECT count(*) AS count FROM history_checkpoints WHERE story_id = $1`,
+      [world.storyId],
+    );
+    assert.equal(Number(count?.count), 2);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});

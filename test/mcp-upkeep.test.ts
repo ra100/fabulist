@@ -216,3 +216,18 @@ test('SQLite commit_narration with server upkeep ignores world and says so', asy
   assert.deepEqual(out.dropped, []);
   world.close();
 });
+
+test('SQLite commit_narration seeds consequences in its own checkpoint, like play', async () => {
+  const { world, ctx } = sqliteContext();
+  const proposal = await proposeTurnTool(ctx, { text: 'i warm the ink' });
+  if (proposal.status !== 'awaiting-narration') throw new Error('expected awaiting-narration');
+  const out = await commitNarrationTool(ctx, { resumeToken: proposal.resumeToken, prose: 'A bargain.', world: AGENT_WORLD });
+  if (out.status !== 'narrated') throw new Error('expected narrated');
+  assert.ok(out.consequencesSeeded > 0, 'a significant event touching a well-connected character ripples');
+  assert.ok(world.consequences.all().length >= out.consequencesSeeded);
+  const checkpoints = world.db
+    .prepare('SELECT count(*) AS n FROM history_checkpoints WHERE story_id = ?')
+    .get(world.storyId) as { n: number };
+  assert.equal(Number(checkpoints.n), 2, 'the turn checkpoint, then the consequence checkpoint');
+  world.close();
+});

@@ -43,7 +43,7 @@ import { createStory, getStory, listStories, listStoriesForUserWithPrivateValues
 import { assertPrivateStoryCreationReady } from '../store/private-story-migration-pg.ts';
 import type { SessionUser } from '../auth/config.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType } from '../domain/types.ts';
-import { playTurn } from '../application/play-pg.ts';
+import { commitNarration, playTurn } from '../application/play-pg.ts';
 import { appliedCounts, buildGuide, upkeepFor } from './upkeep.ts';
 
 export interface McpToolContext {
@@ -689,7 +689,14 @@ export async function commitNarrationTool(
   // story, and `commitExternalNarration` refuses a story mismatch — which,
   // resolved through the shared pointer, is what any other reader's switch
   // would have looked like.
-  const outcome = await ctx.engine.commitExternalNarration(args.resumeToken, args.prose, await ctx.world(), agentWorld);
+  const { outcome, seeded, tick } = await commitNarration(
+    ctx.db,
+    ctx.engine,
+    await ctx.world(),
+    args.resumeToken,
+    args.prose,
+    agentWorld,
+  );
   if (outcome.kind === 'narrated') {
     return {
       status: 'narrated' as const,
@@ -703,6 +710,8 @@ export async function commitNarrationTool(
       newThreads: outcome.commit.newThreadIds,
       applied: appliedCounts(outcome.delta),
       dropped: agentWorld === undefined ? [] : outcome.validation.issues.filter((i) => i.repaired),
+      consequencesSeeded: seeded,
+      consequencesFired: tick?.fired.length ?? 0,
       ...(warning ? { warning } : {}),
     };
   }
