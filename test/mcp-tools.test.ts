@@ -526,6 +526,21 @@ test('startStoryTool adopts an existing character and proposes an opening', () =
   world.close();
 });
 
+test('startStoryTool adopts an existing character by entity id', () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const mock = new MockProvider();
+  const engine = new Engine({ world, providers: new ProviderRegistry(mock) });
+  const svc = new SetupService({ world, providers: new ProviderRegistry(mock) });
+  const ctx: McpToolContext = { world: () => world, engine, setup: svc, dataRoot: 'data' };
+
+  const out = startStoryTool(ctx, { existing: 'char:hela-vask' });
+  assert.equal(out.playerCharacterId, 'char:hela-vask');
+  assert.equal(out.created, false);
+  assert.equal(world.graph.get('char:the-newcomer'), undefined, 'no stand-in protagonist is invented');
+  world.close();
+});
+
 test('startStoryTool places an original character when existing is omitted', () => {
   const world = World.open(':memory:');
   seedWorld(world);

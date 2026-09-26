@@ -217,14 +217,15 @@ export async function assignPlayerCharacter(
 
   // Clear any previous player flag, or two characters end up marked.
   for (const sheet of await world.cast.list()) {
-    if (sheet.isPlayer) world.cast.put({ ...sheet, isPlayer: false });
+    if (sheet.isPlayer) await world.cast.put({ ...sheet, isPlayer: false });
   }
 
   let entity: Entity | undefined;
   let created = false;
 
   if (sketch.existing) {
-    entity = await world.graph.resolveName(sketch.existing);
+    // `list_characters` hands out ids, the setup wizard hands out names; accept both.
+    entity = (await world.graph.get(sketch.existing)) ?? (await world.graph.resolveName(sketch.existing));
     if (!entity) warnings.push(`"${sketch.existing}" is not in this world; creating an original character instead`);
   }
 

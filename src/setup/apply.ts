@@ -208,7 +208,8 @@ export function assignPlayerCharacter(
   let created = false;
 
   if (sketch.existing) {
-    entity = world.graph.resolveName(sketch.existing);
+    // `list_characters` hands out ids, the setup wizard hands out names; accept both.
+    entity = world.graph.get(sketch.existing) ?? world.graph.resolveName(sketch.existing);
     if (!entity) warnings.push(`"${sketch.existing}" is not in this world; creating an original character instead`);
   }
 

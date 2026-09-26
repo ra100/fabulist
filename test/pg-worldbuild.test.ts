@@ -474,6 +474,12 @@ test('assignPlayerCharacter adopts an existing character or creates one', async 
     assert.equal(adopted.created, false);
     assert.equal((await world.cast.player())?.entityId, 'char:picard');
 
+    // By id, as `list_characters` reports it, not only by display name.
+    const byId = await assignPlayerCharacter(world, { existing: 'char:picard', name: '', role: '', goals: [], vows: [] });
+    assert.equal(byId.playerCharacterId, 'char:picard');
+    assert.equal(byId.created, false);
+    assert.deepEqual(byId.warnings.filter((w) => /not in this world/.test(w)), []);
+
     // Creating an original inside the same world. The previous player must be
     // un-flagged, or `cast.player()` finds two and the gate reads the wrong one.
     const created = await assignPlayerCharacter(world, { existing: null, name: 'Ensign Vale', role: 'an ensign', goals: ['prove herself'], vows: [{ text: 'Follow lawful orders', rank: 1 }] });
