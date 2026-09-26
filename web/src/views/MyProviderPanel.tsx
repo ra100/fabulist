@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { providerSecretSchema } from '../../../src/server/contracts.ts';
 import { api, type CurrentUser } from '../api.ts';
 import { eraseUnlockedStoryKeys, unlockWithPassphrase, wrapProviderKey } from '../crypto/keys.ts';
 import { keyHintFor, providerStatusLine, TRUST_COPY } from '../my-provider.ts';
@@ -52,6 +53,12 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
     ...(mechanics.trim() ? { mechanics: mechanics.trim() } : {}),
     ...(extract.trim() ? { extract: extract.trim() } : {}),
   });
+  // An unlock wrap is opaque to the server, so a malformed key must be caught before it is wrapped.
+  const checkedKey = () => {
+    const key = apiKey.trim();
+    if (!providerSecretSchema.safeParse(key).success) throw new Error('API key must be 8-512 printable characters with no spaces');
+    return key;
+  };
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
     setNote(null);
@@ -66,31 +73,32 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
 
   const onLoadModels = () =>
     run(async () => {
-      const { models: found } = await listModels.mutateAsync({ endpointId: endpoint, key: apiKey });
+      const { models: found } = await listModels.mutateAsync({ endpointId: endpoint, key: checkedKey() });
       setModels(found);
       setNote(found.length ? `${found.length} models found` : 'this provider did not list models; type a model id');
     });
 
   const onTest = () =>
     run(async () => {
-      const result = await probe.mutateAsync({ endpointId: endpoint, model: narrate.trim(), key: apiKey });
+      const result = await probe.mutateAsync({ endpointId: endpoint, model: narrate.trim(), key: checkedKey() });
       setNote(result.ok ? `works — ${result.model} answered` : `failed — ${result.error}`);
     });
 
   const onSave = () =>
     run(async () => {
+      const key = checkedKey();
       const id = crypto.randomUUID();
       const base = { id, label: '', endpointId: endpoint, models: modelSet() };
       if (trust === 'sealed') {
-        await save.mutateAsync({ ...base, trust: 'sealed', key: apiKey });
+        await save.mutateAsync({ ...base, trust: 'sealed', key });
       } else {
         const bundle = await queryClient.fetchQuery({ queryKey: encryptionKeys.keys, queryFn: api.encryption.keys });
         if (!bundle.userKey) throw new Error('set up private storage first, or choose the server-sealed mode');
         const unlocked = await unlockWithPassphrase(user.id, bundle.userKey, [], passphrase);
         try {
-          const wrap = await wrapProviderKey(user.id, unlocked.masterKey, id, apiKey);
-          await save.mutateAsync({ ...base, trust: 'unlock', wrap, keyHint: keyHintFor(apiKey) });
-          await unlock.mutateAsync({ storyKeys: [], providerKeys: [{ keyId: id, key: apiKey }] });
+          const wrap = await wrapProviderKey(user.id, unlocked.masterKey, id, key);
+          await save.mutateAsync({ ...base, trust: 'unlock', wrap, keyHint: keyHintFor(key) });
+          await unlock.mutateAsync({ storyKeys: [], providerKeys: [{ keyId: id, key }] });
         } finally {
           eraseUnlockedStoryKeys(unlocked);
         }

@@ -1,3 +1,5 @@
+import { providerSecretSchema } from '../../../src/server/contracts.ts';
+
 const VERSION = 1;
 export const PBKDF2_ITERATIONS = 600_000;
 const encoder = new TextEncoder();
@@ -305,8 +307,10 @@ export async function providerKeyHandoff(
   for (const record of records) {
     const bytes = await decrypt(master, record.wrap, providerAad(userId, record.keyId)).catch(() => null);
     if (!bytes) continue;
-    out.push({ keyId: record.keyId, key: new TextDecoder().decode(bytes) });
+    const key = new TextDecoder().decode(bytes);
     bytes.fill(0);
+    // A key the server would reject must not fail the story keys sent alongside it.
+    if (providerSecretSchema.safeParse(key).success) out.push({ keyId: record.keyId, key });
   }
   return out;
 }
