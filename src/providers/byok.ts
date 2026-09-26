@@ -55,6 +55,11 @@ export function scrubSecrets(text: string, known: readonly string[] = []): strin
   return out;
 }
 
+// A redirect would carry the user's key and prompt to wherever the Location points.
+function noRedirects(fetcher: typeof fetch = fetch): typeof fetch {
+  return (input, init) => fetcher(input, { ...init, redirect: 'error' });
+}
+
 export function byokProvider(
   endpoint: ByokEndpoint,
   model: string,
@@ -62,6 +67,7 @@ export function byokProvider(
   fetcher?: typeof fetch,
 ): Provider {
   const capabilities = caps({ structuredOutput: endpoint.id === 'openai' ? 'native-schema' : 'none' });
+  const guarded = noRedirects(fetcher);
   return {
     id: endpoint.id,
     model,
@@ -69,7 +75,7 @@ export function byokProvider(
     async complete(req: CompletionRequest): Promise<CompletionResult> {
       // Read per call, so a lock or delete between two calls of one turn stops the second.
       const apiKey = secret();
-      const opts = { apiKey, baseUrl: endpoint.baseUrl, model, capabilities, fetcher };
+      const opts = { apiKey, baseUrl: endpoint.baseUrl, model, capabilities, fetcher: guarded };
       const inner =
         endpoint.kind === 'anthropic' ? new AnthropicProvider(opts) : new OpenAICompatProvider(endpoint.id, opts);
       try {
@@ -92,7 +98,7 @@ export async function listModels(
     ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
     : { authorization: `Bearer ${apiKey}` };
   try {
-    const res = await fetcher(url, { headers, signal: AbortSignal.timeout(5_000) });
+    const res = await noRedirects(fetcher)(url, { headers, signal: AbortSignal.timeout(5_000) });
     if (!res.ok) return [];
     const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
     return (body.data ?? [])
