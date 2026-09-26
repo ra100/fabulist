@@ -41,6 +41,16 @@ export interface StoryKeyHandoff {
   key: string;
 }
 
+export interface ProviderKeyRecord {
+  keyId: string;
+  wrap: EncryptedKeyEnvelope;
+}
+
+export interface ProviderKeyHandoff {
+  keyId: string;
+  key: string;
+}
+
 function requireCrypto(): Crypto {
   if (!globalThis.crypto?.subtle || !globalThis.crypto.getRandomValues) {
     throw new Error('this browser does not support Web Crypto');
@@ -164,6 +174,10 @@ function storyAad(userId: string, storyId: string): string {
   return `fabulist:user:${userId}:story:${storyId}:dek:v${VERSION}`;
 }
 
+function providerAad(userId: string, keyId: string): string {
+  return `fabulist:user:${userId}:provider:${keyId}:v${VERSION}`;
+}
+
 export async function createEncryptionEnrollment(userId: string, passphrase: string, storyIds: string[]): Promise<EncryptionEnrollment> {
   if (!storyIds.length) throw new Error('create a story before enabling private storage');
   if (new Set(storyIds).size !== storyIds.length) throw new Error('duplicate story identifier');
@@ -267,6 +281,34 @@ export function storyKeyHandoff(storyKeys: Map<string, Uint8Array>): StoryKeyHan
   return [...storyKeys]
     .map(([storyId, key]) => ({ storyId, key: toBase64(key) }))
     .sort((a, b) => a.storyId.localeCompare(b.storyId));
+}
+
+/** Wraps a provider API key under the unlocked master key; the server only ever stores the result. */
+export async function wrapProviderKey(
+  userId: string,
+  masterKey: Uint8Array,
+  keyId: string,
+  apiKey: string,
+): Promise<EncryptedKeyEnvelope> {
+  if (!keyId || !apiKey) throw new Error('a provider key needs an id and a value');
+  return encrypt(await importAesKey(masterKey), encoder.encode(apiKey), providerAad(userId, keyId));
+}
+
+/** Unwraps provider keys for the one-request unlock handoff; an unreadable wrap is skipped so story unlock still works. */
+export async function providerKeyHandoff(
+  userId: string,
+  masterKey: Uint8Array,
+  records: ProviderKeyRecord[],
+): Promise<ProviderKeyHandoff[]> {
+  const master = await importAesKey(masterKey);
+  const out: ProviderKeyHandoff[] = [];
+  for (const record of records) {
+    const bytes = await decrypt(master, record.wrap, providerAad(userId, record.keyId)).catch(() => null);
+    if (!bytes) continue;
+    out.push({ keyId: record.keyId, key: new TextDecoder().decode(bytes) });
+    bytes.fill(0);
+  }
+  return out;
 }
 
 /** Clear temporary browser byte arrays after handing them to the active server session. */

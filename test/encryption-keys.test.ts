@@ -3,9 +3,11 @@ import test from 'node:test';
 import {
   createEncryptionEnrollment,
   eraseUnlockedStoryKeys,
+  providerKeyHandoff,
   storyKeyHandoff,
   unlockWithPassphrase,
   unlockWithRecoveryCode,
+  wrapProviderKey,
 } from '../web/src/crypto/keys.ts';
 
 const userId = 'user_private_test';
@@ -94,4 +96,18 @@ test('a corrupt story key is skipped without blocking healthy private stories', 
   assert.deepEqual([...unlocked.storyKeys.keys()], ['story-one']);
   assert.deepEqual(unlocked.failedStoryKeys.map((item) => item.storyId), ['story-two']);
   assert.match(unlocked.failedStoryKeys[0]?.error ?? '', /incorrect passphrase or recovery code/);
+});
+
+test('a provider key wrap round-trips only for the same user and key id', async () => {
+  const enrollment = await createEncryptionEnrollment(userId, passphrase, storyIds);
+  const unlocked = await unlockWithPassphrase(userId, enrollment.userKey, [], passphrase);
+  const apiKey = 'sk-live-provider-secret-0123';
+  const wrap = await wrapProviderKey(userId, unlocked.masterKey, 'key-1', apiKey);
+  assert.equal(Buffer.from(wrap.ciphertext, 'base64').includes(Buffer.from(apiKey)), false);
+  assert.deepEqual(await providerKeyHandoff(userId, unlocked.masterKey, [{ keyId: 'key-1', wrap }]), [
+    { keyId: 'key-1', key: apiKey },
+  ]);
+  assert.deepEqual(await providerKeyHandoff(userId, unlocked.masterKey, [{ keyId: 'key-2', wrap }]), []);
+  assert.deepEqual(await providerKeyHandoff('another-user', unlocked.masterKey, [{ keyId: 'key-1', wrap }]), []);
+  eraseUnlockedStoryKeys(unlocked);
 });
