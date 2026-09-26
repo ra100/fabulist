@@ -48,7 +48,9 @@ export function openProviderKey(secretsKey: Buffer, userId: string, keyId: strin
     const decipher = createDecipheriv('aes-256-gcm', secretsKey, sealed.nonce, { authTagLength: TAG_BYTES });
     decipher.setAAD(aad(userId, keyId));
     decipher.setAuthTag(sealed.ciphertext.subarray(-TAG_BYTES));
-    return Buffer.concat([decipher.update(sealed.ciphertext.subarray(0, -TAG_BYTES)), decipher.final()]).toString('utf8');
+    return Buffer.concat([decipher.update(sealed.ciphertext.subarray(0, -TAG_BYTES)), decipher.final()]).toString(
+      'utf8',
+    );
   } catch {
     throw new Error('sealed provider key cannot be decrypted');
   }
