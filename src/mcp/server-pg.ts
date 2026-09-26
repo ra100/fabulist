@@ -83,9 +83,10 @@ import {
   recordFactTool,
   openThreadTool,
   addConsequenceTool,
+  upkeepOf,
   type McpToolContext,
 } from './tools-pg.ts';
-import { triggerInput, upkeepFor, worldDeltaInput } from './upkeep.ts';
+import { triggerInput, worldDeltaInput } from './upkeep.ts';
 
 /** Every tool's result, JSON-stringified into the one `content` block every MCP client already knows how to render, plus the same value as `structuredContent` for a client that reads that instead — the dual-encoding OpenAI's own MCP compatibility guide documents (see `.design/MCP-CONNECTOR.md` §4). */
 function toolResult(value: unknown) {
@@ -1185,7 +1186,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
         wish: z.string().optional().describe('What kind of story the player wants, in their own words.'),
       },
     },
-    ({ world, wish }) => ({
+    async ({ world, wish }) => ({
       messages: [
         {
           role: 'user' as const,
@@ -1223,7 +1224,7 @@ function buildServer(ctx: McpToolContext, resourceUrl: string): McpServer {
               '  a revealed allegiance, a broken vow — call update_sheet (identity/contract/voice/condition/',
               '  appearance) rather than letting the prose drift ahead of the sheet. appearance.referenceImagePath',
               '  and .seed are read-only through update_sheet; only generate_portrait writes those.',
-              ...(upkeepFor(ctx.engine.registry) === 'server'
+              ...((await upkeepOf(ctx)) === 'server'
                 ? [
                     '- Relationships record themselves: commit_narration’s extraction step reads what the prose',
                     '  actually depicts and creates the connections — there is no separate "create a connection"',
