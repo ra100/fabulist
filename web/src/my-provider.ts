@@ -1,4 +1,4 @@
-import type { ProviderStatus } from './api.ts';
+import type { ProviderKeySummary, ProviderModels, ProviderStatus } from './api.ts';
 
 export function providerStatusLine(status: ProviderStatus | undefined): string {
   switch (status) {
@@ -46,4 +46,18 @@ export async function unlockHandoffNote(handoff: () => Promise<unknown>): Promis
 
 export function keyHintFor(apiKey: string): string {
   return apiKey.slice(-4);
+}
+
+/**
+ * Permanent info line under a saved key. States that the narrate/mechanics/
+ * extract fields shown here are authoritative — they are what your key is
+ * actually used for — so editing them and saving updates that, and reloading
+ * the page restores them from the saved row.
+ */
+export function savedKeyInfo(key: ProviderKeySummary): string {
+  const models = key.models as ProviderModels;
+  const parts = [models.narrate, models.mechanics, models.extract].filter(
+    (m): m is string => typeof m === 'string' && m.trim().length > 0,
+  );
+  return `These model settings are what your key is used for (${parts.length} role${parts.length === 1 ? '' : 's'} set). Edit them and save to change it; reloading this page restores them from your saved key.`;
 }

@@ -1,9 +1,16 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { providerSecretSchema } from '../../../src/server/contracts.ts';
 import { api, type CurrentUser } from '../api.ts';
 import { eraseUnlockedStoryKeys, unlockWithPassphrase, wrapProviderKey } from '../crypto/keys.ts';
-import { effectiveTrust, keyHintFor, providerStatusLine, TRUST_COPY, unlockHandoffNote } from '../my-provider.ts';
+import {
+  effectiveTrust,
+  keyHintFor,
+  providerStatusLine,
+  savedKeyInfo,
+  TRUST_COPY,
+  unlockHandoffNote,
+} from '../my-provider.ts';
 import {
   encryptionKeys,
   useDeleteProviderKeyMutation,
@@ -11,8 +18,10 @@ import {
   useMyUsageQuery,
   useProviderKeyQuery,
   useProviderModelsMutation,
+  useProviderModelsSavedQuery,
   useSaveProviderKeyMutation,
   useTestProviderKeyMutation,
+  useTestProviderKeySavedMutation,
   useUnlockMutation,
   useUsageByUserQuery,
 } from '../queries.ts';
@@ -25,6 +34,8 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
   const remove = useDeleteProviderKeyMutation();
   const probe = useTestProviderKeyMutation();
   const listModels = useProviderModelsMutation();
+  const listModelsSaved = useProviderModelsSavedQuery(state?.key !== null);
+  const probeSaved = useTestProviderKeySavedMutation();
   const unlock = useUnlockMutation();
   const [endpointId, setEndpointId] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -36,6 +47,17 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
   const [models, setModels] = useState<string[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Authoritative: the saved key's narrate/mechanics/extract settings are what
+  // is actually used for your key. Seed the form from them on mount/refresh so
+  // the settings show what's in use instead of an empty form.
+  useEffect(() => {
+    const m = state?.key?.models;
+    if (!m) return;
+    setNarrate((prev) => (prev.trim() ? prev : m.narrate));
+    setMechanics((prev) => (prev.trim() ? prev : m.mechanics ?? ''));
+    setExtract((prev) => (prev.trim() ? prev : m.extract ?? ''));
+  }, [state?.key?.id]);
 
   if (!state) {
     return (
@@ -74,14 +96,22 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
 
   const onLoadModels = () =>
     run(async () => {
-      const { models: found } = await listModels.mutateAsync({ endpointId: endpoint, key: checkedKey() });
+      // Use the saved key when there is one — no need to re-type it. Otherwise
+      // fall back to a key typed into this form.
+      const found = state.key
+        ? await listModelsSaved.refetch().then((r) => r.data?.models ?? [])
+        : (await listModels.mutateAsync({ endpointId: endpoint, key: checkedKey() })).models;
       setModels(found);
       setNote(found.length ? `${found.length} models found` : 'this provider did not list models; type a model id');
     });
 
   const onTest = () =>
     run(async () => {
-      const result = await probe.mutateAsync({ endpointId: endpoint, model: narrate.trim(), key: checkedKey() });
+      const model = narrate.trim();
+      if (!model) throw new Error('enter a narrate model id first');
+      const result = state.key
+        ? await probeSaved.mutateAsync(model)
+        : await probe.mutateAsync({ endpointId: endpoint, model, key: checkedKey() });
       setNote(result.ok ? `works — ${result.model} answered` : `failed — ${result.error}`);
     });
 
@@ -144,6 +174,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
           saved: <span className="mono">{state.key.endpointId} ••••{state.key.keyHint}</span> ({state.key.trust})
         </p>
       ) : null}
+      {state.key ? <p className="small dim">{savedKeyInfo(state.key)}</p> : null}
       <label className="field-row">
         <span>provider</span>
         <select value={endpoint} disabled={busy} onChange={(e) => setEndpointId(e.target.value)}>
@@ -158,7 +189,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
         <span>API key</span>
         <input type="password" autoComplete="off" value={apiKey} disabled={busy} onChange={(e) => setApiKey(e.target.value)} />
       </label>
-      <button type="button" disabled={busy || !apiKey} onClick={() => void onLoadModels()}>
+      <button type="button" disabled={busy || (!apiKey && !state.key)} onClick={() => void onLoadModels()}>
         load models
       </button>
       <datalist id="my-provider-models">

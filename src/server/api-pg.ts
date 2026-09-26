@@ -57,7 +57,7 @@ import {
 } from '../setup/service-pg.ts';
 import type { IngestLimits } from '../ingest/depth-pg.ts';
 import type { Registry, SwappableRegistry } from '../providers/provider.ts';
-import { ProviderKeyForbiddenError, ProviderKeyInputError, type ProviderResolver } from '../providers/resolver-pg.ts';
+import { ProviderKeyForbiddenError, ProviderKeyInputError, ProviderKeyLockedError, type ProviderResolver } from '../providers/resolver-pg.ts';
 import { BYOK_ENDPOINTS } from '../providers/byok.ts';
 import { usageByUser, usageForUser } from '../store/usage-pg.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
@@ -605,6 +605,36 @@ route('POST', '/api/provider-key/models', async (_req, res, { body, user, provid
     send(res, 200, { models: await resolver.models(parseBody(providerModelsBodySchema, body)) });
   } catch (err) {
     if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
+    throw err;
+  }
+});
+
+// List models for the caller's *saved* key — no plaintext travels in the request.
+route('GET', '/api/provider-key/models', async (_req, res, { user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver || !takeKeyCall(res, resolver, user)) return;
+  try {
+    send(res, 200, { models: await resolver.modelsForSaved(user) });
+  } catch (err: unknown) {
+    if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
+    if (err instanceof ProviderKeyLockedError) return send(res, 409, { error: err.message });
+    throw err;
+  }
+});
+
+// Probe the caller's *saved* key against a model — no plaintext travels in the request.
+route('GET', '/api/provider-key/test', async (req, res, { user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver || !takeKeyCall(res, resolver, user)) return;
+  const model = new URL(req.url ?? '', 'http://localhost').searchParams.get('model') ?? '';
+  if (!model) return send(res, 400, { error: 'model query parameter is required' });
+  try {
+    send(res, 200, await resolver.testForSaved(user, model));
+  } catch (err: unknown) {
+    if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
+    if (err instanceof ProviderKeyLockedError) return send(res, 409, { error: err.message });
     throw err;
   }
 });
