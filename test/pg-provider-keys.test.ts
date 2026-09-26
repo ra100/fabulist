@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { withPg } from './pg-harness.ts';
+import {
+  deleteProviderKey,
+  providerKeyFor,
+  saveProviderKey,
+  summarizeProviderKey,
+  touchProviderKey,
+} from '../src/auth/provider-keys-pg.ts';
 
 const ID1 = '00000000-0000-4000-8000-000000000001';
 const ID2 = '00000000-0000-4000-8000-000000000002';
@@ -51,6 +58,44 @@ test('migration 010 is recorded and grants the play role both tables and the usa
           AND has_sequence_privilege('fabulist_play', 'usage_events_id_seq', 'USAGE') AS ok`,
     );
     assert.equal(grants.rows[0]?.ok, true);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+const key = (id: string, userId: string) => ({
+  id,
+  userId,
+  label: '',
+  endpointId: 'openai',
+  models: { narrate: 'gpt-test' },
+  trust: 'sealed' as const,
+  nonce: Buffer.alloc(12, 1),
+  ciphertext: Buffer.alloc(40, 2),
+  keyHint: 'abcd',
+});
+
+test('the provider key store is owner-scoped and replaces a user\'s key on save', async (t) => {
+  const ran = await withPg(async (db, _schema, roles) => {
+    await saveProviderKey(roles.play, key(ID1, 'user:alice'));
+    await saveProviderKey(roles.play, { ...key(ID2, 'user:alice'), models: { narrate: 'gpt-2', extract: 'gpt-x' } });
+    const alice = await providerKeyFor(roles.play, 'user:alice');
+    assert.equal(alice?.id, ID2);
+    assert.deepEqual(alice?.models, { narrate: 'gpt-2', extract: 'gpt-x' });
+    assert.equal(alice?.lastUsedAt, null);
+    assert.equal((await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM user_provider_keys`)).rows[0]?.n, 1);
+
+    assert.equal(await providerKeyFor(roles.play, 'user:bob'), null);
+    await assert.rejects(saveProviderKey(roles.play, key(ID2, 'user:bob')), { code: '23505' });
+    assert.equal(await deleteProviderKey(roles.play, 'user:bob'), false);
+    await touchProviderKey(roles.play, 'user:bob', ID2);
+    assert.equal((await providerKeyFor(roles.play, 'user:alice'))?.lastUsedAt, null, 'another user cannot touch it');
+    await touchProviderKey(roles.play, 'user:alice', ID2);
+    assert.ok((await providerKeyFor(roles.play, 'user:alice'))?.lastUsedAt);
+
+    const summary = summarizeProviderKey(alice!);
+    assert.deepEqual(Object.keys(summary).sort(), ['createdAt', 'endpointId', 'id', 'keyHint', 'label', 'lastUsedAt', 'models', 'trust']);
+    assert.equal(await deleteProviderKey(roles.play, 'user:alice'), true);
+    assert.equal(await providerKeyFor(roles.play, 'user:alice'), null);
   });
   if (!ran) t.skip('no Postgres configured');
 });
