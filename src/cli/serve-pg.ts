@@ -36,6 +36,8 @@ import { buildImageRegistry, buildSwappableRegistry, loadConfig } from '../confi
 import { makeProseGate } from '../lint/gate.ts';
 import { SetupService } from '../setup/service-pg.ts';
 import { ConfigService } from '../config/service.ts';
+import { secretsKeyFromEnv } from '../crypto/provider-secret.ts';
+import { ProviderResolver } from '../providers/resolver-pg.ts';
 import { IllustrationService } from '../illustration/service-pg.ts';
 import { buildMcpAuth } from '../mcp/auth.ts';
 import { resolveAuthConfig } from '../auth/config.ts';
@@ -270,6 +272,15 @@ async function boot(): Promise<void> {
   const { registry, notes } = buildSwappableRegistry(cfg);
   const { registry: imageRegistry, notes: imageNotes } = buildImageRegistry(cfg);
   const configService = new ConfigService({ registry, imageRegistry, path: configPath });
+  // Throws on a malformed FABULIST_SECRETS_KEY rather than booting with sealed keys silently unusable.
+  const secretsKey = secretsKeyFromEnv(process.env);
+  if (!secretsKey) console.log('sealed provider keys disabled (set FABULIST_SECRETS_KEY to 32 random bytes, base64)');
+  const providerResolver = new ProviderResolver({
+    db: play,
+    server: registry,
+    shareServerProvider: () => configService.get().shareServerProvider !== false,
+    secretsKey,
+  });
   for (const n of notes) console.log(n);
   if (cfg.profile === 'mock') console.log('tip: pnpm providers — the UI can switch profile without a restart');
   for (const n of imageNotes) console.log(n);
@@ -361,6 +372,7 @@ async function boot(): Promise<void> {
     imageRegistry,
     dataRoot,
     imagesDir,
+    providerResolver,
     mcpAuth: mcpAuth ?? undefined,
     mcpResourceUrl,
     authConfig: authConfig ?? undefined,

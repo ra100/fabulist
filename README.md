@@ -768,6 +768,7 @@ Two providers, chosen with `AUTH_PROVIDER`:
 AUTH_REQUIRE_LOGIN=true
 AUTH_PUBLIC_ORIGIN=https://fabulist.example.com   # the origin browsers reach; /auth/callback hangs off it
 AUTH_ADMIN_EMAILS=you@example.com                 # who may change provider config and run canon ingest
+FABULIST_SECRETS_KEY=<openssl rand -base64 32>    # enables "sealed" personal provider keys; whoever holds it and the DB can decrypt them
 
 # AUTH_PROVIDER=workos (the default) — WorkOS AuthKit
 WORKOS_CLIENT_ID=client_...

@@ -697,3 +697,14 @@ async function withRemoteOllama(
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+test('shareServerProvider is an admin-patchable boolean that defaults to sharing', () => {
+  const { svc, saved } = service();
+  assert.equal(svc.get().shareServerProvider, undefined);
+  const off = svc.patch({ shareServerProvider: false });
+  assert.deepEqual(off.issues, []);
+  assert.equal(saved().shareServerProvider, false);
+  const bad = svc.patch({ shareServerProvider: 'no' as never });
+  assert.equal(bad.issues[0]?.field, 'shareServerProvider');
+  assert.equal(saved().shareServerProvider, false, 'an invalid value is not saved');
+});
