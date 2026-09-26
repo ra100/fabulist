@@ -119,3 +119,20 @@ test('model listing returns sorted ids and degrades to an empty list', async () 
   assert.equal(anthropic.seen[0]?.url, 'https://api.anthropic.com/v1/models');
   assert.deepEqual(await listModels(byokEndpoint('openai')!, 'bad', spyFetch(401, {}).fetcher), []);
 });
+
+test('byok calls refuse redirects so the key and prompt never follow one cross-origin', async () => {
+  const redirects: Array<RequestRedirect | undefined> = [];
+  const fetcher = (async (_url: string, init: RequestInit = {}) => {
+    redirects.push(init.redirect);
+    return { ok: true, status: 200, json: async () => ({ data: [] }), text: async () => '' } as unknown as Response;
+  }) as unknown as typeof fetch;
+  for (const id of ['openai', 'anthropic']) {
+    await byokProvider(byokEndpoint(id)!, 'm', () => 'sk-0123456789abcdef', fetcher).complete(ask);
+    await byokProvider(byokEndpoint(id)!, 'm', () => 'sk-0123456789abcdef', fetcher)
+      .complete({ ...ask, onToken: () => {} })
+      .catch(() => {});
+    await listModels(byokEndpoint(id)!, 'sk-0123456789abcdef', fetcher);
+  }
+  assert.equal(redirects.length, 6);
+  assert.deepEqual(new Set(redirects), new Set(['error']));
+});
