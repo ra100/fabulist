@@ -914,6 +914,19 @@ test('the reset split: /api/setup/reset keeps canon, /api/canon/rebuild keeps pr
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('POST /api/setup/player returns the proposed opening, not an unresolved promise', async (t) => {
+  const ran = await withPg(async (db) => {
+    await withServer(db, async (base) => {
+      const res = await send(base, 'POST', '/api/setup/player', { existing: 'char:hela-vask' });
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.equal(res.body.playerCharacterId, 'char:hela-vask');
+      assert.equal(typeof res.body.opening, 'string');
+      assert.ok(res.body.opening.length > 0, 'an opening line is proposed');
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('POST /api/branch forks the story rather than copying a file', async (t) => {
   const ran = await withPg(async (db) => {
     await withServer(db, async (base, world) => {

@@ -2442,7 +2442,7 @@ route('POST', '/api/setup/player', async (_req, res, { setup, world, body }) => 
     goals: sketch.goals ?? [],
     vows: sketch.vows ?? [],
   });
-  send(res, 200, { ...assigned, opening: proposeOpening(world) });
+  send(res, 200, { ...assigned, opening: await proposeOpening(world) });
 });
 
 /**
