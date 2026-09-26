@@ -167,7 +167,7 @@ export class HistoryStore {
     return row<EligibleTurn>(
       this.db
         .prepare(
-          `SELECT t.id AS turnId, t.scene, t.turn, t.history_position AS position
+          `SELECT t.id AS turnId, t.scene, t.turn, t.history_position AS position, h.origin
              FROM turns t JOIN history_checkpoints h ON h.story_id = t.story_id AND h.turn_id = t.id
             WHERE t.story_id = ? AND t.id = ? AND t.history_position IS NOT NULL`,
         )
@@ -179,7 +179,7 @@ export class HistoryStore {
     return rows<EligibleTurn>(
       this.db
         .prepare(
-          `SELECT t.id AS turnId, t.scene, t.turn, t.history_position AS position
+          `SELECT t.id AS turnId, t.scene, t.turn, t.history_position AS position, h.origin
              FROM turns t JOIN history_checkpoints h ON h.story_id = t.story_id AND h.turn_id = t.id
             WHERE t.story_id = ? AND t.history_position IS NOT NULL
             ORDER BY t.history_position`,

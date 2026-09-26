@@ -386,6 +386,7 @@ test('the book endpoint returns both registers per turn', async (t) => {
     assert.equal(turns.length, 1);
     assert.match(turns[0]!.rawInput, /fetch water/, 'the note survives');
     assert.ok(turns[0]!.bookProse.length > 0, 'and the prose exists alongside it');
+    assert.equal((turns[0] as { origin?: string | null }).origin, 'turn:server', 'the rollback picker can show who wrote it');
   });
 
   await t.test('book and timeline expose split turns in their derived scenes', async () => {

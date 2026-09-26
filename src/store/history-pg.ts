@@ -112,7 +112,7 @@ export class HistoryStore {
 
   async eligibleTurn(turnId: string): Promise<EligibleTurn | undefined> {
     const { rows } = await this.db.query<EligibleTurn>(
-      `SELECT t.id AS "turnId", t.scene, t.turn, t.history_position AS position
+      `SELECT t.id AS "turnId", t.scene, t.turn, t.history_position AS position, h.origin
          FROM turns t JOIN history_checkpoints h ON h.story_id = t.story_id AND h.turn_id = t.id
         WHERE t.story_id = $1 AND t.id = $2 AND t.history_position IS NOT NULL`,
       [this.storyId, turnId],
@@ -122,7 +122,7 @@ export class HistoryStore {
 
   async eligibleTurns(): Promise<EligibleTurn[]> {
     const { rows } = await this.db.query<EligibleTurn>(
-      `SELECT t.id AS "turnId", t.scene, t.turn, t.history_position AS position
+      `SELECT t.id AS "turnId", t.scene, t.turn, t.history_position AS position, h.origin
          FROM turns t JOIN history_checkpoints h ON h.story_id = t.story_id AND h.turn_id = t.id
         WHERE t.story_id = $1 AND t.history_position IS NOT NULL
         ORDER BY t.history_position`,
@@ -611,7 +611,7 @@ export class HistoryStore {
 
   private async eligibleTurnFrom(queryable: Queryable, turnId: string): Promise<EligibleTurn | undefined> {
     const { rows } = await queryable.query<EligibleTurn>(
-      `SELECT t.id AS "turnId", t.scene, t.turn, t.history_position AS position
+      `SELECT t.id AS "turnId", t.scene, t.turn, t.history_position AS position, h.origin
          FROM turns t JOIN history_checkpoints h ON h.story_id = t.story_id AND h.turn_id = t.id
         WHERE t.story_id = $1 AND t.id = $2 AND t.history_position IS NOT NULL`,
       [this.storyId, turnId],

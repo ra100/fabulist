@@ -168,7 +168,7 @@ export interface Timeline {
 export interface BookTurn {
   id: string; scene: number; chapter: number; turn: number; rawInput: string; bookProse: string;
   pinned: boolean; move: string | null; integrity: string | null; lintScore: number | null;
-  eligible: boolean; historyPosition: number | null; startsScene: boolean;
+  eligible: boolean; historyPosition: number | null; origin: string | null; startsScene: boolean;
 }
 
 export type RollbackTarget =

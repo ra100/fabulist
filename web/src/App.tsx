@@ -1624,7 +1624,7 @@ function RollbackPanel({
             <select value={turnId} onChange={(e) => setTurnId(e.target.value)} disabled={busy || !eligibleTurns.length}>
               {eligibleTurns.map((turn) => (
                 <option key={turn.id} value={turn.id}>
-                  {chapterTurnLabel(turn)} · scene {turn.scene}
+                  {chapterTurnLabel(turn)} · scene {turn.scene}{turn.origin ? ` · ${turn.origin}` : ''}
                 </option>
               ))}
             </select>
