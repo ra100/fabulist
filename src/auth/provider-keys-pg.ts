@@ -87,10 +87,6 @@ export async function deleteProviderKey(db: Queryable, userId: string): Promise<
   return (rowCount ?? 0) > 0;
 }
 
-export async function touchProviderKey(db: Queryable, userId: string, keyId: string): Promise<void> {
-  await db.query(`UPDATE user_provider_keys SET last_used_at = now() WHERE user_id = $1 AND id = $2`, [userId, keyId]);
-}
-
 export function summarizeProviderKey(row: ProviderKeyRow): ProviderKeySummary {
   const { userId: _userId, nonce: _nonce, ciphertext: _ciphertext, version: _version, ...summary } = row;
   return summary;

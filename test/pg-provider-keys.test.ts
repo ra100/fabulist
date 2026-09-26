@@ -6,8 +6,8 @@ import {
   providerKeyFor,
   saveProviderKey,
   summarizeProviderKey,
-  touchProviderKey,
 } from '../src/auth/provider-keys-pg.ts';
+import { recordUsage } from '../src/store/usage-pg.ts';
 
 const ID1 = '00000000-0000-4000-8000-000000000001';
 const ID2 = '00000000-0000-4000-8000-000000000002';
@@ -51,7 +51,10 @@ test('provider keys and usage events are writable by the play role and constrain
 test('migration 010 is recorded and grants the play role both tables and the usage sequence', async (t) => {
   const ran = await withPg(async (db) => {
     const { rows } = await db.query<{ name: string }>(`SELECT name FROM migrations WHERE version = 10`);
-    assert.deepEqual(rows.map((r) => r.name), ['010-byok-provider-keys.sql']);
+    assert.deepEqual(
+      rows.map((r) => r.name),
+      ['010-byok-provider-keys.sql'],
+    );
     const grants = await db.query<{ ok: boolean }>(
       `SELECT has_table_privilege('fabulist_play', 'user_provider_keys', 'INSERT')
           AND has_table_privilege('fabulist_play', 'usage_events', 'INSERT')
@@ -74,7 +77,7 @@ const key = (id: string, userId: string) => ({
   keyHint: 'abcd',
 });
 
-test('the provider key store is owner-scoped and replaces a user\'s key on save', async (t) => {
+test("the provider key store is owner-scoped and replaces a user's key on save", async (t) => {
   const ran = await withPg(async (db, _schema, roles) => {
     await saveProviderKey(roles.play, key(ID1, 'user:alice'));
     await saveProviderKey(roles.play, { ...key(ID2, 'user:alice'), models: { narrate: 'gpt-2', extract: 'gpt-x' } });
@@ -87,13 +90,32 @@ test('the provider key store is owner-scoped and replaces a user\'s key on save'
     assert.equal(await providerKeyFor(roles.play, 'user:bob'), null);
     await assert.rejects(saveProviderKey(roles.play, key(ID2, 'user:bob')), { code: '23505' });
     assert.equal(await deleteProviderKey(roles.play, 'user:bob'), false);
-    await touchProviderKey(roles.play, 'user:bob', ID2);
+    const call = {
+      storyId: null,
+      role: 'narrate',
+      providerId: 'byok:openai',
+      model: 'gpt-2',
+      keySource: 'own' as const,
+      tokensIn: 1,
+      tokensOut: 1,
+      keyId: ID2,
+    };
+    await recordUsage(roles.play, { ...call, userId: 'user:bob' });
     assert.equal((await providerKeyFor(roles.play, 'user:alice'))?.lastUsedAt, null, 'another user cannot touch it');
-    await touchProviderKey(roles.play, 'user:alice', ID2);
+    await recordUsage(roles.play, { ...call, userId: 'user:alice' });
     assert.ok((await providerKeyFor(roles.play, 'user:alice'))?.lastUsedAt);
 
     const summary = summarizeProviderKey(alice!);
-    assert.deepEqual(Object.keys(summary).sort(), ['createdAt', 'endpointId', 'id', 'keyHint', 'label', 'lastUsedAt', 'models', 'trust']);
+    assert.deepEqual(Object.keys(summary).sort(), [
+      'createdAt',
+      'endpointId',
+      'id',
+      'keyHint',
+      'label',
+      'lastUsedAt',
+      'models',
+      'trust',
+    ]);
     assert.equal(await deleteProviderKey(roles.play, 'user:alice'), true);
     assert.equal(await providerKeyFor(roles.play, 'user:alice'), null);
   });
