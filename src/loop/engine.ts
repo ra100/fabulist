@@ -214,6 +214,11 @@ export class Engine {
     return this.compactor;
   }
 
+  /** The registry roles resolve from; MCP reads it per request to report who keeps the world. */
+  get registry(): Registry {
+    return this.providers;
+  }
+
   /** Compatibility aggregate. Prefer `activity.isBusy(storyId)` for request-scoped status. */
   get busy(): boolean {
     return this.activity.busy;

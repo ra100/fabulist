@@ -1,9 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MockProvider } from '../src/providers/mock.ts';
-import { ProviderRegistry } from '../src/providers/provider.ts';
+import { ProviderRegistry, SwappableRegistry } from '../src/providers/provider.ts';
 import { defaultKnobs, defaultStyleContract } from '../src/domain/types.ts';
 import { buildGuide, upkeepFor } from '../src/mcp/upkeep.ts';
+import { World } from '../src/store/index.ts';
+import { seedWorld } from '../src/seed/verrow.ts';
+import { Engine } from '../src/loop/engine.ts';
+import {
+  createStoryTool,
+  getGuideTool,
+  getStateTool,
+  proposeTurnTool,
+  type McpToolContext,
+} from '../src/mcp/tools.ts';
 
 test('upkeepFor is "agent" exactly when the extract role resolves to the mock', () => {
   assert.equal(upkeepFor(new ProviderRegistry(new MockProvider())), 'agent');
@@ -57,4 +67,26 @@ test('buildGuide carries the loop, the writing contract and validation, and the 
   const server = buildGuide({ ...input, upkeep: 'server' });
   assert.equal(server.upkeep, 'server');
   assert.equal(server.upkeepChecklist, undefined);
+});
+
+test('SQLite MCP story tools report upkeep and follow a mid-session provider swap', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const registry = new SwappableRegistry(new ProviderRegistry(new MockProvider()));
+  const engine = new Engine({ world, providers: registry });
+  const ctx: McpToolContext = { world: () => world, engine, dataRoot: 'data', lintBlocklist: () => ['stock phrase'] };
+
+  assert.equal(getStateTool(ctx).upkeep, 'agent');
+  assert.equal(createStoryTool(ctx, { title: 'Second' }).upkeep, 'agent');
+  const proposal = await proposeTurnTool(ctx, { text: 'i warm the ink' });
+  assert.equal(proposal.upkeep, 'agent');
+  const guide = getGuideTool(ctx);
+  assert.ok(guide.upkeepChecklist?.length);
+  assert.match(guide.writing.rules, /You do not invent world facts/);
+  assert.deepEqual(guide.writing.blocklist, ['stock phrase']);
+
+  registry.swap(new ProviderRegistry(new MockProvider({ id: 'stub-extractor' })), 'stub');
+  assert.equal(getStateTool(ctx).upkeep, 'server', 'no reconnect needed');
+  assert.equal(getGuideTool(ctx).upkeepChecklist, undefined);
+  world.close();
 });

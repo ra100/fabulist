@@ -14,6 +14,7 @@
  * than reimplementing any part of the turn loop here.
  */
 import type { Engine } from '../loop/engine.ts';
+import { narratorSystem } from '../loop/roles.ts';
 import { recordAuthoringCheckpoint, splitSceneAtTurn } from '../loop/history.ts';
 import { forkStory, branchSave, branchTargetIn, rollback, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate.ts';
@@ -33,6 +34,7 @@ import { createStory, getStory, listStories, listStoriesForUser } from '../store
 import type { SessionUser } from '../auth/config.ts';
 import { listWorlds } from '../store/worlds.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType } from '../domain/types.ts';
+import { buildGuide, upkeepFor } from './upkeep.ts';
 
 export interface McpToolContext {
   /** Resolves fresh per call, exactly like every route in `api.ts` does — a story/world switch must take effect on the next call, not after a restart. */
@@ -70,7 +72,11 @@ export interface McpToolContext {
   /** Undefined on a server built with no image provider configured — see `requireIllustrations`'s REST-side equivalent in `src/server/api.ts`. */
   illustrations?: IllustrationService;
   dataRoot: string;
+  /** The prose-lint blocklist the gate enforces, for `get_guide`; absent means none. */
+  lintBlocklist?: () => string[];
 }
+
+const upkeepOf = (ctx: McpToolContext) => upkeepFor(ctx.engine.registry);
 
 const VISUAL_STYLES: VisualStyle[] = ['realistic', 'drawing', 'sketch', 'draft', 'animation'];
 function parseVisualStyle(v: unknown): VisualStyle | undefined {
@@ -162,7 +168,7 @@ export function createStoryTool(ctx: McpToolContext, args: { title?: string }) {
   });
   // Scene 1 comes with the story now — see `createStory`, which opens it for
   // every creation path rather than leaving each one to remember.
-  return { story };
+  return { story, upkeep: upkeepOf(ctx) };
 }
 
 /**
@@ -263,10 +269,10 @@ export function switchStoryTool(ctx: McpToolContext, args: { id: string }) {
   // login-off path, where there is only one reader by definition.
   if (ctx.user && ctx.selectStory) {
     ctx.selectStory(args.id);
-    return { current: args.id, scope: 'this connection' as const };
+    return { current: args.id, scope: 'this connection' as const, upkeep: upkeepOf(ctx) };
   }
   ctx.currentStory.switchTo(args.id);
-  return { current: args.id, scope: 'server-wide' as const };
+  return { current: args.id, scope: 'server-wide' as const, upkeep: upkeepOf(ctx) };
 }
 
 export function getStateTool(ctx: McpToolContext) {
@@ -285,7 +291,22 @@ export function getStateTool(ctx: McpToolContext) {
     pendingConsequences: world.consequences.pending().length,
     hiddenFired: world.consequences.hiddenFiredCount(),
     usage: world.chronicle.usageTotals(),
+    upkeep: upkeepOf(ctx),
   };
+}
+
+/** `get_guide`. The turn loop, writing contract, validation behaviour and, for agent upkeep, the world checklist. */
+export function getGuideTool(ctx: McpToolContext) {
+  const world = ctx.world();
+  const session = world.session.get();
+  return buildGuide({
+    upkeep: upkeepOf(ctx),
+    writingRules: narratorSystem(session.style, false),
+    style: session.style,
+    knobs: session.knobs,
+    anchors: world.chronicle.anchors().map(({ text, note }) => ({ text, note })),
+    blocklist: ctx.lintBlocklist?.() ?? [],
+  });
 }
 
 export function getCastTool(ctx: McpToolContext, args: { name?: string }) {
@@ -505,6 +526,7 @@ export function startStoryTool(
   });
   return {
     ...assigned,
+    upkeep: upkeepOf(ctx),
     opening: proposeOpening(world),
     nextStep: assigned.playerCharacterId
       ? 'The book is playable now. Offer the opening to the player, then take their first turn with propose_turn.'
@@ -544,6 +566,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'awaiting-narration') {
     return {
       status: 'awaiting-narration' as const,
+      upkeep: upkeepOf(ctx),
       // Stated in the payload, not only in the tool description and the server
       // instructions: a client that ignored both still gets told, at the exact
       // moment it matters, that stopping here throws the turn away.
@@ -558,6 +581,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'interrupted') {
     return {
       status: 'interrupted' as const,
+      upkeep: upkeepOf(ctx),
       nextStep:
         'Show the player these options and call resolve_interrupt with the one they pick and this originalText. Do not call commit_narration — no turn is pending.',
       message: outcome.interrupt.message,
@@ -573,6 +597,7 @@ export async function proposeTurnTool(ctx: McpToolContext, args: { text: string;
   if (outcome.kind === 'answered') {
     return {
       status: 'answered' as const,
+      upkeep: upkeepOf(ctx),
       nextStep:
         'This was a question about the world, not an action. Relay the answer; there is nothing to narrate or commit.',
       text: outcome.text,
