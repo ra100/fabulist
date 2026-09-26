@@ -135,6 +135,8 @@ export class ProviderResolver {
       keyHint,
       ...wrapped,
     });
+    // An unlock that read the old row while the write ran must not keep its grant.
+    this.grants.lock(user.id);
     this.invalidate(user.id);
     const saved = await this.summary(user);
     if (!saved) throw new Error('provider key was not saved');
@@ -145,6 +147,7 @@ export class ProviderResolver {
     this.grants.lock(user.id);
     this.invalidate(user.id);
     const removed = await deleteProviderKey(this.db, user.id);
+    this.grants.lock(user.id);
     this.invalidate(user.id);
     return removed;
   }
@@ -156,8 +159,11 @@ export class ProviderResolver {
   async unlock(user: SessionUser, handoff: Array<{ keyId: string; key: string }>): Promise<ProviderKeyGrant[]> {
     const [first, ...rest] = handoff;
     if (!first) return [];
+    const before = this.generation.get(user.id) ?? 0;
     const { row } = await this.cached(user.id);
-    if (rest.length || row?.trust !== 'unlock' || row.id !== first.keyId) throw new ProviderKeyForbiddenError();
+    // A save or delete during the read means `row` may be gone; granting it would outlive the change.
+    const stale = (this.generation.get(user.id) ?? 0) !== before;
+    if (stale || rest.length || row?.trust !== 'unlock' || row.id !== first.keyId) throw new ProviderKeyForbiddenError();
     return [this.grants.unlock(user.id, row.id, first.key)];
   }
 
