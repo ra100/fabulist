@@ -413,7 +413,7 @@ export class OllamaProvider implements Provider {
 
 // -------------------------------------------------------------- presets
 
-function caps(over: Partial<ProviderCapabilities> = {}): ProviderCapabilities {
+export function caps(over: Partial<ProviderCapabilities> = {}): ProviderCapabilities {
   return {
     contextWindow: 64_000,
     structuredOutput: 'json-mode',
