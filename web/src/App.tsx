@@ -22,6 +22,7 @@ import {
 import { GraphView } from './views/GraphView.tsx';
 import { SetupWizard } from './views/SetupWizard.tsx';
 import { ConfigPanels } from './views/ConfigPanels.tsx';
+import { AdminUsagePanel, MyProviderPanel, MyUsagePanel } from './views/MyProviderPanel.tsx';
 import { AppearanceEditor, PortraitPanel, SceneIllustration, StylePicker } from './views/Illustration.tsx';
 import { SheetEditor } from './views/SheetEditor.tsx';
 import { TimelineView } from './views/TimelineView.tsx';
@@ -2173,6 +2174,7 @@ function SettingsTab({
             onChanged={onPrivateStorageChanged}
           />
         ) : null}
+        {currentUser ? <MyProviderPanel user={currentUser} /> : null}
         <PalettePicker />
         {style ? (
           <div className="card">
@@ -2234,6 +2236,8 @@ function SettingsTab({
         {showSystemSettings ? <ImageProvidersPanel /> : null}
         {showSystemSettings ? <ProvidersPanel /> : null}
         <UsagePanel usage={state?.usage ?? null} />
+        {currentUser ? <MyUsagePanel /> : null}
+        {currentUser?.isAdmin ? <AdminUsagePanel /> : null}
         {showSystemSettings ? <ConfigPanels /> : null}
 
         {anchors.length ? (

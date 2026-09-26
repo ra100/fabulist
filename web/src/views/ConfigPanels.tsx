@@ -47,6 +47,7 @@ export function ConfigPanels({ onChanged }: { onChanged?: () => void }) {
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const patchMutation = useConfigPatchMutation();
 
   // Cache writes (merging `PatchResult.config` back in, invalidating for
   // `providerKeys`/`presets` changes) happen inside the mutation hooks
@@ -85,6 +86,19 @@ export function ConfigPanels({ onChanged }: { onChanged?: () => void }) {
         </div>
       ) : null}
 
+      <div className="card">
+        <h3>shared provider</h3>
+        <label className="field-row">
+          <span>let signed-in users use this server's provider</span>
+          <input
+            type="checkbox"
+            checked={cfg.shareServerProvider !== false}
+            disabled={busy}
+            onChange={(e) => void apply(() => patchMutation.mutateAsync({ shareServerProvider: e.target.checked }))}
+          />
+        </label>
+        <p className="hint">Off: users without their own key get no model and their agent keeps the world. Admins always use it.</p>
+      </div>
       <ProsePanel cfg={cfg} busy={busy} apply={apply} />
       <RoutingPanel bundle={bundle} busy={busy} apply={apply} />
       {/* `reload` is a no-op here: `useConfigQuery`'s cache already refreshes itself
