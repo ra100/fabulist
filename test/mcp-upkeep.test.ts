@@ -476,3 +476,18 @@ test('SQLite replace_turn_prose with world re-summarises the scene a recommitted
   assert.ok(summaryOf(scene), 'the recommit compacts it again');
   world.close();
 });
+
+test('SQLite replace_turn_prose re-applies the director bump for a turn recorded before meta.threadId', async () => {
+  const { world, ctx } = sqliteContext();
+  const first = await sqliteAgentTurn(ctx, 'i warm the ink', AGENT_WORLD);
+  const directed = world.chronicle.getTurn(first.turnId)!.meta.threadId;
+  assert.ok(directed, 'the director steered this turn toward a thread');
+  const tension = world.threads.get(directed)!.tension;
+  world.db.prepare(`UPDATE turns SET meta = json_remove(meta, '$.threadId') WHERE id = ?`).run(first.turnId);
+  assert.equal(world.chronicle.getTurn(first.turnId)!.meta.threadId, undefined);
+
+  const out = await replaceTurnProseTool(ctx, { id: first.turnId, prose: 'Anselm strikes a bargain with Oll.', world: AGENT_WORLD });
+  if (out.status !== 'replaced') throw new Error(`expected replaced, got ${out.status}`);
+  assert.equal(world.threads.get(directed)!.tension, tension);
+  world.close();
+});

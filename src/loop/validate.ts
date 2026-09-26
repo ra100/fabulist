@@ -433,6 +433,24 @@ export function validateDelta(world: World, delta: Delta): ValidationResult {
   return { ok: blocking.length === 0, delta, issues };
 }
 
+/** The tension the director's steer adds to the thread a turn was steered toward. */
+export const STEER_BUMP = 0.05;
+
+/**
+ * A turn recorded before meta.threadId existed: its steered thread is the one whose tension rose by the
+ * bump beyond the turn's own tensionDelta, between the base checkpoint (`before`) and the turn's (`after`).
+ */
+export function legacySteeredThread(old: Turn, after: Array<Record<string, unknown>>, before: Map<string, number>): string | null {
+  const own = new Map<string, number>();
+  for (const t of old.delta?.threadUpdates ?? []) if (t.id) own.set(t.id, (own.get(t.id) ?? 0) + (t.tensionDelta ?? 0));
+  for (const row of after) {
+    const id = String(row.id);
+    const base = before.get(id);
+    if (base !== undefined && Math.abs(Number(row.tension) - base - (own.get(id) ?? 0) - STEER_BUMP) < 1e-6) return id;
+  }
+  return null;
+}
+
 /** Vow breaks the integrity check flagged were authorised by the player, not the agent's world, so a re-commit keeps them. */
 export function carryAuthorisedVowBreaks(old: Turn, delta: Delta): void {
   const flagged = old.meta.integrity?.violatedVows ?? [];

@@ -11,7 +11,7 @@ import { tx } from '../db/db.ts';
 import type { World } from '../store/index.ts';
 import { storyLayout } from './history.ts';
 import { agentDelta } from './roles.ts';
-import { carryAuthorisedVowBreaks, type ValidationResult } from './validate.ts';
+import { carryAuthorisedVowBreaks, legacySteeredThread, STEER_BUMP, type ValidationResult } from './validate.ts';
 
 export interface CommitResult {
   events: StoryEvent[];
@@ -196,7 +196,7 @@ export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResu
       pinned: false,
       meta: input.meta,
     });
-    if (input.threadId) world.threads.adjustTension(input.threadId, 0.05);
+    if (input.threadId) world.threads.adjustTension(input.threadId, STEER_BUMP);
     if (input.delta.sceneAdvance) {
       world.session.set({ scene: activeScene + 1, turn: 0 });
       world.chronicle.upsertScene(activeScene + 1, {}, `raw:${scene + 1}`);
@@ -219,7 +219,12 @@ export function recommitTurn(world: World, turnId: string, bookProse: string, ag
     return tx(world.db, () => {
       const old = world.chronicle.getTurn(turnId);
       if (!old) throw new Error(`replace_turn_prose: no turn ${turnId}`);
+      // Read before the rewind deletes the turn's checkpoint.
+      const legacy = old.meta.threadId === undefined ? (world.history.checkpointForTurn(turnId)?.state.tables.threads ?? []) : null;
       world.history.rewindBefore(turnId);
+      const threadId = legacy
+        ? legacySteeredThread(old, legacy, new Map(world.threads.all().map((t) => [t.id, t.tension])))
+        : (old.meta.threadId ?? null);
       // Validated after the rewind so ids only the replaced delta introduced do not count as known.
       const { delta, validation } = agentDelta(world, agentWorld, bookProse);
       if (!validation.ok) {
@@ -233,7 +238,7 @@ export function recommitTurn(world: World, turnId: string, bookProse: string, ag
         delta,
         bookProse,
         meta: old.meta,
-        threadId: old.meta.threadId ?? null,
+        threadId,
         origin: 'turn:agent',
       });
       if (old.pinned) world.chronicle.setPinned(turn.id, true);
