@@ -889,6 +889,22 @@ export function openThreadTool(
   });
 }
 
+// isReady matches trigger ids exactly, so an unresolved name or foreign fact id would leave the consequence pending forever.
+function consequenceTrigger(world: World, trigger: Trigger): Trigger {
+  if (trigger.kind === 'on-enter') {
+    const locationId = entityReference(world, trigger.locationId, 'add_consequence');
+    const type = world.graph.get(locationId)!.type;
+    if (type !== 'Location') throw new Error(`add_consequence: ${locationId} is a ${type}, not a Location`);
+    return { kind: 'on-enter', locationId };
+  }
+  if (trigger.kind === 'on-learn') {
+    const fact = world.db.prepare(`SELECT 1 FROM facts WHERE story_id = ? AND id = ?`).get(world.storyId, trigger.factId);
+    if (!fact) throw new Error(`add_consequence: no fact ${JSON.stringify(trigger.factId)} in this story`);
+    return { kind: 'on-learn', entityId: entityReference(world, trigger.entityId, 'add_consequence'), factId: trigger.factId };
+  }
+  return trigger;
+}
+
 /** `add_consequence`. A reaction the prose sets up that propagation over the graph cannot infer. */
 export function addConsequenceTool(
   ctx: McpToolContext,
@@ -902,7 +918,7 @@ export function addConsequenceTool(
     if (!cause) throw new Error(`add_consequence: no event ${JSON.stringify(args.causeEventId)} in this story`);
     const consequence = world.consequences.enqueue({
       causeEventId: args.causeEventId,
-      trigger: args.trigger,
+      trigger: consequenceTrigger(world, args.trigger),
       actorId: entityReference(world, args.actorId, 'add_consequence'),
       action,
       visibility: args.visibility,
