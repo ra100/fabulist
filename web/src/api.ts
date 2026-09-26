@@ -752,7 +752,7 @@ export const api = {
     enroll: ({ recoveryCode: _recoveryCode, ...enrollment }: EncryptionEnrollment) =>
       post<{ enrolled: true }>('/encryption/enroll', enrollment),
     unlock: (handoff: { storyKeys: StoryKeyHandoff[]; providerKeys?: ProviderKeyHandoff[] }) =>
-      post<{ grants: StoryKeyGrant[]; providerGrants: ProviderKeyGrant[] }>('/encryption/unlock', handoff),
+      post<{ grants: StoryKeyGrant[]; providerGrants: ProviderKeyGrant[]; providerError?: string }>('/encryption/unlock', handoff),
     lock: (storyId?: string) =>
       post<{ lockedStoryIds: string[]; providerLocked: boolean }>('/encryption/lock', storyId ? { storyId } : {}),
     migration: () => req<{ migration: PrivateStoryMigrationStatus | null }>('/encryption/migration'),

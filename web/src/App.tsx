@@ -651,6 +651,7 @@ function PrivateStoragePanel({
       if (unlocked.failedStoryKeys.length) {
         setError(`Skipped corrupt private-story key(s): ${unlocked.failedStoryKeys.map((item) => item.storyId).join(', ')}`);
       }
+      if (result.providerError) setError(`Your provider key stayed locked: ${result.providerError}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
