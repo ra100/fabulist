@@ -402,3 +402,21 @@ test('PostgreSQL replace_turn_prose with world keeps a vow break the player chos
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('PostgreSQL commit_narration decides upkeep and extracts on one provider resolution', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { ctx } = await pgContext(db);
+    const server = new MockProvider({ id: 'stub-extractor' });
+    const answers: ProviderRegistry[] = [];
+    // Each resolution may see a different key state (a lock, a delete, a toggle); these answers differ per call.
+    ctx.providers = async () => answers.shift() ?? new ProviderRegistry(new MockProvider());
+    const proposal = await proposeTurnTool(ctx, { text: 'i warm the ink' });
+    if (proposal.status !== 'awaiting-narration') throw new Error('expected awaiting-narration');
+    answers.push(new ProviderRegistry(server), new ProviderRegistry(new MockProvider()));
+    const out = await commitNarrationTool(ctx, { resumeToken: proposal.resumeToken, prose: 'Anselm waits by the door.' });
+    if (out.status !== 'narrated') throw new Error(`expected narrated, got ${out.status}`);
+    assert.equal(out.upkeep, 'server');
+    assert.ok(server.calls.some((c) => c.role === 'extract'), 'the registry that decided upkeep is the one that extracted');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
