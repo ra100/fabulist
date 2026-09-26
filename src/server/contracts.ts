@@ -347,7 +347,7 @@ export const stateResponseSchema = z.object({
     tokensIn: z.number().nonnegative(),
     tokensOut: z.number().nonnegative(),
     calls: z.number().int().nonnegative(),
-    byRole: z.record(z.object({
+    byRole: z.record(z.string(), z.object({
       tokensIn: z.number().nonnegative(),
       tokensOut: z.number().nonnegative(),
       calls: z.number().int().nonnegative(),
