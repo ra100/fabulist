@@ -459,7 +459,9 @@ export function agentDelta(
   prose: string,
 ): { delta: Delta; validation: ValidationResult } {
   const session = world.session.get();
-  const { delta, issues } = coerceAgentDelta(raw, prose, presentIds({ world, session }), session.currentLocationId);
+  // validateDelta blocks any event naming the dead, so the fallback cast must not.
+  const alive = presentIds({ world, session }).filter((id) => world.graph.get(id)?.props.status !== 'dead');
+  const { delta, issues } = coerceAgentDelta(raw, prose, alive, session.currentLocationId);
   const validation = validateDelta(world, delta);
   validation.issues = [...issues, ...validation.issues];
   validation.ok = validation.issues.filter((i) => !i.repaired).length === 0;

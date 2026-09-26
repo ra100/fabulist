@@ -106,6 +106,18 @@ test('PostgreSQL agentDelta validates an agent world and records the present cas
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('PostgreSQL agentDelta leaves the dead out of the fallback event instead of blocking the turn', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await seededStory(db);
+    const anselm = (await world.graph.get('char:brother-anselm'))!;
+    await world.graph.upsert({ ...anselm, props: { ...anselm.props, status: 'dead' } }, 'chronicle');
+    const { delta, validation } = await agentDelta(world, {}, 'The candle burns down.');
+    assert.equal(validation.ok, true, JSON.stringify(validation.issues));
+    assert.equal(delta.events[0]!.participants.includes('char:brother-anselm'), false);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('PostgreSQL commit_narration with agent upkeep commits the world delta and reports what was dropped', async (t) => {
   const ran = await withPg(async (db) => {
     const { world, ctx } = await pgContext(db);

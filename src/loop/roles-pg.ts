@@ -493,7 +493,10 @@ export async function agentDelta(
   prose: string,
 ): Promise<{ delta: Delta; validation: ValidationResult }> {
   const session = await world.session.get();
-  const participants = await resolvePresentIds(world, session);
+  const present = await resolvePresentIds(world, session);
+  const known = present.length ? await world.graph.getMany(present) : new Map<string, never>();
+  // validateDelta blocks any event naming the dead, so the fallback cast must not.
+  const participants = present.filter((id) => known.get(id)?.props.status !== 'dead');
   const { delta, issues } = coerceAgentDelta(raw, prose, participants, session.currentLocationId);
   const validation = await validateDelta(world, delta);
   validation.issues = [...issues, ...validation.issues];
