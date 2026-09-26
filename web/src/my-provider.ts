@@ -24,6 +24,16 @@ export const TRUST_COPY = {
     'The server encrypts it with its own secret. Always usable, including MCP and background jobs, but whoever runs this server can decrypt it.',
 } as const;
 
+/** The note after a saved unlock-mode key: the handoff can fail (e.g. the key-call limit) without undoing the save. */
+export async function unlockHandoffNote(handoff: () => Promise<unknown>): Promise<string> {
+  try {
+    await handoff();
+    return 'saved';
+  } catch (e) {
+    return `saved — key stays locked until you next unlock: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
 export function keyHintFor(apiKey: string): string {
   return apiKey.slice(-4);
 }
