@@ -97,6 +97,7 @@ export async function recordAuthoringCheckpoint<T>(
   db: Db,
   world: World,
   mutate: (transactionWorld: World) => Promise<T>,
+  origin?: string,
 ): Promise<T> {
   return db.tx(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [world.storyId]);
@@ -108,7 +109,7 @@ export async function recordAuthoringCheckpoint<T>(
       crypto: world.crypto,
     });
     const result = await mutate(transactionWorld);
-    await transactionWorld.history.capture();
+    await transactionWorld.history.capture(undefined, origin);
     return result;
   });
 }

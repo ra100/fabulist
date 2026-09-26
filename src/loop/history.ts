@@ -74,8 +74,8 @@ export function reconcileContinuation(world: World): void {
 }
 
 /** Records an immutable post-authoring snapshot without replacing a turn checkpoint. */
-export function recordAuthoringCheckpoint(world: World): void {
-  world.history.capture();
+export function recordAuthoringCheckpoint(world: World, origin?: string): void {
+  world.history.capture(undefined, origin);
 }
 
 /**
@@ -89,10 +89,11 @@ export function recordAuthoringCheckpoint(world: World): void {
 export async function recordAuthoringCheckpointTx<T>(
   world: World,
   mutate: (world: World) => Promise<T>,
+  origin?: string,
 ): Promise<T> {
   return txAsync(world.db, async () => {
     const result = await mutate(world);
-    world.history.capture();
+    world.history.capture(undefined, origin);
     return result;
   });
 }

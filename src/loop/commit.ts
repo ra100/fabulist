@@ -26,6 +26,7 @@ export interface CommitTurnInput {
   bookProse: string;
   meta: Turn['meta'];
   threadId?: string | null;
+  origin?: string;
 }
 
 export interface CommitTurnResult {
@@ -198,7 +199,7 @@ export function commitTurn(world: World, input: CommitTurnInput): CommitTurnResu
     } else {
       world.session.set({ turn: turnNo });
     }
-    world.history.capture(turn.id);
+    world.history.capture(turn.id, input.origin ?? 'turn:server');
     return { commit, turn };
   });
 }

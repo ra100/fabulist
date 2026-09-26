@@ -562,9 +562,9 @@ async function copyRetainedCheckpoints(
     const state = remapCheckpointState(checkpoint.state, storyId, idMaps, segmentIds);
     const turnId = checkpoint.turnId ? idMaps.get('turns')?.get(checkpoint.turnId) ?? null : null;
     await tx.query(
-      `INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at)
-       VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
-      [`checkpoint:${randomUUID()}`, storyId, turnId, checkpoint.position, JSON.stringify(state), checkpoint.createdAt],
+      `INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at, origin)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)`,
+      [`checkpoint:${randomUUID()}`, storyId, turnId, checkpoint.position, JSON.stringify(state), checkpoint.createdAt, checkpoint.origin],
     );
   }
 }

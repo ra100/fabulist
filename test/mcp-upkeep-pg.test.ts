@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { makeWorld, withPg } from './pg-harness.ts';
-import type { Db } from '../src/db/pg.ts';
+import { applyMigrations, type Db } from '../src/db/pg.ts';
 import { createStory } from '../src/store/world-pg.ts';
 import { World } from '../src/store/index-pg.ts';
 import { seedWorld } from '../src/seed/verrow-pg.ts';
@@ -15,6 +15,7 @@ import {
   getGuideTool,
   getStateTool,
   proposeTurnTool,
+  rollbackTool,
   switchStoryTool,
   type McpToolContext,
 } from '../src/mcp/tools-pg.ts';
@@ -160,4 +161,56 @@ test('PostgreSQL commit_narration seeds consequences in its own checkpoint, like
     assert.equal(Number(count?.count), 2);
   });
   if (!ran) t.skip('no Postgres configured');
+});
+
+async function agentTurn(ctx: McpToolContext, text: string, world: Record<string, unknown>) {
+  const proposal = await proposeTurnTool(ctx, { text });
+  if (proposal.status !== 'awaiting-narration') throw new Error(`expected awaiting-narration, got ${proposal.status}`);
+  const out = await commitNarrationTool(ctx, { resumeToken: proposal.resumeToken, prose: `${text}, and it is written down.`, world });
+  if (out.status !== 'narrated') throw new Error(`expected narrated, got ${out.status}`);
+  return out;
+}
+
+async function origins(db: Db, storyId: string): Promise<Array<string | null>> {
+  const { rows } = await db.query<{ origin: string | null }>(
+    `SELECT origin FROM history_checkpoints WHERE story_id = $1 ORDER BY position`,
+    [storyId],
+  );
+  return rows.map((row) => row.origin);
+}
+
+test('PostgreSQL migration 009 adds history_checkpoints.origin to an existing schema', async (t) => {
+  const ran = await withPg(async (db, schema) => {
+    await db.query('ALTER TABLE history_checkpoints DROP COLUMN origin');
+    await db.query('DELETE FROM migrations WHERE version = 9');
+    await applyMigrations(db);
+    const row = await db.one<{ count: string }>(
+      `SELECT count(*) AS count FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = 'history_checkpoints' AND column_name = 'origin'`,
+      [schema],
+    );
+    assert.equal(Number(row?.count), 1);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('PostgreSQL checkpoints record their origin, and a fork keeps it', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world, ctx } = await pgContext(db);
+    const first = await agentTurn(ctx, 'i warm the ink', { entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll' }] });
+    assert.deepEqual(await origins(db, world.storyId), ['turn:agent', 'tool:consequences']);
+
+    const fork = await rollbackTool(ctx, { turnId: first.turnId });
+    assert.deepEqual(await origins(db, fork.story!.id), ['turn:agent'], 'the fork copies the retained checkpoint with its origin');
+  });
+  if (!ran) return t.skip('no Postgres configured');
+
+  // A fresh schema: pgContext seeds the verrow world, whose slug is unique.
+  await withPg(async (db) => {
+    const server = await pgContext(db, 'stub-extractor');
+    const proposal = await proposeTurnTool(server.ctx, { text: 'i check the door' });
+    if (proposal.status !== 'awaiting-narration') throw new Error('expected awaiting-narration');
+    await commitNarrationTool(server.ctx, { resumeToken: proposal.resumeToken, prose: 'The door holds.' });
+    assert.deepEqual(await origins(db, server.world.storyId), ['turn:server', 'tool:consequences']);
+  });
 });

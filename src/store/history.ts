@@ -30,6 +30,7 @@ interface CheckpointRow {
   position: number;
   state: string;
   created_at: string;
+  origin: string | null;
 }
 
 function toCheckpoint(rowValue: CheckpointRow): HistoryCheckpoint {
@@ -40,6 +41,7 @@ function toCheckpoint(rowValue: CheckpointRow): HistoryCheckpoint {
     position: rowValue.position,
     state: jsonGet<StorySnapshot>(rowValue.state, { session: {} as StorySnapshot['session'], tables: {} }),
     createdAt: rowValue.created_at,
+    origin: rowValue.origin ?? null,
   };
 }
 
@@ -57,7 +59,7 @@ export class HistoryStore {
     this.storyId = storyId;
   }
 
-  capture(turnId?: string): HistoryCheckpoint {
+  capture(turnId?: string, origin?: string): HistoryCheckpoint {
     return tx(this.db, () => {
       if (turnId) {
         const existing = row<CheckpointRow>(
@@ -116,10 +118,11 @@ export class HistoryStore {
         position,
         state: this.layout(),
         createdAt: new Date().toISOString(),
+        origin: origin ?? null,
       };
       this.db
         .prepare(
-          `INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at) VALUES (?,?,?,?,?,?)`,
+          `INSERT INTO history_checkpoints (id, story_id, turn_id, position, state, created_at, origin) VALUES (?,?,?,?,?,?,?)`,
         )
         .run(
           checkpoint.id,
@@ -128,6 +131,7 @@ export class HistoryStore {
           checkpoint.position,
           JSON.stringify(checkpoint.state),
           checkpoint.createdAt,
+          checkpoint.origin,
         );
       return checkpoint;
     });

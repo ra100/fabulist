@@ -607,6 +607,7 @@ export class Engine {
       bookProse: prose,
       meta,
       threadId: plan.threadId,
+      origin: args.agentWorld === undefined ? 'turn:server' : 'turn:agent',
     });
 
     // Compaction is derived data and runs only after the authoritative turn

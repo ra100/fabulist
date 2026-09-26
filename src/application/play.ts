@@ -23,7 +23,7 @@ function postCommit(takeTurn: Adapter['takeTurn']): Adapter {
       ).length,
     tickConsequences,
     worldTick,
-    recordAuthoringCheckpoint: recordAuthoringCheckpointTx,
+    recordAuthoringCheckpoint: (resolvedWorld, mutate) => recordAuthoringCheckpointTx(resolvedWorld, mutate, 'tool:consequences'),
   };
 }
 

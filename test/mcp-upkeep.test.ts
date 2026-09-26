@@ -15,6 +15,7 @@ import {
   getGuideTool,
   getStateTool,
   proposeTurnTool,
+  rollbackTool,
   type McpToolContext,
 } from '../src/mcp/tools.ts';
 
@@ -230,4 +231,36 @@ test('SQLite commit_narration seeds consequences in its own checkpoint, like pla
     .get(world.storyId) as { n: number };
   assert.equal(Number(checkpoints.n), 2, 'the turn checkpoint, then the consequence checkpoint');
   world.close();
+});
+
+function sqliteOrigins(world: World): Array<string | null> {
+  return (
+    world.db.prepare('SELECT origin FROM history_checkpoints WHERE story_id = ? ORDER BY position').all(world.storyId) as Array<{
+      origin: string | null;
+    }>
+  ).map((row) => row.origin);
+}
+
+async function sqliteAgentTurn(ctx: McpToolContext, text: string, world: Record<string, unknown>) {
+  const proposal = await proposeTurnTool(ctx, { text });
+  if (proposal.status !== 'awaiting-narration') throw new Error(`expected awaiting-narration, got ${proposal.status}`);
+  const out = await commitNarrationTool(ctx, { resumeToken: proposal.resumeToken, prose: `${text}, and it is written down.`, world });
+  if (out.status !== 'narrated') throw new Error(`expected narrated, got ${out.status}`);
+  return out;
+}
+
+test('SQLite checkpoints record their origin, and a fork keeps it', async () => {
+  const { world, ctx } = sqliteContext();
+  const first = await sqliteAgentTurn(ctx, 'i warm the ink', { entityUpserts: [{ id: 'char:ferryman-oll', type: 'Character', name: 'Oll' }] });
+  assert.deepEqual(sqliteOrigins(world), ['turn:agent', 'tool:consequences']);
+  const fork = rollbackTool(ctx, { turnId: first.turnId });
+  assert.deepEqual(sqliteOrigins(world.withStory(fork.forkedStory!.id)), ['turn:agent']);
+  world.close();
+
+  const server = sqliteContext('stub-extractor');
+  const proposal = await proposeTurnTool(server.ctx, { text: 'i check the door' });
+  if (proposal.status !== 'awaiting-narration') throw new Error('expected awaiting-narration');
+  await commitNarrationTool(server.ctx, { resumeToken: proposal.resumeToken, prose: 'The door holds.' });
+  assert.deepEqual(sqliteOrigins(server.world), ['turn:server', 'tool:consequences']);
+  server.world.close();
 });

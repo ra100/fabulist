@@ -528,6 +528,7 @@ export class Engine {
       bookProse: prose,
       meta,
       threadId: plan.threadId,
+      origin: args.agentWorld === undefined ? 'turn:server' : 'turn:agent',
     });
 
     // Compaction runs after the commit, on the scene that just closed: only the

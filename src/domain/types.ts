@@ -403,6 +403,8 @@ export interface HistoryCheckpoint {
   position: number;
   state: StorySnapshot;
   createdAt: string;
+  /** `turn:agent`, `turn:server` or `tool:<name>`; null for checkpoints recorded before origins existed. */
+  origin: string | null;
 }
 
 /** A committed turn with the exact checkpoint needed for turn-level operations. */

@@ -26,7 +26,7 @@ function postCommit(db: Db, takeTurn: Adapter['takeTurn']): Adapter {
       ).length,
     tickConsequences,
     worldTick,
-    recordAuthoringCheckpoint: (resolvedWorld, mutate) => recordAuthoringCheckpoint(db, resolvedWorld, mutate),
+    recordAuthoringCheckpoint: (resolvedWorld, mutate) => recordAuthoringCheckpoint(db, resolvedWorld, mutate, 'tool:consequences'),
   };
 }
 

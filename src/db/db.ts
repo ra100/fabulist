@@ -125,6 +125,7 @@ function migrate(db: Db): void {
       FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE
     );
   `);
+  addColumnIfMissing(db, 'history_checkpoints', 'origin', 'TEXT');
 }
 
 function addColumnIfMissing(db: Db, table: string, column: string, ddl: string): void {
