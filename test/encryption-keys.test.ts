@@ -109,5 +109,7 @@ test('a provider key wrap round-trips only for the same user and key id', async 
   ]);
   assert.deepEqual(await providerKeyHandoff(userId, unlocked.masterKey, [{ keyId: 'key-2', wrap }]), []);
   assert.deepEqual(await providerKeyHandoff('another-user', unlocked.masterKey, [{ keyId: 'key-1', wrap }]), []);
+  const bad = await wrapProviderKey(userId, unlocked.masterKey, 'key-3', ' sk-leading-space');
+  assert.deepEqual(await providerKeyHandoff(userId, unlocked.masterKey, [{ keyId: 'key-3', wrap: bad }]), [], 'a key the server rejects is not handed off');
   eraseUnlockedStoryKeys(unlocked);
 });
