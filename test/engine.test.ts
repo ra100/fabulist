@@ -51,6 +51,19 @@ class BlockingNarratorProvider extends MockProvider {
   }
 }
 
+class EmptyStreamingNarratorProvider extends MockProvider {
+  streamingNarrations = 0;
+
+  override async complete(req: CompletionRequest): Promise<CompletionResult> {
+    if (req.role === 'narrate' && req.onToken) {
+      this.streamingNarrations += 1;
+      const result = await super.complete({ ...req, onToken: undefined });
+      return { ...result, text: '' };
+    }
+    return super.complete(req);
+  }
+}
+
 const DEEPENED_SCRIPTORIUM: WikiPage = {
   pageId: 'page:scriptorium',
   title: 'The Scriptorium',
@@ -122,6 +135,24 @@ test('a plain turn narrates, extracts a delta, and commits an event', async () =
   assert.ok(out.delta.events.length > 0, 'prose without a delta would be drift');
   assert.equal(out.commit.events.length, out.delta.events.length);
   assert.equal(world.chronicle.events().length, 1);
+  world.close();
+});
+
+test('an empty streaming narration retries without streaming instead of committing blank prose', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const provider = new EmptyStreamingNarratorProvider();
+  const engine = new Engine({ world, providers: new ProviderRegistry(provider) });
+  const tokens: string[] = [];
+
+  const out = await engine.takeTurn('i warm the ink and keep copying', { onToken: (chunk) => tokens.push(chunk) });
+
+  assert.equal(out.kind, 'narrated');
+  if (out.kind !== 'narrated') return;
+  assert.equal(provider.streamingNarrations, 1);
+  assert.ok(out.prose.length > 0);
+  assert.equal(tokens.join(''), out.prose);
+  assert.equal(world.chronicle.turns()[0]?.bookProse, out.prose);
   world.close();
 });
 
