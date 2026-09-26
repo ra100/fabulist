@@ -18,7 +18,7 @@ import {
   worldsResponseSchema,
 } from '../../src/server/contracts.ts';
 import type { ZodTypeAny } from 'zod';
-import type { EncryptionEnrollment, StoryKeyHandoff, StoryKeyRecord, UserKeyRecord } from './crypto/keys.ts';
+import type { EncryptedKeyEnvelope, EncryptionEnrollment, ProviderKeyHandoff, ProviderKeyRecord, StoryKeyHandoff, StoryKeyRecord, UserKeyRecord } from './crypto/keys.ts';
 
 /**
  * Which of *this user's own* stories the current browser tab is looking at,
@@ -488,6 +488,7 @@ export interface AppConfig {
   proseLintThreshold: number;
   blocklist: string[];
   mockTokenDelayMs?: number;
+  shareServerProvider?: boolean;
 }
 
 export interface ConfigBundle {
@@ -589,11 +590,64 @@ export interface EncryptionKeyBundle {
   userKey: UserKeyRecord | null;
   storyKeys: StoryKeyRecord[];
   grants: StoryKeyGrant[];
+  providerKey?: ProviderKeyRecord | null;
 }
 
 export interface StoryKeyGrant {
   storyId: string;
   expiresAt: string;
+}
+
+export type ProviderStatus = 'own' | 'locked' | 'unavailable' | 'server' | 'none';
+
+export interface ProviderModels {
+  narrate: string;
+  mechanics?: string;
+  extract?: string;
+}
+
+export interface ProviderKeySummary {
+  id: string;
+  label: string;
+  endpointId: string;
+  models: ProviderModels;
+  trust: 'unlock' | 'sealed';
+  keyHint: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface ProviderKeyState {
+  key: ProviderKeySummary | null;
+  status: ProviderStatus;
+  sealedAvailable: boolean;
+  endpoints: Array<{ id: string; label: string }>;
+}
+
+export type ProviderKeyInput =
+  | { id: string; label: string; endpointId: string; models: ProviderModels; trust: 'sealed'; key: string }
+  | { id: string; label: string; endpointId: string; models: ProviderModels; trust: 'unlock'; wrap: EncryptedKeyEnvelope; keyHint: string };
+
+export interface ProviderKeyGrant {
+  keyId: string;
+  expiresAt: string;
+}
+
+export interface UsageRow {
+  day: string;
+  model: string;
+  keySource: 'own' | 'server';
+  calls: number;
+  tokensIn: number;
+  tokensOut: number;
+}
+
+export interface UserUsageRow {
+  userId: string;
+  keySource: 'own' | 'server';
+  calls: number;
+  tokensIn: number;
+  tokensOut: number;
 }
 
 export interface PrivateStoryMigrationStatus {
@@ -644,6 +698,10 @@ export const REQUIRED_ROUTES = [
   'POST /api/images/profile',
   'POST /api/rollback',
   'POST /api/scene/split',
+  'GET /api/provider-key',
+  'PUT /api/provider-key',
+  'DELETE /api/provider-key',
+  'GET /api/usage',
 ] as const;
 
 export interface StaleServer {
@@ -693,10 +751,24 @@ export const api = {
     keys: () => req<EncryptionKeyBundle>('/encryption/keys'),
     enroll: ({ recoveryCode: _recoveryCode, ...enrollment }: EncryptionEnrollment) =>
       post<{ enrolled: true }>('/encryption/enroll', enrollment),
-    unlock: (storyKeys: StoryKeyHandoff[]) => post<{ grants: StoryKeyGrant[] }>('/encryption/unlock', { storyKeys }),
-    lock: (storyId?: string) => post<{ lockedStoryIds: string[] }>('/encryption/lock', storyId ? { storyId } : {}),
+    unlock: (handoff: { storyKeys: StoryKeyHandoff[]; providerKeys?: ProviderKeyHandoff[] }) =>
+      post<{ grants: StoryKeyGrant[]; providerGrants: ProviderKeyGrant[] }>('/encryption/unlock', handoff),
+    lock: (storyId?: string) =>
+      post<{ lockedStoryIds: string[]; providerLocked: boolean }>('/encryption/lock', storyId ? { storyId } : {}),
     migration: () => req<{ migration: PrivateStoryMigrationStatus | null }>('/encryption/migration'),
     migrate: () => post<{ migration: PrivateStoryMigrationStatus }>('/encryption/migration', {}),
+  },
+  providerKey: {
+    get: () => req<ProviderKeyState>('/provider-key'),
+    save: (input: ProviderKeyInput) => put<{ key: ProviderKeySummary; status: ProviderStatus }>('/provider-key', input),
+    remove: () => req<{ removed: boolean; status: ProviderStatus }>('/provider-key', { method: 'DELETE' }),
+    test: (input: { endpointId: string; model: string; key: string }) =>
+      post<{ ok: true; model: string } | { ok: false; error: string }>('/provider-key/test', input),
+    models: (input: { endpointId: string; key: string }) => post<{ models: string[] }>('/provider-key/models', input),
+  },
+  usage: {
+    mine: (days = 30) => req<{ days: number; rows: UsageRow[] }>(`/usage?days=${days}`),
+    byUser: (days = 30) => req<{ days: number; rows: UserUsageRow[] }>(`/admin/usage?days=${days}`),
   },
   state: () => parsedReq<State>('/state', stateResponseSchema),
   /**

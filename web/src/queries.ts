@@ -114,6 +114,13 @@ export const encryptionKeys = {
   migration: ['encryption', 'migration'] as const,
 };
 
+export const providerKeyKeys = { all: ['provider-key'] as const };
+export const usageKeys = {
+  all: ['usage'] as const,
+  mine: (days: number) => ['usage', 'mine', days] as const,
+  byUser: (days: number) => ['usage', 'by-user', days] as const,
+};
+
 export function useEncryptionKeysQuery(enabled: boolean) {
   return useQuery({ queryKey: encryptionKeys.keys, queryFn: api.encryption.keys, enabled });
 }
@@ -123,7 +130,7 @@ export function useEncryptionMigrationQuery(enabled: boolean) {
 }
 
 /**
- * These four don't invalidate on success themselves: `App.tsx`'s
+ * These four don't invalidate the encryption reads on success: `App.tsx`'s
  * `PrivateStoragePanel` already calls its `onChanged` prop at the exact
  * point each handler used to re-fetch (and, for `unlock`, only on some
  * outcomes — an empty grant list throws before ever re-fetching), so
@@ -135,15 +142,65 @@ export function useEnrollMutation() {
 }
 
 export function useUnlockMutation() {
-  return useMutation({ mutationFn: api.encryption.unlock });
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.encryption.unlock,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: providerKeyKeys.all }),
+  });
 }
 
 export function useLockMutation() {
-  return useMutation({ mutationFn: () => api.encryption.lock() });
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.encryption.lock(),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: providerKeyKeys.all }),
+  });
 }
 
 export function useMigrateMutation() {
   return useMutation({ mutationFn: api.encryption.migrate });
+}
+
+// ---------------------------------------------------------------- my provider
+
+export function useProviderKeyQuery(enabled: boolean) {
+  return useQuery({ queryKey: providerKeyKeys.all, queryFn: api.providerKey.get, enabled, retry: false });
+}
+
+export function useSaveProviderKeyMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.providerKey.save,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: providerKeyKeys.all }),
+  });
+}
+
+export function useDeleteProviderKeyMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.providerKey.remove,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: providerKeyKeys.all }),
+  });
+}
+
+export function useTestProviderKeyMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.providerKey.test,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: usageKeys.all }),
+  });
+}
+
+export function useProviderModelsMutation() {
+  return useMutation({ mutationFn: api.providerKey.models });
+}
+
+export function useMyUsageQuery(days: number, enabled: boolean) {
+  return useQuery({ queryKey: usageKeys.mine(days), queryFn: () => api.usage.mine(days), enabled });
+}
+
+export function useUsageByUserQuery(days: number, enabled: boolean) {
+  return useQuery({ queryKey: usageKeys.byUser(days), queryFn: () => api.usage.byUser(days), enabled });
 }
 
 // ------------------------------------------------------------- core story state
