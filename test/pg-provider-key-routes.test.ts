@@ -11,7 +11,7 @@ import { Engine } from '../src/loop/engine-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
 import { SESSION_COOKIE } from '../src/auth/config.ts';
 import { getStateTool } from '../src/mcp/tools-pg.ts';
-import { createEncryptionEnrollment } from '../web/src/crypto/keys.ts';
+import { createEncryptionEnrollment, storyKeyHandoff, unlockWithPassphrase } from '../web/src/crypto/keys.ts';
 import type { Db } from '../src/db/pg.ts';
 
 const ALICE_KEY = 'sk-alice-0123456789abcdefghij';
@@ -160,6 +160,38 @@ test('Test and model listing are rate-limited per user and their usage is report
         dataRoot: 'data',
       });
       assert.equal(state.myUsage?.length, 1);
+    }, { keyCallLimit: { burst: 2, perMinute: 1 } });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('a provider key in the unlock handoff spends a key call, and a refused one never blocks the story keys', async (t) => {
+  const ran = await withPg(async (db, _schema, roles) => {
+    const stories = await storiesFor(db);
+    await withKeyServer(roles, async (as, resolver) => {
+      const { recoveryCode: _code, ...enrollment } = await createEncryptionEnrollment(PEOPLE.alice.id, 'a durable private passphrase', [stories.alice]);
+      assert.equal((await as('alice', 'POST', '/api/encryption/enroll', enrollment)).status, 201);
+      const opened = await unlockWithPassphrase(PEOPLE.alice.id, enrollment.userKey, enrollment.storyKeys, 'a durable private passphrase');
+      const storyKeys = storyKeyHandoff(opened.storyKeys);
+      assert.equal((await as('alice', 'PUT', '/api/provider-key', { id: KEY1, endpointId: 'openai', models, trust: 'unlock', wrap: fakeWrap, keyHint: 'ghij' })).status, 200);
+
+      const stale = await as('alice', 'POST', '/api/encryption/unlock', { storyKeys, providerKeys: [{ keyId: KEY2, key: ALICE_KEY }] });
+      assert.equal(stale.status, 200, JSON.stringify(stale.body));
+      assert.equal((body(stale).grants as unknown[]).length, 1);
+      assert.deepEqual(body(stale).providerGrants, []);
+      assert.match(String(body(stale).providerError), /own provider key/);
+
+      const limited = await as('alice', 'POST', '/api/encryption/unlock', { providerKeys: [{ keyId: KEY1, key: ALICE_KEY }] });
+      assert.equal(limited.status, 429);
+      assert.ok(limited.headers.get('retry-after'));
+      assert.equal(await resolver.status(sessionUser('alice')), 'locked');
+
+      const storiesOnly = await as('alice', 'POST', '/api/encryption/unlock', { storyKeys });
+      assert.equal(storiesOnly.status, 200, 'story-key unlock is not metered as a key call');
+      const both = await as('alice', 'POST', '/api/encryption/unlock', { storyKeys, providerKeys: [{ keyId: KEY1, key: ALICE_KEY }] });
+      assert.equal(both.status, 200);
+      assert.equal((body(both).grants as unknown[]).length, 1);
+      assert.match(String(body(both).providerError), /too many provider-key requests/);
     }, { keyCallLimit: { burst: 2, perMinute: 1 } });
   });
   if (!ran) t.skip('no Postgres configured');

@@ -467,13 +467,27 @@ route('POST', '/api/encryption/unlock', async (_req, res, { body, db, user, ephe
     // Key bytes are deliberately not returned, logged, or placed in an error.
     return send(res, 400, { error: 'invalid private-story key' });
   }
-  try {
-    const providerGrants = providerResolver ? await providerResolver.unlock(user, providerKeys) : [];
-    send(res, 200, { grants, providerGrants });
-  } catch (err) {
-    if (err instanceof ProviderKeyForbiddenError) return send(res, 403, { error: err.message });
-    throw err;
+  let providerGrants: Awaited<ReturnType<ProviderResolver['unlock']>> = [];
+  let refused: { status: number; error: string; wait?: number } | null = null;
+  if (providerResolver && providerKeys.length) {
+    // Metered like Test: otherwise unlock plus a turn checks stolen keys outside the key-call budget.
+    const wait = providerResolver.takeKeyCall(user.id);
+    if (wait !== null) {
+      refused = { status: 429, error: `too many provider-key requests; try again in ${wait}s`, wait };
+    } else {
+      try {
+        providerGrants = await providerResolver.unlock(user, providerKeys);
+      } catch (err) {
+        if (!(err instanceof ProviderKeyForbiddenError)) throw err;
+        refused = { status: 403, error: err.message };
+      }
+    }
   }
+  if (refused && !storyKeys.length) {
+    if (refused.wait !== undefined) res.setHeader('retry-after', String(refused.wait));
+    return send(res, refused.status, { error: refused.error });
+  }
+  send(res, 200, { grants, providerGrants, ...(refused ? { providerError: refused.error } : {}) });
 });
 
 route('POST', '/api/encryption/lock', async (_req, res, { body, user, ephemeralStoryKeys, providerResolver }) => {
