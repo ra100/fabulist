@@ -12,7 +12,9 @@ function write(level: 'info' | 'error', event: string, fields: LogFields = {}): 
     event,
     ...Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)),
   };
-  process.stdout.write(`${JSON.stringify(record)}\n`);
+  const line = JSON.stringify(record);
+  if (level === 'error') console.error(line);
+  else console.log(line);
 }
 
 export function logEvent(event: string, fields: LogFields = {}): void {
@@ -26,6 +28,12 @@ export function logError(event: string, fields: LogFields = {}): void {
 export function errorKind(error: unknown): string {
   if (error instanceof Error && error.name) return error.name;
   return typeof error;
+}
+
+export function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(code) ? code : undefined;
 }
 
 /**

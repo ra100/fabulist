@@ -1140,12 +1140,11 @@ test('/api/health answers 503 when the database is gone', async (t) => {
       await new Promise<void>((r) => server.close(() => r()));
       await dead.close().catch(() => {});
     }
-    // ...and the operator still gets the real error in the log.
-    const flat = logged
-      .flat()
-      .map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a)))
-      .join(' ');
-    assert.ok(flat.includes('ECONNREFUSED') || flat.includes('127.0.0.1:1'), 'full error is logged server-side');
+    // ...and the operator still gets a structured, privacy-safe diagnostic.
+    const flat = logged.flat().map(String).join(' ');
+    assert.ok(flat.includes('"event":"health.database.failure"'), 'health failure is logged server-side');
+    assert.ok(flat.includes('"errorCode":"ECONNREFUSED"'), 'database error code is logged');
+    assert.ok(!flat.includes('127.0.0.1:1'), 'connection detail must not enter server logs');
   });
   if (!ran) t.skip('no Postgres configured');
 });
