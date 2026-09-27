@@ -104,8 +104,12 @@ test('interlanguage and category links do not leak into a summary', () => {
 
 test('markup stripping does not reintroduce HTML comment markers', () => {
   const plain = stripMarkup('<<!-- -->!-- visible');
-  assert.doesNotMatch(plain, /<!--|-->/);
+  assert.doesNotMatch(plain, /<!--|--!?>/);
   assert.match(plain, /visible/);
+
+  const bangClosed = stripMarkup('<!-- hidden --!> visible');
+  assert.doesNotMatch(bangClosed, /<!--|--!?>/);
+  assert.match(bangClosed, /visible/);
 });
 
 test('markup stripping removes nested HTML-like tags to a fixed point', () => {

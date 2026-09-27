@@ -252,7 +252,7 @@ export function stripMarkup(wikitext: string): string {
   let prevComments = '';
   while (prevComments !== t) {
     prevComments = t;
-    t = t.replace(/<!--[\s\S]*?-->|<!--|-->/g, '');
+    t = t.replace(/<!--[\s\S]*?--!?>|<!--|--!?>/g, '');
   }
   t = t.replace(/<ref[^>]*>[\s\S]*?<\/ref>/gi, '').replace(/<ref[^>]*\/>/gi, '');
   t = t.replace(/\{\|[\s\S]*?\|\}/g, ''); // tables
