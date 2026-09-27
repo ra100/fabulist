@@ -88,6 +88,7 @@ import {
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { applyCors, passesFetchSiteGuard, rejectsHost, requestOrigin } from './origin-guard.ts';
 import { errorBody, HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
+import { errorKind, logError, logEvent, logProviderCall, startHttpRequest } from './observability.ts';
 import { DEFAULT_PAID_CALL_LIMIT, RateLimiter, type PaidCallLimit } from './rate-limit.ts';
 import {
   createThreadBodySchema,
@@ -241,6 +242,7 @@ interface RouteContext {
   imageRegistry: SwappableImageRegistry | undefined;
   dataRoot: string;
   url: URL;
+  requestId: string;
   body: unknown;
   /** Raw request bytes, populated only for routes listed in `RAW_BODY_ROUTES` — `undefined` for every other route, which reads `body` instead. */
   rawBody: Buffer | undefined;
@@ -381,13 +383,13 @@ function route(method: string, path: string, handler: Handler): void {
  * hostnames, ports and connection detail. The full error goes to the server log,
  * where an operator is already looking when the healthcheck starts failing.
  */
-route('GET', '/api/health', async (_req, res, { db }) => {
+route('GET', '/api/health', async (_req, res, { db, requestId }) => {
   const started = Date.now();
   try {
     await db.query('SELECT 1');
     send(res, 200, { ok: true, database: 'reachable', ms: Date.now() - started });
   } catch (err) {
-    console.error('[health] database unreachable:', err);
+    logError('health.database.failure', { requestId, errorKind: errorKind(err) });
     send(res, 503, {
       ok: false,
       database: 'unreachable',
@@ -879,15 +881,39 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { db, engine, world,
   }
 });
 
-route('POST', '/api/play', async (_req, res, { db, engine, world, body, providers }) => {
+route('POST', '/api/play', async (_req, res, { db, engine, world, body, providers, requestId }) => {
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
+  const playStarted = Date.now();
+  let lastStageAt = playStarted;
+  logEvent('play.start', { requestId });
 
   // `world` explicit: the per-request (per-user, when login is on) world —
   // see `TakeTurnOptions.world`'s own doc comment for why this must not be
   // left to the engine's own captured getter once two users can each be
   // mid-turn on their own story at the same time.
-  const result = await playTurn(db, engine, world, input, { overrideIntegrity, providers });
-  send(res, 200, result);
+  try {
+    const result = await playTurn(db, engine, world, input, {
+      overrideIntegrity,
+      providers,
+      onStage: (stage) => {
+        const now = Date.now();
+        logEvent('play.stage', { requestId, stage, durationMs: now - lastStageAt, elapsedMs: now - playStarted });
+        lastStageAt = now;
+      },
+      onProviderCall: (call) => logProviderCall(requestId, call),
+    });
+    logEvent('play.complete', {
+      requestId,
+      outcome: result.outcome.kind,
+      seeded: result.seeded,
+      rumours: result.tick?.transmissions.length ?? 0,
+      durationMs: Date.now() - playStarted,
+    });
+    send(res, 200, result);
+  } catch (err) {
+    logError('play.failure', { requestId, durationMs: Date.now() - playStarted, errorKind: errorKind(err) });
+    throw err;
+  }
 });
 
 route('GET', '/api/threads', async (_req, res, { world }) => {
@@ -2020,8 +2046,11 @@ route('GET', '/api/providers', async (_req, res, ctx) => {
  * Server-sent events rather than a websocket: the traffic is one-directional and
  * short-lived, and SSE reconnects itself.
  */
-route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body, providers }) => {
+route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body, providers, requestId }) => {
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
+  const playStarted = Date.now();
+  let lastStageAt = playStarted;
+  logEvent('play.start', { requestId });
 
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -2037,12 +2066,31 @@ route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body, p
     const result = await playTurn(db, engine, world, input, {
       overrideIntegrity,
       providers,
-      onStage: (stage) => emit('stage', { stage }),
+      onStage: (stage) => {
+        const now = Date.now();
+        logEvent('play.stage', {
+          requestId,
+          stage,
+          durationMs: now - lastStageAt,
+          elapsedMs: now - playStarted,
+        });
+        lastStageAt = now;
+        emit('stage', { stage });
+      },
+      onProviderCall: (call) => logProviderCall(requestId, call),
       onToken: (chunk) => emit('token', { chunk }),
+    });
+    logEvent('play.complete', {
+      requestId,
+      outcome: result.outcome.kind,
+      seeded: result.seeded,
+      rumours: result.tick?.transmissions.length ?? 0,
+      durationMs: Date.now() - playStarted,
     });
     emit('done', result);
   } catch (err) {
-    emit('error', { error: err instanceof Error ? err.message : String(err) });
+    logError('play.failure', { requestId, durationMs: Date.now() - playStarted, errorKind: errorKind(err) });
+    emit('error', { error: err instanceof Error ? err.message : String(err), requestId });
   } finally {
     res.end();
   }
@@ -2733,6 +2781,14 @@ export function createApiServer(opts: ServerOptions) {
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    const surface = url.pathname.startsWith('/api/')
+      ? '/api'
+      : url.pathname === '/mcp'
+        ? '/mcp'
+        : url.pathname.startsWith('/auth/')
+          ? '/auth'
+          : '/static';
+    const requestId = startHttpRequest(req, res, surface);
 
     // Baseline headers for every response, so they do not depend on the reverse
     // proxy's config alone. HSTS and CSP stay with the proxy: HSTS means nothing
@@ -2795,7 +2851,12 @@ export function createApiServer(opts: ServerOptions) {
           body && typeof body === 'object' && 'method' in body && typeof body.method === 'string'
             ? body.method
             : req.method;
-        console.error(`MCP request failed (${method}):`, err);
+        logError('mcp.request.failure', {
+          requestId,
+          method,
+          session: !!req.headers['mcp-session-id'],
+          errorKind: errorKind(err),
+        });
         if (!res.headersSent) {
           const id =
             body &&
@@ -2884,7 +2945,7 @@ export function createApiServer(opts: ServerOptions) {
         await db.query('SELECT 1');
         return send(res, 200, { ok: true, database: 'reachable', ms: Date.now() - started });
       } catch (err) {
-        console.error('[health] database unreachable:', err);
+        logError('health.database.failure', { requestId, errorKind: errorKind(err) });
         return send(res, 503, {
           ok: false,
           database: 'unreachable',
@@ -2922,7 +2983,11 @@ export function createApiServer(opts: ServerOptions) {
 
     if (url.pathname.startsWith('/api/')) {
       const match = routes.find((r) => r.method === req.method && r.pattern.test(url.pathname));
-      if (!match) return send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
+      if (!match) {
+        logEvent('api.route', { requestId, method: req.method ?? 'UNKNOWN', route: 'not-found' });
+        return send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
+      }
+      logEvent('api.route', { requestId, method: req.method ?? 'UNKNOWN', route: match.path });
       if (PAID_ROUTES.has(`${match.method} ${match.path}`)) {
         const wait = paidCallWait(user);
         if (wait !== null) {
@@ -2994,6 +3059,7 @@ export function createApiServer(opts: ServerOptions) {
           imageRegistry,
           dataRoot,
           url,
+          requestId,
           body,
           rawBody,
           params,
@@ -3015,11 +3081,21 @@ export function createApiServer(opts: ServerOptions) {
         // not stop the server for everyone else. The error is still reported —
         // logged rather than sent, since the client already has its answer.
         if (res.headersSent) {
-          console.error(`error after the response was sent for ${req.method} ${url.pathname}:`, err);
+          logError('api.request.after-response-failure', {
+            requestId,
+            method: req.method ?? 'UNKNOWN',
+            errorKind: errorKind(err),
+          });
           res.end();
         } else {
           const status = statusForError(err);
-          send(res, status, errorBody(err, status, authConfig !== undefined));
+          logError('api.request.failure', {
+            requestId,
+            method: req.method ?? 'UNKNOWN',
+            status,
+            errorKind: errorKind(err),
+          });
+          send(res, status, errorBody(err, status, authConfig !== undefined, requestId));
         }
       }
       return;

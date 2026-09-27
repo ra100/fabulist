@@ -1,3 +1,5 @@
+import type { ProviderCallTelemetry } from '../loop/provider-telemetry.ts';
+
 export interface NarratedOutcome {
   kind: string;
   delta?: unknown;
@@ -8,7 +10,12 @@ export interface PlayWorkflowAdapter<World, Outcome extends NarratedOutcome, Tic
   takeTurn(
     world: World,
     input: string,
-    options: { overrideIntegrity: boolean; onStage?: (stage: string) => void; onToken?: (chunk: string) => void },
+    options: {
+      overrideIntegrity: boolean;
+      onStage?: (stage: string) => void;
+      onToken?: (chunk: string) => void;
+      onProviderCall?: (call: ProviderCallTelemetry) => void;
+    },
   ): Promise<Outcome>;
   seedConsequences(world: World, delta: unknown, events: unknown[]): number | Promise<number>;
   tickConsequences(world: World): Tick | Promise<Tick>;
@@ -21,6 +28,7 @@ export interface PlayWorkflowOptions {
   overrideIntegrity?: boolean;
   onStage?: (stage: string) => void;
   onToken?: (chunk: string) => void;
+  onProviderCall?: (call: ProviderCallTelemetry) => void;
 }
 
 /**
@@ -39,6 +47,7 @@ export async function runPlayTurn<World, Outcome extends NarratedOutcome, Tick>(
     overrideIntegrity: options.overrideIntegrity === true,
     ...(options.onStage ? { onStage: options.onStage } : {}),
     ...(options.onToken ? { onToken: options.onToken } : {}),
+    ...(options.onProviderCall ? { onProviderCall: options.onProviderCall } : {}),
   });
 
   let seeded = 0;

@@ -25,8 +25,9 @@ import {
   presentIds,
   type FrameContext,
 } from '../frame/builders.ts';
-import { adaptRequest, extractJson, type Provider } from '../providers/provider.ts';
+import { adaptRequest, extractJson, type CompletionResult, type Provider } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
+import { providerErrorKind, type ProviderCallTelemetry } from './provider-telemetry.ts';
 import {
   coerceAgentDelta,
   coerceDelta,
@@ -44,6 +45,7 @@ export interface RoleDeps {
   provider: (role: string) => Provider;
   ctx: (role: string, extra?: Partial<FrameContext>) => FrameContext;
   log: (role: string, provider: string, model: string, tokensIn: number, tokensOut: number) => void;
+  onProviderCall?: (call: ProviderCallTelemetry) => void;
 }
 
 async function callJson(
@@ -70,7 +72,29 @@ async function callJson(
       });
     }
     const req = adaptRequest({ messages, role, schema, temperature: 0 }, provider.capabilities);
-    const res = await provider.complete(req);
+    const started = Date.now();
+    let res: CompletionResult;
+    try {
+      res = await provider.complete(req);
+    } catch (err) {
+      deps.onProviderCall?.({
+        role,
+        provider: provider.id,
+        durationMs: Date.now() - started,
+        ok: false,
+        errorKind: providerErrorKind(err),
+      });
+      throw err;
+    }
+    deps.onProviderCall?.({
+      role,
+      provider: provider.id,
+      model: res.model,
+      tokensIn: res.tokensIn,
+      tokensOut: res.tokensOut,
+      durationMs: Date.now() - started,
+      ok: true,
+    });
     deps.log(role, provider.id, res.model, res.tokensIn, res.tokensOut);
     try {
       return extractJson(res.text);

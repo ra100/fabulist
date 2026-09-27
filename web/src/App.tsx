@@ -938,6 +938,7 @@ function BookTab({
   const [busy, setBusy] = useState(false);
   const [interrupt, setInterrupt] = useState<{ interrupt: Interrupt; input: string } | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
+  const [turnError, setTurnError] = useState<string | null>(null);
   // Prose as it arrives, plus which gate the turn is currently passing through.
   const [streaming, setStreaming] = useState('');
   const [stage, setStage] = useState('');
@@ -1037,6 +1038,7 @@ function BookTab({
   async function play(text: string, override = false) {
     if (!text.trim() || busy || !beginMutation()) return;
     setBusy(true);
+    setTurnError(null);
     setNotes([]);
     setStreaming('');
     setStage('');
@@ -1093,11 +1095,14 @@ function BookTab({
           onDone: (res) => {
             finished = true;
             finishPromise = finish(res).catch((e: unknown) => {
-              setNotes([e instanceof Error ? e.message : String(e)]);
+              const message = e instanceof Error ? e.message : String(e);
+              setTurnError(message);
+              setNotes([message]);
             }).finally(endMutation);
           },
           onError: (message) => {
             if (abort.signal.aborted) return;
+            setTurnError(message);
             setNotes([message]);
             endMutation();
           },
@@ -1106,7 +1111,11 @@ function BookTab({
       });
       if (finishPromise) await finishPromise;
     } catch (e) {
-      if (!abort.signal.aborted) setNotes([e instanceof Error ? e.message : String(e)]);
+      if (!abort.signal.aborted) {
+        const message = e instanceof Error ? e.message : String(e);
+        setTurnError(message);
+        setNotes([message]);
+      }
       endMutation();
     } finally {
       if (streamAbort.current === abort) streamAbort.current = null;
@@ -1252,6 +1261,15 @@ function BookTab({
 
   return (
     <div className="main">
+      {turnError ? (
+        <div className="turn-error-overlay" role="alert" aria-live="assertive">
+          <div>
+            <b>Turn failed</b>
+            <span>{turnError}</span>
+          </div>
+          <button type="button" onClick={() => setTurnError(null)}>dismiss</button>
+        </div>
+      ) : null}
       <div className="pane" style={{ display: 'flex', flexDirection: 'column', padding: 0 }}>
         <div className="pane" style={{ flex: 1 }}>
           <div className="book">

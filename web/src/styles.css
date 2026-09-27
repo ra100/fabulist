@@ -1693,6 +1693,45 @@ hr {
   margin-bottom: 2px;
 }
 
+.turn-error-overlay {
+  position: fixed;
+  z-index: 20;
+  top: var(--s4);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  width: min(42rem, calc(100vw - 2 * var(--s4)));
+  transform: translateX(-50%);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--warn-line);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--warn-surface);
+  box-shadow: var(--elev-panel);
+  color: var(--ink);
+}
+.turn-error-overlay > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.turn-error-overlay b {
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.turn-error-overlay span {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.turn-error-overlay button {
+  flex-shrink: 0;
+}
+
 .interrupt {
   border: 1px solid var(--warn-line);
   border-left: 2px solid var(--warn);

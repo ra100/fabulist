@@ -160,6 +160,22 @@ test('browser streaming play reports response drift instead of calling onDone', 
   assert.match(errors[0] ?? '', /malformed play completion/);
 });
 
+test('browser streaming play reports a closed stream without a terminal event', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    'event: stage\ndata: {"stage":"writing"}\n\n',
+    { status: 200, headers: { 'content-type': 'text/event-stream', 'x-request-id': 'request-1234' } },
+  );
+  const errors: string[] = [];
+  try {
+    await api.playStream('wait', false, { onError: (message) => errors.push(message) });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(errors, ['turn stream ended before the server reported completion (request request-)']);
+});
+
 test('browser streaming play aborts in-flight fetches without stale callbacks', async () => {
   const originalFetch = globalThis.fetch;
   const abort = new AbortController();
