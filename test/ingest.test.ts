@@ -102,6 +102,18 @@ test('interlanguage and category links do not leak into a summary', () => {
   assert.equal(firstParagraph(text), '', 'no garbled interlanguage residue becomes the summary');
 });
 
+test('markup stripping does not reintroduce HTML comment markers', () => {
+  const plain = stripMarkup('<<!-- -->!-- visible');
+  assert.doesNotMatch(plain, /<!--|-->/);
+  assert.match(plain, /visible/);
+});
+
+test('markup stripping removes nested HTML-like tags to a fixed point', () => {
+  const plain = stripMarkup('<scr<script>ipt>alert(1)</scr<script>ipt> visible');
+  assert.doesNotMatch(plain, /<script/i);
+  assert.match(plain, /visible/);
+});
+
 test('an infobox field with an interlanguage link inside it drops the link, not the field', () => {
   const box = parseInfobox(`{{Infobox character
 | name = Someone
