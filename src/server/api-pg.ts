@@ -889,6 +889,7 @@ route('POST', '/api/play', async (_req, res, { db, engine, world, body, provider
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
   const playStarted = Date.now();
   let lastStageAt = playStarted;
+  let currentStage: string | undefined;
   logEvent('play.start', { requestId });
 
   // `world` explicit: the per-request (per-user, when login is on) world —
@@ -901,6 +902,7 @@ route('POST', '/api/play', async (_req, res, { db, engine, world, body, provider
       providers,
       onStage: (stage) => {
         const now = Date.now();
+        currentStage = stage;
         logEvent('play.stage', { requestId, stage, durationMs: now - lastStageAt, elapsedMs: now - playStarted });
         lastStageAt = now;
       },
@@ -915,7 +917,13 @@ route('POST', '/api/play', async (_req, res, { db, engine, world, body, provider
     });
     send(res, 200, result);
   } catch (err) {
-    logError('play.failure', { requestId, durationMs: Date.now() - playStarted, errorKind: errorKind(err) });
+    logError('play.failure', {
+      requestId,
+      stage: currentStage,
+      durationMs: Date.now() - playStarted,
+      errorKind: errorKind(err),
+      errorCode: errorCode(err),
+    });
     throw err;
   }
 });
@@ -2054,6 +2062,7 @@ route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body, p
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
   const playStarted = Date.now();
   let lastStageAt = playStarted;
+  let currentStage: string | undefined;
   logEvent('play.start', { requestId });
 
   res.writeHead(200, {
@@ -2072,6 +2081,7 @@ route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body, p
       providers,
       onStage: (stage) => {
         const now = Date.now();
+        currentStage = stage;
         logEvent('play.stage', {
           requestId,
           stage,
@@ -2093,7 +2103,15 @@ route('POST', '/api/play/stream', async (_req, res, { db, engine, world, body, p
     });
     emit('done', result);
   } catch (err) {
-    logError('play.failure', { requestId, durationMs: Date.now() - playStarted, errorKind: errorKind(err) });
+    logError('play.failure', {
+      requestId,
+      transport: 'sse',
+      terminalEvent: 'error',
+      stage: currentStage,
+      durationMs: Date.now() - playStarted,
+      errorKind: errorKind(err),
+      errorCode: errorCode(err),
+    });
     emit('error', { error: err instanceof Error ? err.message : String(err), requestId });
   } finally {
     res.end();

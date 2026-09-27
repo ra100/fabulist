@@ -76,6 +76,8 @@ export function logProviderCall(requestId: string, call: ProviderCallTelemetry):
     model: call.model,
     tokensIn: call.tokensIn,
     tokensOut: call.tokensOut,
+    responseChars: call.responseChars,
+    streamChars: call.streamChars,
     durationMs: call.durationMs,
     ok: call.ok,
     errorKind: call.errorKind,
