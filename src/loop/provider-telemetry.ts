@@ -5,6 +5,9 @@ export interface ProviderCallTelemetry {
   model?: string;
   tokensIn?: number;
   tokensOut?: number;
+  /** Character counts only; generated text is never logged. */
+  responseChars?: number;
+  streamChars?: number;
   durationMs: number;
   ok: boolean;
   errorKind?: string;

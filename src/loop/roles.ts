@@ -422,6 +422,13 @@ export async function narrate(
 ): Promise<string> {
   const { system, user, maxTokens } = buildNarratorPrompt(deps, rawInput, agreedBeat, verbatim);
   const provider = deps.provider('narrate');
+  let streamedText = '';
+  const streamToken = onToken
+    ? (chunk: string) => {
+        streamedText += chunk;
+        onToken(chunk);
+      }
+    : undefined;
 
   const req = adaptRequest(
     {
@@ -432,12 +439,12 @@ export async function narrate(
       role: 'narrate',
       maxTokens,
       temperature: 0.8,
-      ...(onToken ? { onToken } : {}),
+      ...(streamToken ? { onToken: streamToken } : {}),
     },
     provider.capabilities,
   );
   let res = await provider.complete(req);
-  let prose = res.text.trim();
+  let prose = streamedText.trim() || res.text.trim();
 
   // A broken or provider-specific streaming response can finish successfully
   // without yielding any text. Never let that empty result reach finishTurn:
@@ -452,7 +459,11 @@ export async function narrate(
   }
 
   deps.log('narrate', provider.id, res.model, res.tokensIn, res.tokensOut);
-  if (!prose) throw new Error('narrator returned no prose; nothing was committed');
+  if (!prose) {
+    const error = new Error('narrator returned no prose; nothing was committed');
+    Object.assign(error, { code: 'NARRATOR_EMPTY' });
+    throw error;
+  }
   return prose;
 }
 
