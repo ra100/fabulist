@@ -39,6 +39,7 @@ import type { AuthConfig, SessionUser } from '../auth/config.ts';
 import { verifySession } from '../auth/config.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
+import { errorKind, logError } from './observability.ts';
 import { applyCors, passesFetchSiteGuard, rejectsHost, requestOrigin } from './origin-guard.ts';
 import {
   createThreadBodySchema,
@@ -2099,7 +2100,7 @@ export function createApiServer(opts: ServerOptions) {
         // not stop the server for everyone else. The error is still reported —
         // logged rather than sent, since the client already has its answer.
         if (res.headersSent) {
-          console.error(`error after the response was sent for ${req.method} ${url.pathname}:`, err);
+          logError('api.request.after-response-failure', { method: req.method ?? 'UNKNOWN', errorKind: errorKind(err) });
           res.end();
         } else {
           send(res, statusForError(err), { error: err instanceof Error ? err.message : String(err) });

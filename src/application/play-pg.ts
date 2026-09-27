@@ -4,6 +4,7 @@ import type { Engine, TakeTurnOptions, TurnOutcome } from '../loop/engine-pg.ts'
 import { recommitTurn } from '../loop/commit-pg.ts';
 import { recordAuthoringCheckpoint } from '../loop/history-pg.ts';
 import type { Registry } from '../providers/provider.ts';
+import type { ProviderCallTelemetry } from '../loop/provider-telemetry.ts';
 import type { World } from '../store/index-pg.ts';
 import { runPlayTurn, type NarratedOutcome, type PlayWorkflowAdapter } from './play-workflow.ts';
 
@@ -11,6 +12,7 @@ export interface PlayTurnOptions {
   overrideIntegrity?: boolean;
   onStage?: TakeTurnOptions['onStage'];
   onToken?: TakeTurnOptions['onToken'];
+  onProviderCall?: (call: ProviderCallTelemetry) => void;
   providers?: Registry;
 }
 
@@ -51,6 +53,7 @@ export async function playTurn(db: Db, engine: Engine, world: World, input: stri
         ...(opts.providers ? { providers: opts.providers } : {}),
         ...(options.onStage ? { onStage: options.onStage } : {}),
         ...(options.onToken ? { onToken: options.onToken } : {}),
+        ...(options.onProviderCall ? { onProviderCall: options.onProviderCall } : {}),
       }),
     ),
     world,

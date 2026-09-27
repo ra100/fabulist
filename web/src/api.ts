@@ -922,10 +922,12 @@ export const api = {
       throw err;
     }
     if (handlers.signal?.aborted) return;
+    const requestId = res.headers.get('x-request-id');
     if (!res.ok || !res.body) {
       const body = await res.json().catch(() => ({}));
       if (handlers.signal?.aborted) return;
-      handlers.onError?.((body as { error?: string }).error ?? `stream failed (${res.status})`);
+      const suffix = requestId ? ` (request ${requestId.slice(0, 8)})` : '';
+      handlers.onError?.(`${(body as { error?: string }).error ?? `stream failed (${res.status})`}${suffix}`);
       return;
     }
 
@@ -933,6 +935,7 @@ export const api = {
     const decoder = new TextDecoder();
     let buffer = '';
     let event = '';
+    let terminalEvent = false;
 
     for (;;) {
       let chunk: ReadableStreamReadResult<Uint8Array>;
@@ -967,6 +970,7 @@ export const api = {
           if (event === 'stage') handlers.onStage?.(String(data.stage));
           else if (event === 'token') handlers.onToken?.(String(data.chunk));
           else if (event === 'done') {
+            terminalEvent = true;
             const parsed = playResponseSchema.safeParse(data);
             if (!parsed.success) {
               const issue = parsed.error.issues[0];
@@ -978,10 +982,18 @@ export const api = {
               handlers.onDone?.(parsed.data as PlayResponse);
             }
           }
-          else if (event === 'error') handlers.onError?.(String(data.error));
+          else if (event === 'error') {
+            terminalEvent = true;
+            const suffix = typeof data.requestId === 'string' ? ` (request ${data.requestId.slice(0, 8)})` : requestId ? ` (request ${requestId.slice(0, 8)})` : '';
+            handlers.onError?.(`${String(data.error)}${suffix}`);
+          }
         }
         newline = buffer.indexOf('\n');
       }
+    }
+    if (!terminalEvent && !handlers.signal?.aborted) {
+      const suffix = requestId ? ` (request ${requestId.slice(0, 8)})` : '';
+      handlers.onError?.(`turn stream ended before the server reported completion${suffix}`);
     }
   },
 

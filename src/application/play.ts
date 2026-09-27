@@ -1,5 +1,6 @@
 import { seedConsequences, tickConsequences, worldTick, type TickResult } from '../consequence/propagate.ts';
 import type { Engine, TakeTurnOptions, TurnOutcome } from '../loop/engine.ts';
+import type { ProviderCallTelemetry } from '../loop/provider-telemetry.ts';
 import { recommitTurn } from '../loop/commit.ts';
 import { recordAuthoringCheckpointTx } from '../loop/history.ts';
 import type { World } from '../store/index.ts';
@@ -9,6 +10,7 @@ export interface PlayTurnOptions {
   overrideIntegrity?: boolean;
   onStage?: TakeTurnOptions['onStage'];
   onToken?: TakeTurnOptions['onToken'];
+  onProviderCall?: (call: ProviderCallTelemetry) => void;
 }
 
 type Adapter<Outcome extends NarratedOutcome = TurnOutcome> = PlayWorkflowAdapter<World, Outcome, TickResult>;
@@ -38,6 +40,7 @@ export function playTurn(engine: Engine, world: World, input: string, options: P
         overrideIntegrity: opts.overrideIntegrity,
         ...(opts.onStage ? { onStage: opts.onStage } : {}),
         ...(opts.onToken ? { onToken: opts.onToken } : {}),
+        ...(opts.onProviderCall ? { onProviderCall: opts.onProviderCall } : {}),
       }),
     ),
     world,

@@ -48,6 +48,7 @@ import {
   type RoleDeps,
 } from './roles-pg.ts';
 import type { ValidationResult } from './validate-pg.ts';
+import type { ProviderCallTelemetry } from './provider-telemetry.ts';
 
 /** Per-role output reservations. The narrator needs far more room than the rest. */
 const OUTPUT_RESERVE: Record<string, number> = {
@@ -135,6 +136,8 @@ export interface TakeTurnOptions {
   onToken?: (chunk: string) => void;
   /** Called once the gates have passed, so the UI can stop saying "thinking". */
   onStage?: (stage: string) => void;
+  /** Receives privacy-safe timing data for each text-provider attempt. */
+  onProviderCall?: (call: ProviderCallTelemetry) => void;
   /**
    * Stop after Direct and return `{ kind: 'awaiting-narration' }` instead of
    * calling this engine's own Narrator role. For a caller — the MCP tool
@@ -282,6 +285,7 @@ export class Engine {
     calls: TurnMeta['providerCalls'],
     frames: Record<string, Frame>,
     providers: Registry,
+    onProviderCall?: (call: ProviderCallTelemetry) => void,
   ): RoleDeps {
     return {
       world,
@@ -294,6 +298,7 @@ export class Engine {
       log: (role, provider, model, tokensIn, tokensOut) => {
         calls.push({ role, provider, model, tokensIn, tokensOut });
       },
+      onProviderCall,
     };
   }
 
@@ -407,7 +412,7 @@ export class Engine {
     await this.deepenLocationIfNeeded(world, session.currentLocationId, opts.onStage);
     const data = await loadFrameData(world, session);
     const providers = this.registryFor(opts.providers);
-    const deps = this.deps(world, session, data, calls, frames, providers);
+    const deps = this.deps(world, session, data, calls, frames, providers, opts.onProviderCall);
     const actorId = opts.actorId ?? session.playerCharacterId;
 
     // 1. CLASSIFY

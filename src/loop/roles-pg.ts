@@ -34,8 +34,9 @@ import {
   type FrameData,
   type FrameContext,
 } from '../frame/builders-pg.ts';
-import { adaptRequest, extractJson, type Provider } from '../providers/provider.ts';
+import { adaptRequest, extractJson, type CompletionResult, type Provider } from '../providers/provider.ts';
 import type { World } from '../store/index-pg.ts';
+import { providerErrorKind, type ProviderCallTelemetry } from './provider-telemetry.ts';
 import {
   coerceAgentDelta,
   coerceDelta,
@@ -64,6 +65,7 @@ export interface RoleDeps {
   data: FrameData;
   recordFrame: (role: string, frame: Frame) => void;
   log: (role: string, provider: string, model: string, tokensIn: number, tokensOut: number) => void;
+  onProviderCall?: (call: ProviderCallTelemetry) => void;
 }
 
 async function callJson(
@@ -90,7 +92,29 @@ async function callJson(
       });
     }
     const req = adaptRequest({ messages, role, schema, temperature: 0 }, provider.capabilities);
-    const res = await provider.complete(req);
+    const started = Date.now();
+    let res: CompletionResult;
+    try {
+      res = await provider.complete(req);
+    } catch (err) {
+      deps.onProviderCall?.({
+        role,
+        provider: provider.id,
+        durationMs: Date.now() - started,
+        ok: false,
+        errorKind: providerErrorKind(err),
+      });
+      throw err;
+    }
+    deps.onProviderCall?.({
+      role,
+      provider: provider.id,
+      model: res.model,
+      tokensIn: res.tokensIn,
+      tokensOut: res.tokensOut,
+      durationMs: Date.now() - started,
+      ok: true,
+    });
     deps.log(role, provider.id, res.model, res.tokensIn, res.tokensOut);
     try {
       return extractJson(res.text);
@@ -445,7 +469,29 @@ export async function narrate(
     },
     provider.capabilities,
   );
-  let res = await provider.complete(req);
+  const started = Date.now();
+  let res: CompletionResult;
+  try {
+    res = await provider.complete(req);
+  } catch (err) {
+    deps.onProviderCall?.({
+      role: 'narrate',
+      provider: provider.id,
+      durationMs: Date.now() - started,
+      ok: false,
+      errorKind: providerErrorKind(err),
+    });
+    throw err;
+  }
+  deps.onProviderCall?.({
+    role: 'narrate',
+    provider: provider.id,
+    model: res.model,
+    tokensIn: res.tokensIn,
+    tokensOut: res.tokensOut,
+    durationMs: Date.now() - started,
+    ok: true,
+  });
   let prose = res.text.trim();
 
   // A broken or provider-specific streaming response can finish successfully
@@ -455,7 +501,28 @@ export async function narrate(
   // provider's ordinary completion path, then fail loudly if it is still empty.
   if (!prose && onToken) {
     const { onToken: _stream, ...nonStreamingReq } = req;
-    res = await provider.complete(nonStreamingReq);
+    const retryStarted = Date.now();
+    try {
+      res = await provider.complete(nonStreamingReq);
+    } catch (err) {
+      deps.onProviderCall?.({
+        role: 'narrate',
+        provider: provider.id,
+        durationMs: Date.now() - retryStarted,
+        ok: false,
+        errorKind: providerErrorKind(err),
+      });
+      throw err;
+    }
+    deps.onProviderCall?.({
+      role: 'narrate',
+      provider: provider.id,
+      model: res.model,
+      tokensIn: res.tokensIn,
+      tokensOut: res.tokensOut,
+      durationMs: Date.now() - retryStarted,
+      ok: true,
+    });
     prose = res.text.trim();
     if (prose) onToken(prose);
   }
