@@ -4,7 +4,7 @@ import type { output, ZodTypeAny } from 'zod';
 import { RollbackTargetError, SceneSplitTargetError, WorldAccessError } from '../domain/types.ts';
 import { PrivateStoryLockedError } from '../store/private-story-access.ts';
 import { ProviderKeyLockedError, ProviderKeyRejectedError } from '../providers/byok.ts';
-import { errorKind, logError } from './observability.ts';
+import { errorCode, errorKind, logError } from './observability.ts';
 
 const DEFAULT_JSON_LIMIT = 1024 * 1024;
 const DEFAULT_RAW_LIMIT = 256 * 1024 * 1024;
@@ -73,7 +73,13 @@ export function errorBody(err: unknown, status: number, hide: boolean, requestId
   const message = err instanceof Error ? err.message : String(err);
   if (status < 500 || !hide) return { error: message };
   const ref = randomUUID().slice(0, 8);
-  logError('http.internal-error', { ref, requestId, status, errorKind: errorKind(err) });
+  logError('http.internal-error', {
+    ref,
+    requestId,
+    status,
+    errorKind: errorKind(err),
+    errorCode: errorCode(err),
+  });
   return { error: `internal error (ref ${ref})` };
 }
 

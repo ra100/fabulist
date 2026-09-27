@@ -88,7 +88,7 @@ import {
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { applyCors, passesFetchSiteGuard, rejectsHost, requestOrigin } from './origin-guard.ts';
 import { errorBody, HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
-import { errorKind, logError, logEvent, logProviderCall, startHttpRequest } from './observability.ts';
+import { errorCode, errorKind, logError, logEvent, logProviderCall, startHttpRequest } from './observability.ts';
 import { DEFAULT_PAID_CALL_LIMIT, RateLimiter, type PaidCallLimit } from './rate-limit.ts';
 import {
   createThreadBodySchema,
@@ -389,7 +389,11 @@ route('GET', '/api/health', async (_req, res, { db, requestId }) => {
     await db.query('SELECT 1');
     send(res, 200, { ok: true, database: 'reachable', ms: Date.now() - started });
   } catch (err) {
-    logError('health.database.failure', { requestId, errorKind: errorKind(err) });
+    logError('health.database.failure', {
+      requestId,
+      errorKind: errorKind(err),
+      errorCode: errorCode(err),
+    });
     send(res, 503, {
       ok: false,
       database: 'unreachable',
@@ -2945,7 +2949,11 @@ export function createApiServer(opts: ServerOptions) {
         await db.query('SELECT 1');
         return send(res, 200, { ok: true, database: 'reachable', ms: Date.now() - started });
       } catch (err) {
-        logError('health.database.failure', { requestId, errorKind: errorKind(err) });
+        logError('health.database.failure', {
+          requestId,
+          errorKind: errorKind(err),
+          errorCode: errorCode(err),
+        });
         return send(res, 503, {
           ok: false,
           database: 'unreachable',

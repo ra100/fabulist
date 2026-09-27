@@ -61,7 +61,10 @@ test('a signed-in 500 hides the internal message behind a logged reference', asy
     assert.ok(ref, `the reply carries a reference: ${message}`);
     const logged = errors.find((args) => String(args[0]).includes(ref));
     assert.ok(logged, 'the reference is logged');
-    assert.ok(logged.some((a) => a instanceof Error && a.message === INTERNAL), 'next to the real error');
+    const record = JSON.parse(String(logged[0])) as Record<string, unknown>;
+    assert.equal(record.event, 'http.internal-error');
+    assert.equal(record.errorKind, 'Error');
+    assert.ok(!errors.flat().some((a) => String(a).includes(INTERNAL)), 'internal detail stays out of logs');
   });
   if (!ran) t.skip('no Postgres configured');
 });
