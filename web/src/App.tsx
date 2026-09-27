@@ -1057,6 +1057,10 @@ function BookTab({
 
       setInterrupt(null);
       if (o.kind === 'narrated') {
+        if (!o.prose.trim()) throw new Error('turn completed without prose');
+        // Keep the committed response visible while the history query refreshes.
+        // The stream can finish before the paged book query has the new turn.
+        setStreaming(o.prose);
         setInput('');
         // `o.turn.meta` already has what `useTurnQuery` would fetch — no
         // separate read needed, `lastTurnId` reactively picks up the new
@@ -1078,6 +1082,7 @@ function BookTab({
     };
 
     let finished = false;
+    let finishPromise: Promise<void> | null = null;
     try {
       await playStreamMutation.mutateAsync({
         input: text,
@@ -1087,7 +1092,7 @@ function BookTab({
           onToken: (chunk) => setStreaming((prev) => prev + chunk),
           onDone: (res) => {
             finished = true;
-            void finish(res).catch((e: unknown) => {
+            finishPromise = finish(res).catch((e: unknown) => {
               setNotes([e instanceof Error ? e.message : String(e)]);
             }).finally(endMutation);
           },
@@ -1099,6 +1104,7 @@ function BookTab({
           signal: abort.signal,
         },
       });
+      if (finishPromise) await finishPromise;
     } catch (e) {
       if (!abort.signal.aborted) setNotes([e instanceof Error ? e.message : String(e)]);
       endMutation();

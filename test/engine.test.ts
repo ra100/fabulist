@@ -156,6 +156,22 @@ test('an empty streaming narration retries without streaming instead of committi
   world.close();
 });
 
+test('an empty prose-gate rewrite cannot commit blank prose', async () => {
+  const { world, mock } = setup();
+  const engine = new Engine({
+    world,
+    providers: new ProviderRegistry(mock),
+    proseGate: {
+      lint: () => ({ profile: 'fiction', findings: [], score: 10, tripped: true }),
+      rewrite: async () => '',
+    },
+  });
+
+  await assert.rejects(engine.takeTurn('i warm the ink and keep copying'), /prose became empty before commit/);
+  assert.equal(world.chronicle.turns().length, 0);
+  world.close();
+});
+
 test('play-time JIT deepening updates the resolved location before role frames are built', async () => {
   const world = World.open(':memory:');
   seedWorld(world);

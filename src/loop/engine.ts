@@ -358,31 +358,13 @@ export class Engine {
       }
     }
 
-    // 4. REFEREE
+    // 4-5. REFEREE + DIRECT. They read the same snapshot and do not depend on
+    // each other, so overlap the two model calls after integrity passes.
     opts.onStage?.('checking it against the world');
-    const refereeVerdict = await referee(deps, rawInput);
-    for (const s of refereeVerdict.spawn) {
-      const id = `${typePrefix(s.type)}:${slug(s.name)}`;
-      if (!world.graph.has(id)) {
-        world.graph.upsert(
-          {
-            id,
-            type: s.type,
-            name: s.name,
-            summary: s.summary,
-            provenance: `emergent:${session.scene}`,
-            createdScene: session.scene,
-            salience: 0.6,
-          },
-          'chronicle',
-        );
-      }
-    }
-
-    // 5. DIRECT
+    const refereePromise = referee(deps, rawInput);
     opts.onStage?.('deciding what happens');
-    const plan = await direct(deps, rawInput);
-
+    const planPromise = direct(deps, rawInput);
+    const [refereeVerdict, plan] = await Promise.all([refereePromise, planPromise]);
     // The agreed beat is the boundary: everything below this line renders, it
     // does not decide. Passing resistance in as narration guidance is how the
     // 'stretch' tier stays in-fiction instead of becoming a system message.
@@ -491,6 +473,30 @@ export class Engine {
       if (lint.tripped && this.proseGate.rewrite) {
         prose = await this.proseGate.rewrite(prose, lint);
         lint = this.proseGate.lint(prose);
+      }
+    }
+
+    if (!prose.trim()) {
+      throw new Error('prose became empty before commit; nothing was committed');
+    }
+
+    // Referee spawns are provisional until narration has produced usable prose.
+    // Keeping them here prevents a failed turn from leaving partial world state.
+    for (const s of refereeVerdict.spawn) {
+      const id = `${typePrefix(s.type)}:${slug(s.name)}`;
+      if (!world.graph.has(id)) {
+        world.graph.upsert(
+          {
+            id,
+            type: s.type,
+            name: s.name,
+            summary: s.summary,
+            provenance: `emergent:${session.scene}`,
+            createdScene: session.scene,
+            salience: 0.6,
+          },
+          'chronicle',
+        );
       }
     }
 
