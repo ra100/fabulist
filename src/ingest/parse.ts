@@ -247,7 +247,13 @@ export function parseQuotes(wikitext: string): string[] {
 
 export function stripMarkup(wikitext: string): string {
   let t = wikitext;
-  t = t.replace(/<!--[\s\S]*?-->/g, '');
+  // Remove comment delimiters to a fixed point so a replacement cannot
+  // reintroduce an HTML comment marker across the removed text.
+  let prevComments = '';
+  while (prevComments !== t) {
+    prevComments = t;
+    t = t.replace(/<!--[\s\S]*?-->|<!--|-->/g, '');
+  }
   t = t.replace(/<ref[^>]*>[\s\S]*?<\/ref>/gi, '').replace(/<ref[^>]*\/>/gi, '');
   t = t.replace(/\{\|[\s\S]*?\|\}/g, ''); // tables
   // Templates, innermost first, so nesting unwinds.
@@ -259,7 +265,12 @@ export function stripMarkup(wikitext: string): string {
   t = t.replace(/\[\[(?:File|Image):[^\]]*\]\]/gi, '');
   t = stripNonContentLinks(t);
   t = unlink(t);
-  t = t.replace(/<[^>]+>/g, '');
+  // Strip HTML-like tags to a fixed point to avoid incomplete multi-character sanitization.
+  let prevTags = '';
+  while (prevTags !== t) {
+    prevTags = t;
+    t = t.replace(/<[^>]+>/g, '');
+  }
   t = t.replace(/'''?/g, '');
   t = t.replace(/^[*#:;]+\s*/gm, '');
   t = t.replace(/^={2,6}.*?={2,6}\s*$/gm, '');
