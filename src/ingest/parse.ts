@@ -259,7 +259,12 @@ export function stripMarkup(wikitext: string): string {
   t = t.replace(/\[\[(?:File|Image):[^\]]*\]\]/gi, '');
   t = stripNonContentLinks(t);
   t = unlink(t);
-  t = t.replace(/<[^>]+>/g, '');
+  // Strip HTML-like tags to a fixed point to avoid incomplete multi-character sanitization.
+  let prevTags = '';
+  while (prevTags !== t) {
+    prevTags = t;
+    t = t.replace(/<[^>]+>/g, '');
+  }
   t = t.replace(/'''?/g, '');
   t = t.replace(/^[*#:;]+\s*/gm, '');
   t = t.replace(/^={2,6}.*?={2,6}\s*$/gm, '');
