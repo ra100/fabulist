@@ -67,6 +67,11 @@ export class MeteredRegistry implements Registry {
     return metered(this.inner.get(role), this.sink);
   }
 
+  getOptional(role: string): Provider | undefined {
+    const provider = this.inner.getOptional?.(role);
+    return provider ? metered(provider, this.sink) : undefined;
+  }
+
   all(): Provider[] {
     return this.inner.all().map((p) => metered(p, this.sink));
   }

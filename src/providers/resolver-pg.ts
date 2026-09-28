@@ -107,6 +107,13 @@ class ProviderOverlayRegistry implements Registry {
     return this.routes.get(role) ?? this.sourceProvider(this.fallback.get(role));
   }
 
+  getOptional(role: string): Provider | undefined {
+    const assigned = this.routes.get(role);
+    if (assigned) return assigned;
+    const optional = this.fallback.getOptional?.(role);
+    return optional ? this.sourceProvider(optional) : undefined;
+  }
+
   all(): Provider[] {
     const providers = new Set([
       ...this.fallback.all().map((provider) => this.sourceProvider(provider)),
@@ -231,6 +238,16 @@ export class ProviderResolver {
   }
 
   async saveAssignments(user: SessionUser, assignments: ProviderModelAssignment[]): Promise<ProviderModelAssignment[]> {
+    if (assignments.some((assignment) => assignment.role === 'jev-fastpath')) {
+      const keys = new Map((await providerKeysFor(this.db, user.id)).map((row) => [row.id, row]));
+      for (const assignment of assignments) {
+        if (assignment.role !== 'jev-fastpath') continue;
+        const key = keys.get(assignment.providerKeyId);
+        if (key && key.endpointId !== 'openrouter') {
+          throw new ProviderKeyInputError('Jev fast checks require an OpenRouter provider');
+        }
+      }
+    }
     try {
       await saveProviderModelAssignments(this.db, user.id, assignments);
     } catch (err) {
@@ -403,6 +420,7 @@ export class ProviderResolver {
       'classify',
       'integrity',
       'referee',
+      'jev-fastpath',
       'director',
       'humanize',
       'summarize',
@@ -410,20 +428,23 @@ export class ProviderResolver {
       'extract',
       'passb',
     ] as const) {
-      const assignment = assignments.get(role) ?? (role === 'narrate' ? undefined : narration);
+      const assignment =
+        assignments.get(role) ?? (role === 'narrate' || role === 'jev-fastpath' ? undefined : narration);
       if (!assignment) continue;
       const row = keys.get(assignment.providerKeyId);
       routes.set(
         role,
-        row ? this.providerFor(userId, row, assignment.model) : this.unavailableProvider(role, assignment.model),
+        row ? this.providerFor(userId, row, assignment.model, role) : this.unavailableProvider(role, assignment.model),
       );
     }
     return new ProviderOverlayRegistry(fallback, routes, fallbackSource);
   }
 
-  private providerFor(userId: string, row: ProviderKeyRow, model: string): Provider {
+  private providerFor(userId: string, row: ProviderKeyRow, model: string, role: string): Provider {
     const endpoint = byokEndpoint(row.endpointId);
-    if (!endpoint) return this.unavailableProvider(row.endpointId, model);
+    if (!endpoint || (role === 'jev-fastpath' && endpoint.id !== 'openrouter')) {
+      return this.unavailableProvider(role, model);
+    }
     return {
       ...byokProvider(endpoint, model, () => this.secretFor(userId, row), this.fetcher),
       usageKeyId: row.id,

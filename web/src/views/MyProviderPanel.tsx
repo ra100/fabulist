@@ -25,6 +25,7 @@ const ROLE_OPTIONS: Array<{ role: ProviderModelRole; label: string }> = [
   { role: 'classify', label: 'Classify' },
   { role: 'integrity', label: 'Integrity' },
   { role: 'referee', label: 'Referee' },
+  { role: 'jev-fastpath', label: 'Jev fast check' },
   { role: 'director', label: 'Director' },
   { role: 'humanize', label: 'Humanize' },
   { role: 'summarize', label: 'Summarize' },
@@ -405,6 +406,11 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
           return (
             <div className="provider-model-role" key={role}>
               <h4>{roleLabel}</h4>
+              {role === 'jev-fastpath' ? (
+                <p className="small dim">
+                  Optional OpenRouter check. Use <span className="mono">typesafe/jev-1.13</span>; unclear or unsafe results use your full Integrity and Referee routes.
+                </p>
+              ) : null}
               <label className="field-row">
                 <span>provider</span>
                 <select
@@ -421,11 +427,13 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
                   }
                 >
                   <option value="">use fallback</option>
-                  {state.keys.map(({ key }) => (
-                    <option key={key.id} value={key.id}>
-                      {providerName(key)}
-                    </option>
-                  ))}
+                  {state.keys
+                    .filter(({ key }) => role !== 'jev-fastpath' || key.endpointId === 'openrouter')
+                    .map(({ key }) => (
+                      <option key={key.id} value={key.id}>
+                        {providerName(key)}
+                      </option>
+                    ))}
                 </select>
               </label>
               <label className="field-row">
@@ -433,6 +441,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
                 <input
                   list={draft.providerKeyId ? listId : undefined}
                   value={draft.model}
+                  placeholder={role === 'jev-fastpath' ? 'typesafe/jev-1.13' : undefined}
                   disabled={!draft.providerKeyId || modelBusy}
                   onChange={(event) =>
                     setModelDrafts((previous) => ({ ...previous, [role]: { ...draft, model: event.target.value } }))

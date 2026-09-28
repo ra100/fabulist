@@ -395,7 +395,7 @@ CREATE TABLE IF NOT EXISTS user_provider_keys (
 CREATE TABLE IF NOT EXISTS user_provider_model_assignments (
   user_id        TEXT NOT NULL,
   role           TEXT NOT NULL CHECK (role IN (
-    'narrate', 'classify', 'integrity', 'referee', 'director',
+    'narrate', 'classify', 'integrity', 'referee', 'jev-fastpath', 'director',
     'humanize', 'summarize', 'setup', 'extract', 'passb'
   )),
   provider_key_id TEXT NOT NULL,

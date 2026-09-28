@@ -293,6 +293,7 @@ export const providerModelAssignmentsBodySchema = z
               'classify',
               'integrity',
               'referee',
+              'jev-fastpath',
               'director',
               'humanize',
               'summarize',
@@ -305,7 +306,7 @@ export const providerModelAssignmentsBodySchema = z
           })
           .strict(),
       )
-      .max(10),
+      .max(11),
   })
   .strict()
   .superRefine((body, context) => {
