@@ -1,4 +1,4 @@
-import { AnthropicProvider, OpenAICompatProvider, ProviderHttpError, caps } from './http.ts';
+import { AnthropicProvider, JevProvider, OpenAICompatProvider, ProviderHttpError, caps } from './http.ts';
 import type { CompletionRequest, CompletionResult, Provider } from './provider.ts';
 
 export interface ByokEndpoint {
@@ -98,7 +98,11 @@ export function byokProvider(
       const apiKey = secret();
       const opts = { apiKey, baseUrl: endpoint.baseUrl, model, capabilities, fetcher: guarded };
       const inner =
-        endpoint.kind === 'anthropic' ? new AnthropicProvider(opts) : new OpenAICompatProvider(endpoint.id, opts);
+        req.role === 'jev-fastpath' && endpoint.id === 'openrouter'
+          ? new JevProvider(opts)
+          : endpoint.kind === 'anthropic'
+            ? new AnthropicProvider(opts)
+            : new OpenAICompatProvider(endpoint.id, opts);
       try {
         return await inner.complete(req);
       } catch (err) {

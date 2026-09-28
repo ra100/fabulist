@@ -651,6 +651,7 @@ export type ProviderModelRole =
   | 'classify'
   | 'integrity'
   | 'referee'
+  | 'jev-fastpath'
   | 'director'
   | 'humanize'
   | 'summarize'

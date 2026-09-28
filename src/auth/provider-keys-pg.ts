@@ -8,6 +8,7 @@ export const PROVIDER_MODEL_ROLES = [
   'classify',
   'integrity',
   'referee',
+  'jev-fastpath',
   'director',
   'humanize',
   'summarize',
