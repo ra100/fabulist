@@ -56,7 +56,7 @@ export interface PatchResult {
   registryRebuilt: boolean;
 }
 
-const KINDS: ProviderKind[] = ['openai-compat', 'anthropic', 'ollama', 'bedrock', 'google', 'copilot', 'mock'];
+const KINDS: ProviderKind[] = ['openai-compat', 'anthropic', 'ollama', 'bedrock', 'google', 'copilot', 'jev', 'mock'];
 const IMAGE_KINDS: ImageProviderKind[] = ['mock', 'comfyui', 'unsloth', 'bedrock-stability'];
 
 /** Roles the UI may route independently. */
@@ -71,6 +71,7 @@ export const ROUTABLE_ROLES = [
   'summarize',
   'setup',
   'humanize',
+  'jev-fastpath',
 ] as const;
 
 export class ConfigService {
@@ -183,6 +184,15 @@ export class ConfigService {
         if (!key) continue; // an empty value clears the override
         if (!known.has(key)) {
           issues.push({ field: `routes.${role}`, message: `unknown provider "${key}"` });
+          continue;
+        }
+        const spec = partial.providers?.[key] ?? this.resolveSpec(key);
+        if (role === 'jev-fastpath' && spec?.kind !== 'jev') {
+          issues.push({ field: `routes.${role}`, message: 'jev-fastpath requires a Jev provider' });
+          continue;
+        }
+        if (role !== 'jev-fastpath' && spec?.kind === 'jev') {
+          issues.push({ field: `routes.${role}`, message: 'Jev providers may only be routed to jev-fastpath' });
           continue;
         }
         routes[role] = key;

@@ -9,6 +9,7 @@ import { Engine } from '../src/loop/engine.ts';
 import { fingerprintFrameInput } from '../src/loop/frame-fingerprint.ts';
 import { coerceDelta, validateDelta } from '../src/loop/validate.ts';
 import { extractJson } from '../src/providers/provider.ts';
+import { clearAnswers, ScriptedJevProvider } from './jev-fixtures.ts';
 import type { PageSource, WikiPage } from '../src/ingest/client.ts';
 
 function setup(providerOpts = {}) {
@@ -135,6 +136,65 @@ test('a plain turn narrates, extracts a delta, and commits an event', async () =
   assert.ok(out.delta.events.length > 0, 'prose without a delta would be drift');
   assert.equal(out.commit.events.length, out.delta.events.length);
   assert.equal(world.chronicle.events().length, 1);
+  world.close();
+});
+
+test('clear Jev decisions bypass the full Integrity and Referee calls and record usage', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const full = new MockProvider();
+  const jev = new ScriptedJevProvider(clearAnswers());
+  const engine = new Engine({
+    world,
+    providers: new ProviderRegistry(full, { 'jev-fastpath': jev }),
+  });
+
+  const out = await engine.takeTurn('i warm the ink and keep copying');
+  assert.equal(out.kind, 'narrated');
+  if (out.kind !== 'narrated') return;
+  const roles = out.turn.meta.providerCalls.map((call) => call.role);
+  assert.ok(roles.includes('jev-fastpath'));
+  assert.ok(!roles.includes('integrity'));
+  assert.ok(!roles.includes('referee'));
+  assert.equal(out.turn.meta.integrity?.distance, 'in-character');
+  assert.equal(out.turn.meta.referee?.ruling, 'allow');
+  assert.deepEqual(Object.keys(jev.requests[0]?.schema?.schema.properties as object).sort(), ['integrity', 'referee']);
+  world.close();
+});
+
+test('Jev unclear character result falls back only to the full Integrity route', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const full = new MockProvider();
+  const jev = new ScriptedJevProvider(clearAnswers({ integrityChoice: 'full_integrity_review' }));
+  const engine = new Engine({
+    world,
+    providers: new ProviderRegistry(full, { 'jev-fastpath': jev }),
+  });
+
+  const out = await engine.takeTurn('i warm the ink and keep copying');
+  assert.equal(out.kind, 'narrated');
+  const roles = full.calls.map((call) => call.role);
+  assert.ok(roles.includes('integrity'));
+  assert.ok(!roles.includes('referee'));
+  world.close();
+});
+
+test('Jev possible Referee consequence falls back only to the full Referee route', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const full = new MockProvider();
+  const jev = new ScriptedJevProvider(clearAnswers({ refereeChoice: 'full_referee_review' }));
+  const engine = new Engine({
+    world,
+    providers: new ProviderRegistry(full, { 'jev-fastpath': jev }),
+  });
+
+  const out = await engine.takeTurn('i warm the ink and keep copying');
+  assert.equal(out.kind, 'narrated');
+  const roles = full.calls.map((call) => call.role);
+  assert.ok(!roles.includes('integrity'));
+  assert.ok(roles.includes('referee'));
   world.close();
 });
 

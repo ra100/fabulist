@@ -172,6 +172,8 @@ export function extractJson(text: string): unknown {
 /** Per-role routing so cheap models do bookkeeping and a strong one narrates. */
 export interface Registry {
   get(role: string): Provider;
+  /** Returns only an explicitly routed provider, without the global fallback. */
+  getOptional?(role: string): Provider | undefined;
   all(): Provider[];
 }
 
@@ -194,6 +196,10 @@ export class SwappableRegistry implements Registry {
 
   get(role: string): Provider {
     return this.current.get(role);
+  }
+
+  getOptional(role: string): Provider | undefined {
+    return this.current.getOptional?.(role);
   }
 
   all(): Provider[] {
@@ -221,6 +227,10 @@ export class ProviderRegistry implements Registry {
 
   get(role: string): Provider {
     return this.byRole.get(role) ?? this.fallback;
+  }
+
+  getOptional(role: string): Provider | undefined {
+    return this.byRole.get(role);
   }
 
   route(role: string, provider: Provider): void {

@@ -19,7 +19,7 @@ import {
   useUnblockMutation,
 } from '../queries.ts';
 
-const KINDS = ['openai-compat', 'anthropic', 'ollama', 'bedrock', 'google', 'copilot'] as const;
+const KINDS = ['openai-compat', 'anthropic', 'ollama', 'bedrock', 'google', 'copilot', 'jev'] as const;
 const DIALECTS = ['openai', 'vllm', 'llamacpp'] as const;
 
 /** Fields that only make sense for some kinds; showing all of them is noise. */
@@ -37,6 +37,8 @@ function relevantFields(kind: string): Array<'baseUrl' | 'dialect' | 'apiKeyEnv'
       return ['project', 'location'];
     case 'copilot':
       return ['allowUnofficial'];
+    case 'jev':
+      return ['baseUrl', 'apiKeyEnv'];
     default:
       return [];
   }
@@ -204,6 +206,8 @@ function RoutingPanel({
         <button onClick={() => setOpen(!open)}>{open ? 'less' : 'more'}</button>
       </div>
       <p className="hint">
+        Set <span className="mono">jev-fastpath</span> to Jev for optional clear-case checks; keep{' '}
+        <span className="mono">integrity</span> and <span className="mono">referee</span> routed to their full-model fallbacks.{' '}
         Empty means the profile decides. Worth pinning <span className="mono">extract</span> and{' '}
         <span className="mono">passb</span> deliberately: they write your world model, and changing them mid-campaign
         yields a subtly inconsistent world with no obvious cause.
@@ -220,9 +224,14 @@ function RoutingPanel({
                 onChange={(e) => void apply(() => patchMutation.mutateAsync({ routes: { ...cfg.routes, [role]: e.target.value } }))}
               >
                 <option value="">(profile default)</option>
-                {bundle.providerKeys.map((key) => (
-                  <option key={key} value={key}>{key}</option>
-                ))}
+                {bundle.providerKeys
+                  .filter((key) => {
+                    const spec = bundle.config.providers[key] ?? bundle.presets[key];
+                    return role === 'jev-fastpath' ? spec?.kind === 'jev' : spec?.kind !== 'jev';
+                  })
+                  .map((key) => (
+                    <option key={key} value={key}>{key}</option>
+                  ))}
               </select>
             </label>
           ))}

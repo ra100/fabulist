@@ -28,6 +28,7 @@ import {
 import { adaptRequest, extractJson, type CompletionResult, type Provider } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
 import { providerErrorKind, type ProviderCallTelemetry } from './provider-telemetry.ts';
+import { checkWithJev, type JevFastPathResult } from './jev-fastpath.ts';
 import {
   coerceAgentDelta,
   coerceDelta,
@@ -43,6 +44,7 @@ import {
 export interface RoleDeps {
   world: World;
   provider: (role: string) => Provider;
+  optionalProvider?: (role: string) => Provider | undefined;
   ctx: (role: string, extra?: Partial<FrameContext>) => FrameContext;
   log: (role: string, provider: string, model: string, tokensIn: number, tokensOut: number) => void;
   onProviderCall?: (call: ProviderCallTelemetry) => void;
@@ -105,6 +107,26 @@ async function callJson(
   throw new Error(`${role}: unparseable response after ${retries + 1} attempts: ${String(lastErr)}`);
 }
 
+/** Run the optional Jev check after classification; only ask the character question when Integrity would call a model. */
+export async function jevFastCheck(
+  deps: RoleDeps,
+  rawInput: string,
+  actorId: EntityId,
+  checkIntegrity: boolean,
+): Promise<JevFastPathResult> {
+  if (!deps.optionalProvider?.('jev-fastpath')) return {};
+  const sheet = deps.world.cast.get(actorId);
+  const strictness = deps.world.session.get().knobs.characterStrictness;
+  const integrityApplies = checkIntegrity && !!sheet && sheet.contract.vows.length > 0 && strictness !== 'permissive';
+  const refereeFrame = buildRefereeFrame(deps.ctx('referee', { rawInput }));
+  const integrityFrame = integrityApplies ? buildIntegrityFrame(deps.ctx('integrity', { rawInput }), actorId) : undefined;
+  return checkWithJev(deps, {
+    rawInput,
+    refereeState: refereeFrame.text,
+    ...(integrityFrame ? { integrityState: integrityFrame.text } : {}),
+  });
+}
+
 // ------------------------------------------------------------------ classify
 
 const CLASSIFY_SYSTEM = `You classify a player's input in a role-play session.
@@ -165,6 +187,7 @@ export async function integrity(
   deps: RoleDeps,
   rawInput: string,
   actorId: EntityId,
+  jevAccepted = false,
 ): Promise<IntegrityVerdict> {
   const world = deps.world;
   const sheet = world.cast.get(actorId);
@@ -178,6 +201,9 @@ export async function integrity(
   const strictness = world.session.get().knobs.characterStrictness;
   if (strictness === 'permissive') {
     return { distance: 'in-character', violatedVows: [], reasoning: 'gate disabled', interrupt: null };
+  }
+  if (jevAccepted) {
+    return { distance: 'in-character', violatedVows: [], reasoning: 'Jev clear in-character check', interrupt: null };
   }
 
   const ctx = deps.ctx('integrity', { rawInput });
@@ -270,7 +296,8 @@ If the player references something that does not exist but should, put it in
 
 Reply with JSON only.`;
 
-export async function referee(deps: RoleDeps, rawInput: string): Promise<RefereeVerdict> {
+export async function referee(deps: RoleDeps, rawInput: string, jevAccepted = false): Promise<RefereeVerdict> {
+  if (jevAccepted) return { ruling: 'allow', reasoning: '', cost: null, spawn: [] };
   const ctx = deps.ctx('referee', { rawInput });
   const frame = buildRefereeFrame(ctx);
   const raw = (await callJson(deps, 'referee', REFEREE_SYSTEM, frame.text, refereeSchema)) as Record<string, unknown>;

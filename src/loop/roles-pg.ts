@@ -37,6 +37,7 @@ import {
 import { adaptRequest, extractJson, type CompletionResult, type Provider } from '../providers/provider.ts';
 import type { World } from '../store/index-pg.ts';
 import { providerErrorKind, type ProviderCallTelemetry } from './provider-telemetry.ts';
+import { checkWithJev, type JevFastPathResult } from './jev-fastpath.ts';
 import {
   coerceAgentDelta,
   coerceDelta,
@@ -52,6 +53,7 @@ import {
 export interface RoleDeps {
   world: World;
   provider: (role: string) => Provider;
+  optionalProvider?: (role: string) => Provider | undefined;
   ctx: (role: string, extra?: Partial<FrameContext>) => FrameContext;
   /**
    * The turn's prefetched world snapshot, loaded once by the engine.
@@ -125,6 +127,30 @@ async function callJson(
   throw new Error(`${role}: unparseable response after ${retries + 1} attempts: ${String(lastErr)}`);
 }
 
+/** Run the optional Jev check after classification; only ask the character question when Integrity would call a model. */
+export async function jevFastCheck(
+  deps: RoleDeps,
+  rawInput: string,
+  actorId: EntityId,
+  checkIntegrity: boolean,
+): Promise<JevFastPathResult> {
+  if (!deps.optionalProvider?.('jev-fastpath')) return {};
+  const sheet = await deps.world.cast.get(actorId);
+  const strictness = (await deps.world.session.get()).knobs.characterStrictness;
+  const integrityApplies = checkIntegrity && !!sheet && sheet.contract.vows.length > 0 && strictness !== 'permissive';
+  const refereeFrame = buildRefereeFrame(deps.ctx('referee', { rawInput }), deps.data);
+  deps.recordFrame('referee', refereeFrame);
+  const integrityFrame = integrityApplies
+    ? buildIntegrityFrame(deps.ctx('integrity', { rawInput }), deps.data, actorId)
+    : undefined;
+  if (integrityFrame) deps.recordFrame('integrity', integrityFrame);
+  return checkWithJev(deps, {
+    rawInput,
+    refereeState: refereeFrame.text,
+    ...(integrityFrame ? { integrityState: integrityFrame.text } : {}),
+  });
+}
+
 // ------------------------------------------------------------------ classify
 
 const CLASSIFY_SYSTEM = `You classify a player's input in a role-play session.
@@ -194,6 +220,7 @@ export async function integrity(
   deps: RoleDeps,
   rawInput: string,
   actorId: EntityId,
+  jevAccepted = false,
 ): Promise<IntegrityVerdict> {
   const world = deps.world;
   const sheet = await world.cast.get(actorId);
@@ -207,6 +234,9 @@ export async function integrity(
   const strictness = (await world.session.get()).knobs.characterStrictness;
   if (strictness === 'permissive') {
     return { distance: 'in-character', violatedVows: [], reasoning: 'gate disabled', interrupt: null };
+  }
+  if (jevAccepted) {
+    return { distance: 'in-character', violatedVows: [], reasoning: 'Jev clear in-character check', interrupt: null };
   }
 
   const ctx = deps.ctx('integrity', { rawInput });
@@ -300,7 +330,8 @@ If the player references something that does not exist but should, put it in
 
 Reply with JSON only.`;
 
-export async function referee(deps: RoleDeps, rawInput: string): Promise<RefereeVerdict> {
+export async function referee(deps: RoleDeps, rawInput: string, jevAccepted = false): Promise<RefereeVerdict> {
+  if (jevAccepted) return { ruling: 'allow', reasoning: '', cost: null, spawn: [] };
   const ctx = deps.ctx('referee', { rawInput });
   const frame = buildRefereeFrame(ctx, deps.data);
   deps.recordFrame('referee', frame);
