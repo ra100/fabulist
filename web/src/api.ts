@@ -18,7 +18,15 @@ import {
   worldsResponseSchema,
 } from '../../src/server/contracts.ts';
 import type { ZodTypeAny } from 'zod';
-import type { EncryptedKeyEnvelope, EncryptionEnrollment, ProviderKeyHandoff, ProviderKeyRecord, StoryKeyHandoff, StoryKeyRecord, UserKeyRecord } from './crypto/keys.ts';
+import type {
+  EncryptedKeyEnvelope,
+  EncryptionEnrollment,
+  ProviderKeyHandoff,
+  ProviderKeyRecord,
+  StoryKeyHandoff,
+  StoryKeyRecord,
+  UserKeyRecord,
+} from './crypto/keys.ts';
 
 /**
  * Which of *this user's own* stories the current browser tab is looking at,
@@ -135,7 +143,14 @@ export interface ForkResult {
 
 export interface State {
   worldTitle: string;
-  session: { scene: number; turn: number; playerCharacterId: string; currentLocationId: string | null; style: StyleContract; knobs: Knobs };
+  session: {
+    scene: number;
+    turn: number;
+    playerCharacterId: string;
+    currentLocationId: string | null;
+    style: StyleContract;
+    knobs: Knobs;
+  };
   counts: { entities: number; edges: number; canon: number; chronicle: number };
   scenes: Array<{ scene: number; title: string; summary: string; chapter: number }>;
   threads: Thread[];
@@ -143,7 +158,12 @@ export interface State {
   pendingConsequences: number;
   hiddenFired: number;
   divergences: Array<{ id: number; scene: number; kind: string; detail: string }>;
-  usage: { tokensIn: number; tokensOut: number; calls: number; byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }> };
+  usage: {
+    tokensIn: number;
+    tokensOut: number;
+    calls: number;
+    byRole: Record<string, { tokensIn: number; tokensOut: number; calls: number }>;
+  };
 }
 
 /** §11's "chronicle with the divergence points marked" — one call, one spine. */
@@ -164,11 +184,21 @@ export interface Timeline {
   divergenceCount: number;
 }
 
-
 export interface BookTurn {
-  id: string; scene: number; chapter: number; turn: number; rawInput: string; bookProse: string;
-  pinned: boolean; move: string | null; integrity: string | null; lintScore: number | null;
-  eligible: boolean; historyPosition: number | null; origin: string | null; startsScene: boolean;
+  id: string;
+  scene: number;
+  chapter: number;
+  turn: number;
+  rawInput: string;
+  bookProse: string;
+  pinned: boolean;
+  move: string | null;
+  integrity: string | null;
+  lintScore: number | null;
+  eligible: boolean;
+  historyPosition: number | null;
+  origin: string | null;
+  startsScene: boolean;
 }
 
 export type RollbackTarget =
@@ -208,7 +238,11 @@ export interface Interrupt {
 export type Outcome =
   | { kind: 'narrated'; prose: string; turn: { id: string; meta: TurnMeta } }
   | { kind: 'interrupted'; interrupt: Interrupt; distance: string; reasoning: string }
-  | { kind: 'blocked'; reason: string; validation: { issues: Array<{ tier: string; message: string; repaired: boolean }> } }
+  | {
+      kind: 'blocked';
+      reason: string;
+      validation: { issues: Array<{ tier: string; message: string; repaired: boolean }> };
+    }
   | { kind: 'answered'; text: string };
 
 export interface TurnMeta {
@@ -235,7 +269,9 @@ export interface PlayResponse {
 }
 
 export interface Fact {
-  id: string; text: string; scene: number;
+  id: string;
+  text: string;
+  scene: number;
   knowers: Array<{ entityId: string; name: string; level: string; distortion: number }>;
 }
 
@@ -251,16 +287,26 @@ export interface EntityDetail {
 }
 
 export interface CausalityGraph {
-  nodes: Array<{ id: string; kind: string; label: string; scene: number; visibility: string; fromConsequenceId: string | null }>;
+  nodes: Array<{
+    id: string;
+    kind: string;
+    label: string;
+    scene: number;
+    visibility: string;
+    fromConsequenceId: string | null;
+  }>;
   links: Array<{ from: string; to: string; kind: string; maturity: string }>;
 }
 
 export interface DirectiveResult {
   directive: { id: string; text: string };
   diff: {
-    supersededConsequences: string[]; retimedConsequences: string[];
-    raisedThreads: string[]; loweredThreads: string[];
-    raisedThreadTitles: string[]; loweredThreadTitles: string[];
+    supersededConsequences: string[];
+    retimedConsequences: string[];
+    raisedThreads: string[];
+    loweredThreads: string[];
+    raisedThreadTitles: string[];
+    loweredThreadTitles: string[];
   };
 }
 
@@ -590,7 +636,7 @@ export interface EncryptionKeyBundle {
   userKey: UserKeyRecord | null;
   storyKeys: StoryKeyRecord[];
   grants: StoryKeyGrant[];
-  providerKey?: ProviderKeyRecord | null;
+  providerKeys?: ProviderKeyRecord[];
 }
 
 export interface StoryKeyGrant {
@@ -600,17 +646,28 @@ export interface StoryKeyGrant {
 
 export type ProviderStatus = 'own' | 'locked' | 'unavailable' | 'server' | 'none';
 
-export interface ProviderModels {
-  narrate: string;
-  mechanics?: string;
-  extract?: string;
+export type ProviderModelRole =
+  | 'narrate'
+  | 'classify'
+  | 'integrity'
+  | 'referee'
+  | 'director'
+  | 'humanize'
+  | 'summarize'
+  | 'setup'
+  | 'extract'
+  | 'passb';
+
+export interface ProviderModelAssignment {
+  role: ProviderModelRole;
+  providerKeyId: string;
+  model: string;
 }
 
 export interface ProviderKeySummary {
   id: string;
   label: string;
   endpointId: string;
-  models: ProviderModels;
   trust: 'unlock' | 'sealed';
   keyHint: string;
   createdAt: string;
@@ -618,19 +675,24 @@ export interface ProviderKeySummary {
 }
 
 export interface ProviderKeyState {
-  key: ProviderKeySummary | null;
+  keys: Array<{ key: ProviderKeySummary; status: 'ready' | 'locked' | 'unavailable' }>;
   status: ProviderStatus;
   sealedAvailable: boolean;
   endpoints: Array<{ id: string; label: string }>;
 }
 
 export type ProviderKeyInput =
-  | { id: string; label: string; endpointId: string; models: ProviderModels; trust: 'sealed'; key: string }
-  | { id: string; label: string; endpointId: string; models: ProviderModels; trust: 'unlock'; wrap: EncryptedKeyEnvelope; keyHint: string };
+  | { id: string; label: string; endpointId: string; trust: 'sealed'; key: string }
+  | { id: string; label: string; endpointId: string; trust: 'unlock'; wrap: EncryptedKeyEnvelope; keyHint: string };
 
 export interface ProviderKeyGrant {
   keyId: string;
   expiresAt: string;
+}
+
+export interface ProviderKeyTestResult {
+  status: 'verified' | 'rejected' | 'unsupported' | 'unavailable';
+  message: string;
 }
 
 export interface UsageRow {
@@ -698,9 +760,14 @@ export const REQUIRED_ROUTES = [
   'POST /api/images/profile',
   'POST /api/rollback',
   'POST /api/scene/split',
-  'GET /api/provider-key',
-  'PUT /api/provider-key',
-  'DELETE /api/provider-key',
+  'GET /api/provider-keys',
+  'POST /api/provider-keys',
+  'DELETE /api/provider-keys/:id',
+  'GET /api/provider-keys/:id/models',
+  'POST /api/provider-key/test',
+  'POST /api/provider-key/models',
+  'GET /api/provider-models',
+  'PUT /api/provider-models',
   'GET /api/usage',
 ] as const;
 
@@ -752,23 +819,31 @@ export const api = {
     enroll: ({ recoveryCode: _recoveryCode, ...enrollment }: EncryptionEnrollment) =>
       post<{ enrolled: true }>('/encryption/enroll', enrollment),
     unlock: (handoff: { storyKeys: StoryKeyHandoff[]; providerKeys?: ProviderKeyHandoff[] }) =>
-      post<{ grants: StoryKeyGrant[]; providerGrants: ProviderKeyGrant[]; providerError?: string }>('/encryption/unlock', handoff),
+      post<{ grants: StoryKeyGrant[]; providerGrants: ProviderKeyGrant[]; providerError?: string }>(
+        '/encryption/unlock',
+        handoff,
+      ),
     lock: (storyId?: string) =>
       post<{ lockedStoryIds: string[]; providerLocked: boolean }>('/encryption/lock', storyId ? { storyId } : {}),
     migration: () => req<{ migration: PrivateStoryMigrationStatus | null }>('/encryption/migration'),
     migrate: () => post<{ migration: PrivateStoryMigrationStatus }>('/encryption/migration', {}),
   },
   providerKey: {
-    get: () => req<ProviderKeyState>('/provider-key'),
-    save: (input: ProviderKeyInput) => put<{ key: ProviderKeySummary; status: ProviderStatus }>('/provider-key', input),
-    remove: () => req<{ removed: boolean; status: ProviderStatus }>('/provider-key', { method: 'DELETE' }),
-    test: (input: { endpointId: string; model: string; key: string }) =>
-      post<{ ok: true; model: string } | { ok: false; error: string }>('/provider-key/test', input),
+    get: () => req<ProviderKeyState>('/provider-keys'),
+    save: (input: ProviderKeyInput) =>
+      post<{ key: ProviderKeySummary; status: ProviderStatus }>('/provider-keys', input),
+    remove: (id: string) =>
+      req<{ removed: boolean; status: ProviderStatus }>(`/provider-keys/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      }),
+    test: (input: { endpointId: string; key: string }) => post<ProviderKeyTestResult>('/provider-key/test', input),
     models: (input: { endpointId: string; key: string }) => post<{ models: string[] }>('/provider-key/models', input),
-    // Saved-key variants: no plaintext in the request, the server decrypts the caller's own key.
-    modelsSaved: () => req<{ models: string[] }>('/provider-key/models'),
-    testSaved: (model: string) =>
-      req<{ ok: true; model: string } | { ok: false; error: string }>(`/provider-key/test?model=${encodeURIComponent(model)}`),
+    modelsSaved: (id: string) => req<{ models: string[] }>(`/provider-keys/${encodeURIComponent(id)}/models`),
+  },
+  providerModels: {
+    get: () => req<{ assignments: ProviderModelAssignment[] }>('/provider-models'),
+    save: (assignments: ProviderModelAssignment[]) =>
+      put<{ assignments: ProviderModelAssignment[] }>('/provider-models', { assignments }),
   },
   usage: {
     mine: (days = 30) => req<{ days: number; rows: UsageRow[] }>(`/usage?days=${days}`),
@@ -785,7 +860,9 @@ export const api = {
     if (params.type) q.set('type', params.type);
     if (params.limit) q.set('limit', String(params.limit));
     if (params.minWeight !== undefined) q.set('minWeight', String(params.minWeight));
-    return req<{ entities: Entity[]; edges: Edge[]; scene: number; hiddenEdges: number; minWeight: number }>(`/graph?${q}`);
+    return req<{ entities: Entity[]; edges: Edge[]; scene: number; hiddenEdges: number; minWeight: number }>(
+      `/graph?${q}`,
+    );
   },
   entity: (id: string) => req<EntityDetail>(`/entity/${encodeURIComponent(id)}`),
   cast: () => req<Array<{ sheet: Sheet; entity: Entity | null }>>('/cast'),
@@ -805,7 +882,10 @@ export const api = {
   pin: (id: string, pinned: boolean) => post(`/turn/${encodeURIComponent(id)}/pin`, { pinned }),
   /** Re-renders a turn's prose from its stored delta; what happened never changes. */
   regenerate: (id: string, note?: string) =>
-    post<{ id: string; bookProse: string; pinned: boolean }>(`/turn/${encodeURIComponent(id)}/regenerate`, note ? { note } : {}),
+    post<{ id: string; bookProse: string; pinned: boolean }>(
+      `/turn/${encodeURIComponent(id)}/regenerate`,
+      note ? { note } : {},
+    ),
   threads: () => req<Thread[]>('/threads'),
   /** §11's "you cannot create a thread by hand" — retitle/close already went through `updateThread`. */
   createThread: (title: string, stakes: string) => post<Thread>('/threads', { title, stakes }),
@@ -818,7 +898,10 @@ export const api = {
     post<{ factId: string; knowers: unknown[] }>(`/fact/${encodeURIComponent(factId)}/knowledge`, { entityId, level }),
   /** The undo: back to "never told", not to a fourth level meaning "explicitly does not know". */
   revokeKnowledge: (factId: string, entityId: string) =>
-    req<{ factId: string; knowers: unknown[] }>(`/fact/${encodeURIComponent(factId)}/knowledge/${encodeURIComponent(entityId)}`, { method: 'DELETE' }),
+    req<{ factId: string; knowers: unknown[] }>(
+      `/fact/${encodeURIComponent(factId)}/knowledge/${encodeURIComponent(entityId)}`,
+      { method: 'DELETE' },
+    ),
   style: () => req<StyleContract>('/style'),
   setStyle: (patch: Partial<StyleContract>) => put<StyleContract>('/style', patch),
   knobs: () => req<Knobs>('/knobs'),
@@ -835,15 +918,22 @@ export const api = {
   search: (q: string) => req<Entity[]>(`/search?q=${encodeURIComponent(q)}`),
   providers: () => req<ProvidersReport>('/providers'),
   closeScene: () =>
-    post<{ closedScene: number; nowScene: number; summary: string | null; scenesSummarised: number[]; chaptersSummarised: number[] }>(
-      '/scene/close',
-    ),
-  chapters: () => req<{ chapters: Array<{ chapter: number; title: string; summary: string }>; scenes: State['scenes'] }>('/chapters'),
+    post<{
+      closedScene: number;
+      nowScene: number;
+      summary: string | null;
+      scenesSummarised: number[];
+      chaptersSummarised: number[];
+    }>('/scene/close'),
+  chapters: () =>
+    req<{ chapters: Array<{ chapter: number; title: string; summary: string }>; scenes: State['scenes'] }>('/chapters'),
   /**
    * `mode` defaults to `'fork'` server-side — the safe option — so an unset
    * mode here mirrors that rather than choosing a destructive default.
    */
-  rollback: async (target: RollbackTarget & { mode?: 'fork' | 'destructive'; includeTarget?: boolean }): Promise<RollbackResult> => {
+  rollback: async (
+    target: RollbackTarget & { mode?: 'fork' | 'destructive'; includeTarget?: boolean },
+  ): Promise<RollbackResult> => {
     const result = await post<RollbackResult | LegacyPostgresRollbackResult>('/rollback', target);
     if ('toScene' in result) return result;
     return {
@@ -863,14 +953,17 @@ export const api = {
   config: {
     get: () => req<ConfigBundle>('/config'),
     patch: (partial: Partial<AppConfig>) => put<PatchResult>('/config', partial),
-    putProvider: (key: string, spec: ProviderSpec) => put<PatchResult>(`/config/provider/${encodeURIComponent(key)}`, spec),
-    removeProvider: (key: string) => req<PatchResult>(`/config/provider/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+    putProvider: (key: string, spec: ProviderSpec) =>
+      put<PatchResult>(`/config/provider/${encodeURIComponent(key)}`, spec),
+    removeProvider: (key: string) =>
+      req<PatchResult>(`/config/provider/${encodeURIComponent(key)}`, { method: 'DELETE' }),
     testProvider: (key: string, spec: ProviderSpec) =>
       post<ProbeResult & { issues: ValidationIssue[] }>('/config/provider/test', { key, spec }),
     block: (phrase: string) => post<PatchResult>('/config/blocklist', { phrase }),
     unblock: (phrase: string) => post<PatchResult>('/config/blocklist', { phrase, remove: true }),
   },
-  setProfile: (profile: string) => post<{ profile: string; ok: boolean; notes: string[] }>('/providers/profile', { profile }),
+  setProfile: (profile: string) =>
+    post<{ profile: string; ok: boolean; notes: string[] }>('/providers/profile', { profile }),
 
   illustrate: {
     portrait: (entityId: string, visualStyle?: VisualStyle) =>
@@ -879,9 +972,13 @@ export const api = {
       post<Illustration>(`/illustrate/scene/${encodeURIComponent(turnId)}`, visualStyle ? { visualStyle } : {}),
     /** The prompt alone, no provider required — the copy-paste fallback when no vision model is configured. */
     portraitPrompt: (entityId: string, visualStyle?: VisualStyle) =>
-      req<ComposedPrompt>(`/illustrate/portrait/${encodeURIComponent(entityId)}/prompt${visualStyle ? `?visualStyle=${visualStyle}` : ''}`),
+      req<ComposedPrompt>(
+        `/illustrate/portrait/${encodeURIComponent(entityId)}/prompt${visualStyle ? `?visualStyle=${visualStyle}` : ''}`,
+      ),
     scenePrompt: (turnId: string, visualStyle?: VisualStyle) =>
-      req<ComposedPrompt>(`/illustrate/scene/${encodeURIComponent(turnId)}/prompt${visualStyle ? `?visualStyle=${visualStyle}` : ''}`),
+      req<ComposedPrompt>(
+        `/illustrate/scene/${encodeURIComponent(turnId)}/prompt${visualStyle ? `?visualStyle=${visualStyle}` : ''}`,
+      ),
     forTurn: (turnId: string) => req<Illustration[]>(`/illustrations/turn/${encodeURIComponent(turnId)}`),
     forEntity: (entityId: string) => req<Illustration[]>(`/illustrations/entity/${encodeURIComponent(entityId)}`),
     remove: (id: string) => req(`/illustration/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -891,7 +988,8 @@ export const api = {
   images: {
     status: () => req<ImageProviderStatus>('/images/status'),
     providers: () => req<ImageProvidersReport>('/images/providers'),
-    setProfile: (profile: string | null) => post<{ profile: string; ok: boolean; notes: string[] }>('/images/profile', { profile }),
+    setProfile: (profile: string | null) =>
+      post<{ profile: string; ok: boolean; notes: string[] }>('/images/profile', { profile }),
   },
 
   /**
@@ -981,10 +1079,14 @@ export const api = {
             } else {
               handlers.onDone?.(parsed.data as PlayResponse);
             }
-          }
-          else if (event === 'error') {
+          } else if (event === 'error') {
             terminalEvent = true;
-            const suffix = typeof data.requestId === 'string' ? ` (request ${data.requestId.slice(0, 8)})` : requestId ? ` (request ${requestId.slice(0, 8)})` : '';
+            const suffix =
+              typeof data.requestId === 'string'
+                ? ` (request ${data.requestId.slice(0, 8)})`
+                : requestId
+                  ? ` (request ${requestId.slice(0, 8)})`
+                  : '';
             handlers.onError?.(`${String(data.error)}${suffix}`);
           }
         }
@@ -1002,9 +1104,14 @@ export const api = {
     create: (title?: string) => post<Story>('/stories', title ? { title } : {}),
     /** `fromStoryId` defaults server-side to whichever story is current; pass it explicitly to fork a story other than the one currently open, with no switch required. */
     fork: (fromStoryId: string, title?: string, atScene?: number) =>
-      post<ForkResult>('/stories/fork', { fromStoryId, ...(title ? { title } : {}), ...(atScene !== undefined ? { atScene } : {}) }),
+      post<ForkResult>('/stories/fork', {
+        fromStoryId,
+        ...(title ? { title } : {}),
+        ...(atScene !== undefined ? { atScene } : {}),
+      }),
     switchTo: (id: string) => post<{ current: string }>(`/stories/${encodeURIComponent(id)}/switch`),
-    rename: (id: string, title: string) => put<{ id: string; title: string }>(`/stories/${encodeURIComponent(id)}/title`, { title }),
+    rename: (id: string, title: string) =>
+      put<{ id: string; title: string }>(`/stories/${encodeURIComponent(id)}/title`, { title }),
     remove: (id: string) => req<{ ok: boolean }>(`/stories/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     /**
      * Books with no owner — imported saves, which arrive unowned on purpose.
@@ -1042,7 +1149,10 @@ export const api = {
         `/worlds/${encodeURIComponent(slug)}/access`,
       ),
     grant: (slug: string, userId: string, role: 'reader' | 'ingest' | 'owner' = 'reader') =>
-      post<{ slug: string; userId: string; role: string }>(`/worlds/${encodeURIComponent(slug)}/access`, { userId, role }),
+      post<{ slug: string; userId: string; role: string }>(`/worlds/${encodeURIComponent(slug)}/access`, {
+        userId,
+        role,
+      }),
     revoke: (slug: string, userId: string) =>
       req<{ ok: boolean }>(`/worlds/${encodeURIComponent(slug)}/access/${encodeURIComponent(userId)}`, {
         method: 'DELETE',
@@ -1059,10 +1169,9 @@ export const api = {
      * world wins on any id two of them share.
      */
     setSources: (slugs: string[]) =>
-      put<{ storyId: string; sources: Array<{ worldId: number; ordinal: number; alias: string }> }>(
-        '/story/sources',
-        { slugs },
-      ),
+      put<{ storyId: string; sources: Array<{ worldId: number; ordinal: number; alias: string }> }>('/story/sources', {
+        slugs,
+      }),
   },
 
   /**
@@ -1098,7 +1207,16 @@ export const api = {
       excludeCategories: string[] = [],
       title = '',
       budgets: IngestBudgetOverrides = {},
-    ) => post<Job<DiscoverResult>>('/setup/discover', { baseUrl, seeds, mode, character, excludeCategories, title, ...budgets }),
+    ) =>
+      post<Job<DiscoverResult>>('/setup/discover', {
+        baseUrl,
+        seeds,
+        mode,
+        character,
+        excludeCategories,
+        title,
+        ...budgets,
+      }),
     ingest: (previewKey: string, character: CharacterSketch, style: Partial<StyleContract>, opening: string) =>
       post<Job>('/setup/ingest', { previewKey, character, style, opening }),
     custom: (description: string, style?: Partial<StyleContract>) => post<Job>('/setup/custom', { description, style }),
@@ -1108,7 +1226,11 @@ export const api = {
     job: (id: string) => req<Job>(`/setup/job/${encodeURIComponent(id)}`),
     cancel: (id: string) => post<{ cancelled: boolean }>(`/setup/job/${encodeURIComponent(id)}/cancel`),
     characters: () => req<CandidateCharacter[]>('/setup/characters'),
-    setPlayer: (sketch: Partial<CharacterSketch>) => post<{ playerCharacterId: string; created: boolean; warnings: string[]; opening: string }>('/setup/player', sketch),
+    setPlayer: (sketch: Partial<CharacterSketch>) =>
+      post<{ playerCharacterId: string; created: boolean; warnings: string[]; opening: string }>(
+        '/setup/player',
+        sketch,
+      ),
     /**
      * Starts *this book* over. Canon and every other book are untouched.
      *

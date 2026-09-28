@@ -73,6 +73,10 @@ export interface JsonSchema {
 export interface Provider {
   readonly id: string;
   readonly model: string;
+  /** Credential row used by this provider, for per-key usage attribution. */
+  readonly usageKeyId?: string;
+  /** Usage source when a mixed personal registry falls back to this provider. */
+  readonly usageKeySource?: 'own' | 'server';
   readonly capabilities: ProviderCapabilities;
   complete(req: CompletionRequest): Promise<CompletionResult>;
 }

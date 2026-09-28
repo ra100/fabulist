@@ -116,8 +116,19 @@ type Tab = AppTab;
 function roman(n: number): string {
   if (n < 1) return String(n);
   const table: Array<[number, string]> = [
-    [1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'],
-    [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i'],
+    [1000, 'm'],
+    [900, 'cm'],
+    [500, 'd'],
+    [400, 'cd'],
+    [100, 'c'],
+    [90, 'xc'],
+    [50, 'l'],
+    [40, 'xl'],
+    [10, 'x'],
+    [9, 'ix'],
+    [5, 'v'],
+    [4, 'iv'],
+    [1, 'i'],
   ];
   let out = '';
   let left = n;
@@ -143,7 +154,11 @@ function formatTokens(n: number): string {
 }
 
 function ErrorNotice({ error }: { error: string | null }) {
-  return error ? <div className="card warn" style={{ margin: 12 }} role="alert">{error}</div> : null;
+  return error ? (
+    <div className="card warn" style={{ margin: 12 }} role="alert">
+      {error}
+    </div>
+  ) : null;
 }
 
 export function App() {
@@ -183,20 +198,23 @@ export function App() {
     if (!currentUser || !keysQuery.data || !migrationQuery.data) return null;
     return { keys: keysQuery.data, migration: migrationQuery.data.migration };
   }, [currentUser, keysQuery.data, migrationQuery.data]);
-  const privateStorageError = currentUser ? (keysQuery.error ?? migrationQuery.error)?.message ?? null : null;
+  const privateStorageError = currentUser ? ((keysQuery.error ?? migrationQuery.error)?.message ?? null) : null;
 
   const stateQuery = useStateQuery();
   const setupStatusQuery = useSetupStatusQuery();
   const state = stateQuery.data ?? null;
 
-  const selectStory = useCallback((storyId: string) => {
-    // Selection first: invalidateEverything's refetches read the selected
-    // story id via `withStoryId()` inside each queryFn, so a query that
-    // starts before the id is updated would fetch the *old* story's data
-    // under the new story's screen.
-    setSelectedStoryId(storyId);
-    void invalidateEverything(queryClient);
-  }, [queryClient]);
+  const selectStory = useCallback(
+    (storyId: string) => {
+      // Selection first: invalidateEverything's refetches read the selected
+      // story id via `withStoryId()` inside each queryFn, so a query that
+      // starts before the id is updated would fetch the *old* story's data
+      // under the new story's screen.
+      setSelectedStoryId(storyId);
+      void invalidateEverything(queryClient);
+    },
+    [queryClient],
+  );
 
   const navigateToTab = useCallback((next: Tab) => {
     const path = pathForTab(next);
@@ -300,7 +318,9 @@ export function App() {
   // Independent of the world check: a stale server is worth saying even when
   // everything else looks fine, because the symptom appears later and elsewhere.
   useEffect(() => {
-    void checkServerFreshness().then(setStale).catch(() => {});
+    void checkServerFreshness()
+      .then(setStale)
+      .catch(() => {});
   }, []);
 
   // Separate call from the freshness check above rather than threading the
@@ -310,9 +330,8 @@ export function App() {
   // speak of) would make a reader wonder why a staleness check also carries
   // a version string.
   useEffect(() => {
-    const expiries = privateStorage?.keys.grants
-      .map(({ expiresAt }) => Date.parse(expiresAt))
-      .filter(Number.isFinite) ?? [];
+    const expiries =
+      privateStorage?.keys.grants.map(({ expiresAt }) => Date.parse(expiresAt)).filter(Number.isFinite) ?? [];
     if (!expiries.length) return;
     const delay = Math.max(1_000, Math.min(...expiries) - Date.now() + 250);
     const timer = window.setTimeout(() => {
@@ -352,7 +371,15 @@ export function App() {
     }
   }, [logoutMutation]);
 
-  if (fresh === null) return <><ErrorNotice error={error} /><div className="wizard"><div className="wizard-card dim">loading…</div></div></>;
+  if (fresh === null)
+    return (
+      <>
+        <ErrorNotice error={error} />
+        <div className="wizard">
+          <div className="wizard-card dim">loading…</div>
+        </div>
+      </>
+    );
 
   if (fresh) {
     return (
@@ -389,11 +416,18 @@ export function App() {
         </h1>
         {state ? (
           <div className="meta">
-            <span>scene <b>{state.session.scene}·{state.session.turn}</b></span>
+            <span>
+              scene{' '}
+              <b>
+                {state.session.scene}·{state.session.turn}
+              </b>
+            </span>
             <span title="entities and live edges in the world model">
               <b>{state.counts.entities}</b> entities <b>{state.counts.edges}</b> edges
             </span>
-            <span title="pending consequences"><b>{state.pendingConsequences}</b> in motion</span>
+            <span title="pending consequences">
+              <b>{state.pendingConsequences}</b> in motion
+            </span>
             {state.hiddenFired > 0 ? (
               <span className="warn" title="fired offscreen and still unseen">
                 <b>{state.hiddenFired}</b> unseen
@@ -417,11 +451,7 @@ export function App() {
           ))}
         </nav>
         {currentUser ? (
-          <PrivateStorageIndicator
-            snapshot={privateStorage}
-            error={privateStorageError}
-            onOpen={openPrivateStorage}
-          />
+          <PrivateStorageIndicator snapshot={privateStorage} error={privateStorageError} onOpen={openPrivateStorage} />
         ) : null}
         {/*
           Absent entirely when login is off or nobody is signed in yet — the
@@ -447,10 +477,15 @@ export function App() {
           <b>This page is newer than the server.</b>{' '}
           <span className="small">
             {stale.missing.length} route{stale.missing.length === 1 ? '' : 's'} this build needs
-            {stale.missing.length ? <> — including <span className="mono">{stale.missing[0]}</span></> : null}
+            {stale.missing.length ? (
+              <>
+                {' '}
+                — including <span className="mono">{stale.missing[0]}</span>
+              </>
+            ) : null}
             {stale.missing.length > 1 ? <> and {stale.missing.length - 1} more</> : null}{' '}
-            {stale.missing.length === 1 ? 'is' : 'are'} missing, so some controls will fail with a 404 rather than
-            work. Restart it: <span className="mono">pnpm serve</span>
+            {stale.missing.length === 1 ? 'is' : 'are'} missing, so some controls will fail with a 404 rather than work.
+            Restart it: <span className="mono">pnpm serve</span>
           </span>
         </div>
       ) : null}
@@ -458,20 +493,11 @@ export function App() {
       <ErrorNotice error={error} />
 
       {currentUser ? (
-        <PrivateStorageBanner
-          snapshot={privateStorage}
-          error={privateStorageError}
-          onOpen={openPrivateStorage}
-        />
+        <PrivateStorageBanner snapshot={privateStorage} error={privateStorageError} onOpen={openPrivateStorage} />
       ) : null}
 
       {tab === 'book' ? (
-        <BookTab
-          state={state}
-          hasPlayer={hasPlayer}
-          onChanged={refreshHistory}
-          onStorySelected={selectStory}
-        />
+        <BookTab state={state} hasPlayer={hasPlayer} onChanged={refreshHistory} onStorySelected={selectStory} />
       ) : null}
       {tab === 'timeline' ? (
         <TimelineView
@@ -548,8 +574,7 @@ function PrivateStorageBanner({
     <div className={`private-storage-banner ${presentation.state}`} role="status">
       <span className="private-storage-indicator-dot" aria-hidden="true" />
       <p>
-        <b>Private storage: {presentation.label}.</b>{' '}
-        {presentation.detail}
+        <b>Private storage: {presentation.label}.</b> {presentation.detail}
       </p>
       <button onClick={onOpen}>
         {presentation.state === 'setup'
@@ -606,7 +631,11 @@ function PrivateStoragePanel({
       // rather than firing a second independent fetch — same `['stories']`
       // key, so this is a cache hit whenever the stories tab has loaded.
       const stories = await queryClient.fetchQuery({ queryKey: storiesKeys.all, queryFn: api.stories.list });
-      const next = await createEncryptionEnrollment(user.id, passphrase, stories.map((story) => story.id));
+      const next = await createEncryptionEnrollment(
+        user.id,
+        passphrase,
+        stories.map((story) => story.id),
+      );
       setDraft(next);
       setPassphrase('');
       setConfirmation('');
@@ -641,15 +670,17 @@ function PrivateStoragePanel({
       unlocked = unlockWithRecovery
         ? await unlockWithRecoveryCode(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret)
         : await unlockWithPassphrase(user.id, keyBundle.userKey, keyBundle.storyKeys, unlockSecret);
-      const providerKeys = keyBundle.providerKey
-        ? await providerKeyHandoff(user.id, unlocked.masterKey, [keyBundle.providerKey])
+      const providerKeys = keyBundle.providerKeys?.length
+        ? await providerKeyHandoff(user.id, unlocked.masterKey, keyBundle.providerKeys)
         : [];
       const result = await unlockMutation.mutateAsync({ storyKeys: storyKeyHandoff(unlocked.storyKeys), providerKeys });
       if (!result.grants.length && !result.providerGrants.length) throw new Error('no private stories were unlocked');
       setUnlockSecret('');
       await onChanged();
       if (unlocked.failedStoryKeys.length) {
-        setError(`Skipped corrupt private-story key(s): ${unlocked.failedStoryKeys.map((item) => item.storyId).join(', ')}`);
+        setError(
+          `Skipped corrupt private-story key(s): ${unlocked.failedStoryKeys.map((item) => item.storyId).join(', ')}`,
+        );
       }
       if (result.providerError) setError(`Your provider key stayed locked: ${result.providerError}`);
     } catch (err) {
@@ -708,7 +739,9 @@ function PrivateStoragePanel({
     );
   }
   if (enrolled) {
-    const expiry = grants[0]?.expiresAt ? new Date(grants[0].expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
+    const expiry = grants[0]?.expiresAt
+      ? new Date(grants[0].expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : null;
     const migrationComplete = migration?.status === 'complete';
     return (
       <section id="private-storage" className="card private-storage">
@@ -717,7 +750,9 @@ function PrivateStoragePanel({
           <span className={`tag${grants.length ? ' locked' : ''}`}>{grants.length ? 'unlocked' : 'locked'}</span>
         </div>
         <div className="private-storage-status">
-          <span className="private-storage-mark" aria-hidden="true">◆</span>
+          <span className="private-storage-mark" aria-hidden="true">
+            ◆
+          </span>
           <p>
             <b>{grants.length ? 'Private-story access is active.' : 'Your recovery path is ready.'}</b>{' '}
             {grants.length
@@ -729,7 +764,9 @@ function PrivateStoragePanel({
         </div>
         {grants.length ? (
           <div className="private-storage-actions">
-            <button onClick={() => void lock()} disabled={busy}>{busy ? 'locking…' : 'lock private stories'}</button>
+            <button onClick={() => void lock()} disabled={busy}>
+              {busy ? 'locking…' : 'lock private stories'}
+            </button>
             <button className="primary" onClick={() => void migrate()} disabled={busy || migrationComplete}>
               {busy ? 'migrating…' : migrationComplete ? 'private stories migrated' : 'migrate all private stories'}
             </button>
@@ -738,7 +775,11 @@ function PrivateStoragePanel({
           <div className="private-unlock">
             <label className="field-row">
               <span>unlock with</span>
-              <select value={unlockWithRecovery ? 'recovery' : 'passphrase'} onChange={(event) => setUnlockWithRecovery(event.target.value === 'recovery')} disabled={busy}>
+              <select
+                value={unlockWithRecovery ? 'recovery' : 'passphrase'}
+                onChange={(event) => setUnlockWithRecovery(event.target.value === 'recovery')}
+                disabled={busy}
+              >
                 <option value="passphrase">passcode</option>
                 <option value="recovery">recovery code</option>
               </select>
@@ -762,11 +803,17 @@ function PrivateStoragePanel({
           </div>
         )}
         <p className="private-storage-footnote">
-          Migration requires an active grant for every story you own. It copies your shared blocklist into every story before removing legacy plaintext; no passcode or recovery code is sent.
-          {migration ? ` Status: ${migration.status}${migration.error ? ` — ${migration.error}` : ''}.` : ''}
-          {' '}Creating, claiming, forking, and resetting stories is temporarily disabled while private storage is enrolled, until browser-side key provisioning is added.
+          Migration requires an active grant for every story you own. It copies your shared blocklist into every story
+          before removing legacy plaintext; no passcode or recovery code is sent.
+          {migration ? ` Status: ${migration.status}${migration.error ? ` — ${migration.error}` : ''}.` : ''} Creating,
+          claiming, forking, and resetting stories is temporarily disabled while private storage is enrolled, until
+          browser-side key provisioning is added.
         </p>
-        {error || statusError ? <p className="private-storage-error" role="alert">{error ?? statusError}</p> : null}
+        {error || statusError ? (
+          <p className="private-storage-error" role="alert">
+            {error ?? statusError}
+          </p>
+        ) : null}
       </section>
     );
   }
@@ -837,11 +884,23 @@ function PrivateStoragePanel({
             <button className="primary" onClick={() => void enroll()} disabled={!acknowledged || busy}>
               {busy ? 'saving…' : 'save recovery setup'}
             </button>
-            <button onClick={() => { setDraft(null); setAcknowledged(false); setCopied(false); }}>start over</button>
+            <button
+              onClick={() => {
+                setDraft(null);
+                setAcknowledged(false);
+                setCopied(false);
+              }}
+            >
+              start over
+            </button>
           </div>
         </div>
       )}
-      {error || statusError ? <p className="private-storage-error" role="alert">{error ?? statusError}</p> : null}
+      {error || statusError ? (
+        <p className="private-storage-error" role="alert">
+          {error ?? statusError}
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -1079,7 +1138,10 @@ function BookTab({
       } else if (o.kind === 'answered') {
         setNotes([o.text]);
       } else if (o.kind === 'blocked') {
-        setNotes([`the world model refused that: ${o.reason}`, ...o.validation.issues.filter((i) => !i.repaired).map((i) => `${i.tier}: ${i.message}`)]);
+        setNotes([
+          `the world model refused that: ${o.reason}`,
+          ...o.validation.issues.filter((i) => !i.repaired).map((i) => `${i.tier}: ${i.message}`),
+        ]);
       }
     };
 
@@ -1094,11 +1156,13 @@ function BookTab({
           onToken: (chunk) => setStreaming((prev) => prev + chunk),
           onDone: (res) => {
             finished = true;
-            finishPromise = finish(res).catch((e: unknown) => {
-              const message = e instanceof Error ? e.message : String(e);
-              setTurnError(message);
-              setNotes([message]);
-            }).finally(endMutation);
+            finishPromise = finish(res)
+              .catch((e: unknown) => {
+                const message = e instanceof Error ? e.message : String(e);
+                setTurnError(message);
+                setNotes([message]);
+              })
+              .finally(endMutation);
           },
           onError: (message) => {
             if (abort.signal.aborted) return;
@@ -1176,9 +1240,14 @@ function BookTab({
   async function doRollback(target: RollbackTarget & { includeTarget?: boolean }, mode: 'fork' | 'destructive') {
     if (rollbackBusy || mutationLock.current) return;
     if (mode === 'destructive') {
-      const label = 'turnId' in target
-        ? target.includeTarget ? 'the selected turn and every newer turn' : 'everything after the selected turn'
-        : target.scene !== undefined ? `scene ${target.scene} and every later scene` : `chapter ${target.chapter} and every later chapter`;
+      const label =
+        'turnId' in target
+          ? target.includeTarget
+            ? 'the selected turn and every newer turn'
+            : 'everything after the selected turn'
+          : target.scene !== undefined
+            ? `scene ${target.scene} and every later scene`
+            : `chapter ${target.chapter} and every later chapter`;
       if (!window.confirm(`Discard ${label} permanently from this book? This cannot be undone.`)) return;
     }
     const sourceStoryId = getSelectedStoryId();
@@ -1193,7 +1262,9 @@ function BookTab({
       if (result.mode === 'fork' && result.forkedStory) {
         // `storyId` makes all subsequent PostgreSQL reads use this safe fork.
         onStorySelected(result.forkedStory.id);
-        setNotes([`Rolled back to ${targetLabel} in a safe fork. This book is unchanged; the new book is "${result.forkedStory.title || 'untitled'}".`]);
+        setNotes([
+          `Rolled back to ${targetLabel} in a safe fork. This book is unchanged; the new book is "${result.forkedStory.title || 'untitled'}".`,
+        ]);
       } else {
         setNotes([
           'includeTarget' in target && target.includeTarget
@@ -1207,7 +1278,10 @@ function BookTab({
         await queryClient.invalidateQueries({ queryKey: timelineKeys.all });
         await onChanged();
       } catch (e) {
-        setNotes((notes) => [...notes, `The rollback succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);
+        setNotes((notes) => [
+          ...notes,
+          `The rollback succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`,
+        ]);
       }
     } catch (e) {
       setNotes([`Rollback was not applied: ${e instanceof Error ? e.message : String(e)}. Try again.`]);
@@ -1227,10 +1301,15 @@ function BookTab({
         await reloadBook();
         await onChanged();
       } catch (e) {
-        setNotes((notes) => [...notes, `The scene split succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`]);
+        setNotes((notes) => [
+          ...notes,
+          `The scene split succeeded, but the updated book could not be loaded: ${e instanceof Error ? e.message : String(e)}.`,
+        ]);
       }
     } catch (e) {
-      setNotes([`The scene was not split at turn ${chapterTurnLabel(turn)}: ${e instanceof Error ? e.message : String(e)}. Try again.`]);
+      setNotes([
+        `The scene was not split at turn ${chapterTurnLabel(turn)}: ${e instanceof Error ? e.message : String(e)}. Try again.`,
+      ]);
     } finally {
       setSplittingId(null);
       endMutation();
@@ -1267,7 +1346,9 @@ function BookTab({
             <b>Turn failed</b>
             <span>{turnError}</span>
           </div>
-          <button type="button" onClick={() => setTurnError(null)}>dismiss</button>
+          <button type="button" onClick={() => setTurnError(null)}>
+            dismiss
+          </button>
         </div>
       ) : null}
       <div className="pane" style={{ display: 'flex', flexDirection: 'column', padding: 0 }}>
@@ -1279,8 +1360,8 @@ function BookTab({
                 {state?.counts.entities
                   ? 'The world has canon, but nobody to play as — which is what a story created outside the setup wizard looks like.'
                   : 'There is no canon here yet either.'}{' '}
-                Open <b>Library → start a new book</b> to run the wizard, or call <code>start_story</code> over MCP after
-                picking someone with <code>list_characters</code>.
+                Open <b>Library → start a new book</b> to run the wizard, or call <code>start_story</code> over MCP
+                after picking someone with <code>list_characters</code>.
               </div>
             ) : null}
             {bookQuery.isError || isFetchNextPageError ? (
@@ -1299,126 +1380,159 @@ function BookTab({
               const opensScene = t.startsScene;
               const isLastTurn = i === turns.length - 1;
               return (
-              <Fragment key={t.id}>
-                {opensScene && i > 0 ? (
-                  <div className="scene-break" role="separator" aria-label={`scene ${t.scene}`}>
-                    <Mark size={14} />
-                    <span>scene {roman(t.scene)}</span>
-                  </div>
-                ) : null}
-              <div
-                className={`turn${t.pinned ? ' pinned' : ''}${t.id === arrivingId ? ' arriving' : ''}${opensScene ? ' opens-scene' : ''}`}
-              >
-                <span className="folio">{t.scene}·{t.turn}</span>
-                <div className="raw">{t.rawInput}</div>
-                <p className="prose">{t.bookProse}</p>
-                <SceneIllustration turnId={t.id} defaultStyle={state?.session.style.visualStyle ?? 'drawing'} />
-                {rerollOpenId === t.id ? (
-                  <div className="row" style={{ margin: '4px 0 6px', gap: 'var(--s2)' }}>
-                    <input
-                      autoFocus
-                      value={rerollNote}
-                      placeholder="steer it, or leave blank for a plain reroll"
-                      onChange={(e) => setRerollNote(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void regenerate(t.id, rerollNote);
-                        if (e.key === 'Escape') { setRerollOpenId(null); setRerollNote(''); }
-                      }}
-                    />
-                    <button
-                      className="primary"
-                      disabled={mutationPending}
-                      onClick={() => regenerate(t.id, rerollNote)}
-                    >
-                      {regeneratingId === t.id ? 'rerolling…' : 'reroll'}
-                    </button>
-                    <button onClick={() => { setRerollOpenId(null); setRerollNote(''); }}>cancel</button>
-                  </div>
-                ) : null}
-                <div className="turn-tools">
-                  {t.move ? <span className="move" title="gm move">{t.move}</span> : null}
-                  {t.integrity && t.integrity !== 'in-character' ? <span className="status ripening">{t.integrity}</span> : null}
-                  {t.lintScore != null && t.lintScore > 0 ? <span className="mono">lint {t.lintScore}</span> : null}
-                  <span className="turn-position" title={`chapter ${t.chapter}, turn ${t.turn}`}>ch. {chapterTurnLabel(t)}</span>
-                  <span className="grow" />
-                  {t.eligible && !t.startsScene ? (
-                    <button disabled={mutationPending} onClick={() => void splitScene(t)}>
-                      {splittingId === t.id ? 'splitting…' : 'split scene here'}
-                    </button>
+                <Fragment key={t.id}>
+                  {opensScene && i > 0 ? (
+                    <div className="scene-break" role="separator" aria-label={`scene ${t.scene}`}>
+                      <Mark size={14} />
+                      <span>scene {roman(t.scene)}</span>
+                    </div>
                   ) : null}
-                  {t.eligible ? (
-                    <>
-                      <button
-                        className="branch-action"
-                        title="make a safe branch that keeps this turn and removes everything after it"
-                        disabled={mutationPending}
-                        onClick={() => void doRollback({ turnId: t.id }, 'fork')}
-                      >
-                        branch here
-                      </button>
-                      {isLastTurn ? (
+                  <div
+                    className={`turn${t.pinned ? ' pinned' : ''}${t.id === arrivingId ? ' arriving' : ''}${opensScene ? ' opens-scene' : ''}`}
+                  >
+                    <span className="folio">
+                      {t.scene}·{t.turn}
+                    </span>
+                    <div className="raw">{t.rawInput}</div>
+                    <p className="prose">{t.bookProse}</p>
+                    <SceneIllustration turnId={t.id} defaultStyle={state?.session.style.visualStyle ?? 'drawing'} />
+                    {rerollOpenId === t.id ? (
+                      <div className="row" style={{ margin: '4px 0 6px', gap: 'var(--s2)' }}>
+                        <input
+                          autoFocus
+                          value={rerollNote}
+                          placeholder="steer it, or leave blank for a plain reroll"
+                          onChange={(e) => setRerollNote(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void regenerate(t.id, rerollNote);
+                            if (e.key === 'Escape') {
+                              setRerollOpenId(null);
+                              setRerollNote('');
+                            }
+                          }}
+                        />
                         <button
-                          className="warn"
-                          title="remove this turn"
+                          className="primary"
                           disabled={mutationPending}
-                          onClick={() => void doRollback({ turnId: t.id, includeTarget: true }, 'destructive')}
+                          onClick={() => regenerate(t.id, rerollNote)}
                         >
-                          remove turn
+                          {regeneratingId === t.id ? 'rerolling…' : 'reroll'}
                         </button>
-                      ) : (
-                        <details className="turn-discard">
-                          <summary>discard…</summary>
-                          <div className="turn-discard-menu">
-                            <button
-                              title="keep this turn and discard everything after it"
-                              disabled={mutationPending}
-                              onClick={() => void doRollback({ turnId: t.id }, 'destructive')}
-                            >
-                              discard after this turn
-                            </button>
+                        <button
+                          onClick={() => {
+                            setRerollOpenId(null);
+                            setRerollNote('');
+                          }}
+                        >
+                          cancel
+                        </button>
+                      </div>
+                    ) : null}
+                    <div className="turn-tools">
+                      {t.move ? (
+                        <span className="move" title="gm move">
+                          {t.move}
+                        </span>
+                      ) : null}
+                      {t.integrity && t.integrity !== 'in-character' ? (
+                        <span className="status ripening">{t.integrity}</span>
+                      ) : null}
+                      {t.lintScore != null && t.lintScore > 0 ? <span className="mono">lint {t.lintScore}</span> : null}
+                      <span className="turn-position" title={`chapter ${t.chapter}, turn ${t.turn}`}>
+                        ch. {chapterTurnLabel(t)}
+                      </span>
+                      <span className="grow" />
+                      {t.eligible && !t.startsScene ? (
+                        <button disabled={mutationPending} onClick={() => void splitScene(t)}>
+                          {splittingId === t.id ? 'splitting…' : 'split scene here'}
+                        </button>
+                      ) : null}
+                      {t.eligible ? (
+                        <>
+                          <button
+                            className="branch-action"
+                            title="make a safe branch that keeps this turn and removes everything after it"
+                            disabled={mutationPending}
+                            onClick={() => void doRollback({ turnId: t.id }, 'fork')}
+                          >
+                            branch here
+                          </button>
+                          {isLastTurn ? (
                             <button
                               className="warn"
-                              title="discard this turn and everything after it"
+                              title="remove this turn"
                               disabled={mutationPending}
                               onClick={() => void doRollback({ turnId: t.id, includeTarget: true }, 'destructive')}
                             >
-                              discard this turn too
+                              remove turn
                             </button>
-                          </div>
-                        </details>
-                      )}
-                    </>
-                  ) : null}
-                  <button
-                    title={t.pinned ? 'pinned passages are never rewritten' : 'different sentences, same events — what happened does not change'}
-                    disabled={t.pinned || mutationPending}
-                    onClick={() => {
-                      if (rerollOpenId === t.id) { setRerollOpenId(null); setRerollNote(''); }
-                      else { setRerollOpenId(t.id); setRerollNote(''); }
-                    }}
-                  >
-                    reroll
-                  </button>
-                  <button
-                    disabled={mutationPending}
-                    onClick={async () => {
-                      if (!beginMutation()) return;
-                      try {
-                        await pinMutation.mutateAsync({ id: t.id, pinned: !t.pinned });
-                        if (!t.pinned) await addAnchorMutation.mutateAsync({ text: t.bookProse.slice(0, 300), note: 'pinned by the author' });
-                        await reloadBook();
-                      } catch (e) {
-                        setNotes([e instanceof Error ? e.message : String(e)]);
-                      } finally {
-                        endMutation();
-                      }
-                    }}
-                  >
-                    {t.pinned ? 'unpin' : 'pin'}
-                  </button>
-                </div>
-              </div>
-              </Fragment>
+                          ) : (
+                            <details className="turn-discard">
+                              <summary>discard…</summary>
+                              <div className="turn-discard-menu">
+                                <button
+                                  title="keep this turn and discard everything after it"
+                                  disabled={mutationPending}
+                                  onClick={() => void doRollback({ turnId: t.id }, 'destructive')}
+                                >
+                                  discard after this turn
+                                </button>
+                                <button
+                                  className="warn"
+                                  title="discard this turn and everything after it"
+                                  disabled={mutationPending}
+                                  onClick={() => void doRollback({ turnId: t.id, includeTarget: true }, 'destructive')}
+                                >
+                                  discard this turn too
+                                </button>
+                              </div>
+                            </details>
+                          )}
+                        </>
+                      ) : null}
+                      <button
+                        title={
+                          t.pinned
+                            ? 'pinned passages are never rewritten'
+                            : 'different sentences, same events — what happened does not change'
+                        }
+                        disabled={t.pinned || mutationPending}
+                        onClick={() => {
+                          if (rerollOpenId === t.id) {
+                            setRerollOpenId(null);
+                            setRerollNote('');
+                          } else {
+                            setRerollOpenId(t.id);
+                            setRerollNote('');
+                          }
+                        }}
+                      >
+                        reroll
+                      </button>
+                      <button
+                        disabled={mutationPending}
+                        onClick={async () => {
+                          if (!beginMutation()) return;
+                          try {
+                            await pinMutation.mutateAsync({ id: t.id, pinned: !t.pinned });
+                            if (!t.pinned)
+                              await addAnchorMutation.mutateAsync({
+                                text: t.bookProse.slice(0, 300),
+                                note: 'pinned by the author',
+                              });
+                            await reloadBook();
+                          } catch (e) {
+                            setNotes([e instanceof Error ? e.message : String(e)]);
+                          } finally {
+                            endMutation();
+                          }
+                        }}
+                      >
+                        {t.pinned ? 'unpin' : 'pin'}
+                      </button>
+                    </div>
+                  </div>
+                </Fragment>
               );
             })}
             {/*
@@ -1433,9 +1547,7 @@ function BookTab({
             */}
             {awaiting || streaming ? (
               <div className={`turn awaiting${streaming ? ' streaming' : ''}`} aria-live="polite">
-                <span className="folio">
-                  {state ? `${state.session.scene}·${state.session.turn + 1}` : '·'}
-                </span>
+                <span className="folio">{state ? `${state.session.scene}·${state.session.turn + 1}` : '·'}</span>
                 <div className="raw">{awaiting ?? input}</div>
                 {streaming ? (
                   <p className="prose">
@@ -1443,7 +1555,11 @@ function BookTab({
                     <span className="caret" />
                   </p>
                 ) : (
-                  <div className="ruled" aria-hidden="true"><i /><i /><i /></div>
+                  <div className="ruled" aria-hidden="true">
+                    <i />
+                    <i />
+                    <i />
+                  </div>
                 )}
                 <div className="turn-tools">
                   <span className="stage">{stage || 'writing'}</span>
@@ -1499,7 +1615,13 @@ function BookTab({
                 // `useState` initializer.
                 <p className="empty">opening…</p>
               ) : (
-                <RollbackPanel state={state} chapters={chapters} busy={mutationPending} onRollback={doRollback} onCancel={() => setRollbackOpen(false)} />
+                <RollbackPanel
+                  state={state}
+                  chapters={chapters}
+                  busy={mutationPending}
+                  onRollback={doRollback}
+                  onCancel={() => setRollbackOpen(false)}
+                />
               )
             ) : null}
 
@@ -1520,7 +1642,9 @@ function BookTab({
                 title="download the book as markdown"
                 href={turns.length ? api.exportUrl('markdown') : undefined}
                 aria-disabled={!turns.length}
-                onClick={(e) => { if (!turns.length) e.preventDefault(); }}
+                onClick={(e) => {
+                  if (!turns.length) e.preventDefault();
+                }}
               >
                 export .md
               </a>
@@ -1529,7 +1653,9 @@ function BookTab({
                 title="download the book as plain text"
                 href={turns.length ? api.exportUrl('text') : undefined}
                 aria-disabled={!turns.length}
-                onClick={(e) => { if (!turns.length) e.preventDefault(); }}
+                onClick={(e) => {
+                  if (!turns.length) e.preventDefault();
+                }}
               >
                 export .txt
               </a>
@@ -1603,8 +1729,7 @@ function BookTab({
                 <div className="stack">
                   {state.divergences.map((d) => (
                     <div key={d.id} className="small">
-                      <span className="tag chronicle">{d.kind}</span>{' '}
-                      <span className="dim">{d.detail}</span>{' '}
+                      <span className="tag chronicle">{d.kind}</span> <span className="dim">{d.detail}</span>{' '}
                       <span className="mono dimmer">s{d.scene}</span>
                     </div>
                   ))}
@@ -1626,7 +1751,11 @@ function BookTab({
  * behaviour depends on a mode nobody remembers they set.
  */
 function RollbackPanel({
-  state, chapters, busy, onRollback, onCancel,
+  state,
+  chapters,
+  busy,
+  onRollback,
+  onCancel,
 }: {
   state: State | null;
   chapters: Array<{ chapter: number; title: string; summary: string }>;
@@ -1638,9 +1767,14 @@ function RollbackPanel({
   const [chapter, setChapter] = useState(chapters.length ? String(chapters[chapters.length - 1]!.chapter) : '');
   const currentScene = state?.session.scene ?? 1;
   const [scene, setScene] = useState(String(Math.max(1, currentScene - 1)));
-  const target = unit === 'chapter'
-    ? (chapter.trim() ? { chapter: Number(chapter) } : null)
-    : (scene.trim() ? { scene: Number(scene) } : null);
+  const target =
+    unit === 'chapter'
+      ? chapter.trim()
+        ? { chapter: Number(chapter) }
+        : null
+      : scene.trim()
+        ? { scene: Number(scene) }
+        : null;
   const valid = target !== null && Number.isFinite(unit === 'chapter' ? target.chapter : target.scene);
   const retention = 'A scene or chapter target and all newer history are removed.';
 
@@ -1649,13 +1783,16 @@ function RollbackPanel({
       <b>Roll back</b>
       <p className="small dim" style={{ margin: '4px 0 var(--s3)' }}>
         Currently at scene {currentScene}. Branch (safe) creates and switches to a shorter sibling while this book
-        remains untouched. Discard permanently changes this book and cannot be undone. {retention} Exact-turn actions live next to each turn.
+        remains untouched. Discard permanently changes this book and cannot be undone. {retention} Exact-turn actions
+        live next to each turn.
       </p>
       <div className="row" style={{ marginBottom: 'var(--s2)' }}>
         <label className="rollback-field">
           <span>target</span>
           <select value={unit} onChange={(e) => setUnit(e.target.value as 'chapter' | 'scene')} disabled={busy}>
-            <option value="chapter" disabled={!chapters.length}>chapter{chapters.length ? '' : ' (none recorded yet)'}</option>
+            <option value="chapter" disabled={!chapters.length}>
+              chapter{chapters.length ? '' : ' (none recorded yet)'}
+            </option>
             <option value="scene">scene</option>
           </select>
         </label>
@@ -1665,7 +1802,8 @@ function RollbackPanel({
             <select value={chapter} onChange={(e) => setChapter(e.target.value)} disabled={busy}>
               {chapters.map((c) => (
                 <option key={c.chapter} value={c.chapter}>
-                  chapter {c.chapter}{c.title ? ` — ${c.title}` : ''}
+                  chapter {c.chapter}
+                  {c.title ? ` — ${c.title}` : ''}
                 </option>
               ))}
             </select>
@@ -1674,8 +1812,11 @@ function RollbackPanel({
           <label className="rollback-field">
             <span>scene</span>
             <input
-              type="number" min={1} max={Math.max(1, currentScene - 1)}
-              value={scene} onChange={(e) => setScene(e.target.value)}
+              type="number"
+              min={1}
+              max={Math.max(1, currentScene - 1)}
+              value={scene}
+              onChange={(e) => setScene(e.target.value)}
               disabled={busy}
               style={{ width: '5rem' }}
             />
@@ -1683,21 +1824,15 @@ function RollbackPanel({
         )}
       </div>
       <div className="row wrap">
-        <button
-          className="primary"
-          disabled={busy || !valid}
-          onClick={() => target && onRollback(target, 'fork')}
-        >
+        <button className="primary" disabled={busy || !valid} onClick={() => target && onRollback(target, 'fork')}>
           {busy ? 'rolling back…' : 'roll back (fork — safe)'}
         </button>
-        <button
-          className="warn"
-          disabled={busy || !valid}
-          onClick={() => target && onRollback(target, 'destructive')}
-        >
+        <button className="warn" disabled={busy || !valid} onClick={() => target && onRollback(target, 'destructive')}>
           discard permanently
         </button>
-        <button onClick={onCancel} disabled={busy}>cancel</button>
+        <button onClick={onCancel} disabled={busy}>
+          cancel
+        </button>
       </div>
     </section>
   );
@@ -1706,7 +1841,13 @@ function RollbackPanel({
 /** Shows the machinery behind the last turn: the reason to trust it. */
 function WhyPanel({ meta }: { meta: TurnMeta | null }) {
   const blockMutation = useBlockMutation();
-  if (!meta) return <div className="card"><h3>why</h3><p className="empty">Play a turn.</p></div>;
+  if (!meta)
+    return (
+      <div className="card">
+        <h3>why</h3>
+        <p className="empty">Play a turn.</p>
+      </div>
+    );
   return (
     <div className="card">
       <h3>why</h3>
@@ -1727,15 +1868,13 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
           <>
             <dt>prose lint</dt>
             <dd>
-              {meta.lint.score} {meta.lint.tripped ? <span className="warn">tripped</span> : <span className="ok">clean</span>}
+              {meta.lint.score}{' '}
+              {meta.lint.tripped ? <span className="warn">tripped</span> : <span className="ok">clean</span>}
               {meta.lint.findings.slice(0, 5).map((f, i) => (
                 <div key={i} className="dimmer small lint-finding">
                   <span className="grow">{f.rule}</span>
                   {f.excerpt ? (
-                    <button
-                      title={`never write "${f.excerpt}" again`}
-                      onClick={() => blockMutation.mutate(f.excerpt)}
-                    >
+                    <button title={`never write "${f.excerpt}" again`} onClick={() => blockMutation.mutate(f.excerpt)}>
                       block
                     </button>
                   ) : null}
@@ -1762,7 +1901,9 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
             </div>
           ))}
           {meta.frameLog.evicted.length ? (
-            <div className="small warn" style={{ marginTop: 6 }}>evicted: {meta.frameLog.evicted.join(', ')}</div>
+            <div className="small warn" style={{ marginTop: 6 }}>
+              evicted: {meta.frameLog.evicted.join(', ')}
+            </div>
           ) : null}
           {meta.frameLog.compressed.length ? (
             <div className="small dimmer">compressed: {meta.frameLog.compressed.join(', ')}</div>
@@ -1776,7 +1917,9 @@ function WhyPanel({ meta }: { meta: TurnMeta | null }) {
           {meta.providerCalls.map((c, i) => (
             <div key={i} className="row small">
               <span className="grow dim">{c.role}</span>
-              <span className="mono dimmer">{c.tokensIn}→{c.tokensOut}</span>
+              <span className="mono dimmer">
+                {c.tokensIn}→{c.tokensOut}
+              </span>
             </div>
           ))}
         </>
@@ -1831,9 +1974,15 @@ function GraphTab() {
             />
             {query.trim() ? (
               <div className="search-results">
-                {searching ? <div className="dimmer small" style={{ padding: 'var(--s2)' }}>searching…</div> : null}
+                {searching ? (
+                  <div className="dimmer small" style={{ padding: 'var(--s2)' }}>
+                    searching…
+                  </div>
+                ) : null}
                 {!searching && results.length === 0 ? (
-                  <div className="dimmer small" style={{ padding: 'var(--s2)' }}>nothing found</div>
+                  <div className="dimmer small" style={{ padding: 'var(--s2)' }}>
+                    nothing found
+                  </div>
                 ) : null}
                 {results.map((e) => (
                   <button
@@ -1845,7 +1994,9 @@ function GraphTab() {
                     }}
                   >
                     <b>{e.name}</b>
-                    <span className="dimmer small">{e.type} · {e.layer}</span>
+                    <span className="dimmer small">
+                      {e.type} · {e.layer}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -1859,7 +2010,9 @@ function GraphTab() {
           <select value={type} onChange={(e) => setType(e.target.value)} style={{ width: 170 }}>
             <option value="">all types</option>
             {['Character', 'Location', 'Faction', 'Item', 'Concept', 'Event'].map((t) => (
-              <option key={t} value={t}>{t}</option>
+              <option key={t} value={t}>
+                {t}
+              </option>
             ))}
           </select>
           <label className="row small dimmer" style={{ alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
@@ -1891,8 +2044,7 @@ function GraphTab() {
  */
 function entityNamer(entities: Entity[] | undefined) {
   const byId = new Map((entities ?? []).map((e) => [e.id, e.name]));
-  return (id: string) =>
-    byId.get(id) ?? (id.split(':').pop() ?? id).replace(/-/g, ' ');
+  return (id: string) => byId.get(id) ?? (id.split(':').pop() ?? id).replace(/-/g, ' ');
 }
 
 /** `keeps_secret_from` is a database predicate, not something a reader should see. */
@@ -1911,7 +2063,13 @@ function EntityPanel({
   entities?: Entity[];
 }) {
   const nameOf = entityNamer(entities);
-  if (!detail) return <div className="card"><h3>entity</h3><p className="empty">Select a node.</p></div>;
+  if (!detail)
+    return (
+      <div className="card">
+        <h3>entity</h3>
+        <p className="empty">Select a node.</p>
+      </div>
+    );
   const { entity, canon, sheet } = detail;
   return (
     <>
@@ -1924,18 +2082,28 @@ function EntityPanel({
           {entity.summary || <i className="dimmer">no summary</i>}
         </p>
         <dl className="kv small">
-          <dt>type</dt><dd>{entity.type}</dd>
-          <dt>salience</dt><dd>{entity.salience.toFixed(2)}</dd>
-          <dt>depth</dt><dd>{['none', 'skim', 'mid', 'deep'][entity.depthLevel] ?? entity.depthLevel}</dd>
-          <dt>provenance</dt><dd>{entity.provenance}</dd>
+          <dt>type</dt>
+          <dd>{entity.type}</dd>
+          <dt>salience</dt>
+          <dd>{entity.salience.toFixed(2)}</dd>
+          <dt>depth</dt>
+          <dd>{['none', 'skim', 'mid', 'deep'][entity.depthLevel] ?? entity.depthLevel}</dd>
+          <dt>provenance</dt>
+          <dd>{entity.provenance}</dd>
           {/* The key is developer information, so it goes last and stays quiet. */}
-          <dt>id</dt><dd className="mono dimmer">{entity.id}</dd>
+          <dt>id</dt>
+          <dd className="mono dimmer">{entity.id}</dd>
         </dl>
         {/* Canon divergence is the point of the two-layer model, so show it. */}
         {canon && canon.summary !== entity.summary ? (
-          <div className="small" style={{ marginTop: 'var(--s3)', borderTop: '1px solid var(--rule)', paddingTop: 'var(--s3)' }}>
+          <div
+            className="small"
+            style={{ marginTop: 'var(--s3)', borderTop: '1px solid var(--rule)', paddingTop: 'var(--s3)' }}
+          >
             <span className="tag canon">canon said</span>
-            <div className="dim" style={{ marginTop: 5 }}>{canon.summary}</div>
+            <div className="dim" style={{ marginTop: 5 }}>
+              {canon.summary}
+            </div>
           </div>
         ) : null}
       </div>
@@ -1944,22 +2112,28 @@ function EntityPanel({
         <div className="card">
           <h3>vows</h3>
           <div className="stack">
-            {[...sheet.contract.vows].sort((a, b) => a.rank - b.rank).map((v) => (
-              <div key={v.id} className="row baseline small">
-                <span className={`status ${v.broken ? 'ripening' : 'fired'}`} style={{ minWidth: '3.4rem' }}>
-                  {v.broken ? 'broken' : 'held'}
-                </span>
-                <span className="mono dimmer">r{v.rank}</span>
-                <span className="grow">{v.text}</span>
-              </div>
-            ))}
+            {[...sheet.contract.vows]
+              .sort((a, b) => a.rank - b.rank)
+              .map((v) => (
+                <div key={v.id} className="row baseline small">
+                  <span className={`status ${v.broken ? 'ripening' : 'fired'}`} style={{ minWidth: '3.4rem' }}>
+                    {v.broken ? 'broken' : 'held'}
+                  </span>
+                  <span className="mono dimmer">r{v.rank}</span>
+                  <span className="grow">{v.text}</span>
+                </div>
+              ))}
           </div>
         </div>
       ) : null}
 
       <div className="card">
         <h3>connections out</h3>
-        {detail.edgesOut.length === 0 ? <p className="empty" style={{ padding: 0 }}>none</p> : null}
+        {detail.edgesOut.length === 0 ? (
+          <p className="empty" style={{ padding: 0 }}>
+            none
+          </p>
+        ) : null}
         <div className="rels">
           {detail.edgesOut.map((e) => (
             <button key={e.id} className="rel" onClick={() => onSelect(e.object)}>
@@ -1969,7 +2143,11 @@ function EntityPanel({
           ))}
         </div>
         <h3 style={{ marginTop: 'var(--s4)' }}>connections in</h3>
-        {detail.edgesIn.length === 0 ? <p className="empty" style={{ padding: 0 }}>none</p> : null}
+        {detail.edgesIn.length === 0 ? (
+          <p className="empty" style={{ padding: 0 }}>
+            none
+          </p>
+        ) : null}
         <div className="rels">
           {detail.edgesIn.map((e) => (
             <button key={e.id} className="rel" onClick={() => onSelect(e.subject)}>
@@ -1994,12 +2172,23 @@ function EntityPanel({
                   <span className="regard-dir" title={r.outward ? 'toward them' : 'toward this character'}>
                     {r.outward ? '→' : '←'}
                   </span>
-                  <button className="rel-name grow" onClick={() => onSelect(r.id)}>{nameOf(r.id)}</button>
+                  <button className="rel-name grow" onClick={() => onSelect(r.id)}>
+                    {nameOf(r.id)}
+                  </button>
                 </div>
                 <div className="regard-metrics">
-                  <span><i>trust</i>{signed(r.trust)}</span>
-                  <span><i>affection</i>{signed(r.affection)}</span>
-                  <span><i>respect</i>{signed(r.respect)}</span>
+                  <span>
+                    <i>trust</i>
+                    {signed(r.trust)}
+                  </span>
+                  <span>
+                    <i>affection</i>
+                    {signed(r.affection)}
+                  </span>
+                  <span>
+                    <i>respect</i>
+                    {signed(r.respect)}
+                  </span>
                 </div>
                 {r.note ? <div className="small dimmer">{r.note}</div> : null}
               </div>
@@ -2062,65 +2251,71 @@ function CastTab({ state }: { state: State | null }) {
             <option value="canon">canon only</option>
             <option value="chronicle">chronicle only</option>
           </select>
-          <span className="dimmer small grow">{visible.length} of {cast.length} shown</span>
+          <span className="dimmer small grow">
+            {visible.length} of {cast.length} shown
+          </span>
         </div>
         <div className="cast-grid">
           {visible.map(({ sheet, entity }) => {
             const open = openId === sheet.entityId;
             return (
-            <div key={sheet.entityId} className={`card${open ? ' span' : ''}`}>
-              <div className="row baseline">
-                <h2 className="name grow">
-                  {entity?.name ?? sheet.entityId}{' '}
-                  {sheet.isPlayer ? <span className="tag locked">player</span> : null}
-                  {entity ? <span className={`tag ${entity.layer}`}>{entity.layer}</span> : null}
-                </h2>
-                <button onClick={() => setOpenId(open ? null : sheet.entityId)}>
-                  {open ? 'less' : 'more'}
-                </button>
-              </div>
-              <p className="small dim" style={{ margin: '6px 0 8px', maxWidth: '46rem' }}>
-                {entity?.summary}
-              </p>
-              <div className="small dimmer cast-cond">
-                {placeName(sheet.condition.locationId)} · {sheet.condition.mood || 'unreadable'}
-                {sheet.condition.intent ? ` · ${sheet.condition.intent}` : ''}
-              </div>
-
-              {openId === sheet.entityId ? (
-                <div className="sheet-detail">
-                  <h3 className="eyebrow rule" style={{ marginTop: 0 }}>appearance</h3>
-                  <PortraitPanel sheet={sheet} onChanged={load} />
-                  <AppearanceEditor sheet={sheet} onSaved={load} />
-
-                  <SheetEditor sheet={sheet} currentScene={state?.session.scene ?? 0} onSaved={load} />
-
-                  {/* Locks are how nudging parameters actually works. */}
-                  <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>locks</h3>
-                  <div className="row wrap">
-                    {['condition.mood', 'condition.intent', 'condition.locationId', 'condition.inventory'].map((path) => {
-                      const on = sheet.locks.includes(path);
-                      return (
-                        <button
-                          key={path}
-                          className={on ? 'primary' : ''}
-                          aria-pressed={on}
-                          onClick={async () => {
-                            await lockSheetFieldMutation.mutateAsync({ id: sheet.entityId, path, locked: !on });
-                            await load();
-                          }}
-                        >
-                          {on ? '◆' : '◇'} {path.replace('condition.', '').replace('locationId', 'location')}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
-                    A locked field is ground truth; the AI may not overwrite it.
-                  </div>
+              <div key={sheet.entityId} className={`card${open ? ' span' : ''}`}>
+                <div className="row baseline">
+                  <h2 className="name grow">
+                    {entity?.name ?? sheet.entityId}{' '}
+                    {sheet.isPlayer ? <span className="tag locked">player</span> : null}
+                    {entity ? <span className={`tag ${entity.layer}`}>{entity.layer}</span> : null}
+                  </h2>
+                  <button onClick={() => setOpenId(open ? null : sheet.entityId)}>{open ? 'less' : 'more'}</button>
                 </div>
-              ) : null}
-            </div>
+                <p className="small dim" style={{ margin: '6px 0 8px', maxWidth: '46rem' }}>
+                  {entity?.summary}
+                </p>
+                <div className="small dimmer cast-cond">
+                  {placeName(sheet.condition.locationId)} · {sheet.condition.mood || 'unreadable'}
+                  {sheet.condition.intent ? ` · ${sheet.condition.intent}` : ''}
+                </div>
+
+                {openId === sheet.entityId ? (
+                  <div className="sheet-detail">
+                    <h3 className="eyebrow rule" style={{ marginTop: 0 }}>
+                      appearance
+                    </h3>
+                    <PortraitPanel sheet={sheet} onChanged={load} />
+                    <AppearanceEditor sheet={sheet} onSaved={load} />
+
+                    <SheetEditor sheet={sheet} currentScene={state?.session.scene ?? 0} onSaved={load} />
+
+                    {/* Locks are how nudging parameters actually works. */}
+                    <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>
+                      locks
+                    </h3>
+                    <div className="row wrap">
+                      {['condition.mood', 'condition.intent', 'condition.locationId', 'condition.inventory'].map(
+                        (path) => {
+                          const on = sheet.locks.includes(path);
+                          return (
+                            <button
+                              key={path}
+                              className={on ? 'primary' : ''}
+                              aria-pressed={on}
+                              onClick={async () => {
+                                await lockSheetFieldMutation.mutateAsync({ id: sheet.entityId, path, locked: !on });
+                                await load();
+                              }}
+                            >
+                              {on ? '◆' : '◇'} {path.replace('condition.', '').replace('locationId', 'location')}
+                            </button>
+                          );
+                        },
+                      )}
+                    </div>
+                    <div className="small dimmer" style={{ marginTop: 'var(--s2)' }}>
+                      A locked field is ground truth; the AI may not overwrite it.
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             );
           })}
         </div>
@@ -2139,8 +2334,8 @@ function PalettePicker() {
     <div className="card">
       <h3>appearance</h3>
       <p className="lede" style={{ margin: '0 0 var(--s3)' }}>
-        One preset per genre, each derived from a specific source rather than picked from a
-        wheel. All nine are contrast-verified; the light ones follow your system by default.
+        One preset per genre, each derived from a specific source rather than picked from a wheel. All nine are
+        contrast-verified; the light ones follow your system by default.
       </p>
       <div className="palettes">
         {PRESETS.map((p) => (
@@ -2213,102 +2408,113 @@ function SettingsTab({
       <div className="pane">
         <div className="measure-tool">
           {currentUser ? (
-          <PrivateStoragePanel
-            user={currentUser}
-            snapshot={privateStorage}
-            statusError={privateStorageError}
-            onChanged={onPrivateStorageChanged}
-          />
-        ) : null}
-        {currentUser ? <MyProviderPanel user={currentUser} /> : null}
-        <PalettePicker />
-        {style ? (
-          <div className="card">
-            <h3>style contract</h3>
-            {([
-              ['pov', ['first', 'third-limited', 'third-omniscient', 'second']],
-              ['tense', ['past', 'present']],
-              ['register', ['plain', 'clipped', 'lyrical', 'ornate', 'archaic']],
-              ['density', ['sparse', 'balanced', 'rich']],
-              ['humor', ['none', 'dry', 'absurd']],
-              ['pacing', ['languid', 'steady', 'breakneck']],
-            ] as const).map(([key, opts]) => (
-              <label className="field-row" key={key}>
-                <span>{key}</span>
-                <select value={style[key] as string} onChange={(e) => void saveStyle({ [key]: e.target.value })}>
-                  {opts.map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
+            <PrivateStoragePanel
+              user={currentUser}
+              snapshot={privateStorage}
+              statusError={privateStorageError}
+              onChanged={onPrivateStorageChanged}
+            />
+          ) : null}
+          {currentUser ? <MyProviderPanel user={currentUser} /> : null}
+          <PalettePicker />
+          {style ? (
+            <div className="card">
+              <h3>style contract</h3>
+              {(
+                [
+                  ['pov', ['first', 'third-limited', 'third-omniscient', 'second']],
+                  ['tense', ['past', 'present']],
+                  ['register', ['plain', 'clipped', 'lyrical', 'ornate', 'archaic']],
+                  ['density', ['sparse', 'balanced', 'rich']],
+                  ['humor', ['none', 'dry', 'absurd']],
+                  ['pacing', ['languid', 'steady', 'breakneck']],
+                ] as const
+              ).map(([key, opts]) => (
+                <label className="field-row" key={key}>
+                  <span>{key}</span>
+                  <select value={style[key] as string} onChange={(e) => void saveStyle({ [key]: e.target.value })}>
+                    {opts.map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+              <label className="field-row">
+                <span>genre</span>
+                <input defaultValue={style.genreLens} onBlur={(e) => void saveStyle({ genreLens: e.target.value })} />
               </label>
-            ))}
-            <label className="field-row">
-              <span>genre</span>
-              <input
-                defaultValue={style.genreLens}
-                onBlur={(e) => void saveStyle({ genreLens: e.target.value })}
-              />
-            </label>
-            <label className="field-row">
-              <span>comparables</span>
-              <input
-                defaultValue={style.comparables.join(', ')}
-                placeholder="naming a work beats any stack of adjectives"
-                onBlur={(e) => void saveStyle({ comparables: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
-              />
-            </label>
-            <label className="field-row">
-              <span>scene target</span>
-              <input
-                type="number" defaultValue={style.sceneTarget}
-                onBlur={(e) => void saveStyle({ sceneTarget: Number(e.target.value) })}
-              />
-            </label>
-            <label className="field-row">
-              <span>illustration style</span>
-              <StylePicker value={style.visualStyle} onChange={(v) => void saveStyle({ visualStyle: v })} />
-            </label>
-            <label className="field-row block">
-              <span>visual anchor</span>
-              <textarea
-                rows={2}
-                defaultValue={style.visualAnchor}
-                placeholder="what stays true in every image of this world — architecture, dress, light, palette"
-                onBlur={(e) => void saveStyle({ visualAnchor: e.target.value })}
-              />
-            </label>
-          </div>
-        ) : null}
+              <label className="field-row">
+                <span>comparables</span>
+                <input
+                  defaultValue={style.comparables.join(', ')}
+                  placeholder="naming a work beats any stack of adjectives"
+                  onBlur={(e) =>
+                    void saveStyle({
+                      comparables: e.target.value
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+              </label>
+              <label className="field-row">
+                <span>scene target</span>
+                <input
+                  type="number"
+                  defaultValue={style.sceneTarget}
+                  onBlur={(e) => void saveStyle({ sceneTarget: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field-row">
+                <span>illustration style</span>
+                <StylePicker value={style.visualStyle} onChange={(v) => void saveStyle({ visualStyle: v })} />
+              </label>
+              <label className="field-row block">
+                <span>visual anchor</span>
+                <textarea
+                  rows={2}
+                  defaultValue={style.visualAnchor}
+                  placeholder="what stays true in every image of this world — architecture, dress, light, palette"
+                  onBlur={(e) => void saveStyle({ visualAnchor: e.target.value })}
+                />
+              </label>
+            </div>
+          ) : null}
 
-        {showSystemSettings ? <IngestHealthPanel worldTitle={state?.worldTitle} onChanged={onChanged} /> : null}
-        {showSystemSettings ? <ImageProvidersPanel /> : null}
-        {showSystemSettings ? <ProvidersPanel /> : null}
-        <UsagePanel usage={state?.usage ?? null} />
-        {currentUser ? <MyUsagePanel /> : null}
-        {currentUser?.isAdmin ? <AdminUsagePanel /> : null}
-        {showSystemSettings ? <ConfigPanels /> : null}
+          {showSystemSettings ? <IngestHealthPanel worldTitle={state?.worldTitle} onChanged={onChanged} /> : null}
+          {showSystemSettings ? <ImageProvidersPanel /> : null}
+          {showSystemSettings ? <ProvidersPanel /> : null}
+          <UsagePanel usage={state?.usage ?? null} />
+          {currentUser ? <MyUsagePanel /> : null}
+          {currentUser?.isAdmin ? <AdminUsagePanel /> : null}
+          {showSystemSettings ? <ConfigPanels /> : null}
 
-        {anchors.length ? (
-          <div className="card">
-            <h3>style anchors</h3>
-            <p className="small dimmer" style={{ marginTop: 0 }}>
-              Re-injected periodically. These do more to prevent drift than the lint pass does.
-            </p>
-            {anchors.map((a) => (
-              <p
-                key={a.id}
-                style={{
-                  font: 'italic 15px/1.55 var(--serif)',
-                  color: 'var(--ink-2)',
-                  borderLeft: '1px solid var(--rule-strong)',
-                  padding: '2px 0 2px var(--s3)',
-                  margin: 'var(--s2) 0 0',
-                  maxWidth: '40rem',
-                }}
-              >
-                “{a.text}”
+          {anchors.length ? (
+            <div className="card">
+              <h3>style anchors</h3>
+              <p className="small dimmer" style={{ marginTop: 0 }}>
+                Re-injected periodically. These do more to prevent drift than the lint pass does.
               </p>
-            ))}
-          </div>
-        ) : null}
+              {anchors.map((a) => (
+                <p
+                  key={a.id}
+                  style={{
+                    font: 'italic 15px/1.55 var(--serif)',
+                    color: 'var(--ink-2)',
+                    borderLeft: '1px solid var(--rule-strong)',
+                    padding: '2px 0 2px var(--s3)',
+                    margin: 'var(--s2) 0 0',
+                    maxWidth: '40rem',
+                  }}
+                >
+                  “{a.text}”
+                </p>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -2341,13 +2547,15 @@ function SettingsTab({
                 <option value="au">alternate universe</option>
               </select>
             </div>
-            {([
-              ['danger', 0, 1, 0.05],
-              ['pacing', 0, 1, 0.05],
-              ['npcAgency', 0, 1, 0.05],
-              ['propagationDepth', 1, 5, 1],
-              ['ignoranceBudget', 0, 20, 1],
-            ] as const).map(([key, min, max, step]) => (
+            {(
+              [
+                ['danger', 0, 1, 0.05],
+                ['pacing', 0, 1, 0.05],
+                ['npcAgency', 0, 1, 0.05],
+                ['propagationDepth', 1, 5, 1],
+                ['ignoranceBudget', 0, 20, 1],
+              ] as const
+            ).map(([key, min, max, step]) => (
               <div className="knob" key={key}>
                 <label>
                   {/* camelCase is the field name, not a label */}
@@ -2356,15 +2564,18 @@ function SettingsTab({
                 </label>
                 <div className="scale">
                   <input
-                    type="range" min={min} max={max} step={step} value={knobs[key] as number}
+                    type="range"
+                    min={min}
+                    max={max}
+                    step={step}
+                    value={knobs[key] as number}
                     onChange={(e) => void saveKnobs({ [key]: Number(e.target.value) })}
                   />
                 </div>
               </div>
             ))}
             <p className="small dimmer">
-              Ignorance budget caps how much may mature unseen before the engine starts steering
-              traces toward you.
+              Ignorance budget caps how much may mature unseen before the engine starts steering traces toward you.
             </p>
           </div>
         ) : null}
@@ -2396,7 +2607,11 @@ function SettingsTab({
  * `world_access` — which is strictly better than an admin flag, because it can say
  * "you own this one world" rather than only "you administer everything".
  */
-function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
+function StoriesTab({
+  currentSceneTurn,
+  onSwitched,
+  onResetToWizard,
+}: {
   currentSceneTurn: string;
   onSwitched: () => void;
   onResetToWizard: () => void;
@@ -2500,10 +2715,10 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
           <div className="card">
             <h3>worlds</h3>
             <p className="hint">
-              A world is canon: entities, cast sheets and the relations between them, ingested once and shared
-              by every book that reads it. Tick the worlds this book should read — more than one makes a
-              crossover, and the order decides which one wins when two of them use the same id. Your writing
-              lives in the book, not the world, so changing this never touches a scene you have already played.
+              A world is canon: entities, cast sheets and the relations between them, ingested once and shared by every
+              book that reads it. Tick the worlds this book should read — more than one makes a crossover, and the order
+              decides which one wins when two of them use the same id. Your writing lives in the book, not the world, so
+              changing this never touches a scene you have already played.
             </p>
             {sourceError ? <p className="error">{sourceError}</p> : null}
             {!worlds ? (
@@ -2557,12 +2772,20 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                               <span className="row-name">
                                 <b>{w.title || 'untitled world'}</b>
                                 {reading[0] === w.slug && reading.length > 1 ? (
-                                  <span className="tag locked" style={{ marginLeft: 6 }} title="wins any id these worlds share">
+                                  <span
+                                    className="tag locked"
+                                    style={{ marginLeft: 6 }}
+                                    title="wins any id these worlds share"
+                                  >
                                     primary
                                   </span>
                                 ) : null}
                                 {w.visibility === 'private' ? (
-                                  <span className="tag" style={{ marginLeft: 6 }} title="only people you have granted access can see this world">
+                                  <span
+                                    className="tag"
+                                    style={{ marginLeft: 6 }}
+                                    title="only people you have granted access can see this world"
+                                  >
                                     private
                                   </span>
                                 ) : null}
@@ -2593,12 +2816,14 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                                   ? 'hide this world from everyone you have not granted access'
                                   : 'let anyone signed in read this world'
                               }
-                              onClick={() => void run(w.slug, 'wvis', async () => {
-                                await setWorldVisibilityMutation.mutateAsync({
-                                  slug: w.slug,
-                                  visibility: w.visibility === 'public' ? 'private' : 'public',
-                                });
-                              })}
+                              onClick={() =>
+                                void run(w.slug, 'wvis', async () => {
+                                  await setWorldVisibilityMutation.mutateAsync({
+                                    slug: w.slug,
+                                    visibility: w.visibility === 'public' ? 'private' : 'public',
+                                  });
+                                })
+                              }
                             >
                               {w.visibility === 'public' ? 'make private' : 'make public'}
                             </button>
@@ -2614,7 +2839,12 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                                   : 'delete this world and its canon'
                             }
                             onClick={() => {
-                              if (!window.confirm(`Delete the world "${w.title || w.slug}"? This removes its canon. Books are not touched.`)) return;
+                              if (
+                                !window.confirm(
+                                  `Delete the world "${w.title || w.slug}"? This removes its canon. Books are not touched.`,
+                                )
+                              )
+                                return;
                               void run(w.slug, 'wdelete', async () => {
                                 await removeWorldMutation.mutateAsync(w.slug);
                               });
@@ -2638,17 +2868,19 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
               <button
                 disabled={busy === 'newworld create'}
                 title="creates an empty world; switch to it and the setup wizard will offer to ingest a wiki"
-                onClick={() => void run('newworld', 'create', async () => {
-                  await createWorldMutation.mutateAsync(newWorldTitle.trim() || undefined);
-                  setNewWorldTitle('');
-                })}
+                onClick={() =>
+                  void run('newworld', 'create', async () => {
+                    await createWorldMutation.mutateAsync(newWorldTitle.trim() || undefined);
+                    setNewWorldTitle('');
+                  })
+                }
               >
                 add world
               </button>
             </div>
             <p className="hint small">
-              A new world starts empty. Switch to it and the setup wizard opens, so you can ingest a wiki or
-              author one by hand — the world you are in now is left untouched.
+              A new world starts empty. Switch to it and the setup wizard opens, so you can ingest a wiki or author one
+              by hand — the world you are in now is left untouched.
             </p>
           </div>
 
@@ -2693,7 +2925,11 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                             <>
                               <span className="row-name">
                                 <b>{s.title || 'untitled book'}</b>
-                                {s.current ? <span className="tag locked" style={{ marginLeft: 6 }}>reading</span> : null}
+                                {s.current ? (
+                                  <span className="tag locked" style={{ marginLeft: 6 }}>
+                                    reading
+                                  </span>
+                                ) : null}
                               </span>
                               {s.forkedFrom ? (
                                 <span className="row-meta">forked at scene {s.forkedAtScene}</span>
@@ -2701,26 +2937,30 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                             </>
                           )}
                         </td>
-                        <td className="mono">{s.scene}·{s.turn}</td>
+                        <td className="mono">
+                          {s.scene}·{s.turn}
+                        </td>
                         <td className="actions">
                           <button
                             className={s.current ? '' : 'primary'}
                             disabled={s.current || busy === `${s.id}switch`}
                             title={s.current ? 'already reading this book' : 'open this book'}
-                            onClick={() => void run(s.id, 'switch', async () => {
-                              // `useSwitchStoryMutation` also does the
-                              // client-side selection, not just the server-side
-                              // call: once login is on, `world.storyId`
-                              // resolution happens per-request from *this user's*
-                              // own stories (`worldFor`, `src/store/index.ts`),
-                              // not from the legacy shared pointer `switchTo`
-                              // still updates for login-off compatibility. Without
-                              // this, every request after a successful switch
-                              // would keep resolving back to "my most recently
-                              // played" rather than the one just picked.
-                              await switchStoryMutation.mutateAsync(s.id);
-                              onSwitched();
-                            })}
+                            onClick={() =>
+                              void run(s.id, 'switch', async () => {
+                                // `useSwitchStoryMutation` also does the
+                                // client-side selection, not just the server-side
+                                // call: once login is on, `world.storyId`
+                                // resolution happens per-request from *this user's*
+                                // own stories (`worldFor`, `src/store/index.ts`),
+                                // not from the legacy shared pointer `switchTo`
+                                // still updates for login-off compatibility. Without
+                                // this, every request after a successful switch
+                                // would keep resolving back to "my most recently
+                                // played" rather than the one just picked.
+                                await switchStoryMutation.mutateAsync(s.id);
+                                onSwitched();
+                              })
+                            }
                           >
                             {s.current ? 'reading' : 'open'}
                           </button>
@@ -2742,9 +2982,18 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
                           <button
                             className="warn"
                             disabled={stories.length <= 1 || busy === `${s.id}delete`}
-                            title={stories.length <= 1 ? 'the last story in a world cannot be deleted this way' : 'delete this story only — canon and every other story are unaffected'}
+                            title={
+                              stories.length <= 1
+                                ? 'the last story in a world cannot be deleted this way'
+                                : 'delete this story only — canon and every other story are unaffected'
+                            }
                             onClick={async () => {
-                              if (!window.confirm(`Delete "${s.title || 'untitled story'}"? This only removes this one story — canon and other stories are unaffected.`)) return;
+                              if (
+                                !window.confirm(
+                                  `Delete "${s.title || 'untitled story'}"? This only removes this one story — canon and other stories are unaffected.`,
+                                )
+                              )
+                                return;
                               await run(s.id, 'delete', async () => {
                                 await removeStoryMutation.mutateAsync(s.id);
                               });
@@ -2812,15 +3061,17 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
           <div className="card">
             <h3>start a new book</h3>
             <p className="hint">
-              A fresh playthrough of <em>this</em> world — same canon, no history. To start a different world
-              instead, add one above. Currently at scene/turn {currentSceneTurn}.
+              A fresh playthrough of <em>this</em> world — same canon, no history. To start a different world instead,
+              add one above. Currently at scene/turn {currentSceneTurn}.
             </p>
             <button
               className="primary"
               disabled={busy === 'new'}
-              onClick={() => void run('new', 'create', async () => {
-                await createStoryMutation.mutateAsync(undefined);
-              })}
+              onClick={() =>
+                void run('new', 'create', async () => {
+                  await createStoryMutation.mutateAsync(undefined);
+                })
+              }
             >
               new book
             </button>
@@ -2830,28 +3081,44 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
             <div className="card">
               <h3>branch "{forkFrom.title || 'untitled story'}"</h3>
               <p className="hint">
-                Leave the scene blank for a fresh story sharing only canon. Give a scene number to copy that
-                story's chronicle up to (not including) that scene — a continuation from an earlier point, with
-                the original left exactly as it was.
+                Leave the scene blank for a fresh story sharing only canon. Give a scene number to copy that story's
+                chronicle up to (not including) that scene — a continuation from an earlier point, with the original
+                left exactly as it was.
               </p>
               <label className="field-row">
                 <span>title</span>
-                <input value={forkTitle} onChange={(e) => setForkTitle(e.target.value)} placeholder={`${forkFrom.title || 'untitled story'} (fork)`} />
+                <input
+                  value={forkTitle}
+                  onChange={(e) => setForkTitle(e.target.value)}
+                  placeholder={`${forkFrom.title || 'untitled story'} (fork)`}
+                />
               </label>
               <label className="field-row">
                 <span>continue from scene</span>
-                <input value={forkScene} onChange={(e) => setForkScene(e.target.value)} placeholder="leave blank for a fresh story" inputMode="numeric" />
+                <input
+                  value={forkScene}
+                  onChange={(e) => setForkScene(e.target.value)}
+                  placeholder="leave blank for a fresh story"
+                  inputMode="numeric"
+                />
               </label>
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 <button
                   className="primary"
                   disabled={busy === `${forkFrom.id}fork`}
-                  onClick={() => void run(forkFrom.id, 'fork', async () => {
-                    const scene = forkScene.trim() ? Number(forkScene.trim()) : undefined;
-                    if (scene !== undefined && (!Number.isFinite(scene) || scene < 1)) throw new Error('scene must be a number of 1 or greater');
-                    await forkStoryMutation.mutateAsync({ fromStoryId: forkFrom.id, title: forkTitle.trim() || undefined, atScene: scene });
-                    setForkFrom(null);
-                  })}
+                  onClick={() =>
+                    void run(forkFrom.id, 'fork', async () => {
+                      const scene = forkScene.trim() ? Number(forkScene.trim()) : undefined;
+                      if (scene !== undefined && (!Number.isFinite(scene) || scene < 1))
+                        throw new Error('scene must be a number of 1 or greater');
+                      await forkStoryMutation.mutateAsync({
+                        fromStoryId: forkFrom.id,
+                        title: forkTitle.trim() || undefined,
+                        atScene: scene,
+                      });
+                      setForkFrom(null);
+                    })
+                  }
                 >
                   create branch
                 </button>
@@ -2863,13 +3130,18 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
           <div className="card">
             <h3>start this book over</h3>
             <p className="hint warn">
-              Discards <em>this book</em> — its scenes, prose and everything that happened in it — and gives you
-              a blank one reading the same worlds. Canon stays. Other books stay. This is not undoable.
+              Discards <em>this book</em> — its scenes, prose and everything that happened in it — and gives you a blank
+              one reading the same worlds. Canon stays. Other books stay. This is not undoable.
             </p>
             <button
               className="warn"
               onClick={async () => {
-                if (!window.confirm('Discard this book and start a blank one? Its scenes and prose go; canon and every other book stay.')) return;
+                if (
+                  !window.confirm(
+                    'Discard this book and start a blank one? Its scenes and prose go; canon and every other book stay.',
+                  )
+                )
+                  return;
                 await resetMutation.mutateAsync();
                 onResetToWizard();
               }}
@@ -2881,19 +3153,24 @@ function StoriesTab({ currentSceneTurn, onSwitched, onResetToWizard }: {
           <div className="card">
             <h3>rebuild canon</h3>
             <p className="hint">
-              Empties the canon of the world this book reads, so the setup wizard can ingest it again — for a
-              wiki that has moved on, or an ingest that went wrong. <b>Nothing you have written is touched:</b>{' '}
-              every book keeps its scenes and prose. Until the world is ingested again those books will
-              reference characters that no longer resolve, which the integrity check reports plainly.
+              Empties the canon of the world this book reads, so the setup wizard can ingest it again — for a wiki that
+              has moved on, or an ingest that went wrong. <b>Nothing you have written is touched:</b> every book keeps
+              its scenes and prose. Until the world is ingested again those books will reference characters that no
+              longer resolve, which the integrity check reports plainly.
             </p>
             <button
               className="warn"
               disabled={busy === 'rebuild'}
-              onClick={() => void run('canon', 'rebuild', async () => {
-                if (!window.confirm('Empty this world\u2019s canon so it can be ingested again? No prose is deleted.')) return;
-                await rebuildCanonMutation.mutateAsync();
-                onResetToWizard();
-              })}
+              onClick={() =>
+                void run('canon', 'rebuild', async () => {
+                  if (
+                    !window.confirm('Empty this world\u2019s canon so it can be ingested again? No prose is deleted.')
+                  )
+                    return;
+                  await rebuildCanonMutation.mutateAsync();
+                  onResetToWizard();
+                })
+              }
             >
               {busy === 'canonrebuild' ? 'rebuilding…' : 'rebuild canon'}
             </button>
@@ -2918,22 +3195,31 @@ function UsagePanel({ usage }: { usage: State['usage'] | null }) {
       </div>
     );
   }
-  const roles = Object.entries(usage.byRole).sort((a, b) => (b[1].tokensIn + b[1].tokensOut) - (a[1].tokensIn + a[1].tokensOut));
+  const roles = Object.entries(usage.byRole).sort(
+    (a, b) => b[1].tokensIn + b[1].tokensOut - (a[1].tokensIn + a[1].tokensOut),
+  );
   return (
     <div className="card">
       <h3>session usage</h3>
       <dl className="kv small">
-        <dt>calls</dt><dd>{usage.calls}</dd>
-        <dt>tokens in</dt><dd>{usage.tokensIn.toLocaleString()}</dd>
-        <dt>tokens out</dt><dd>{usage.tokensOut.toLocaleString()}</dd>
+        <dt>calls</dt>
+        <dd>{usage.calls}</dd>
+        <dt>tokens in</dt>
+        <dd>{usage.tokensIn.toLocaleString()}</dd>
+        <dt>tokens out</dt>
+        <dd>{usage.tokensOut.toLocaleString()}</dd>
       </dl>
       {roles.length ? (
         <>
-          <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>by role</h3>
+          <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>
+            by role
+          </h3>
           {roles.map(([role, r]) => (
             <div key={role} className="row small">
               <span className="grow dim">{role}</span>
-              <span className="mono dimmer">{r.calls}× {r.tokensIn.toLocaleString()}→{r.tokensOut.toLocaleString()}</span>
+              <span className="mono dimmer">
+                {r.calls}× {r.tokensIn.toLocaleString()}→{r.tokensOut.toLocaleString()}
+              </span>
             </div>
           ))}
         </>
@@ -2991,7 +3277,10 @@ function IngestHealthPanel({ onChanged }: { worldTitle: string | undefined; onCh
       try {
         const overrides: { seeds?: string[]; mode?: string; maxPages?: number } = {};
         if (widen) {
-          const added = moreSeeds.split(',').map((s) => s.trim()).filter(Boolean);
+          const added = moreSeeds
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
           if (added.length && health?.context) overrides.seeds = [...health.context.seeds, ...added];
           if (deeper && health?.context) overrides.mode = nextMode(health.context.mode);
           // Re-crawls at the wider budget; every page Pass B already finished
@@ -3015,8 +3304,12 @@ function IngestHealthPanel({ onChanged }: { worldTitle: string | undefined; onCh
   return (
     <div className="card">
       <div className="row">
-        <h3 className="grow" style={{ margin: 0 }}>reading {context?.wikiName}</h3>
-        <button disabled={busy} onClick={() => void healthQuery.refetch()}>refresh</button>
+        <h3 className="grow" style={{ margin: 0 }}>
+          reading {context?.wikiName}
+        </h3>
+        <button disabled={busy} onClick={() => void healthQuery.refetch()}>
+          refresh
+        </button>
       </div>
 
       {error ? <p className="small warn">{error}</p> : null}
@@ -3045,7 +3338,9 @@ function IngestHealthPanel({ onChanged }: { worldTitle: string | undefined; onCh
           <div className="progress-stage">
             {job.progress.stage}
             {jobPercent(job) === null ? null : (
-              <span className="dimmer mono" style={{ marginLeft: 8 }}>{jobPercent(job)}%</span>
+              <span className="dimmer mono" style={{ marginLeft: 8 }}>
+                {jobPercent(job)}%
+              </span>
             )}
           </div>
           {job.progress.detail ? <div className="dim small">{job.progress.detail}</div> : null}
@@ -3070,11 +3365,15 @@ function IngestHealthPanel({ onChanged }: { worldTitle: string | undefined; onCh
           </button>
         </div>
       ) : (
-        <p className="small dim" style={{ marginTop: 'var(--s2)' }}>Fully read at {context?.mode} mode.</p>
+        <p className="small dim" style={{ marginTop: 'var(--s2)' }}>
+          Fully read at {context?.mode} mode.
+        </p>
       )}
 
       <details style={{ marginTop: 'var(--s3)' }}>
-        <summary className="small dim" style={{ cursor: 'pointer' }}>read more</summary>
+        <summary className="small dim" style={{ cursor: 'pointer' }}>
+          read more
+        </summary>
         <div style={{ marginTop: 'var(--s2)' }}>
           <label className="field-row">
             <span>more seeds</span>
@@ -3104,12 +3403,17 @@ function IngestHealthPanel({ onChanged }: { worldTitle: string | undefined; onCh
               <span>go deeper</span>
               <span className="row" style={{ alignItems: 'center', gap: 'var(--s2)' }}>
                 <input type="checkbox" checked={deeper} onChange={(e) => setDeeper(e.target.checked)} />
-                <span className="small dimmer">{context.mode} → {nextMode(context.mode)}</span>
+                <span className="small dimmer">
+                  {context.mode} → {nextMode(context.mode)}
+                </span>
               </span>
             </label>
           ) : null}
           <div className="row" style={{ marginTop: 'var(--s2)' }}>
-            <button disabled={busy || job?.status === 'running' || (!moreSeeds.trim() && !deeper && !morePages)} onClick={() => start(true)}>
+            <button
+              disabled={busy || job?.status === 'running' || (!moreSeeds.trim() && !deeper && !morePages)}
+              onClick={() => start(true)}
+            >
               read more
             </button>
           </div>
@@ -3163,7 +3467,9 @@ function ImageProvidersPanel() {
   return (
     <div className="card">
       <div className="row">
-        <h3 className="grow" style={{ margin: 0 }}>illustration</h3>
+        <h3 className="grow" style={{ margin: 0 }}>
+          illustration
+        </h3>
         <button disabled={busy} onClick={() => void reportQuery.refetch()}>
           {busy ? 'checking…' : 'recheck'}
         </button>
@@ -3192,7 +3498,9 @@ function ImageProvidersPanel() {
               {r.fix ? <span className="provider-fix">→ {r.fix}</span> : null}
             </div>
           ))}
-          <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>switch provider</h3>
+          <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>
+            switch provider
+          </h3>
           <div className="row wrap">
             <button
               className={report.profile === 'none' ? 'primary' : ''}
@@ -3255,7 +3563,9 @@ function ProvidersPanel() {
   return (
     <div className="card">
       <div className="row">
-        <h3 className="grow" style={{ margin: 0 }}>models available here</h3>
+        <h3 className="grow" style={{ margin: 0 }}>
+          models available here
+        </h3>
         <button disabled={busy} onClick={() => void reportQuery.refetch()}>
           {busy ? 'checking…' : report ? 'recheck' : 'check'}
         </button>
@@ -3273,7 +3583,9 @@ function ProvidersPanel() {
         <>
           <p className="small dim" style={{ marginTop: 8 }}>
             profile <b>{report.profile}</b>
-            {report.usableProfiles.length ? ` · usable now: ${report.usableProfiles.join(', ')}` : ' · nothing but the mock is usable'}
+            {report.usableProfiles.length
+              ? ` · usable now: ${report.usableProfiles.join(', ')}`
+              : ' · nothing but the mock is usable'}
           </p>
           {report.results.map((r) => (
             <div key={r.key} className="provider">
@@ -3286,9 +3598,14 @@ function ProvidersPanel() {
           ))}
           {report.usableProfiles.length ? (
             <>
-              <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>switch profile</h3>
+              <h3 className="eyebrow rule" style={{ marginTop: 'var(--s4)' }}>
+                switch profile
+              </h3>
               <div className="row wrap">
-                {(report.usableProfiles.includes('mock') ? report.usableProfiles : [...report.usableProfiles, 'mock']).map((name) => (
+                {(report.usableProfiles.includes('mock')
+                  ? report.usableProfiles
+                  : [...report.usableProfiles, 'mock']
+                ).map((name) => (
                   <button
                     key={name}
                     className={name === report.profile ? 'primary' : ''}

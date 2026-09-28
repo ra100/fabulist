@@ -72,8 +72,8 @@ test('one statement records a call and stamps the key it used', async (t) => {
   const ran = await withPg(async (db, _schema, roles) => {
     const keyId = '00000000-0000-4000-8000-000000000001';
     await db.query(
-      `INSERT INTO user_provider_keys (id, user_id, endpoint_id, models, trust, nonce, ciphertext, key_hint)
-       VALUES ($1, 'user:alice', 'openai', '{"narrate":"gpt-test"}', 'sealed', $2, $3, 'abcd')`,
+      `INSERT INTO user_provider_keys (id, user_id, endpoint_id, trust, nonce, ciphertext, key_hint)
+       VALUES ($1, 'user:alice', 'openai', 'sealed', $2, $3, 'abcd')`,
       [keyId, Buffer.alloc(12, 1), Buffer.alloc(40, 2)],
     );
     let statements = 0;

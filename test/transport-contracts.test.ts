@@ -7,6 +7,8 @@ import {
   encryptionUnlockBodySchema,
   illustrationBodySchema,
   providerKeyBodySchema,
+  providerKeyTestBodySchema,
+  providerModelAssignmentsBodySchema,
   knowledgeBodySchema,
   playResponseSchema,
   rollbackBodySchema,
@@ -48,88 +50,109 @@ test('mutation contracts reject unknown fields and invalid nested values', () =>
 
 test('mutation contracts preserve documented defaults and valid clients', () => {
   assert.deepEqual(worldAccessBodySchema.parse({ userId: 'user:a' }), { userId: 'user:a' });
-  assert.deepEqual(setupPreviewBodySchema.parse({
-    baseUrl: 'https://example.test/wiki',
-    seeds: ['Start'],
-  }), {
-    baseUrl: 'https://example.test/wiki',
-    seeds: ['Start'],
-  });
+  assert.deepEqual(
+    setupPreviewBodySchema.parse({
+      baseUrl: 'https://example.test/wiki',
+      seeds: ['Start'],
+    }),
+    {
+      baseUrl: 'https://example.test/wiki',
+      seeds: ['Start'],
+    },
+  );
   assert.deepEqual(illustrationBodySchema.parse({}), {});
   assert.deepEqual(rollbackBodySchema.parse({ turnId: 'turn:2', mode: 'destructive' }), {
     turnId: 'turn:2',
     mode: 'destructive',
   });
   assert.deepEqual(splitSceneBodySchema.parse({ turnId: 'turn:2' }), { turnId: 'turn:2' });
-  assert.equal(encryptionEnrollmentBodySchema.safeParse({
-    userKey: {
-      version: 1,
-      passphraseKdf: 'pbkdf2-sha256',
-      passphraseKdfParams: { iterations: 600_000 },
-      passphraseSalt: 'AAAAAAAAAAAAAAAAAAAAAA==',
-      passphraseWrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
-      recoverySalt: 'AAAAAAAAAAAAAAAAAAAAAA==',
-      recoveryWrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
-      recoveryCodeHint: 'abcdefgh',
-    },
-    storyKeys: [{
-      storyId: 'story-private',
-      version: 1,
-      wrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
-    }],
-  }).success, true);
+  assert.equal(
+    encryptionEnrollmentBodySchema.safeParse({
+      userKey: {
+        version: 1,
+        passphraseKdf: 'pbkdf2-sha256',
+        passphraseKdfParams: { iterations: 600_000 },
+        passphraseSalt: 'AAAAAAAAAAAAAAAAAAAAAA==',
+        passphraseWrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+        recoverySalt: 'AAAAAAAAAAAAAAAAAAAAAA==',
+        recoveryWrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+        recoveryCodeHint: 'abcdefgh',
+      },
+      storyKeys: [
+        {
+          storyId: 'story-private',
+          version: 1,
+          wrap: { nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+        },
+      ],
+    }).success,
+    true,
+  );
   assert.deepEqual(encryptionLockBodySchema.parse({}), {});
-  assert.equal(encryptionUnlockBodySchema.safeParse({
-    storyKeys: [{ storyId: 'story-private', key: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }],
-  }).success, true);
+  assert.equal(
+    encryptionUnlockBodySchema.safeParse({
+      storyKeys: [{ storyId: 'story-private', key: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }],
+    }).success,
+    true,
+  );
 });
 
 test('play response contract detects server drift', () => {
-  assert.equal(playResponseSchema.safeParse({
-    outcome: {
-      kind: 'interrupted',
-      interrupt: { message: 'Choose', options: [] },
-      distance: 'near',
-      reasoning: 'A vow applies',
-    },
-    seeded: 0,
-    tick: null,
-  }).success, true);
-  assert.equal(playResponseSchema.safeParse({
-    outcome: { kind: 'narrated', prose: 'Done', turn: {} },
-    seeded: 'zero',
-    tick: null,
-  }).success, false);
+  assert.equal(
+    playResponseSchema.safeParse({
+      outcome: {
+        kind: 'interrupted',
+        interrupt: { message: 'Choose', options: [] },
+        distance: 'near',
+        reasoning: 'A vow applies',
+      },
+      seeded: 0,
+      tick: null,
+    }).success,
+    true,
+  );
+  assert.equal(
+    playResponseSchema.safeParse({
+      outcome: { kind: 'narrated', prose: 'Done', turn: {} },
+      seeded: 'zero',
+      tick: null,
+    }).success,
+    false,
+  );
 });
 
 test('state response contract detects drift in critical counters and session data', () => {
-  assert.equal(stateResponseSchema.safeParse({
-    worldTitle: 'Test',
-    session: {
-      scene: 'one',
-      turn: 0,
-      playerCharacterId: '',
-      currentLocationId: null,
-      style: {},
-      knobs: {},
-    },
-    counts: { entities: 1, edges: 0, canon: 1, chronicle: 0 },
-    scenes: [],
-    threads: [],
-    directives: [],
-    pendingConsequences: 0,
-    hiddenFired: 0,
-    divergences: [],
-    usage: { tokensIn: 0, tokensOut: 0, calls: 0, byRole: {} },
-  }).success, false);
+  assert.equal(
+    stateResponseSchema.safeParse({
+      worldTitle: 'Test',
+      session: {
+        scene: 'one',
+        turn: 0,
+        playerCharacterId: '',
+        currentLocationId: null,
+        style: {},
+        knobs: {},
+      },
+      counts: { entities: 1, edges: 0, canon: 1, chronicle: 0 },
+      scenes: [],
+      threads: [],
+      directives: [],
+      pendingConsequences: 0,
+      hiddenFired: 0,
+      divergences: [],
+      usage: { tokensIn: 0, tokensOut: 0, calls: 0, byRole: {} },
+    }).success,
+    false,
+  );
 });
 
 test('browser play rejects malformed successful JSON responses', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response('not-json', {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
-  });
+  globalThis.fetch = async () =>
+    new Response('not-json', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
   try {
     await assert.rejects(api.play('wait'), /malformed JSON response from \/play/);
   } finally {
@@ -139,10 +162,11 @@ test('browser play rejects malformed successful JSON responses', async () => {
 
 test('browser streaming play reports response drift instead of calling onDone', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(
-    'event: done\ndata: {"outcome":{"kind":"narrated","prose":"Done","turn":{}},"seeded":"zero","tick":null}\n\n',
-    { status: 200, headers: { 'content-type': 'text/event-stream' } },
-  );
+  globalThis.fetch = async () =>
+    new Response(
+      'event: done\ndata: {"outcome":{"kind":"narrated","prose":"Done","turn":{}},"seeded":"zero","tick":null}\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
   const errors: string[] = [];
   let completed = false;
   try {
@@ -162,10 +186,11 @@ test('browser streaming play reports response drift instead of calling onDone', 
 
 test('browser streaming play reports a closed stream without a terminal event', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(
-    'event: stage\ndata: {"stage":"writing"}\n\n',
-    { status: 200, headers: { 'content-type': 'text/event-stream', 'x-request-id': 'request-1234' } },
-  );
+  globalThis.fetch = async () =>
+    new Response('event: stage\ndata: {"stage":"writing"}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'x-request-id': 'request-1234' },
+    });
   const errors: string[] = [];
   try {
     await api.playStream('wait', false, { onError: (message) => errors.push(message) });
@@ -213,21 +238,52 @@ test('browser streaming play aborts in-flight fetches without stale callbacks', 
 
 test('provider-key contracts reject custom base URLs and accept a provider-only unlock', () => {
   const id = '00000000-0000-4000-8000-000000000001';
-  const sealed = { id, endpointId: 'openai', models: { narrate: 'gpt-test' }, trust: 'sealed', key: 'sk-test-0123456789' };
+  const sealed = { id, endpointId: 'openai', trust: 'sealed', key: 'sk-test-0123456789' };
   assert.equal(providerKeyBodySchema.safeParse(sealed).success, true);
   assert.equal(providerKeyBodySchema.safeParse({ ...sealed, baseUrl: 'http://169.254.169.254/v1' }).success, false);
   assert.equal(providerKeyBodySchema.safeParse({ ...sealed, id: 'not-a-uuid' }).success, false);
   assert.equal(providerKeyBodySchema.safeParse({ ...sealed, key: 'has space in it' }).success, false);
-  assert.equal(providerKeyBodySchema.safeParse({ ...sealed, models: { narrate: '../../etc' } }).success, false);
-  assert.equal(encryptionUnlockBodySchema.safeParse({ providerKeys: [{ keyId: id, key: 'sk-test-0123456789' }] }).success, true);
+  assert.equal(providerKeyBodySchema.safeParse({ ...sealed, models: { narrate: 'unexpected' } }).success, false);
+  assert.equal(providerKeyTestBodySchema.safeParse({ endpointId: 'openai', key: 'sk-test-0123456789' }).success, true);
+  assert.equal(
+    providerKeyTestBodySchema.safeParse({ endpointId: 'openai', model: 'gpt-test', key: 'sk-test-0123456789' }).success,
+    false,
+  );
+  assert.equal(
+    providerModelAssignmentsBodySchema.safeParse({
+      assignments: [{ role: 'narrate', providerKeyId: id, model: 'gpt-test' }],
+    }).success,
+    true,
+  );
+  assert.equal(
+    providerModelAssignmentsBodySchema.safeParse({
+      assignments: [
+        { role: 'narrate', providerKeyId: id, model: 'gpt-test' },
+        { role: 'narrate', providerKeyId: id, model: 'gpt-other' },
+      ],
+    }).success,
+    false,
+  );
+  assert.equal(
+    encryptionUnlockBodySchema.safeParse({ providerKeys: [{ keyId: id, key: 'sk-test-0123456789' }] }).success,
+    true,
+  );
   assert.equal(encryptionUnlockBodySchema.safeParse({}).success, false, 'nothing to unlock');
-  const unlock = { id, endpointId: 'openai', models: { narrate: 'gpt-test' }, trust: 'unlock', keyHint: 'abcd' };
+  const unlock = { id, endpointId: 'openai', trust: 'unlock', keyHint: 'abcd' };
   const wrap = (nonceBytes: number, ciphertextBytes: number) => ({
     nonce: Buffer.alloc(nonceBytes).toString('base64'),
     ciphertext: Buffer.alloc(ciphertextBytes).toString('base64'),
   });
   assert.equal(providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(12, 528) }).success, true);
-  assert.equal(providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(12, 529) }).success, false, 'wrap larger than a 512-byte key');
+  assert.equal(
+    providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(12, 529) }).success,
+    false,
+    'wrap larger than a 512-byte key',
+  );
   assert.equal(providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(12, 750_000) }).success, false);
-  assert.equal(providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(24, 48) }).success, false, 'nonce must be 12 bytes');
+  assert.equal(
+    providerKeyBodySchema.safeParse({ ...unlock, wrap: wrap(24, 48) }).success,
+    false,
+    'nonce must be 12 bytes',
+  );
 });

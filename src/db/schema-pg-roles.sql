@@ -119,7 +119,7 @@ DECLARE
     'encrypted_story_values', 'chron_entity_blind_indexes',
     'user_private_story_migrations', 'story_private_story_migrations',
     -- Per-user BYOK keys (ciphertext only) and the usage they meter.
-    'user_provider_keys', 'usage_events'];
+    'user_provider_keys', 'user_provider_model_assignments', 'usage_events'];
   system_tables TEXT[] := ARRAY[
     -- `world_access` is system data: who may see a world is not something a play
     -- connection may edit, or a user could grant themselves access to a private

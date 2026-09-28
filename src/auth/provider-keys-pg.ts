@@ -3,10 +3,24 @@ import type { Queryable } from '../db/pg.ts';
 
 export type ProviderTrust = 'unlock' | 'sealed';
 
-export interface ProviderModels {
-  narrate: string;
-  mechanics?: string;
-  extract?: string;
+export const PROVIDER_MODEL_ROLES = [
+  'narrate',
+  'classify',
+  'integrity',
+  'referee',
+  'director',
+  'humanize',
+  'summarize',
+  'setup',
+  'extract',
+  'passb',
+] as const;
+export type ProviderModelRole = (typeof PROVIDER_MODEL_ROLES)[number];
+
+export interface ProviderModelAssignment {
+  role: ProviderModelRole;
+  providerKeyId: string;
+  model: string;
 }
 
 export interface ProviderKeyRow {
@@ -14,7 +28,6 @@ export interface ProviderKeyRow {
   userId: string;
   label: string;
   endpointId: string;
-  models: ProviderModels;
   trust: ProviderTrust;
   nonce: Buffer;
   ciphertext: Buffer;
@@ -32,7 +45,6 @@ interface Row extends QueryResultRow {
   user_id: string;
   label: string;
   endpoint_id: string;
-  models: ProviderModels;
   trust: ProviderTrust;
   nonce: Buffer;
   ciphertext: Buffer;
@@ -42,13 +54,18 @@ interface Row extends QueryResultRow {
   last_used_at: Date | null;
 }
 
+interface AssignmentRow extends QueryResultRow {
+  role: ProviderModelRole;
+  provider_key_id: string;
+  model_id: string;
+}
+
 function fromRow(r: Row): ProviderKeyRow {
   return {
     id: r.id,
     userId: r.user_id,
     label: r.label,
     endpointId: r.endpoint_id,
-    models: r.models,
     trust: r.trust,
     nonce: r.nonce,
     ciphertext: r.ciphertext,
@@ -60,31 +77,76 @@ function fromRow(r: Row): ProviderKeyRow {
 }
 
 // Every statement filters by user_id: this module is the owner-only boundary (the schema has no RLS).
-export async function providerKeyFor(db: Queryable, userId: string): Promise<ProviderKeyRow | null> {
+export async function providerKeysFor(db: Queryable, userId: string): Promise<ProviderKeyRow[]> {
   const { rows } = await db.query<Row>(
-    `SELECT id, user_id, label, endpoint_id, models, trust, nonce, ciphertext, key_hint, version, created_at, last_used_at
+    `SELECT id, user_id, label, endpoint_id, trust, nonce, ciphertext, key_hint, version, created_at, last_used_at
        FROM user_provider_keys
-      WHERE user_id = $1`,
+      WHERE user_id = $1
+      ORDER BY created_at, id`,
     [userId],
+  );
+  return rows.map(fromRow);
+}
+
+export async function providerKeyFor(db: Queryable, userId: string, keyId: string): Promise<ProviderKeyRow | null> {
+  const { rows } = await db.query<Row>(
+    `SELECT id, user_id, label, endpoint_id, trust, nonce, ciphertext, key_hint, version, created_at, last_used_at
+       FROM user_provider_keys
+      WHERE user_id = $1 AND id = $2`,
+    [userId, keyId],
   );
   return rows[0] ? fromRow(rows[0]) : null;
 }
 
 export async function saveProviderKey(db: Queryable, key: NewProviderKey): Promise<void> {
   await db.query(
-    `INSERT INTO user_provider_keys (id, user_id, label, endpoint_id, models, trust, nonce, ciphertext, key_hint)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
-     ON CONFLICT (user_id) DO UPDATE SET
-       id = EXCLUDED.id, label = EXCLUDED.label, endpoint_id = EXCLUDED.endpoint_id, models = EXCLUDED.models,
-       trust = EXCLUDED.trust, nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext,
-       key_hint = EXCLUDED.key_hint, version = gen_random_uuid(), created_at = now(), last_used_at = NULL`,
-    [key.id, key.userId, key.label, key.endpointId, JSON.stringify(key.models), key.trust, key.nonce, key.ciphertext, key.keyHint],
+    `INSERT INTO user_provider_keys (id, user_id, label, endpoint_id, trust, nonce, ciphertext, key_hint)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [key.id, key.userId, key.label, key.endpointId, key.trust, key.nonce, key.ciphertext, key.keyHint],
   );
 }
 
-export async function deleteProviderKey(db: Queryable, userId: string): Promise<boolean> {
-  const { rowCount } = await db.query(`DELETE FROM user_provider_keys WHERE user_id = $1`, [userId]);
+export async function deleteProviderKey(db: Queryable, userId: string, keyId: string): Promise<boolean> {
+  const { rowCount } = await db.query(`DELETE FROM user_provider_keys WHERE user_id = $1 AND id = $2`, [userId, keyId]);
   return (rowCount ?? 0) > 0;
+}
+
+export async function providerModelAssignmentsFor(db: Queryable, userId: string): Promise<ProviderModelAssignment[]> {
+  const { rows } = await db.query<AssignmentRow>(
+    `SELECT role, provider_key_id, model_id
+       FROM user_provider_model_assignments
+      WHERE user_id = $1
+      ORDER BY role`,
+    [userId],
+  );
+  return rows.map((row) => ({ role: row.role, providerKeyId: row.provider_key_id, model: row.model_id }));
+}
+
+export async function saveProviderModelAssignments(
+  db: Queryable,
+  userId: string,
+  assignments: ProviderModelAssignment[],
+): Promise<void> {
+  const json = JSON.stringify(
+    assignments.map(({ role, providerKeyId, model }) => ({ role, provider_key_id: providerKeyId, model_id: model })),
+  );
+  await db.query(
+    `WITH desired AS (
+       SELECT role, provider_key_id, model_id
+         FROM jsonb_to_recordset($2::jsonb) AS d(role text, provider_key_id text, model_id text)
+     ), upserted AS (
+       INSERT INTO user_provider_model_assignments (user_id, role, provider_key_id, model_id)
+       SELECT $1, role, provider_key_id, model_id FROM desired
+       ON CONFLICT (user_id, role) DO UPDATE SET
+         provider_key_id = EXCLUDED.provider_key_id, model_id = EXCLUDED.model_id, updated_at = now()
+       RETURNING role
+     )
+     DELETE FROM user_provider_model_assignments existing
+      WHERE existing.user_id = $1
+        AND NOT EXISTS (SELECT 1 FROM desired WHERE desired.role = existing.role)
+        AND (SELECT count(*) FROM upserted) >= 0`,
+    [userId, json],
+  );
 }
 
 export function summarizeProviderKey(row: ProviderKeyRow): ProviderKeySummary {

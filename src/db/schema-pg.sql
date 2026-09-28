@@ -373,24 +373,41 @@ CREATE TABLE IF NOT EXISTS encrypted_story_values (
   PRIMARY KEY (story_id, table_name, record_id, field_name)
 );
 
--- A user's own model-provider key. Plaintext never lands here: `unlock` rows hold
--- a browser wrap under the user's master key, `sealed` rows a server wrap under
--- FABULIST_SECRETS_KEY. One key per user; a save replaces the row with a new id.
+-- A user's own model-provider credentials. Plaintext never lands here:
+-- unlock rows hold a browser wrap, sealed rows a server wrap.
 CREATE TABLE IF NOT EXISTS user_provider_keys (
   id            TEXT PRIMARY KEY,
-  user_id       TEXT NOT NULL UNIQUE,
+  user_id       TEXT NOT NULL,
   label         TEXT NOT NULL DEFAULT '',
   endpoint_id   TEXT NOT NULL,
-  models        JSONB NOT NULL,
   trust         TEXT NOT NULL CHECK (trust IN ('unlock', 'sealed')),
   nonce         BYTEA NOT NULL CHECK (octet_length(nonce) = 12),
   ciphertext    BYTEA NOT NULL CHECK (octet_length(ciphertext) BETWEEN 17 AND 528),
   key_hint      TEXT NOT NULL CHECK (char_length(key_hint) <= 4),
-  -- Server-minted per write: `id` is client-chosen, so it cannot tell a replace from the original.
   version       UUID NOT NULL DEFAULT gen_random_uuid(),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_used_at  TIMESTAMPTZ
+  last_used_at  TIMESTAMPTZ,
+  UNIQUE (id, user_id)
 );
+
+-- Each role can be assigned a model from one saved credential. Deleting that
+-- credential clears its assignments through the composite ownership FK.
+CREATE TABLE IF NOT EXISTS user_provider_model_assignments (
+  user_id        TEXT NOT NULL,
+  role           TEXT NOT NULL CHECK (role IN (
+    'narrate', 'classify', 'integrity', 'referee', 'director',
+    'humanize', 'summarize', 'setup', 'extract', 'passb'
+  )),
+  provider_key_id TEXT NOT NULL,
+  model_id        TEXT NOT NULL CHECK (char_length(model_id) BETWEEN 1 AND 200),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, role),
+  FOREIGN KEY (provider_key_id, user_id)
+    REFERENCES user_provider_keys (id, user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_provider_model_assignments_key
+  ON user_provider_model_assignments (provider_key_id, user_id);
 
 -- One row per provider call made for a signed-in user. `story_id` has no FK on
 -- purpose: spent tokens stay spent when a story is deleted or rolled back.
