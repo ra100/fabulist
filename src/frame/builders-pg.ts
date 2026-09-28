@@ -27,6 +27,7 @@
  * SQLite version. They never touched the database; only the code that fed them
  * did.
  */
+import { ACTIVE_THREAD_BUDGET } from '../domain/thread-policy.ts';
 import type {
   CharacterSheet,
   Consequence,
@@ -330,7 +331,7 @@ export async function loadFrameData(
       session.playerCharacterId ? world.chronicle.factsUnknownTo(session.playerCharacterId, 12) : Promise.resolve([]),
       world.chronicle.divergences(),
       world.chronicle.anchors(3),
-      world.threads.open(),
+      world.threads.open(ACTIVE_THREAD_BUDGET),
       world.directives.active(),
       world.consequences.pending(),
       world.graph.list({ limit: opts.otherLimit ?? 40, minSalience: 0.2 }),
@@ -572,7 +573,7 @@ export function buildExtractFrame(ctx: FrameContext, data: FrameData, prose: str
     { name: 'actor', priority: Priority.agreedBeat, content: session.playerCharacterId, evictable: false },
     { name: 'location', priority: Priority.locationCard, content: session.currentLocationId ?? '', evictable: false },
     { name: 'known-ids', priority: Priority.presentCast, content: ids.map((id) => { const e = data.entities.get(id); return e ? `${e.id} = ${e.name}` : id; }).join('\n'), evictable: false, maxTokens: 800 },
-    { name: 'threads', priority: Priority.openThreads, content: data.threads.slice(0, 6).map((t) => `id=${t.id} ${t.title}`).join('\n'), maxTokens: 400 },
+    { name: 'threads', priority: Priority.openThreads, content: data.threads.slice(0, ACTIVE_THREAD_BUDGET).map((t) => `id=${t.id} ${t.title}`).join('\n'), maxTokens: 400 },
     { name: 'prose', priority: Priority.agreedBeat, content: prose, evictable: false },
     { name: 'player-input', priority: Priority.recentProse, content: ctx.rawInput ?? '', maxTokens: 300 },
   ];

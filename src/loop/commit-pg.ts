@@ -28,6 +28,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Delta, EntityId, StoryEvent, Turn, Visibility } from '../domain/types.ts';
+import { ACTIVE_THREAD_BUDGET, mergeOpenThread } from '../domain/thread-policy.ts';
 import type { Db } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
 import { storyLayout } from './history-pg.ts';
@@ -136,16 +137,24 @@ async function applyDelta(
         status: t.status ?? cur.status,
       });
     } else if (t.title) {
-      const created = await world.threads.create({
-        title: t.title,
-        stakes: t.stakes ?? '',
-        tension: Math.max(0, Math.min(1, 0.4 + (t.tensionDelta ?? 0))),
-        parties: t.parties ?? [],
-        resolutions: t.resolutions?.length ? t.resolutions : ['unresolved', 'escalates', 'fades'],
-        status: t.status ?? 'open',
-        createdScene: scene,
-      });
-      result.newThreadIds.push(created.id);
+      const duplicate = await world.threads.findOpenByTitle(t.title);
+      if (duplicate) {
+        await world.threads.update(duplicate.id, mergeOpenThread(duplicate, t));
+      } else if (
+        (t.status ?? 'open') === 'open' &&
+        (await world.threads.open(ACTIVE_THREAD_BUDGET)).length < ACTIVE_THREAD_BUDGET
+      ) {
+        const created = await world.threads.create({
+          title: t.title,
+          stakes: t.stakes ?? '',
+          tension: Math.max(0, Math.min(1, 0.4 + (t.tensionDelta ?? 0))),
+          parties: t.parties ?? [],
+          resolutions: t.resolutions?.length ? t.resolutions : ['unresolved', 'escalates', 'fades'],
+          status: 'open',
+          createdScene: scene,
+        });
+        result.newThreadIds.push(created.id);
+      }
     }
   }
 
