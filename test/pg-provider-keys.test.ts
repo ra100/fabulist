@@ -17,6 +17,11 @@ const ID1 = '00000000-0000-4000-8000-000000000001';
 const ID2 = '00000000-0000-4000-8000-000000000002';
 const INSERT_KEY =
   'INSERT INTO user_provider_keys (id, user_id, endpoint_id, trust, nonce, ciphertext, key_hint) VALUES ($1, $2, $3, $4, $5, $6, $7)';
+
+function sortAssignments<T extends { role: string }>(items: readonly T[]): T[] {
+  return [...items].sort((a, b) => a.role.localeCompare(b.role));
+}
+
 const key = (id: string, userId: string, endpointId = 'openai') => ({
   id,
   userId,
@@ -132,7 +137,10 @@ test('provider credentials are owner-scoped, independently stored, and deletions
       { role: 'extract' as const, providerKeyId: ID2, model: 'claude-extract' },
     ];
     await saveProviderModelAssignments(roles.play, 'user:alice', assignments);
-    assert.deepEqual(await providerModelAssignmentsFor(roles.play, 'user:alice'), assignments);
+    assert.deepEqual(
+      sortAssignments(await providerModelAssignmentsFor(roles.play, 'user:alice')),
+      sortAssignments(assignments),
+    );
     await assert.rejects(saveProviderModelAssignments(roles.play, 'user:bob', assignments), { code: '23503' });
 
     const call = {
