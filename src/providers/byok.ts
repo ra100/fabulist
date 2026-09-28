@@ -27,6 +27,8 @@ export const BYOK_ENDPOINTS: readonly ByokEndpoint[] = [
   { id: 'fireworks', label: 'Fireworks', kind: 'openai-compat', baseUrl: 'https://api.fireworks.ai/inference/v1' },
   { id: 'openrouter', label: 'OpenRouter', kind: 'openai-compat', baseUrl: 'https://openrouter.ai/api/v1' },
   { id: 'kilo', label: 'Kilo Code', kind: 'openai-compat', baseUrl: 'https://api.kilo.ai/api/gateway' },
+  { id: 'opencode-zen', label: 'OpenCode Zen', kind: 'openai-compat', baseUrl: 'https://opencode.ai/zen/v1' },
+  { id: 'opencode-go', label: 'OpenCode Go', kind: 'openai-compat', baseUrl: 'https://opencode.ai/zen/go/v1' },
 ];
 
 export function byokEndpoint(id: string): ByokEndpoint | undefined {

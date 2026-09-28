@@ -40,6 +40,8 @@ test('the allowlist is exactly the spec providers, all fixed https bases, only A
       'fireworks',
       'openrouter',
       'kilo',
+      'opencode-zen',
+      'opencode-go',
     ],
   );
   for (const e of BYOK_ENDPOINTS) {

@@ -471,6 +471,21 @@ principle could put your GitHub account at risk. It is implemented because it is
 credential on your machine, but nothing reaches it unless you opt in explicitly. If you
 want a supported keyless option, Bedrock and Vertex are both first-class here.
 
+**OpenCode Zen** and **OpenCode Go** are OpenCode's two hosted model gateways. Both are
+plain OpenAI-compatible, so each is one entry in your own provider list — paste a key from
+[opencode.ai/auth](https://opencode.ai/auth) and assign it to roles like any other.
+
+Zen is pay-as-you-go over a curated model list (82 at time of writing, several free); Go is
+a flat monthly subscription capped by dollar usage rather than per-token. One key covers
+both. They are user-key entries like mistral, xai, groq, together or OpenRouter, not
+operator presets: no `OPENCODE_API_KEY` is exported for you, because a shared key would put
+one person's Zen balance in front of every user.
+
+Worth knowing if you reach for `opencode serve` instead: that is a *local* headless agent
+server, not a gateway, and its `/v1/*` paths return the web app rather than an API. It is
+not supported here, and wiring it up would mean a session-based adapter rather than a
+preset.
+
 The engine assumes a **64k floor**. That is what makes the role split load-bearing rather
 than merely tidy: no single call needs the whole picture, so each frame is assembled to a
 hard token budget with a fixed eviction order. The extractor is pinned separately from the
