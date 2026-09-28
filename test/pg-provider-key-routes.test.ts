@@ -7,6 +7,7 @@ import { createStory } from '../src/store/world-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { ProviderResolver, type ProviderResolverOptions } from '../src/providers/resolver-pg.ts';
+import { BYOK_ENDPOINTS } from '../src/providers/byok.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
 import { createApiServer } from '../src/server/api-pg.ts';
 import { SESSION_COOKIE } from '../src/auth/config.ts';
@@ -174,7 +175,14 @@ test('providers can be tested before saving, loaded by selected credential, assi
         assert.equal((saved[0]!.key as Body).keyHint, 'ghij');
         assert.equal(saved[0]!.status, 'ready');
         assert.equal(JSON.stringify(read).includes(ALICE_KEY), false);
-        assert.equal((read.endpoints as unknown[]).length, 12);
+        // Counted from the allowlist rather than written as a literal: every
+        // provider added to `BYOK_ENDPOINTS` is a line here, and a test that
+        // names a number only tells you the count changed, never that the new
+        // entry was meant to be offered to users.
+        assert.deepEqual(
+          (read.endpoints as Array<{ id: string }>).map((e) => e.id).sort(),
+          [...BYOK_ENDPOINTS].map((e) => e.id).sort(),
+        );
 
         const assignments = [
           { role: 'narrate', providerKeyId: KEY1, model: 'gpt-narrate' },
