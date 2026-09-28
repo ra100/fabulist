@@ -16,7 +16,7 @@
 import { commitNarration, recommitNarration } from '../application/play.ts';
 import type { Engine } from '../loop/engine.ts';
 import { narratorSystem } from '../loop/roles.ts';
-import { recordAuthoringCheckpoint, splitSceneAtTurn } from '../loop/history.ts';
+import { recordAuthoringCheckpoint, splitSceneAtTurn, storyLayout } from '../loop/history.ts';
 import { forkStory, branchSave, branchTargetIn, rollback, type ForkOptions, type BranchOptions } from '../loop/branch.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate.ts';
 import type { IllustrationService } from '../illustration/service.ts';
@@ -1185,14 +1185,16 @@ export async function compactTool(ctx: McpToolContext, args: { scene?: number; f
 export async function closeSceneTool(ctx: McpToolContext) {
   const world = ctx.world();
   const before = world.session.get();
-  const result = await ctx.engine.compaction().onSceneClosed(before.scene);
-  world.session.set({ scene: before.scene + 1, turn: 0 });
-  world.chronicle.upsertScene(before.scene + 1, { chapter: ctx.engine.compaction().chapterOf(before.scene + 1) });
+  const closedScene = storyLayout(world).turns.at(-1)?.scene ?? before.scene;
+  const nowScene = closedScene + 1;
+  const result = await ctx.engine.compaction().onSceneClosed(closedScene);
+  world.session.set({ scene: nowScene, turn: 0 });
+  world.chronicle.upsertScene(nowScene, { chapter: ctx.engine.compaction().chapterOf(nowScene) });
   recordAuthoringCheckpoint(world);
-  const summary = world.chronicle.scenes().find((s) => s.scene === before.scene)?.summary ?? null;
+  const summary = world.chronicle.scenes().find((s) => s.scene === closedScene)?.summary ?? null;
   return {
-    closedScene: before.scene,
-    nowScene: before.scene + 1,
+    closedScene,
+    nowScene,
     summary,
     scenesSummarised: result.scenesSummarised,
     chaptersSummarised: result.chaptersSummarised,

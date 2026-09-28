@@ -1506,15 +1506,17 @@ route('POST', '/api/scene/close', async (_req, res, { db, world, engine, provide
   const compactor = engine.compaction(providers);
   const result = await recordAuthoringCheckpoint(db, world, async (transactionWorld) => {
     const before = await transactionWorld.session.get();
-    const compaction = await compactor.onSceneClosed(transactionWorld, before.scene);
-    await transactionWorld.session.set({ scene: before.scene + 1, turn: 0 });
-    await transactionWorld.chronicle.upsertScene(before.scene + 1, { chapter: compactor.chapterOf(before.scene + 1) });
-    const summary = (await transactionWorld.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
-    return { before, compaction, summary };
+    const closedScene = (await storyLayout(transactionWorld)).turns.at(-1)?.scene ?? before.scene;
+    const nowScene = closedScene + 1;
+    const compaction = await compactor.onSceneClosed(transactionWorld, closedScene);
+    await transactionWorld.session.set({ scene: nowScene, turn: 0 });
+    await transactionWorld.chronicle.upsertScene(nowScene, { chapter: compactor.chapterOf(nowScene) });
+    const summary = (await transactionWorld.chronicle.scenes()).find((s) => s.scene === closedScene)?.summary ?? null;
+    return { closedScene, nowScene, compaction, summary };
   });
   send(res, 200, {
-    closedScene: result.before.scene,
-    nowScene: result.before.scene + 1,
+    closedScene: result.closedScene,
+    nowScene: result.nowScene,
     summary: result.summary,
     scenesSummarised: result.compaction.scenesSummarised,
     chaptersSummarised: result.compaction.chaptersSummarised,
