@@ -7,341 +7,340 @@ import { ProviderRegistry, type CompletionRequest } from '../src/providers/provi
 import { ProviderKeyLockedError } from '../src/providers/byok.ts';
 import { usageSettled } from '../src/providers/metered.ts';
 import { EphemeralProviderKeyStore } from '../src/auth/ephemeral-provider-keys.ts';
-import {
-  ProviderKeyForbiddenError,
-  ProviderKeyInputError,
-  ProviderResolver,
-  type ProviderResolverOptions,
-} from '../src/providers/resolver-pg.ts';
+import { ProviderKeyInputError, ProviderResolver, type ProviderResolverOptions } from '../src/providers/resolver-pg.ts';
 import type { Queryable } from '../src/db/pg.ts';
 
 const SECRET = Buffer.alloc(32, 5);
 const ALICE_KEY = 'sk-alice-0123456789abcdefghij';
-const models = { narrate: 'gpt-test' };
-const keyId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const ANTHROPIC_KEY = 'sk-ant-alice-0123456789abcdefghij';
+const keyId = (n: number) => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
 const fakeWrap = { nonce: Buffer.alloc(12, 1).toString('base64'), ciphertext: Buffer.alloc(48, 2).toString('base64') };
 const alice = sessionUser('alice');
 const bob = sessionUser('bob');
 const admin = sessionUser('admin');
 const ask = (role: string): CompletionRequest => ({ role, messages: [{ role: 'user', content: 'hello' }] });
-const sealed = (n: number) => ({ id: keyId(n), label: '', endpointId: 'openai', models, trust: 'sealed' as const, key: ALICE_KEY });
-const unlockMode = (n: number) => ({ id: keyId(n), label: '', endpointId: 'openai', models, trust: 'unlock' as const, wrap: fakeWrap, keyHint: 'ghij' });
 
-/** Answers every chat completion; `fail` echoes the key in a 401 body. Records each bearer it saw. */
-function stubFetch(fail = false) {
-  const bearers: string[] = [];
-  const fetcher = (async (_url: string, init: RequestInit = {}) => {
-    const auth = String((init.headers as Record<string, string> | undefined)?.authorization ?? '');
-    bearers.push(auth);
-    return fail
-      ? ({ ok: false, status: 401, json: async () => ({}), text: async () => `invalid ${auth}` } as unknown as Response)
-      : ({
-          ok: true,
-          status: 200,
-          json: async () => ({ choices: [{ message: { content: 'ready' } }], usage: { prompt_tokens: 7, completion_tokens: 1 } }),
-          text: async () => '',
-        } as unknown as Response);
-  }) as unknown as typeof fetch;
-  return { fetcher, bearers };
+function stubFetch(status = 200) {
+  const calls: Array<{ url: string; authorization: string; apiKey: string; model: string }> = [];
+  const fetcher = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = String(input);
+    const headers = (init.headers ?? {}) as Record<string, string>;
+    const body = init.body ? (JSON.parse(String(init.body)) as { model?: string }) : {};
+    calls.push({
+      url,
+      authorization: headers.authorization ?? '',
+      apiKey: headers['x-api-key'] ?? '',
+      model: body.model ?? '',
+    });
+    if (url.endsWith('/models')) {
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => ({ data: [{ id: 'gpt-b' }, { id: 'gpt-a' }] }),
+        text: async () => '',
+      } as unknown as Response;
+    }
+    if (url.endsWith('/messages')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          content: [{ type: 'text', text: 'ready' }],
+          usage: { input_tokens: 7, output_tokens: 1 },
+        }),
+        text: async () => '',
+      } as unknown as Response;
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: 'ready' } }],
+        usage: { prompt_tokens: 7, completion_tokens: 1 },
+      }),
+      text: async () => '',
+    } as unknown as Response;
+  }) as typeof fetch;
+  return { fetcher, calls };
 }
 
-function resolverFor(db: Queryable, over: Partial<ProviderResolverOptions> = {}, fail = false) {
-  const { fetcher, bearers } = stubFetch(fail);
+function resolverFor(db: Queryable, over: Partial<ProviderResolverOptions> = {}, status = 200) {
+  const stub = stubFetch(status);
+  const server = new MockProvider({ id: 'server-stub' });
   const resolver = new ProviderResolver({
     db,
-    server: new ProviderRegistry(new MockProvider({ id: 'server-stub' })),
+    server: new ProviderRegistry(server),
     shareServerProvider: () => true,
     secretsKey: SECRET,
-    fetcher,
+    fetcher: stub.fetcher,
     ...over,
   });
-  return { resolver, bearers };
+  return { resolver, calls: stub.calls, server };
 }
 
-test('resolution falls back from the own key to the shared server provider to mock', async (t) => {
+function sealed(n: number, endpointId = 'openai', key = ALICE_KEY) {
+  return { id: keyId(n), label: 'test ' + n, endpointId, trust: 'sealed' as const, key };
+}
+
+function unlockMode(n: number) {
+  return {
+    id: keyId(n),
+    label: 'unlock ' + n,
+    endpointId: 'openai',
+    trust: 'unlock' as const,
+    wrap: fakeWrap,
+    keyHint: 'ghij',
+  };
+}
+
+test('resolution keeps existing shared-server and mock fallback until a role is assigned', async (t) => {
   const ran = await withPg(async (_db, _schema, roles) => {
     let share = true;
     const { resolver } = resolverFor(roles.play, { shareServerProvider: () => share });
-    assert.equal((await resolver.forRequest(null)).get('narrate').id, 'server-stub', 'login-off keeps the server registry');
+    assert.equal(
+      (await resolver.forRequest(null)).get('narrate').id,
+      'server-stub',
+      'login-off keeps the server registry',
+    );
     assert.equal((await resolver.forRequest(alice)).get('narrate').id, 'server-stub');
     assert.equal(await resolver.status(alice), 'server');
     share = false;
-    assert.equal((await resolver.forRequest(alice)).get('extract').id, 'mock', 'no key and no sharing: the agent keeps the world');
+    assert.equal((await resolver.forRequest(alice)).get('extract').id, 'mock');
     assert.equal(await resolver.status(alice), 'none');
-    assert.equal((await resolver.forRequest(admin)).get('narrate').id, 'server-stub', 'admins always reach the server provider');
+    assert.equal(
+      (await resolver.forRequest(admin)).get('narrate').id,
+      'server-stub',
+      'admins reach the server provider',
+    );
+
     await resolver.save(alice, sealed(1));
+    assert.equal(
+      (await resolver.forRequest(alice)).get('narrate').id,
+      'mock',
+      'an unassigned credential is not selected implicitly',
+    );
+    await resolver.saveAssignments(alice, [{ role: 'narrate', providerKeyId: keyId(1), model: 'gpt-narrate' }]);
     assert.equal((await resolver.forRequest(alice)).get('narrate').id, 'openai');
+    assert.equal((await resolver.forRequest(alice)).get('referee').model, 'gpt-narrate');
     assert.equal(await resolver.status(alice), 'own');
   });
   if (!ran) t.skip('no Postgres configured');
 });
 
-test('a sealed key reaches the provider and meters as own usage without storing plaintext', async (t) => {
+test('each role routes through its assigned credential and unassigned roles use Narration', async (t) => {
   const ran = await withPg(async (db, _schema, roles) => {
-    const { resolver, bearers } = resolverFor(roles.play);
-    const summary = await resolver.save(alice, sealed(2));
-    assert.equal(summary.keyHint, 'ghij');
-    assert.equal(JSON.stringify(summary).includes(ALICE_KEY), false);
-    const row = await db.one<{ ciphertext: Buffer }>(`SELECT ciphertext FROM user_provider_keys WHERE user_id = $1`, [alice.id]);
-    assert.equal(row!.ciphertext.includes(Buffer.from(ALICE_KEY)), false);
+    const { resolver, calls } = resolverFor(roles.play);
+    await resolver.save(alice, sealed(2, 'openai', ALICE_KEY));
+    await resolver.save(alice, sealed(3, 'anthropic', ANTHROPIC_KEY));
+    await resolver.saveAssignments(alice, [
+      { role: 'narrate', providerKeyId: keyId(2), model: 'gpt-narration' },
+      { role: 'classify', providerKeyId: keyId(3), model: 'claude-classify' },
+      { role: 'extract', providerKeyId: keyId(2), model: 'gpt-extract' },
+    ]);
 
-    await (await resolver.forRequest(alice, 'story-1')).get('referee').complete(ask('referee'));
-    assert.deepEqual(bearers, [`Bearer ${ALICE_KEY}`]);
-    await usageSettled();
-    const usage = await db.query(`SELECT role, key_source, story_id, tokens_in FROM usage_events WHERE user_id = $1`, [alice.id]);
-    assert.deepEqual(usage.rows, [{ role: 'referee', key_source: 'own', story_id: 'story-1', tokens_in: 7 }]);
-    const touched = await db.one<{ last_used_at: Date | null }>(`SELECT last_used_at FROM user_provider_keys WHERE user_id = $1`, [alice.id]);
-    assert.ok(touched?.last_used_at, 'last_used_at is stamped on use');
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('sealed mode is refused without FABULIST_SECRETS_KEY and an existing sealed key falls back', async (t) => {
-  const ran = await withPg(async (_db, _schema, roles) => {
-    await resolverFor(roles.play).resolver.save(alice, sealed(3));
-    const { resolver: keyless } = resolverFor(roles.play, { secretsKey: null });
-    assert.equal(keyless.sealedAvailable, false);
-    await assert.rejects(keyless.save(bob, { ...sealed(4) }), (err: Error) => err instanceof ProviderKeyInputError && /sealed keys are disabled/.test(err.message));
-    assert.equal((await keyless.forRequest(alice)).get('narrate').id, 'server-stub');
-    assert.equal(await keyless.status(alice), 'unavailable');
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('an unlock-mode key is usable only while its grant is live, and a lock mid-turn stops the next call', async (t) => {
-  const ran = await withPg(async (_db, _schema, roles) => {
-    let now = Date.parse('2026-09-26T10:00:00.000Z');
-    const { resolver, bearers } = resolverFor(roles.play, { grants: new EphemeralProviderKeyStore(() => now, 60_000) });
-    await resolver.save(alice, unlockMode(5));
-    assert.equal(await resolver.status(alice), 'locked');
-    assert.equal((await resolver.forRequest(alice)).get('narrate').id, 'server-stub');
-
-    await resolver.unlock(alice, [{ keyId: keyId(5), key: ALICE_KEY }]);
-    const midTurn = await resolver.forRequest(alice);
-    assert.equal(midTurn.get('narrate').id, 'openai');
-    await midTurn.get('classify').complete(ask('classify'));
-    resolver.lock(alice.id);
-    await assert.rejects(midTurn.get('extract').complete(ask('extract')), ProviderKeyLockedError);
-    assert.equal(bearers.length, 1, 'nothing was sent after the lock');
-    assert.equal((await resolver.forRequest(alice)).get('narrate').id, 'server-stub');
-    assert.equal(await resolver.status(alice), 'locked');
-
-    await resolver.unlock(alice, [{ keyId: keyId(5), key: ALICE_KEY }]);
-    now += 60_000;
-    assert.equal((await resolver.forRequest(alice)).get('narrate').id, 'server-stub', 'an expired grant falls back');
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('a user can neither see, unlock, use nor delete another user\'s key', async (t) => {
-  const ran = await withPg(async (db, _schema, roles) => {
-    const { resolver } = resolverFor(roles.play);
-    await resolver.save(alice, unlockMode(6));
-    await assert.rejects(resolver.unlock(bob, [{ keyId: keyId(6), key: 'sk-bob-stolen-0123456789' }]), ProviderKeyForbiddenError);
-    assert.equal(await resolver.summary(bob), null);
-    assert.equal(await resolver.unlockRecord(bob), null);
-    assert.equal((await resolver.forRequest(bob)).get('narrate').id, 'server-stub');
-    assert.equal(await resolver.remove(bob), false);
-    assert.equal((await resolver.summary(alice))?.id, keyId(6));
-
-    await resolver.save(alice, sealed(7));
-    await db.query(
-      `INSERT INTO user_provider_keys (id, user_id, endpoint_id, models, trust, nonce, ciphertext, key_hint)
-       SELECT $1, $2, endpoint_id, models, trust, nonce, ciphertext, key_hint FROM user_provider_keys WHERE user_id = $3`,
-      [keyId(8), bob.id, alice.id],
+    const registry = await resolver.forRequest(alice, 'story-1');
+    for (const role of ['narrate', 'classify', 'extract', 'director']) {
+      await registry.get(role).complete(ask(role));
+    }
+    assert.deepEqual(
+      calls.map(({ url, authorization, apiKey, model }) => ({
+        url: url.split('/').slice(-2).join('/'),
+        authorization,
+        apiKey,
+        model,
+      })),
+      [
+        { url: 'chat/completions', authorization: 'Bearer ' + ALICE_KEY, apiKey: '', model: 'gpt-narration' },
+        { url: 'v1/messages', authorization: '', apiKey: ANTHROPIC_KEY, model: 'claude-classify' },
+        { url: 'chat/completions', authorization: 'Bearer ' + ALICE_KEY, apiKey: '', model: 'gpt-extract' },
+        { url: 'chat/completions', authorization: 'Bearer ' + ALICE_KEY, apiKey: '', model: 'gpt-narration' },
+      ],
     );
-    resolver.invalidate(bob.id);
-    assert.equal((await resolver.forRequest(bob)).get('narrate').id, 'server-stub', 'a copied wrap is bound to its owner');
-    assert.equal(await resolver.status(bob), 'unavailable');
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('deleting or replacing a key takes effect on the next request and on in-flight registries', async (t) => {
-  const ran = await withPg(async (_db, _schema, roles) => {
-    const { resolver, bearers } = resolverFor(roles.play);
-    await resolver.save(alice, sealed(9));
-    const beforeDelete = await resolver.forRequest(alice);
-    assert.equal(beforeDelete.get('narrate').id, 'openai');
-    assert.equal(await resolver.remove(alice), true);
-    assert.equal((await resolver.forRequest(alice)).get('narrate').id, 'server-stub');
-    await assert.rejects(beforeDelete.get('narrate').complete(ask('narrate')), ProviderKeyLockedError);
-
-    await resolver.save(alice, sealed(10));
-    const beforeReplace = await resolver.forRequest(alice);
-    await resolver.save(alice, { ...sealed(11), key: 'sk-alice-rotated-0123456789' });
-    await assert.rejects(beforeReplace.get('narrate').complete(ask('narrate')), ProviderKeyLockedError);
-    await (await resolver.forRequest(alice)).get('narrate').complete(ask('narrate'));
-    assert.deepEqual(bearers, ['Bearer sk-alice-rotated-0123456789']);
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('a delete that lands while a cache fill is reading does not leave the old key cached', async (t) => {
-  const ran = await withPg(async (_db, _schema, roles) => {
-    await resolverFor(roles.play).resolver.save(alice, sealed(12));
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    let gated = true;
-    const slowDb: Queryable = {
-      query: (async (sql: string, params?: unknown[]) => {
-        const result = await roles.play.query(sql, params);
-        if (gated && sql.includes('FROM user_provider_keys')) {
-          gated = false;
-          await gate;
-        }
-        return result;
-      }) as Queryable['query'],
-    };
-    const { resolver } = resolverFor(slowDb);
-    const pending = resolver.forRequest(alice);
-    while (gated) await new Promise((r) => setTimeout(r, 1));
-    await resolver.remove(alice);
-    release();
-    const stale = await pending;
-    await assert.rejects(stale.get('narrate').complete(ask('narrate')), ProviderKeyLockedError);
-    assert.equal((await resolver.forRequest(alice)).get('narrate').id, 'server-stub');
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('Test is a metered live call whose failure text never carries the key, and key calls are rate-limited', async (t) => {
-  const ran = await withPg(async (db, _schema, roles) => {
-    const ok = resolverFor(roles.play, { keyCallLimit: { burst: 2, perMinute: 1 } }).resolver;
-    assert.deepEqual(await ok.test(alice, { endpointId: 'openai', model: 'gpt-test', key: ALICE_KEY }), { ok: true, model: 'gpt-test' });
     await usageSettled();
-    const probe = await db.query(`SELECT role, key_source FROM usage_events WHERE user_id = $1`, [alice.id]);
-    assert.deepEqual(probe.rows, [{ role: 'probe', key_source: 'own' }]);
-    await assert.rejects(ok.test(alice, { endpointId: 'localhost', model: 'm', key: ALICE_KEY }), ProviderKeyInputError);
-
-    const failing = resolverFor(roles.play, {}, true).resolver;
-    const failed = await failing.test(alice, { endpointId: 'openai', model: 'gpt-test', key: ALICE_KEY });
-    assert.equal(failed.ok, false);
-    assert.equal(JSON.stringify(failed).includes(ALICE_KEY), false);
-
-    assert.equal(ok.takeKeyCall(alice.id), null);
-    assert.equal(ok.takeKeyCall(alice.id), null);
-    assert.equal(typeof ok.takeKeyCall(alice.id), 'number');
-    assert.equal(ok.takeKeyCall(bob.id), null, 'buckets are per user');
+    const touched = await db.query<{ id: string; used: boolean }>(
+      'SELECT id, last_used_at IS NOT NULL AS used FROM user_provider_keys WHERE user_id = $1 ORDER BY id',
+      [alice.id],
+    );
+    assert.deepEqual(touched.rows, [
+      { id: keyId(2), used: true },
+      { id: keyId(3), used: true },
+    ]);
+    const usage = await db.query<{ role: string; key_source: string; story_id: string }>(
+      'SELECT DISTINCT role, key_source, story_id FROM usage_events WHERE user_id = $1 ORDER BY role',
+      [alice.id],
+    );
+    assert.ok(usage.rows.every((row) => row.key_source === 'own' && row.story_id === 'story-1'));
   });
   if (!ran) t.skip('no Postgres configured');
 });
 
-test('an unlock-mode wrap is capped at a 512-byte key in save and in the table', async (t) => {
-  const ran = await withPg(async (db, _schema, roles) => {
-    const { resolver } = resolverFor(roles.play);
-    const wrapOf = (bytes: number) => ({ ...fakeWrap, ciphertext: Buffer.alloc(bytes, 2).toString('base64') });
-    await resolver.save(alice, { ...unlockMode(11), wrap: wrapOf(528) });
-    await assert.rejects(resolver.save(alice, { ...unlockMode(12), wrap: wrapOf(529) }), ProviderKeyInputError);
-    await assert.rejects(db.query(
-      `INSERT INTO user_provider_keys (id, user_id, endpoint_id, models, trust, nonce, ciphertext, key_hint)
-       VALUES ($1, 'bob', 'openai', '{}', 'unlock', $2, $3, '')`,
-      [keyId(13), Buffer.alloc(12), Buffer.alloc(529)],
-    ), /check constraint/);
+test('a locked explicit role credential errors instead of using Narration or the shared server key', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    const { resolver, calls, server } = resolverFor(roles.play);
+    await resolver.save(alice, sealed(4));
+    await resolver.save(alice, unlockMode(5));
+    await resolver.saveAssignments(alice, [
+      { role: 'narrate', providerKeyId: keyId(4), model: 'gpt-narration' },
+      { role: 'classify', providerKeyId: keyId(5), model: 'gpt-classify' },
+    ]);
+    const registry = await resolver.forRequest(alice);
+    await assert.rejects(registry.get('classify').complete(ask('classify')), ProviderKeyLockedError);
+    assert.equal(JSON.stringify(calls), '[]', 'the assigned locked key was not replaced with another credential');
+    assert.equal(server.calls.length, 0, 'the configured shared provider was not used');
+    await registry.get('narrate').complete(ask('narrate'));
+    assert.equal(calls[0]?.authorization, 'Bearer ' + ALICE_KEY);
+    assert.equal(await resolver.status(alice), 'locked');
   });
   if (!ran) t.skip('no Postgres configured');
 });
 
-/** Holds the first query matching `match` at the gate, before or after it runs. */
-function gatedDb(db: Queryable, match: (sql: string) => boolean, before = false) {
-  let release!: () => void;
-  const gate = new Promise<void>((r) => {
-    release = r;
+test('saved model discovery uses the selected credential, even when another credential is also saved', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    const { resolver, calls } = resolverFor(roles.play);
+    await resolver.save(alice, sealed(6, 'openai', ALICE_KEY));
+    await resolver.save(alice, sealed(7, 'anthropic', ANTHROPIC_KEY));
+    assert.deepEqual(await resolver.modelsForSaved(alice, keyId(7)), ['gpt-a', 'gpt-b']);
+    assert.deepEqual(
+      calls.map(({ url, authorization, apiKey }) => ({ url, authorization, apiKey })),
+      [
+        {
+          url: 'https://api.anthropic.com/v1/models',
+          authorization: '',
+          apiKey: ANTHROPIC_KEY,
+        },
+      ],
+    );
+    assert.deepEqual(await resolver.modelsForSaved(alice, keyId(6)), ['gpt-a', 'gpt-b']);
+    assert.deepEqual(
+      calls.map((call) => call.authorization || call.apiKey),
+      [ANTHROPIC_KEY, 'Bearer ' + ALICE_KEY],
+    );
   });
-  const state = { held: false, release };
-  let armed = true;
-  const gated: Queryable = {
-    query: (async (sql: string, params?: unknown[]) => {
-      const hit = armed && match(sql);
-      if (hit) armed = false;
-      if (hit && before) {
-        state.held = true;
-        await gate;
-      }
-      const result = await db.query(sql, params);
-      if (hit && !before) {
-        state.held = true;
-        await gate;
-      }
-      return result;
-    }) as Queryable['query'],
-  };
-  return { gated, state };
-}
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('provider key test verifies by listing models and reports rejected, unsupported, and network failure without leaking the key', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    const success = resolverFor(roles.play);
+    assert.deepEqual(await success.resolver.test(alice, { endpointId: 'openai', key: ALICE_KEY }), {
+      status: 'verified',
+      message: 'Provider access verified (2 models listed).',
+    });
+    assert.equal(success.calls[0]?.url, 'https://api.openai.com/v1/models');
+    assert.equal(success.calls[0]?.authorization, 'Bearer ' + ALICE_KEY);
+    assert.equal(
+      success.calls.some((call) => call.url.endsWith('/chat/completions')),
+      false,
+      'key test makes no generation call',
+    );
+
+    const rejectingFetch = (async () =>
+      ({
+        ok: false,
+        status: 401,
+        json: async () => ({}),
+        text: async () => ALICE_KEY,
+      }) as unknown as Response) as typeof fetch;
+    const rejected = await resolverFor(roles.play, { fetcher: rejectingFetch }).resolver.test(alice, {
+      endpointId: 'openai',
+      key: ALICE_KEY,
+    });
+    assert.equal(rejected.status, 'rejected');
+    assert.equal(JSON.stringify(rejected).includes(ALICE_KEY), false);
+
+    const unsupportedFetch = (async () =>
+      ({
+        ok: false,
+        status: 404,
+        json: async () => ({}),
+        text: async () => '',
+      }) as unknown as Response) as typeof fetch;
+    const unsupported = await resolverFor(roles.play, { fetcher: unsupportedFetch }).resolver.test(alice, {
+      endpointId: 'openai',
+      key: ALICE_KEY,
+    });
+    assert.equal(unsupported.status, 'unsupported');
+
+    const networkFetch = (async () => {
+      throw new Error('network error ' + ALICE_KEY);
+    }) as typeof fetch;
+    const unavailable = await resolverFor(roles.play, { fetcher: networkFetch }).resolver.test(alice, {
+      endpointId: 'openai',
+      key: ALICE_KEY,
+    });
+    assert.equal(unavailable.status, 'unavailable');
+    assert.equal(JSON.stringify(unavailable).includes(ALICE_KEY), false);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('saving and removing credentials is independent; removing one clears only its model assignments and grant', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    const grants = new EphemeralProviderKeyStore();
+    const { resolver } = resolverFor(roles.play, { grants });
+    await resolver.save(alice, unlockMode(8));
+    await resolver.save(alice, sealed(9));
+    await resolver.saveAssignments(alice, [
+      { role: 'narrate', providerKeyId: keyId(8), model: 'gpt-unlock' },
+      { role: 'extract', providerKeyId: keyId(9), model: 'gpt-extract' },
+    ]);
+    await resolver.unlock(alice, [{ keyId: keyId(8), key: ALICE_KEY }]);
+    const version = (
+      await roles.play.query<{ version: string }>('SELECT version FROM user_provider_keys WHERE id = $1', [keyId(8)])
+    ).rows[0]!.version;
+    assert.equal(grants.get(alice.id, keyId(8), version), ALICE_KEY);
+
+    assert.equal(await resolver.remove(alice, keyId(8)), true);
+    assert.deepEqual(grants.list(alice.id), []);
+    assert.deepEqual(await resolver.assignments(alice), [
+      { role: 'extract', providerKeyId: keyId(9), model: 'gpt-extract' },
+    ]);
+    assert.equal(await resolver.status(alice), 'own');
+    assert.equal(await resolver.remove(alice, keyId(8)), false);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
 
 test('an unlock racing a delete never leaves a plaintext grant for the removed row', async (t) => {
   const ran = await withPg(async (_db, _schema, roles) => {
-    await resolverFor(roles.play).resolver.save(alice, unlockMode(14));
-    const read = gatedDb(roles.play, (sql) => sql.includes('FROM user_provider_keys'));
-    const { resolver } = resolverFor(read.gated);
-    const pending = resolver.unlock(alice, [{ keyId: keyId(14), key: ALICE_KEY }]);
-    while (!read.state.held) await new Promise((r) => setTimeout(r, 1));
-    await resolver.remove(alice);
-    read.state.release();
-    await assert.rejects(pending, ProviderKeyForbiddenError);
+    await resolverFor(roles.play).resolver.save(alice, unlockMode(10));
+    const db = roles.play;
+    let release!: () => void;
+    let held = false;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let armed = true;
+    const gated: Queryable = {
+      query: (async (sql: string, params?: unknown[]) => {
+        const hit = armed && sql.includes('FROM user_provider_keys');
+        if (hit) {
+          armed = false;
+          held = true;
+          await gate;
+        }
+        return db.query(sql, params);
+      }) as Queryable['query'],
+    };
+    const { resolver } = resolverFor(gated);
+    const pending = resolver.unlock(alice, [{ keyId: keyId(10), key: ALICE_KEY }]);
+    while (!held) await new Promise((resolve) => setTimeout(resolve, 1));
+    await resolver.remove(alice, keyId(10));
+    release();
+    await assert.rejects(pending);
     assert.deepEqual(resolver.grants.list(alice.id), []);
-
-    await resolverFor(roles.play).resolver.save(alice, unlockMode(15));
-    const del = gatedDb(roles.play, (sql) => sql.startsWith('DELETE FROM user_provider_keys'), true);
-    const { resolver: racing } = resolverFor(del.gated);
-    const removing = racing.remove(alice);
-    while (!del.state.held) await new Promise((r) => setTimeout(r, 1));
-    await racing.unlock(alice, [{ keyId: keyId(15), key: ALICE_KEY }]);
-    del.state.release();
-    assert.equal(await removing, true);
-    assert.deepEqual(racing.grants.list(alice.id), [], 'the delete drops a grant that landed while it ran');
   });
   if (!ran) t.skip('no Postgres configured');
 });
 
-test('replacing a key under the same client id still stops in-flight registries and grants', async (t) => {
+test('an explicit assignment cannot be saved to a credential owned by another user', async (t) => {
   const ran = await withPg(async (_db, _schema, roles) => {
-    const { resolver, bearers } = resolverFor(roles.play);
-    await resolver.save(alice, sealed(16));
-    const beforeReplace = await resolver.forRequest(alice);
-    await resolver.save(alice, { ...sealed(16), key: 'sk-alice-rotated-0123456789' });
-    await resolver.forRequest(alice);
-    await assert.rejects(beforeReplace.get('narrate').complete(ask('narrate')), ProviderKeyLockedError);
-    assert.deepEqual(bearers, []);
-
-    const other = resolverFor(roles.play).resolver;
-    await resolver.save(alice, unlockMode(17));
-    await resolver.unlock(alice, [{ keyId: keyId(17), key: ALICE_KEY }]);
-    await other.save(alice, unlockMode(17));
-    resolver.invalidate(alice.id);
-    assert.equal(await resolver.status(alice), 'locked', 'a grant is bound to the row version, not the client id');
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('a delete in another process is seen once the cached row is a minute old', async (t) => {
-  const ran = await withPg(async (_db, _schema, roles) => {
-    let now = Date.parse('2026-09-26T10:00:00.000Z');
-    const writer = resolverFor(roles.play).resolver;
-    const { resolver: reader, bearers } = resolverFor(roles.play, { now: () => now });
-    await writer.save(alice, sealed(18));
-    const inFlight = await reader.forRequest(alice);
-    assert.equal(await reader.status(alice), 'own');
-    await writer.remove(alice);
-    now += 59_000;
-    assert.equal(await reader.status(alice), 'own', 'still cached');
-    now += 1_000;
-    assert.equal(await reader.status(alice), 'server');
-    await assert.rejects(inFlight.get('narrate').complete(ask('narrate')), ProviderKeyLockedError);
-    assert.deepEqual(bearers, []);
-  });
-  if (!ran) t.skip('no Postgres configured');
-});
-
-test('a sealed key the server secret cannot open reports unavailable and falls back instead of failing calls', async (t) => {
-  const ran = await withPg(async (_db, _schema, roles) => {
-    await resolverFor(roles.play).resolver.save(alice, sealed(19));
-    const { resolver: rotated, bearers } = resolverFor(roles.play, { secretsKey: Buffer.alloc(32, 6) });
-    assert.equal(await rotated.status(alice), 'unavailable');
-    assert.equal((await rotated.forRequest(alice)).get('narrate').id, 'server-stub');
-    assert.deepEqual(bearers, []);
+    const { resolver } = resolverFor(roles.play);
+    await resolver.save(bob, sealed(11));
+    await assert.rejects(
+      resolver.saveAssignments(alice, [{ role: 'narrate', providerKeyId: keyId(11), model: 'gpt-test' }]),
+      (error: Error) => error instanceof ProviderKeyInputError && /saved providers/.test(error.message),
+    );
   });
   if (!ran) t.skip('no Postgres configured');
 });

@@ -7,6 +7,8 @@ export type UsageSink = (call: {
   model: string;
   tokensIn: number;
   tokensOut: number;
+  keyId?: string;
+  keySource?: 'own' | 'server';
 }) => Promise<void>;
 
 const pending = new Set<Promise<void>>();
@@ -37,6 +39,8 @@ function metered(inner: Provider, sink: UsageSink): Provider {
           model: result.model,
           tokensIn: result.tokensIn,
           tokensOut: result.tokensOut,
+          ...(inner.usageKeyId ? { keyId: inner.usageKeyId } : {}),
+          ...(inner.usageKeySource ? { keySource: inner.usageKeySource } : {}),
         })
           .catch((err: unknown) =>
             console.error('[usage] could not record a provider call:', err instanceof Error ? err.message : err),

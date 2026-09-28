@@ -13,7 +13,12 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '../db/pg.ts';
 import type { Engine } from '../loop/engine-pg.ts';
-import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint, splitSceneAtTurn, storyLayout } from '../loop/history-pg.ts';
+import {
+  recordAuthoringCheckpoint,
+  regenerateProseWithCheckpoint,
+  splitSceneAtTurn,
+  storyLayout,
+} from '../loop/history-pg.ts';
 import { World, worldFor } from '../store/index-pg.ts';
 import { forkStory, rollback } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
@@ -57,7 +62,12 @@ import {
 } from '../setup/service-pg.ts';
 import type { IngestLimits } from '../ingest/depth-pg.ts';
 import type { Registry, SwappableRegistry } from '../providers/provider.ts';
-import { ProviderKeyForbiddenError, ProviderKeyInputError, ProviderKeyLockedError, type ProviderResolver } from '../providers/resolver-pg.ts';
+import {
+  ProviderKeyForbiddenError,
+  ProviderKeyInputError,
+  ProviderKeyLockedError,
+  type ProviderResolver,
+} from '../providers/resolver-pg.ts';
 import { BYOK_ENDPOINTS } from '../providers/byok.ts';
 import { usageByUser, usageForUser } from '../store/usage-pg.ts';
 import type { SwappableImageRegistry } from '../providers/image.ts';
@@ -87,7 +97,15 @@ import {
 } from '../store/private-story-migration-pg.ts';
 import { handleCallback, handleLogin, handleLogout } from '../auth/routes.ts';
 import { applyCors, passesFetchSiteGuard, rejectsHost, requestOrigin } from './origin-guard.ts';
-import { errorBody, HttpError, parseBody, readJsonBody, readRawBody, sendJson as send, statusForError } from './http.ts';
+import {
+  errorBody,
+  HttpError,
+  parseBody,
+  readJsonBody,
+  readRawBody,
+  sendJson as send,
+  statusForError,
+} from './http.ts';
 import { errorCode, errorKind, logError, logEvent, logProviderCall, startHttpRequest } from './observability.ts';
 import { DEFAULT_PAID_CALL_LIMIT, RateLimiter, type PaidCallLimit } from './rate-limit.ts';
 import {
@@ -99,6 +117,7 @@ import {
   encryptionUnlockBodySchema,
   providerKeyBodySchema,
   providerKeyTestBodySchema,
+  providerModelAssignmentsBodySchema,
   providerModelsBodySchema,
   directiveBodySchema,
   forkStoryBodySchema,
@@ -431,7 +450,7 @@ route('GET', '/api/encryption/keys', async (_req, res, { db, user, ephemeralStor
     enrolled: keys.userKey !== null,
     grants: ephemeralStoryKeys.list(user.id),
     ...keys,
-    providerKey: providerResolver ? await providerResolver.unlockRecord(user) : null,
+    providerKeys: providerResolver ? await providerResolver.unlockRecords(user) : [],
   });
 });
 
@@ -556,26 +575,26 @@ function usageDays(url: URL): number {
   return Number.isInteger(days) && days >= 1 && days <= 365 ? days : 30;
 }
 
-route('GET', '/api/provider-key', async (_req, res, { user, providerResolver }) => {
+route('GET', '/api/provider-keys', async (_req, res, { user, providerResolver }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
   const resolver = requireResolver(res, providerResolver);
   if (!resolver) return;
   send(res, 200, {
-    key: await resolver.summary(user),
+    keys: await resolver.summaries(user),
     status: await resolver.status(user),
     sealedAvailable: resolver.sealedAvailable,
     endpoints: BYOK_ENDPOINTS.map(({ id, label }) => ({ id, label })),
   });
 });
 
-route('PUT', '/api/provider-key', async (_req, res, { body, user, providerResolver }) => {
+route('POST', '/api/provider-keys', async (_req, res, { body, user, providerResolver }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
   const resolver = requireResolver(res, providerResolver);
   if (!resolver || !takeKeyCall(res, resolver, user)) return;
   const input = parseBody(providerKeyBodySchema, body);
   try {
     const key = await resolver.save(user, input);
-    send(res, 200, { key, status: await resolver.status(user) });
+    send(res, 201, { key, status: await resolver.status(user) });
   } catch (err) {
     if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
     if ((err as { code?: string }).code === '23505') return send(res, 409, { error: 'that key id is already in use' });
@@ -583,12 +602,32 @@ route('PUT', '/api/provider-key', async (_req, res, { body, user, providerResolv
   }
 });
 
-route('DELETE', '/api/provider-key', async (_req, res, { user, providerResolver }) => {
+route('DELETE', '/api/provider-keys/:id', async (_req, res, { user, providerResolver, params }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
   const resolver = requireResolver(res, providerResolver);
   if (!resolver) return;
-  const removed = await resolver.remove(user);
+  const removed = await resolver.remove(user, decodeURIComponent(params.id ?? ''));
   send(res, 200, { removed, status: await resolver.status(user) });
+});
+
+route('GET', '/api/provider-models', async (_req, res, { user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver) return;
+  send(res, 200, { assignments: await resolver.assignments(user) });
+});
+
+route('PUT', '/api/provider-models', async (_req, res, { body, user, providerResolver }) => {
+  if (!user) return send(res, 401, { error: 'sign-in required' });
+  const resolver = requireResolver(res, providerResolver);
+  if (!resolver) return;
+  try {
+    const { assignments } = parseBody(providerModelAssignmentsBodySchema, body);
+    send(res, 200, { assignments: await resolver.saveAssignments(user, assignments) });
+  } catch (err) {
+    if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
+    throw err;
+  }
 });
 
 route('POST', '/api/provider-key/test', async (_req, res, { body, user, providerResolver }) => {
@@ -615,29 +654,12 @@ route('POST', '/api/provider-key/models', async (_req, res, { body, user, provid
   }
 });
 
-// List models for the caller's *saved* key — no plaintext travels in the request.
-route('GET', '/api/provider-key/models', async (_req, res, { user, providerResolver }) => {
+route('GET', '/api/provider-keys/:id/models', async (_req, res, { user, providerResolver, params }) => {
   if (!user) return send(res, 401, { error: 'sign-in required' });
   const resolver = requireResolver(res, providerResolver);
   if (!resolver || !takeKeyCall(res, resolver, user)) return;
   try {
-    send(res, 200, { models: await resolver.modelsForSaved(user) });
-  } catch (err: unknown) {
-    if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
-    if (err instanceof ProviderKeyLockedError) return send(res, 409, { error: err.message });
-    throw err;
-  }
-});
-
-// Probe the caller's *saved* key against a model — no plaintext travels in the request.
-route('GET', '/api/provider-key/test', async (req, res, { user, providerResolver }) => {
-  if (!user) return send(res, 401, { error: 'sign-in required' });
-  const resolver = requireResolver(res, providerResolver);
-  if (!resolver || !takeKeyCall(res, resolver, user)) return;
-  const model = new URL(req.url ?? '', 'http://localhost').searchParams.get('model') ?? '';
-  if (!model) return send(res, 400, { error: 'model query parameter is required' });
-  try {
-    send(res, 200, await resolver.testForSaved(user, model));
+    send(res, 200, { models: await resolver.modelsForSaved(user, decodeURIComponent(params.id ?? '')) });
   } catch (err: unknown) {
     if (err instanceof ProviderKeyInputError) return send(res, 400, { error: err.message });
     if (err instanceof ProviderKeyLockedError) return send(res, 409, { error: err.message });
@@ -800,16 +822,33 @@ route('GET', '/api/book', async (req, res, { world }) => {
   send(res, 200, {
     scenes: (await world.chronicle.scenes()).flatMap((scene) => {
       const derived = derivedSceneForIdentity.get(scene.identity);
-      return derived === undefined ? [] : [{
-      ...scene,
-      scene: derived,
-    }];
+      return derived === undefined
+        ? []
+        : [
+            {
+              ...scene,
+              scene: derived,
+            },
+          ];
     }),
-    turns: layout.turns.slice(offset, offset + limit).map(({ source: t, scene, chapter, eligible, position, origin, startsScene }) => ({
-      id: t.id, scene, chapter, turn: t.turn, historyPosition: position, origin, eligible, startsScene,
-      rawInput: t.rawInput, bookProse: t.bookProse, pinned: t.pinned, move: t.meta.move,
-      integrity: t.meta.integrity?.distance ?? null, lintScore: t.meta.lint?.score ?? null,
-    })),
+    turns: layout.turns
+      .slice(offset, offset + limit)
+      .map(({ source: t, scene, chapter, eligible, position, origin, startsScene }) => ({
+        id: t.id,
+        scene,
+        chapter,
+        turn: t.turn,
+        historyPosition: position,
+        origin,
+        eligible,
+        startsScene,
+        rawInput: t.rawInput,
+        bookProse: t.bookProse,
+        pinned: t.pinned,
+        move: t.meta.move,
+        integrity: t.meta.integrity?.distance ?? null,
+        lintScore: t.meta.lint?.score ?? null,
+      })),
     nextOffset: offset + limit < layout.turns.length ? offset + limit : null,
   });
 });
@@ -879,7 +918,8 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { db, engine, world,
     send(res, 200, turn);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (message.includes('pinned') || message.includes('changed while prose was being rendered')) return send(res, 409, { error: message });
+    if (message.includes('pinned') || message.includes('changed while prose was being rendered'))
+      return send(res, 409, { error: message });
     if (message.startsWith('no turn ')) return send(res, 404, { error: message });
     throw err;
   }
@@ -1075,7 +1115,9 @@ route('POST', '/api/fact/:id/knowledge', async (_req, res, { db, world, params, 
 route('DELETE', '/api/fact/:id/knowledge/:entityId', async (_req, res, { db, world, params }) => {
   const factId = decodeURIComponent(params.id ?? '');
   const entityId = decodeURIComponent(params.entityId ?? '');
-  await recordAuthoringCheckpoint(db, world, (transactionWorld) => transactionWorld.chronicle.revokeKnowledge(factId, entityId));
+  await recordAuthoringCheckpoint(db, world, (transactionWorld) =>
+    transactionWorld.chronicle.revokeKnowledge(factId, entityId),
+  );
   send(res, 200, { factId, knowers: await world.chronicle.knowersOf(factId) });
 });
 
@@ -1389,10 +1431,10 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
 
   const divergencesByScene = new Map<number, typeof divergences>();
   for (const d of divergences) {
-    const scene = d.turn == null
-      ? derivedSceneForIdentity.get(`raw:${d.scene}`) ?? d.scene
-      : derivedSceneForTurn.get(`${d.scene}:${d.turn}`)
-        ?? derivedSceneForIdentity.get(`raw:${d.scene}`) ?? d.scene;
+    const scene =
+      d.turn == null
+        ? (derivedSceneForIdentity.get(`raw:${d.scene}`) ?? d.scene)
+        : (derivedSceneForTurn.get(`${d.scene}:${d.turn}`) ?? derivedSceneForIdentity.get(`raw:${d.scene}`) ?? d.scene);
     const list = divergencesByScene.get(scene) ?? [];
     list.push(d);
     divergencesByScene.set(scene, list);
@@ -1412,10 +1454,12 @@ route('GET', '/api/timeline', async (_req, res, { world }) => {
     ...divergencesByScene.keys(),
     (await world.session.get()).scene,
   ]);
-  const sceneMeta = new Map(scenes.flatMap((s) => {
-    const derived = derivedSceneForIdentity.get(s.identity);
-    return derived === undefined ? [] : [[derived, s] as const];
-  }));
+  const sceneMeta = new Map(
+    scenes.flatMap((s) => {
+      const derived = derivedSceneForIdentity.get(s.identity);
+      return derived === undefined ? [] : [[derived, s] as const];
+    }),
+  );
 
   const sceneEntries = [...sceneNumbers]
     .sort((a, b) => a - b)
@@ -1531,9 +1575,10 @@ async function ownsStoryOrRespond(
   }
   if (story.ownerUserId !== user.id) {
     send(res, 403, {
-      error: story.ownerUserId === null
-        ? 'this story is unowned and must be assigned by an administrator'
-        : 'this story belongs to another user',
+      error:
+        story.ownerUserId === null
+          ? 'this story is unowned and must be assigned by an administrator'
+          : 'this story belongs to another user',
     });
     return false;
   }
@@ -1813,23 +1858,25 @@ route('GET', '/api/worlds', async (_req, res, { world, db, user }) => {
   // round trip regardless of how many worlds exist.
   const visible = new Map((await worldsVisibleTo(db, user)).map((v) => [v.worldId, v]));
   send(res, 200, {
-    worlds: (await listWorlds(db)).filter((w) => visible.has(w.id)).map((w) => ({
-      id: w.id,
-      slug: w.slug,
-      title: w.title,
-      storyCount: w.storyCount,
-      entityCount: w.entityCount,
-      edgeCount: w.edgeCount,
-      lastPlayedAt: w.lastPlayedAt,
-      lastRefreshedAt: w.lastRefreshedAt,
-      sources: w.sources,
-      // "Is this story reading it", not "is the server holding it open".
-      reading: reading.has(w.id),
-      visibility: visible.get(w.id)!.visibility,
-      // What *this* caller may do with it, so the UI can hide an action rather than
-      // offering one that will 403.
-      role: visible.get(w.id)!.role,
-    })),
+    worlds: (await listWorlds(db))
+      .filter((w) => visible.has(w.id))
+      .map((w) => ({
+        id: w.id,
+        slug: w.slug,
+        title: w.title,
+        storyCount: w.storyCount,
+        entityCount: w.entityCount,
+        edgeCount: w.edgeCount,
+        lastPlayedAt: w.lastPlayedAt,
+        lastRefreshedAt: w.lastRefreshedAt,
+        sources: w.sources,
+        // "Is this story reading it", not "is the server holding it open".
+        reading: reading.has(w.id),
+        visibility: visible.get(w.id)!.visibility,
+        // What *this* caller may do with it, so the UI can hide an action rather than
+        // offering one that will 403.
+        role: visible.get(w.id)!.role,
+      })),
   });
 });
 
@@ -2024,7 +2071,10 @@ route('POST', '/api/blocklist', async (_req, res, { db, body, user, world }) => 
 });
 
 route('DELETE', '/api/blocklist/:pattern', async (_req, res, { db, params, user, world }) => {
-  await unblockPhrase(db, user, decodeURIComponent(params.pattern ?? ''), { storyId: world.storyId, crypto: world.crypto });
+  await unblockPhrase(db, user, decodeURIComponent(params.pattern ?? ''), {
+    storyId: world.storyId,
+    crypto: world.crypto,
+  });
   send(res, 200, { ok: true });
 });
 
@@ -2383,7 +2433,17 @@ route('POST', '/api/setup/discover', (_req, res, { setup, body, user, providers 
     send(
       res,
       200,
-      svc.startDiscover(baseUrl, seeds, mode ?? 'mid', sketch, excludeCategories ?? [], title ?? '', limits, user?.id, providers),
+      svc.startDiscover(
+        baseUrl,
+        seeds,
+        mode ?? 'mid',
+        sketch,
+        excludeCategories ?? [],
+        title ?? '',
+        limits,
+        user?.id,
+        providers,
+      ),
     );
   } catch (e) {
     send(res, setupFailureStatus(e, 400), { error: e instanceof Error ? e.message : String(e) });
@@ -2731,7 +2791,8 @@ export function createApiServer(opts: ServerOptions) {
   const dataRoot = opts.dataRoot ?? 'data';
   const db = opts.db;
   const ingestDb = opts.ingestDb ?? db;
-  const paidCallLimit = opts.paidCallLimit === undefined ? (authConfig ? DEFAULT_PAID_CALL_LIMIT : null) : opts.paidCallLimit;
+  const paidCallLimit =
+    opts.paidCallLimit === undefined ? (authConfig ? DEFAULT_PAID_CALL_LIMIT : null) : opts.paidCallLimit;
   const paidCalls = paidCallLimit ? new RateLimiter(paidCallLimit.burst, paidCallLimit.perMinute) : null;
   /** Null when `user` may make this paid call now, else the seconds until they may. Admins are not metered. */
   const paidCallWait = (user: SessionUser | null): number | null =>
@@ -2764,7 +2825,10 @@ export function createApiServer(opts: ServerOptions) {
    * "most recently played" afterwards, which is the same durability the web
    * UI's own `?storyId=` selection has.
    */
-  const mcpToolContextFor = async (verified: { userId: string; raw: Record<string, unknown> }): Promise<McpToolContext> => {
+  const mcpToolContextFor = async (verified: {
+    userId: string;
+    raw: Record<string, unknown>;
+  }): Promise<McpToolContext> => {
     const user = mcpSessionUser(verified, authConfig);
     let selected: string | undefined;
     // Async now, and resolved per call rather than from a process-wide pointer.
@@ -3055,13 +3119,16 @@ export function createApiServer(opts: ServerOptions) {
         // path that matters in production, where `opts.world` is the boot shim and
         // a signed-in user always resolves their own.
         const storyIdParam = url.searchParams.get('storyId');
-        const world = user || storyIdParam
-          ? await worldFor(db, user, {
-              ...(storyIdParam ? { storyIdOverride: storyIdParam } : {}),
-              imagesDir,
-              ...(user ? { crypto: { keyForStory: (storyId: string) => ephemeralStoryKeys.get(user.id, storyId) } } : {}),
-            })
-          : await getWorld();
+        const world =
+          user || storyIdParam
+            ? await worldFor(db, user, {
+                ...(storyIdParam ? { storyIdOverride: storyIdParam } : {}),
+                imagesDir,
+                ...(user
+                  ? { crypto: { keyForStory: (storyId: string) => ephemeralStoryKeys.get(user.id, storyId) } }
+                  : {}),
+              })
+            : await getWorld();
         if (!url.pathname.startsWith('/api/encryption/') && url.pathname !== '/api/meta') {
           try {
             await assertPrivateStoryMigrationReady(db, world.storyId);

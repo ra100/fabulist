@@ -118,6 +118,7 @@ export const providerKeyKeys = {
   all: ['provider-key'] as const,
   models: ['provider-key', 'models'] as const,
 };
+export const providerModelKeys = { all: ['provider-models'] as const };
 export const usageKeys = {
   all: ['usage'] as const,
   mine: (days: number) => ['usage', 'mine', days] as const,
@@ -188,35 +189,35 @@ export function useDeleteProviderKeyMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: api.providerKey.remove,
-    onSuccess: () => invalidateProviderKeyReads(queryClient),
+    onSuccess: () => {
+      invalidateProviderKeyReads(queryClient);
+      void queryClient.invalidateQueries({ queryKey: providerModelKeys.all });
+    },
   });
 }
 
 export function useTestProviderKeyMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: api.providerKey.test,
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: usageKeys.all }),
-  });
+  return useMutation({ mutationFn: api.providerKey.test });
 }
 
 export function useProviderModelsMutation() {
   return useMutation({ mutationFn: api.providerKey.models });
 }
 
-/** Models listed by the caller's *saved* key (no plaintext in the request). */
-export function useProviderModelsSavedQuery(enabled: boolean) {
-  return useQuery({
-    queryKey: providerKeyKeys.models,
-    queryFn: api.providerKey.modelsSaved,
-    enabled,
-    retry: false,
-  });
+export function useProviderModelsSavedMutation() {
+  return useMutation({ mutationFn: api.providerKey.modelsSaved });
 }
 
-/** Probe the caller's *saved* key against a model (no plaintext in the request). */
-export function useTestProviderKeySavedMutation() {
-  return useMutation({ mutationFn: api.providerKey.testSaved });
+export function useProviderModelAssignmentsQuery(enabled: boolean) {
+  return useQuery({ queryKey: providerModelKeys.all, queryFn: api.providerModels.get, enabled, retry: false });
+}
+
+export function useSaveProviderModelAssignmentsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.providerModels.save,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: providerModelKeys.all }),
+  });
 }
 
 export function useMyUsageQuery(days: number, enabled: boolean) {
@@ -271,7 +272,11 @@ export const entityKeys = { detail: (id: string) => ['entity', id] as const };
 
 /** `enabled: id !== null` mirrors `GraphTab`'s old "selection cleared → clear detail" short-circuit. */
 export function useEntityQuery(id: string | null) {
-  return useQuery({ queryKey: entityKeys.detail(id ?? ''), queryFn: () => api.entity(id as string), enabled: id !== null });
+  return useQuery({
+    queryKey: entityKeys.detail(id ?? ''),
+    queryFn: () => api.entity(id as string),
+    enabled: id !== null,
+  });
 }
 
 export const searchKeys = { query: (q: string) => ['search', q] as const };
@@ -333,7 +338,9 @@ export function useChaptersQuery(enabled: boolean) {
 }
 
 export function useRollbackMutation() {
-  return useMutation({ mutationFn: (target: RollbackTarget & { mode?: 'fork' | 'destructive' }) => api.rollback(target) });
+  return useMutation({
+    mutationFn: (target: RollbackTarget & { mode?: 'fork' | 'destructive' }) => api.rollback(target),
+  });
 }
 
 export function useSplitSceneMutation() {
@@ -771,7 +778,15 @@ export function useSetupDiscoverMutation() {
       title: string;
       budgets: IngestBudgetOverrides;
     }) =>
-      api.setup.discover(vars.baseUrl, vars.seeds, vars.mode, vars.character, vars.excludeCategories, vars.title, vars.budgets),
+      api.setup.discover(
+        vars.baseUrl,
+        vars.seeds,
+        vars.mode,
+        vars.character,
+        vars.excludeCategories,
+        vars.title,
+        vars.budgets,
+      ),
     onSuccess: (job) => seedJob(queryClient, job),
   });
 }
@@ -779,8 +794,12 @@ export function useSetupDiscoverMutation() {
 export function useSetupIngestMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (vars: { previewKey: string; character: CharacterSketch; style: Partial<StyleContract>; opening: string }) =>
-      api.setup.ingest(vars.previewKey, vars.character, vars.style, vars.opening),
+    mutationFn: (vars: {
+      previewKey: string;
+      character: CharacterSketch;
+      style: Partial<StyleContract>;
+      opening: string;
+    }) => api.setup.ingest(vars.previewKey, vars.character, vars.style, vars.opening),
     onSuccess: (job) => seedJob(queryClient, job),
   });
 }
@@ -856,7 +875,10 @@ export const illustrationKeys = {
 };
 
 export function useIllustrationsForEntityQuery(entityId: string) {
-  return useQuery({ queryKey: illustrationKeys.forEntity(entityId), queryFn: () => api.illustrate.forEntity(entityId) });
+  return useQuery({
+    queryKey: illustrationKeys.forEntity(entityId),
+    queryFn: () => api.illustrate.forEntity(entityId),
+  });
 }
 
 export function useIllustrationsForTurnQuery(turnId: string) {
@@ -916,7 +938,9 @@ export function useSaveSheetMutation(entityId: string) {
   return useMutation({
     scope: { id: `sheet-save-${entityId}` },
     mutationFn: (buildPatch: (sheet: Sheet) => Partial<Sheet>) => {
-      const current = queryClient.getQueryData<CastEntry[]>(castKeys.all)?.find((c) => c.sheet.entityId === entityId)?.sheet;
+      const current = queryClient
+        .getQueryData<CastEntry[]>(castKeys.all)
+        ?.find((c) => c.sheet.entityId === entityId)?.sheet;
       if (!current) throw new Error(`no cached sheet for entity ${entityId}`);
       return api.saveSheet(entityId, buildPatch(current));
     },

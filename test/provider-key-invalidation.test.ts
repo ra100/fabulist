@@ -3,9 +3,9 @@ import test from 'node:test';
 import { QueryClient } from '@tanstack/react-query';
 import { encryptionKeys, invalidateProviderKeyReads, providerKeyKeys } from '../web/src/queries.ts';
 
-test('saving or deleting a provider key invalidates the cached encryption bundle and provider key', () => {
+test('saving or deleting a provider key invalidates the cached encryption bundle and provider credentials', () => {
   const queryClient = new QueryClient();
-  queryClient.setQueryData(encryptionKeys.keys, { providerKey: { keyId: 'old' } });
+  queryClient.setQueryData(encryptionKeys.keys, { providerKeys: [{ keyId: 'old' }] });
   queryClient.setQueryData(encryptionKeys.migration, { pending: 0 });
   queryClient.setQueryData(providerKeyKeys.all, { key: null });
 

@@ -53,7 +53,9 @@ export class ProviderKeyRejectedError extends Error {
   readonly keySource = 'own' as const;
 
   constructor(status: number) {
-    super(`${REJECTED_COPY[status] ?? 'Your provider refused the request made with your API key'} (${status}). Check it in Settings → My provider.`);
+    super(
+      `${REJECTED_COPY[status] ?? 'Your provider refused the request made with your API key'} (${status}). Check it in Settings → Configure providers.`,
+    );
     this.name = 'ProviderKeyRejectedError';
     this.status = status;
   }
@@ -100,18 +102,24 @@ export function byokProvider(
       try {
         return await inner.complete(req);
       } catch (err) {
-        if (err instanceof ProviderHttpError && err.status in REJECTED_COPY) throw new ProviderKeyRejectedError(err.status);
+        if (err instanceof ProviderHttpError && err.status in REJECTED_COPY)
+          throw new ProviderKeyRejectedError(err.status);
         throw new Error(scrubSecrets(err instanceof Error ? err.message : String(err), [apiKey]));
       }
     },
   };
 }
 
-export async function listModels(
+export interface ModelDiscoveryResult {
+  status: 'verified' | 'unsupported' | 'unavailable';
+  models: string[];
+}
+
+export async function discoverModels(
   endpoint: ByokEndpoint,
   apiKey: string,
   fetcher: typeof fetch = fetch,
-): Promise<string[]> {
+): Promise<ModelDiscoveryResult> {
   const anthropic = endpoint.kind === 'anthropic';
   const url = anthropic ? `${endpoint.baseUrl}/v1/models` : `${endpoint.baseUrl}/models`;
   const headers: Record<string, string> = anthropic
@@ -121,19 +129,31 @@ export async function listModels(
   try {
     res = await noRedirects(fetcher)(url, { headers, signal: AbortSignal.timeout(5_000) });
   } catch {
-    return [];
+    return { status: 'unavailable', models: [] };
   }
-  // 404/405 means this provider has no listing endpoint; anything else non-2xx is about the key.
-  if (res.status === 404 || res.status === 405) return [];
-  if (!res.ok) throw new ProviderKeyRejectedError(res.status);
+  if (res.status === 404 || res.status === 405) return { status: 'unsupported', models: [] };
+  if (res.status === 401 || res.status === 403) throw new ProviderKeyRejectedError(res.status);
+  if (!res.ok) return { status: 'unavailable', models: [] };
   try {
     const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
-    return (body.data ?? [])
-      .map((m) => m.id)
-      .filter((id): id is string => typeof id === 'string')
-      .sort()
-      .slice(0, 500);
+    if (!Array.isArray(body.data)) return { status: 'unavailable', models: [] };
+    return {
+      status: 'verified',
+      models: body.data
+        .map((m) => m.id)
+        .filter((id): id is string => typeof id === 'string')
+        .sort()
+        .slice(0, 500),
+    };
   } catch {
-    return [];
+    return { status: 'unavailable', models: [] };
   }
+}
+
+export async function listModels(
+  endpoint: ByokEndpoint,
+  apiKey: string,
+  fetcher: typeof fetch = fetch,
+): Promise<string[]> {
+  return (await discoverModels(endpoint, apiKey, fetcher)).models;
 }
