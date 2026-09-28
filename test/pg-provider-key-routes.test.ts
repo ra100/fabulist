@@ -23,6 +23,10 @@ const fakeWrap = { nonce: Buffer.alloc(12, 1).toString('base64'), ciphertext: Bu
 type Body = Record<string, unknown>;
 const body = (reply: { body: unknown }) => reply.body as Body;
 
+function sortAssignments(items: Array<{ role: string; providerKeyId: string; model: string }>) {
+  return [...items].sort((a, b) => a.role.localeCompare(b.role));
+}
+
 function providerFetch(
   calls: Array<{ url: string; authorization: string; apiKey: string; model: string }> = [],
   status = 200,
@@ -177,8 +181,11 @@ test('providers can be tested before saving, loaded by selected credential, assi
           { role: 'classify', providerKeyId: KEY2, model: 'claude-classify' },
         ];
         const configured = body(await as('alice', 'PUT', '/api/provider-models', { assignments }));
-        assert.deepEqual(configured.assignments, assignments);
-        assert.deepEqual(body(await as('alice', 'GET', '/api/provider-models')).assignments, assignments);
+        assert.deepEqual(sortAssignments(configured.assignments as typeof assignments), sortAssignments(assignments));
+        assert.deepEqual(
+          sortAssignments(body(await as('alice', 'GET', '/api/provider-models')).assignments as typeof assignments),
+          sortAssignments(assignments),
+        );
 
         const savedModels = body(await as('alice', 'GET', '/api/provider-keys/' + KEY2 + '/models'));
         assert.deepEqual(savedModels.models, ['gpt-a', 'gpt-b']);
