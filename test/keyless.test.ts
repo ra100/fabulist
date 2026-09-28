@@ -743,9 +743,10 @@ test('default auth mode follows the provider kind', () => {
   assert.equal(defaultAuth('anthropic'), 'api-key');
 });
 
-test('every preset still declares at least the 64k floor', () => {
+test('every preset declares its supported context floor', () => {
   for (const [key, spec] of Object.entries(PRESETS)) {
-    assert.ok((spec.capabilities?.contextWindow ?? 64_000) >= 64_000, `${key}`);
+    const floor = spec.kind === 'jev' ? 32_000 : 64_000;
+    assert.ok((spec.capabilities?.contextWindow ?? 64_000) >= floor, `${key}`);
   }
 });
 

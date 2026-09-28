@@ -62,6 +62,70 @@ async function postJson(
   }
 }
 
+/** OpenRouter's typed-decision endpoint, which does not speak chat completions. */
+export class JevProvider implements Provider {
+  readonly id = 'openrouter';
+  readonly model: string;
+  readonly capabilities: ProviderCapabilities;
+  private apiKey: string;
+  private baseUrl: string;
+  private fetcher: typeof fetch;
+  private timeoutMs: number;
+
+  constructor(opts: HttpOptions) {
+    this.apiKey = opts.apiKey;
+    this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
+    this.model = opts.model;
+    this.capabilities = opts.capabilities;
+    this.fetcher = opts.fetcher ?? fetch;
+    this.timeoutMs = opts.timeoutMs ?? 60_000;
+  }
+
+  async complete(req: CompletionRequest): Promise<CompletionResult> {
+    const properties = (req.schema?.schema.properties ?? {}) as Record<
+      string,
+      { instructions?: unknown; criteria?: unknown }
+    >;
+    const questions: Record<string, { type: 'choice'; instructions: string; criteria: Record<string, string> }> = {};
+    for (const [key, definition] of Object.entries(properties)) {
+      if (
+        typeof definition.instructions !== 'string' ||
+        !definition.criteria ||
+        typeof definition.criteria !== 'object' ||
+        Array.isArray(definition.criteria)
+      ) {
+        throw new Error(`Jev question ${key} is missing typed decision criteria`);
+      }
+      questions[key] = {
+        type: 'choice',
+        instructions: definition.instructions,
+        criteria: definition.criteria as Record<string, string>,
+      };
+    }
+    if (Object.keys(questions).length === 0) throw new Error('Jev requires at least one typed decision question');
+
+    const state = req.messages.map((message) => message.content).join('\n\n');
+    const payload = (await postJson(
+      `${this.baseUrl}/alpha/decisions`,
+      { authorization: `Bearer ${this.apiKey}` },
+      { model: this.model, state, questions },
+      this.fetcher,
+      this.timeoutMs,
+    )) as Record<string, unknown>;
+    const usage = (payload.usage ?? {}) as Record<string, unknown>;
+    const tokensIn = Number(usage.input_tokens ?? usage.inputTokens ?? 0);
+    const tokensOut = Number(usage.output_tokens ?? usage.outputTokens ?? 0);
+
+    return {
+      text: JSON.stringify(payload),
+      tokensIn: Number.isFinite(tokensIn) ? tokensIn : 0,
+      tokensOut: Number.isFinite(tokensOut) ? tokensOut : 0,
+      model: typeof payload.model === 'string' ? payload.model : this.model,
+      schemaEnforced: true,
+    };
+  }
+}
+
 // ------------------------------------------------------- OpenAI-compatible
 // Covers OpenAI, Groq, Together, DeepSeek, OpenRouter, LM Studio, and anything
 // else speaking /chat/completions, which is most of the field.
@@ -445,6 +509,7 @@ export type ProviderKind =
   | 'bedrock'
   | 'google'
   | 'copilot'
+  | 'jev'
   | 'mock';
 
 /**
@@ -503,6 +568,13 @@ export function defaultAuth(kind: ProviderKind): AuthMode {
  * do not predict it, and it is the hardest thing here to evaluate automatically.
  */
 export const PRESETS: Record<string, ProviderSpec> = {
+  'openrouter:jev-1.13': {
+    kind: 'jev',
+    model: 'typesafe/jev-1.13',
+    baseUrl: 'https://openrouter.ai/api',
+    apiKeyEnv: 'OPENROUTER_API_KEY',
+    capabilities: { contextWindow: 32_000, structuredOutput: 'native-schema', costTier: 'cheap', proseQuality: 0, steerability: 1 },
+  },
   'openai:gpt-4o': {
     kind: 'openai-compat',
     model: 'gpt-4o',
@@ -712,6 +784,14 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
         capabilities,
         allowUnofficial: spec.allowUnofficial === true,
       });
+    case 'jev':
+      return new JevProvider({
+        apiKey,
+        baseUrl: spec.baseUrl ?? 'https://openrouter.ai/api',
+        model: spec.model,
+        capabilities,
+        timeoutMs: 8_000,
+      });
     case 'openai-compat': {
       const base = spec.baseUrl ?? 'https://api.openai.com/v1';
       // The resolver is attached only when the spec asked for it, so no other
@@ -784,7 +864,7 @@ export function profilesFor(
 ): Record<string, { narrate: string; mechanics: string; extract: string }> {
   const profiles: Record<string, { narrate: string; mechanics: string; extract: string }> = Object.create(null);
   for (const key of Object.keys(providers)) {
-    if (key === 'mock' || Object.hasOwn(PROFILES, key)) continue;
+    if (key === 'mock' || providers[key]?.kind === 'jev' || Object.hasOwn(PROFILES, key)) continue;
     profiles[key] = { narrate: key, mechanics: key, extract: key };
   }
   return Object.assign(profiles, PROFILES);

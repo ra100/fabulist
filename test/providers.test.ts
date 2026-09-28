@@ -196,11 +196,12 @@ test('an unknown profile falls back to mock with a note', () => {
   assert.ok(notes.some((n) => /unknown profile/.test(n)));
 });
 
-test('every preset declares a context window of at least 64k', () => {
-  // The design commits to 64k as the floor; a preset below it would silently
-  // break frame assembly.
+test('every preset declares a context window appropriate to its role', () => {
+  // General-purpose role routes need 64k; Jev is the typed-decision adapter and
+  // is pinned to its documented 32k context window.
   for (const [key, spec] of Object.entries(PRESETS)) {
     const window = spec.capabilities?.contextWindow ?? 64_000;
-    assert.ok(window >= 64_000, `${key} declares ${window}`);
+    const floor = spec.kind === 'jev' ? 32_000 : 64_000;
+    assert.ok(window >= floor, `${key} declares ${window}`);
   }
 });

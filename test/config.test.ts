@@ -104,6 +104,34 @@ test('a valid local server spec is accepted and normalised', () => {
   assert.equal(spec?.dialect, 'vllm');
 });
 
+test('Jev is available only through the optional fastpath route', () => {
+  const { svc } = service();
+  assert.ok(svc.providerKeys().includes('openrouter:jev-1.13'));
+  assert.ok(ROUTABLE_ROLES.includes('jev-fastpath'));
+
+  const validation = validateSpec('fast-check', {
+    kind: 'jev',
+    model: 'typesafe/jev-1.13',
+    baseUrl: 'https://openrouter.ai/api',
+    apiKeyEnv: 'OPENROUTER_API_KEY',
+  });
+  assert.equal(validation.spec?.kind, 'jev');
+  assert.match(
+    service().svc.patch({ routes: { integrity: 'openrouter:jev-1.13' } }).issues[0]?.message ?? '',
+    /only be routed to jev-fastpath/,
+  );
+  assert.match(
+    service().svc.patch({ routes: { 'jev-fastpath': 'openai:gpt-4o-mini' } }).issues[0]?.message ?? '',
+    /requires a Jev provider/,
+  );
+  assert.deepEqual(svc.patch({ routes: { 'jev-fastpath': 'openrouter:jev-1.13' } }).issues, []);
+
+  const profiles = profilesFor({
+    'fast-check': { kind: 'jev', model: 'typesafe/jev-1.13', apiKeyEnv: 'OPENROUTER_API_KEY' },
+  });
+  assert.equal(profiles['fast-check'], undefined, 'Jev must not become a full-model profile');
+});
+
 test('an unknown kind is rejected rather than half-accepted', () => {
   const { spec, issues } = validateSpec('x', { kind: 'telepathy', model: 'm' });
   assert.equal(spec, null);

@@ -42,6 +42,7 @@ import {
   direct,
   extract,
   integrity,
+  jevFastCheck,
   narrate,
   referee,
   type RoleDeps,
@@ -242,6 +243,7 @@ export class Engine {
     return {
       world,
       provider: (role) => providers.get(role),
+      optionalProvider: (role) => providers.getOptional?.(role),
       ctx: (role, extra) => this.frameContext(world, role, providers.get(role), extra),
       log: (role, provider, model, tokensIn, tokensOut) => {
         calls.push({ role, provider, model, tokensIn, tokensOut });
@@ -350,11 +352,20 @@ export class Engine {
       return { kind: 'answered', text: this.answerMetaQuery(world, rawInput) };
     }
 
-    // 2-3. INTEGRITY. Cheapest gate, so it runs first and fails fast.
+    // 2. Optional Jev clear-case checks. The full role routes remain authoritative
+    // fallbacks whenever Jev is unclear, costly, unsafe, malformed, or unavailable.
+    const jevVerdicts = await jevFastCheck(
+      deps,
+      rawInput,
+      actorId,
+      (intent.class === 'action' || intent.class === 'dialogue') && !opts.overrideIntegrity,
+    );
+
+    // 3. INTEGRITY. Cheapest gate, so it runs first and fails fast.
     let integrityVerdict = null;
     if (intent.class === 'action' || intent.class === 'dialogue') {
       opts.onStage?.('checking it against your character');
-      integrityVerdict = await integrity(deps, rawInput, actorId);
+      integrityVerdict = await integrity(deps, rawInput, actorId, jevVerdicts.integrity === true);
       if (integrityVerdict.interrupt && !opts.overrideIntegrity) {
         this.onInterrupt?.(integrityVerdict.interrupt);
         return {
@@ -369,7 +380,7 @@ export class Engine {
     // 4-5. REFEREE + DIRECT. They read the same snapshot and do not depend on
     // each other, so overlap the two model calls after integrity passes.
     opts.onStage?.('checking it against the world');
-    const refereePromise = referee(deps, rawInput);
+    const refereePromise = referee(deps, rawInput, jevVerdicts.referee === true);
     opts.onStage?.('deciding what happens');
     const planPromise = direct(deps, rawInput);
     const [refereeVerdict, plan] = await Promise.all([refereePromise, planPromise]);

@@ -20,6 +20,7 @@ import { createStory } from '../src/store/world-pg.ts';
 import { MockProvider } from '../src/providers/mock.ts';
 import { ProviderRegistry } from '../src/providers/provider.ts';
 import { Engine } from '../src/loop/engine-pg.ts';
+import { clearAnswers, ScriptedJevProvider } from './jev-fixtures.ts';
 import { exportMarkdown, exportPlainText } from '../src/loop/export-pg.ts';
 import type { Db, Queryable } from '../src/db/pg.ts';
 import type { CharacterSheet } from '../src/domain/types.ts';
@@ -154,6 +155,71 @@ test('a plain turn narrates, extracts a delta, and commits it', async (t) => {
     assert.ok(turns[0]!.meta.frames?.extract, 'each role keeps its own frame budget');
     assert.equal((await world.session.get()).turn, 1, 'the turn counter advanced');
     assert.ok((await world.chronicle.events()).length > 0);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('clear Jev decisions bypass the full Integrity and Referee calls on Postgres', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await seed(db);
+    const full = new MockProvider();
+    const jev = new ScriptedJevProvider(clearAnswers());
+    const engine = new Engine({
+      world,
+      db,
+      providers: new ProviderRegistry(full, { 'jev-fastpath': jev }),
+    });
+
+    const out = await engine.takeTurn('i warm the ink and keep copying');
+    assert.equal(out.kind, 'narrated', JSON.stringify(out).slice(0, 300));
+    if (out.kind !== 'narrated') return;
+    const roles = out.turn.meta.providerCalls.map((call) => call.role);
+    assert.ok(roles.includes('jev-fastpath'));
+    assert.ok(!roles.includes('integrity'));
+    assert.ok(!roles.includes('referee'));
+    assert.equal(out.turn.meta.integrity?.distance, 'in-character');
+    assert.equal(out.turn.meta.referee?.ruling, 'allow');
+    assert.deepEqual(Object.keys(jev.requests[0]?.schema?.schema.properties as object).sort(), ['integrity', 'referee']);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('Jev unclear character result falls back only to the full Integrity route on Postgres', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await seed(db);
+    const full = new MockProvider();
+    const jev = new ScriptedJevProvider(clearAnswers({ integrityChoice: 'full_integrity_review' }));
+    const engine = new Engine({
+      world,
+      db,
+      providers: new ProviderRegistry(full, { 'jev-fastpath': jev }),
+    });
+
+    const out = await engine.takeTurn('i warm the ink and keep copying');
+    assert.equal(out.kind, 'narrated');
+    const roles = full.calls.map((call) => call.role);
+    assert.ok(roles.includes('integrity'));
+    assert.ok(!roles.includes('referee'));
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('Jev possible Referee consequence falls back only to the full Referee route on Postgres', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await seed(db);
+    const full = new MockProvider();
+    const jev = new ScriptedJevProvider(clearAnswers({ refereeChoice: 'full_referee_review' }));
+    const engine = new Engine({
+      world,
+      db,
+      providers: new ProviderRegistry(full, { 'jev-fastpath': jev }),
+    });
+
+    const out = await engine.takeTurn('i warm the ink and keep copying');
+    assert.equal(out.kind, 'narrated');
+    const roles = full.calls.map((call) => call.role);
+    assert.ok(!roles.includes('integrity'));
+    assert.ok(roles.includes('referee'));
   });
   if (!ran) t.skip('no Postgres configured');
 });
