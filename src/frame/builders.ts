@@ -8,6 +8,7 @@
  * Two rendering densities per entity (full sheet vs thumbnail) saves more than
  * any other optimisation here.
  */
+import { ACTIVE_THREAD_BUDGET } from '../domain/thread-policy.ts';
 import type {
   CharacterSheet,
   Entity,
@@ -386,7 +387,7 @@ export function buildDirectorFrame(ctx: FrameContext): Frame {
     .map((c) => `id=${c.id} actor=${c.actorId} action=${c.action} visibility=${c.visibility}`)
     .join('\n');
   const specs: SlotSpec[] = [
-    { name: 'threads', priority: Priority.openThreads, content: renderThreads(world.threads.open()), evictable: false, maxTokens: 1200 },
+    { name: 'threads', priority: Priority.openThreads, content: renderThreads(world.threads.open(ACTIVE_THREAD_BUDGET)), evictable: false, maxTokens: 1200 },
     { name: 'directives', priority: Priority.styleContract, content: world.directives.active().map((d) => `[${d.strength}] ${d.text}`).join('\n'), evictable: false, maxTokens: 300 },
     { name: 'present-cast', priority: Priority.presentCast, content: ids.map((id) => { const e = world.graph.get(id); return e ? thumbnail(e) : ''; }).filter(Boolean).join('\n'), maxTokens: 600 },
     { name: 'pending-arrivals', priority: Priority.pendingArrivals, content: arrivals, maxTokens: 500 },
@@ -429,7 +430,7 @@ export function buildExtractFrame(ctx: FrameContext, prose: string): Frame {
     { name: 'actor', priority: Priority.agreedBeat, content: session.playerCharacterId, evictable: false },
     { name: 'location', priority: Priority.locationCard, content: session.currentLocationId ?? '', evictable: false },
     { name: 'known-ids', priority: Priority.presentCast, content: ids.map((id) => { const e = world.graph.get(id); return e ? `${e.id} = ${e.name}` : id; }).join('\n'), evictable: false, maxTokens: 800 },
-    { name: 'threads', priority: Priority.openThreads, content: world.threads.open(6).map((t) => `id=${t.id} ${t.title}`).join('\n'), maxTokens: 400 },
+    { name: 'threads', priority: Priority.openThreads, content: world.threads.open(ACTIVE_THREAD_BUDGET).map((t) => `id=${t.id} ${t.title}`).join('\n'), maxTokens: 400 },
     { name: 'prose', priority: Priority.agreedBeat, content: prose, evictable: false },
     { name: 'player-input', priority: Priority.recentProse, content: ctx.rawInput ?? '', maxTokens: 300 },
   ];

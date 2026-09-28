@@ -197,6 +197,8 @@ export class MockProvider implements Provider {
       'announce off-screen badness',
       'have an NPC act on their own agenda',
       'make the world push back physically',
+      'advance or pay off an existing thread',
+      'take a quiet beat',
     ];
     const threadId = prompt.match(/<threads>[\s\S]*?id=([a-z0-9:-]+)/i)?.[1] ?? null;
     const move = moves[hash(prompt) % moves.length]!;

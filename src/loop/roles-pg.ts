@@ -24,6 +24,7 @@ import type {
   SessionState,
   StyleContract,
 } from '../domain/types.ts';
+import { ACTIVE_THREAD_BUDGET } from '../domain/thread-policy.ts';
 import {
   buildDirectorFrame,
   buildExtractFrame,
@@ -367,6 +368,8 @@ export const GM_MOVES = [
   'announce off-screen badness',
   'have an NPC act on their own agenda',
   'make the world push back physically',
+  'advance or pay off an existing thread',
+  'take a quiet beat',
 ] as const;
 
 const DIRECTOR_SYSTEM = `You decide what happens next, choosing from a fixed menu of moves.
@@ -374,15 +377,23 @@ const DIRECTOR_SYSTEM = `You decide what happens next, choosing from a fixed men
 Available moves:
 ${GM_MOVES.map((m) => `- ${m}`).join('\n')}
 
-Pick the move that best serves the highest-tension thread that has an opening
-here. Constrained choice beats free invention: it produces more legible
-behaviour and it can be explained afterwards.
+Pick the move that best serves an existing thread that has an opening here. If
+none has a meaningful opening, take a quiet beat or satisfy an active directive
+without planting another lasting subplot.
+Prefer advancing a thread toward an outcome, or paying it off when the story has
+earned closure, over adding another unresolved question.
+
+Keep no more than ${ACTIVE_THREAD_BUDGET} major threads active. Reuse a thread when
+a new clue belongs to its existing question. At the budget, do not seed another
+subplot; advance or close an existing thread, or choose a quiet beat. Never
+force a resolution just to make room.
 
 Honour active directives. A 'mandate' must be satisfied, but prefer to satisfy
 it through characters pursuing their own agendas rather than an event dropping
 from the sky.
 
-Sometimes the right answer is a quiet beat. Not every turn needs escalation.
+A thread is resolved only when its central question or stakes have materially
+changed; use a quiet beat when no thread has a meaningful next step.
 
 Reply with JSON only.`;
 
@@ -594,6 +605,10 @@ Rules:
   learning it.
 - edgeRetires is for relations that ended. Do not retire what was never asserted.
 - Set sceneAdvance true only if the prose clearly changes place or time.
+- Threads are scarce: use the matching existing thread id for a new clue or development; do not create a second thread for another facet of the same unresolved question.
+- Open at most one new thread in a turn, and only for a distinct question with independent stakes and genuinely different possible outcomes.
+- Keep at most ${ACTIVE_THREAD_BUDGET} major threads open. At capacity, do not open another; record the event or clue and advance an existing thread instead. Never invent a resolution just to free capacity.
+- When the prose materially answers or drops an existing thread, update its listed id and set status to "resolved" or "abandoned". Lower tension when a thread loses urgency.
 
 Reply with JSON only.`;
 

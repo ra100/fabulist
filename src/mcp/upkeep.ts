@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Delta, Knobs, StyleContract } from '../domain/types.ts';
+import { ACTIVE_THREAD_BUDGET } from '../domain/thread-policy.ts';
 import type { Registry } from '../providers/provider.ts';
 import { MAX_FREE_TEXT_CHARS } from '../server/contracts.ts';
 
@@ -69,7 +70,7 @@ const UPKEEP_CHECKLIST = [
   'Cast: add anyone or anything new in entityUpserts (id "type:kebab-name"), after search_entities shows it does not already exist. Sheet changes (wounds, allegiance, appearance) go through update_sheet between turns.',
   'Relationships: edgeAsserts for a typed relation the prose establishes; edgeRetires only for a live edge that ended; relationshipUpdates for trust/affection/respect shifts between two characters.',
   'Facts: factsLearned for information a character now holds, listing exactly who is in knownBy and who is only in suspectedBy. Use record_fact for a fact you missed.',
-  'Threads: threadUpdates with a title and no id opens a thread; with an id, move tensionDelta or set status "resolved"/"abandoned". Use open_thread between turns.',
+  `Threads: use threadUpdates with the existing thread id to advance a clue or development of the same question. Open at most one genuinely distinct thread per turn and keep no more than ${ACTIVE_THREAD_BUDGET} open; at capacity, advance an existing thread instead. Set status "resolved"/"abandoned" only when the prose earns it.`,
   'Conditions: conditionUpdates for mood, injuries, location or presentWith of anyone the prose changes.',
   'Vows: vowBreaks when a character breaks a vow they hold.',
   'Events: events with participants and significance 0..1; omit to record one event from the prose with the present cast. sceneAdvance: true only when place or time changes.',

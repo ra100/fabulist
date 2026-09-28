@@ -1,5 +1,6 @@
 import { Fragment, useRef, useState } from 'react';
 import type { State, Thread } from '../api.ts';
+
 import {
   useAddDirectiveMutation,
   useCreateThreadMutation,
@@ -156,6 +157,7 @@ function useAction(onSettled?: () => void) {
 
 export function ThreadsView({ state, onChanged }: { state: State | null; onChanged: () => void }) {
   const { data: threads = [] } = useThreadsQuery();
+  const activeThreadCount = threads.filter((thread) => thread.status === 'open').length;
   const [text, setText] = useState('');
   const [strength, setStrength] = useState('push');
   const [diff, setDiff] = useState<Array<[string, string]> | null>(null);
@@ -214,6 +216,10 @@ export function ThreadsView({ state, onChanged }: { state: State | null; onChang
           <p className="lede">
             Tension is the dial the director reads before it chooses what happens next. Raise one and the story leans on
             it.
+          </p>
+          <p className="small dim">
+            {activeThreadCount} active threads. Reuse an existing thread for new clues; at capacity,
+            advance or close one before adding another.
           </p>
           {threads.map((thread) => (
             <ThreadCard key={thread.id} thread={thread} onChanged={onChanged} />

@@ -7,6 +7,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Delta, EntityId, StoryEvent, Turn, Visibility } from '../domain/types.ts';
+import { ACTIVE_THREAD_BUDGET, mergeOpenThread } from '../domain/thread-policy.ts';
 import { tx } from '../db/db.ts';
 import type { World } from '../store/index.ts';
 import { storyLayout } from './history.ts';
@@ -108,8 +109,8 @@ function applyDelta(
     }
 
     for (const t of delta.threadUpdates) {
-      if (t.id && world.threads.get(t.id)) {
-        const cur = world.threads.get(t.id)!;
+      const cur = t.id ? world.threads.get(t.id) : undefined;
+      if (cur && t.id) {
         world.threads.update(t.id, {
           title: t.title ?? cur.title,
           stakes: t.stakes ?? cur.stakes,
@@ -119,17 +120,25 @@ function applyDelta(
           status: t.status ?? cur.status,
         });
       } else if (t.title) {
-        const created = world.threads.create({
-          title: t.title,
-          stakes: t.stakes ?? '',
-          tension: Math.max(0, Math.min(1, 0.4 + (t.tensionDelta ?? 0))),
-          parties: t.parties ?? [],
-          // Never one resolution: a single path is a plot, which breaks on deviation.
-          resolutions: t.resolutions?.length ? t.resolutions : ['unresolved', 'escalates', 'fades'],
-          status: t.status ?? 'open',
-          createdScene: scene,
-        });
-        result.newThreadIds.push(created.id);
+        const duplicate = world.threads.findOpenByTitle(t.title);
+        if (duplicate) {
+          world.threads.update(duplicate.id, mergeOpenThread(duplicate, t));
+        } else if (
+          (t.status ?? 'open') === 'open' &&
+          world.threads.open(ACTIVE_THREAD_BUDGET).length < ACTIVE_THREAD_BUDGET
+        ) {
+          const created = world.threads.create({
+            title: t.title,
+            stakes: t.stakes ?? '',
+            tension: Math.max(0, Math.min(1, 0.4 + (t.tensionDelta ?? 0))),
+            parties: t.parties ?? [],
+            // Never one resolution: a single path is a plot, which breaks on deviation.
+            resolutions: t.resolutions?.length ? t.resolutions : ['unresolved', 'escalates', 'fades'],
+            status: 'open',
+            createdScene: scene,
+          });
+          result.newThreadIds.push(created.id);
+        }
       }
     }
 

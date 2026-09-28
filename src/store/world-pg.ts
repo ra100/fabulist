@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import { decryptStoryValue, encryptStoryValue } from '../crypto/story-envelope.ts';
 import { jsonGet, type Queryable } from '../db/pg.ts';
+import { dedupeOpenThreads, mergeOpenThread, threadTitleKey } from '../domain/thread-policy.ts';
 import { PrivateStoryLockedError } from './private-story-access.ts';
 import type { ChronicleCrypto } from './chronicle-pg.ts';
 import {
@@ -190,6 +191,14 @@ export class ThreadStore {
   }
 
   async create(t: Omit<Thread, 'id'> & { id?: ThreadId }): Promise<Thread> {
+    if (!t.id && t.status === 'open') {
+      const existing = await this.findOpenByTitle(t.title);
+      if (existing) {
+        const merged = mergeOpenThread(existing, t);
+        await this.update(existing.id, merged);
+        return { ...existing, ...merged };
+      }
+    }
     const id = t.id ?? `thread:${randomUUID()}`;
     const key = await this.privateValues.key();
     if (key) {
@@ -236,14 +245,14 @@ export class ThreadStore {
     return rows[0] ? (await this.toThreads(rows, key))[0] : undefined;
   }
 
-  /** Open threads ranked by tension: the Director's menu. */
+  /** Open threads ranked by tension, with repeated titles collapsed before the context limit. */
   async open(limit = 12): Promise<Thread[]> {
     const key = await this.privateValues.key();
     const { rows } = await this.db.query<ThreadRow>(
-      `SELECT ${THREAD_COLS} FROM threads WHERE story_id = $1 AND status = 'open' ORDER BY tension DESC LIMIT $2`,
-      [this.storyId, limit],
+      `SELECT ${THREAD_COLS} FROM threads WHERE story_id = $1 AND status = 'open' ORDER BY tension DESC`,
+      [this.storyId],
     );
-    return this.toThreads(rows, key);
+    return dedupeOpenThreads(await this.toThreads(rows, key), limit);
   }
 
   async all(): Promise<Thread[]> {
@@ -252,7 +261,13 @@ export class ThreadStore {
       `SELECT ${THREAD_COLS} FROM threads WHERE story_id = $1 ORDER BY tension DESC`,
       [this.storyId],
     );
-    return this.toThreads(rows, key);
+    return dedupeOpenThreads(await this.toThreads(rows, key));
+  }
+
+  async findOpenByTitle(title: string): Promise<Thread | undefined> {
+    const key = threadTitleKey(title);
+    if (!key) return undefined;
+    return (await this.open(Number.POSITIVE_INFINITY)).find((thread) => threadTitleKey(thread.title) === key);
   }
 
   async update(id: ThreadId, patch: Partial<Omit<Thread, 'id'>>): Promise<void> {

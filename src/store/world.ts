@@ -12,6 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/db.ts';
 import { jsonGet, row, rows } from '../db/db.ts';
+import { dedupeOpenThreads, mergeOpenThread, threadTitleKey } from '../domain/thread-policy.ts';
 import {
   defaultKnobs,
   defaultStyleContract,
@@ -66,6 +67,14 @@ export class ThreadStore {
   }
 
   create(t: Omit<Thread, 'id'> & { id?: ThreadId }): Thread {
+    if (!t.id && t.status === 'open') {
+      const existing = this.findOpenByTitle(t.title);
+      if (existing) {
+        const merged = mergeOpenThread(existing, t);
+        this.update(existing.id, merged);
+        return { ...existing, ...merged };
+      }
+    }
     const id = t.id ?? `thread:${randomUUID()}`;
     this.db
       .prepare(
@@ -81,19 +90,24 @@ export class ThreadStore {
     return r ? toThread(r) : undefined;
   }
 
-  /** Open threads ranked by tension: the Director's menu. */
+  /** Open threads ranked by tension, with repeated titles collapsed before the context limit. */
   open(limit = 12): Thread[] {
-    return rows<ThreadRow>(
-      this.db
-        .prepare(`SELECT * FROM threads WHERE story_id = ? AND status = 'open' ORDER BY tension DESC LIMIT ?`)
-        .all(this.storyId, limit),
+    const threads = rows<ThreadRow>(
+      this.db.prepare(`SELECT * FROM threads WHERE story_id = ? AND status = 'open' ORDER BY tension DESC`).all(this.storyId),
     ).map(toThread);
+    return dedupeOpenThreads(threads, limit);
   }
 
   all(): Thread[] {
-    return rows<ThreadRow>(
-      this.db.prepare(`SELECT * FROM threads WHERE story_id = ? ORDER BY tension DESC`).all(this.storyId),
-    ).map(toThread);
+    return dedupeOpenThreads(
+      rows<ThreadRow>(this.db.prepare(`SELECT * FROM threads WHERE story_id = ? ORDER BY tension DESC`).all(this.storyId)).map(toThread),
+    );
+  }
+
+  findOpenByTitle(title: string): Thread | undefined {
+    const key = threadTitleKey(title);
+    if (!key) return undefined;
+    return this.open(Number.POSITIVE_INFINITY).find((thread) => threadTitleKey(thread.title) === key);
   }
 
   update(id: ThreadId, patch: Partial<Omit<Thread, 'id'>>): void {
