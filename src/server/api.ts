@@ -954,14 +954,16 @@ route('POST', '/api/compact', async (_req, res, { world, engine, body }) => {
  */
 route('POST', '/api/scene/close', async (_req, res, { world, engine }) => {
   const before = world.session.get();
-  const result = await engine.compaction().onSceneClosed(before.scene);
-  world.session.set({ scene: before.scene + 1, turn: 0 });
-  world.chronicle.upsertScene(before.scene + 1, { chapter: engine.compaction().chapterOf(before.scene + 1) });
+  const closedScene = storyLayout(world).turns.at(-1)?.scene ?? before.scene;
+  const nowScene = closedScene + 1;
+  const result = await engine.compaction().onSceneClosed(closedScene);
+  world.session.set({ scene: nowScene, turn: 0 });
+  world.chronicle.upsertScene(nowScene, { chapter: engine.compaction().chapterOf(nowScene) });
   recordAuthoringCheckpoint(world);
-  const summary = world.chronicle.scenes().find((s) => s.scene === before.scene)?.summary ?? null;
+  const summary = world.chronicle.scenes().find((s) => s.scene === closedScene)?.summary ?? null;
   send(res, 200, {
-    closedScene: before.scene,
-    nowScene: before.scene + 1,
+    closedScene,
+    nowScene,
     summary,
     scenesSummarised: result.scenesSummarised,
     chaptersSummarised: result.chaptersSummarised,

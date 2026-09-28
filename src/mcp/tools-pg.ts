@@ -15,7 +15,7 @@
  */
 import type { Engine } from '../loop/engine-pg.ts';
 import { narratorSystem } from '../loop/roles-pg.ts';
-import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint, splitSceneAtTurn } from '../loop/history-pg.ts';
+import { recordAuthoringCheckpoint, regenerateProseWithCheckpoint, splitSceneAtTurn, storyLayout } from '../loop/history-pg.ts';
 import { forkStory, rollback, type ForkOptions } from '../loop/branch-pg.ts';
 import { exportMarkdown, exportPlainText } from '../loop/export-pg.ts';
 import { applyDirectiveRecalc, tickConsequences, worldTick } from '../consequence/propagate-pg.ts';
@@ -1303,13 +1303,15 @@ export async function closeSceneTool(ctx: McpToolContext) {
   const compactor = ctx.engine.compaction(await requestRegistry(ctx, world));
   return recordAuthoringCheckpoint(ctx.db, world, async (transactionWorld) => {
     const before = await transactionWorld.session.get();
-    const result = await compactor.onSceneClosed(transactionWorld, before.scene);
-    await transactionWorld.session.set({ scene: before.scene + 1, turn: 0 });
-    await transactionWorld.chronicle.upsertScene(before.scene + 1, { chapter: compactor.chapterOf(before.scene + 1) });
-    const summary = (await transactionWorld.chronicle.scenes()).find((s) => s.scene === before.scene)?.summary ?? null;
+    const closedScene = (await storyLayout(transactionWorld)).turns.at(-1)?.scene ?? before.scene;
+    const nowScene = closedScene + 1;
+    const result = await compactor.onSceneClosed(transactionWorld, closedScene);
+    await transactionWorld.session.set({ scene: nowScene, turn: 0 });
+    await transactionWorld.chronicle.upsertScene(nowScene, { chapter: compactor.chapterOf(nowScene) });
+    const summary = (await transactionWorld.chronicle.scenes()).find((s) => s.scene === closedScene)?.summary ?? null;
     return {
-      closedScene: before.scene,
-      nowScene: before.scene + 1,
+      closedScene,
+      nowScene,
       summary,
       scenesSummarised: result.scenesSummarised,
       chaptersSummarised: result.chaptersSummarised,
