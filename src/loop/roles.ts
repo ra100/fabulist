@@ -28,6 +28,7 @@ import {
 } from '../frame/builders.ts';
 import { adaptRequest, extractJson, type CompletionResult, type Provider } from '../providers/provider.ts';
 import type { World } from '../store/index.ts';
+import { narrationOutputTokenBudget, narrationWordRange } from './narration-budget.ts';
 import { providerErrorKind, type ProviderCallTelemetry } from './provider-telemetry.ts';
 import { checkWithJev, type JevFastPathResult } from './jev-fastpath.ts';
 import {
@@ -393,6 +394,7 @@ export async function direct(deps: RoleDeps, rawInput: string): Promise<Director
  * on the other end of an MCP tool call.
  */
 export function narratorSystem(style: StyleContract, verbatim: boolean): string {
+  const wordRange = narrationWordRange(style.sceneTarget);
   return `You are the narrator of a role-play session. You write prose and nothing else.
 
 You do not invent world facts. Render what the referee and director already
@@ -421,7 +423,8 @@ tense: ${style.tense}
 register: ${style.register}
 density: ${style.density}
 genre: ${style.genreLens}
-target: about ${style.sceneTarget} words`;
+target: about ${style.sceneTarget} words (roughly ${wordRange.min}–${wordRange.max}; a soft range, not a hard cap).
+Finish the current beat with a complete sentence, even if you go a little over; do not pad just to reach the target.`;
 }
 
 /**
@@ -447,7 +450,7 @@ export function buildNarratorPrompt(
   return {
     system: narratorSystem(style, verbatim),
     user: frame.text,
-    maxTokens: Math.max(1024, Math.ceil(style.sceneTarget * 4)),
+    maxTokens: narrationOutputTokenBudget(style.sceneTarget),
   };
 }
 

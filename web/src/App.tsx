@@ -2461,7 +2461,7 @@ function SettingsTab({
                 />
               </label>
               <label className="field-row">
-                <span>scene target</span>
+                <span>words per narrated beat (soft target)</span>
                 <input
                   type="number"
                   defaultValue={style.sceneTarget}

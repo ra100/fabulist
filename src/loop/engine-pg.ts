@@ -35,6 +35,7 @@ import { loadFrameData, type FrameData } from '../frame/builders-pg.ts';
 import { commitTurn, type CommitResult } from './commit-pg.ts';
 import { Compactor } from './compact-pg.ts';
 import { fingerprintFrameInput } from './frame-fingerprint.ts';
+import { narrationOutputReserve } from './narration-budget.ts';
 import {
   agentDelta,
   buildNarratorPrompt,
@@ -51,13 +52,12 @@ import {
 import type { ValidationResult } from './validate-pg.ts';
 import type { ProviderCallTelemetry } from './provider-telemetry.ts';
 
-/** Per-role output reservations. The narrator needs far more room than the rest. */
+/** Per-role output reservations; narration scales with its configured word target. */
 const OUTPUT_RESERVE: Record<string, number> = {
   classify: 256,
   integrity: 384,
   referee: 512,
   director: 384,
-  narrate: 2048,
   extract: 1536,
 };
 
@@ -312,7 +312,8 @@ export class Engine {
     extra?: Partial<FrameContext>,
   ): FrameContext {
     const caps = provider.capabilities;
-    const reserve = OUTPUT_RESERVE[role] ?? 512;
+    const reserve =
+      role === 'narrate' ? narrationOutputReserve(session.style.sceneTarget) : (OUTPUT_RESERVE[role] ?? 512);
     return {
       world,
       session,
