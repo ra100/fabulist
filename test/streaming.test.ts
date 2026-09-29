@@ -157,6 +157,7 @@ test('openai-compatible streaming assembles deltas and reports usage', async () 
   const fetcher = streamFetcher([
     'data: {"choices":[{"delta":{"content":"The ink "}}]}\n\n',
     'data: {"choices":[{"delta":{"content":"had frozen."}}]}\n\n',
+    'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
     'data: {"usage":{"prompt_tokens":11,"completion_tokens":4}}\n\n',
     'data: [DONE]\n\n',
   ]);
@@ -171,6 +172,29 @@ test('openai-compatible streaming assembles deltas and reports usage', async () 
   assert.equal(res.text, 'The ink had frozen.');
   assert.equal(res.tokensIn, 11);
   assert.equal(res.tokensOut, 4);
+  assert.equal(res.finishReason, 'length');
+});
+
+test('openai-compatible completion reports when the output limit was reached', async () => {
+  const fetcher = (async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{ message: { content: 'The interview room was' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 20, completion_tokens: 1400 },
+    }),
+    text: async () => '',
+  })) as unknown as typeof fetch;
+  const provider = new OpenAICompatProvider('x', { apiKey: '', baseUrl: 'http://x/v1', model: 'm', capabilities: caps(), fetcher });
+
+  const res = await provider.complete({
+    role: 'narrate',
+    messages: [{ role: 'user', content: 'x' }],
+    maxTokens: 1400,
+  });
+
+  assert.equal(res.finishReason, 'length');
+  assert.equal(res.tokensOut, 1400);
 });
 
 test('anthropic streaming reads its named event types', async () => {

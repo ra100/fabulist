@@ -484,7 +484,7 @@ export function buildNarratorPrompt(
   return {
     system: narratorSystem(style, verbatim),
     user: frame.text,
-    maxTokens: Math.max(512, Math.ceil(style.sceneTarget * 2)),
+    maxTokens: Math.max(1024, Math.ceil(style.sceneTarget * 4)),
   };
 }
 
@@ -526,6 +526,9 @@ export async function narrate(
     deps.onProviderCall?.({
       role: 'narrate',
       provider: provider.id,
+      attempt: 1,
+      maxTokens: req.maxTokens,
+      streaming: !!req.onToken,
       durationMs: Date.now() - started,
       ok: false,
       errorKind: providerErrorKind(err),
@@ -536,10 +539,14 @@ export async function narrate(
     role: 'narrate',
     provider: provider.id,
     model: res.model,
+    attempt: 1,
+    maxTokens: req.maxTokens,
+    streaming: !!req.onToken,
     tokensIn: res.tokensIn,
     tokensOut: res.tokensOut,
     responseChars: res.text.length,
     streamChars: streamedText.length,
+    finishReason: res.finishReason,
     durationMs: Date.now() - started,
     ok: true,
   });
@@ -564,6 +571,9 @@ export async function narrate(
       deps.onProviderCall?.({
         role: 'narrate',
         provider: provider.id,
+        attempt: 2,
+        maxTokens: retryReq.maxTokens,
+        streaming: false,
         durationMs: Date.now() - retryStarted,
         ok: false,
         errorKind: providerErrorKind(err),
@@ -574,10 +584,14 @@ export async function narrate(
       role: 'narrate',
       provider: provider.id,
       model: res.model,
+      attempt: 2,
+      maxTokens: retryReq.maxTokens,
+      streaming: false,
       tokensIn: res.tokensIn,
       tokensOut: res.tokensOut,
       responseChars: res.text.length,
       streamChars: 0,
+      finishReason: res.finishReason,
       durationMs: Date.now() - retryStarted,
       ok: true,
     });

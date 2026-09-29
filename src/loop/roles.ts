@@ -447,7 +447,7 @@ export function buildNarratorPrompt(
   return {
     system: narratorSystem(style, verbatim),
     user: frame.text,
-    maxTokens: Math.max(512, Math.ceil(style.sceneTarget * 2)),
+    maxTokens: Math.max(1024, Math.ceil(style.sceneTarget * 4)),
   };
 }
 
@@ -481,7 +481,38 @@ export async function narrate(
     },
     provider.capabilities,
   );
-  let res = await provider.complete(req);
+  const started = Date.now();
+  let res: CompletionResult;
+  try {
+    res = await provider.complete(req);
+  } catch (err) {
+    deps.onProviderCall?.({
+      role: 'narrate',
+      provider: provider.id,
+      attempt: 1,
+      maxTokens: req.maxTokens,
+      streaming: !!req.onToken,
+      durationMs: Date.now() - started,
+      ok: false,
+      errorKind: providerErrorKind(err),
+    });
+    throw err;
+  }
+  deps.onProviderCall?.({
+    role: 'narrate',
+    provider: provider.id,
+    model: res.model,
+    attempt: 1,
+    maxTokens: req.maxTokens,
+    streaming: !!req.onToken,
+    tokensIn: res.tokensIn,
+    tokensOut: res.tokensOut,
+    responseChars: res.text.length,
+    streamChars: streamedText.length,
+    finishReason: res.finishReason,
+    durationMs: Date.now() - started,
+    ok: true,
+  });
   let prose = streamedText.trim() || res.text.trim();
 
   // A broken or provider-specific streaming response can finish successfully
@@ -496,7 +527,37 @@ export async function narrate(
       // Leave room for reasoning tokens before the provider emits visible prose.
       maxTokens: Math.max(1024, (nonStreamingReq.maxTokens ?? 512) * 2),
     };
-    res = await provider.complete(retryReq);
+    const retryStarted = Date.now();
+    try {
+      res = await provider.complete(retryReq);
+    } catch (err) {
+      deps.onProviderCall?.({
+        role: 'narrate',
+        provider: provider.id,
+        attempt: 2,
+        maxTokens: retryReq.maxTokens,
+        streaming: false,
+        durationMs: Date.now() - retryStarted,
+        ok: false,
+        errorKind: providerErrorKind(err),
+      });
+      throw err;
+    }
+    deps.onProviderCall?.({
+      role: 'narrate',
+      provider: provider.id,
+      model: res.model,
+      attempt: 2,
+      maxTokens: retryReq.maxTokens,
+      streaming: false,
+      tokensIn: res.tokensIn,
+      tokensOut: res.tokensOut,
+      responseChars: res.text.length,
+      streamChars: 0,
+      finishReason: res.finishReason,
+      durationMs: Date.now() - retryStarted,
+      ok: true,
+    });
     prose = res.text.trim();
     if (prose) onToken(prose);
   }

@@ -8,7 +8,13 @@
  * Keys come from the environment. Nothing here is imported by the engine tests,
  * so the suite stays offline.
  */
-import type { CompletionRequest, CompletionResult, Provider, ProviderCapabilities } from './provider.ts';
+import {
+  normalizeFinishReason,
+  type CompletionRequest,
+  type CompletionResult,
+  type Provider,
+  type ProviderCapabilities,
+} from './provider.ts';
 import { readNdjson, readSse, parseJsonSafe } from './stream.ts';
 import { BedrockProvider } from './bedrock.ts';
 import { VertexProvider } from './google.ts';
@@ -354,7 +360,7 @@ export class OpenAICompatProvider implements Provider {
       this.fetcher,
       this.timeoutMs,
     )) as {
-      choices?: Array<{ message?: { content?: string } }>;
+      choices?: Array<{ message?: { content?: string }; finish_reason?: unknown }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
 
@@ -364,6 +370,7 @@ export class OpenAICompatProvider implements Provider {
       tokensOut: json.usage?.completion_tokens ?? 0,
       model: this.model,
       schemaEnforced: !!req.schema && this.capabilities.structuredOutput === 'native-schema',
+      finishReason: normalizeFinishReason(json.choices?.[0]?.finish_reason),
     };
   }
 
@@ -389,22 +396,25 @@ export class OpenAICompatProvider implements Provider {
       let text = '';
       let tokensIn = 0;
       let tokensOut = 0;
+      let finishReason: CompletionResult['finishReason'];
       for await (const payload of readSse(res.body)) {
         const event = parseJsonSafe(payload);
         if (!event) continue;
-        const choices = event.choices as Array<{ delta?: { content?: string } }> | undefined;
-        const chunk = choices?.[0]?.delta?.content;
+        const choices = event.choices as Array<{ delta?: { content?: string }; finish_reason?: unknown }> | undefined;
+        const choice = choices?.[0];
+        const chunk = choice?.delta?.content;
         if (chunk) {
           text += chunk;
           onToken(chunk);
         }
+        if (choice?.finish_reason != null) finishReason = normalizeFinishReason(choice.finish_reason);
         const usage = event.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
         if (usage) {
           tokensIn = usage.prompt_tokens ?? tokensIn;
           tokensOut = usage.completion_tokens ?? tokensOut;
         }
       }
-      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
+      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false, finishReason };
     } finally {
       clearTimeout(timer);
     }
