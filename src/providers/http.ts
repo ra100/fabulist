@@ -28,11 +28,19 @@ interface HttpOptions {
 /** A non-2xx provider answer; `status` lets a BYOK wrapper tell a rejected key from an outage. */
 export class ProviderHttpError extends Error {
   readonly status: number;
+  /**
+   * The response body, kept raw and short. A status alone cannot tell a bad key
+   * from a key that is fine but not allowed to make this call, and several
+   * providers put the difference only in the body — so the caller gets to read
+   * it rather than reverse-engineering it back out of the message.
+   */
+  readonly body: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, body = '') {
     super(message);
     this.name = 'ProviderHttpError';
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -54,7 +62,7 @@ async function postJson(
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new ProviderHttpError(res.status, `${url} returned ${res.status}: ${text.slice(0, 300)}`);
+      throw new ProviderHttpError(res.status, `${url} returned ${res.status}: ${text.slice(0, 300)}`, text);
     }
     return await res.json();
   } finally {
@@ -177,21 +185,30 @@ export class JevCompatProvider implements Provider {
   }
 }
 
-/** OpenRouter's typed-decision endpoint, which does not speak chat completions. */
+/**
+ * A typed-decision API: OpenRouter's `/alpha/decisions` and OpenCode Zen's
+ * `/systemone`. Both take typed questions and return values and calibrated
+ * probabilities, which is what the fast path's cutoffs are written against.
+ *
+ * The URL is supplied whole rather than derived from a chat `baseUrl`, because
+ * the two do not line up: OpenRouter's typed API is one level above the `/v1`
+ * that its chat base carries, and Zen's is inside its own. Deriving one from
+ * the other gets exactly one of them right.
+ */
 export class JevProvider implements Provider {
   readonly id = 'openrouter';
   readonly model: string;
   readonly capabilities: ProviderCapabilities;
   private apiKey: string;
-  private baseUrl: string;
+  private url: string;
   private fetcher: typeof fetch;
   private timeoutMs: number;
 
-  constructor(opts: HttpOptions) {
+  constructor(opts: HttpOptions & { url?: string }) {
     this.apiKey = opts.apiKey;
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
     this.model = opts.model;
     this.capabilities = opts.capabilities;
+    this.url = opts.url ?? `${opts.baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '')}/alpha/decisions`;
     this.fetcher = opts.fetcher ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? 60_000;
   }
@@ -220,14 +237,8 @@ export class JevProvider implements Provider {
     if (Object.keys(questions).length === 0) throw new Error('Jev requires at least one typed decision question');
 
     const state = req.messages.map((message) => message.content).join('\n\n');
-    // The typed API hangs off the account root, one level above the `/v1` that
-    // the allowlist base carries for /models and /chat/completions. Sending
-    // `/api/v1/alpha/decisions` is a 404, so Jev on a user's own OpenRouter key
-    // has been failing on every call rather than being unavailable — and it
-    // failed as a provider error, which reads like a bad key.
-    const base = this.baseUrl.replace(/\/v1$/, '');
     const payload = (await postJson(
-      `${base}/alpha/decisions`,
+      this.url,
       { authorization: `Bearer ${this.apiKey}` },
       { model: this.model, state, questions },
       this.fetcher,

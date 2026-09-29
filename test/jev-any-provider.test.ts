@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JevCompatProvider, JevProvider, caps } from '../src/providers/http.ts';
-import { byokEndpoint, byokProvider } from '../src/providers/byok.ts';
+import { byokEndpoint, byokProvider, providerErrorReason } from '../src/providers/byok.ts';
 import { checkWithJev } from '../src/loop/jev-fastpath.ts';
 import { jevTestCapabilities } from './jev-fixtures.ts';
 import type { CompletionRequest, CompletionResult } from '../src/providers/provider.ts';
@@ -144,7 +144,7 @@ test('a confident answer clears the fast path on a non-OpenRouter provider', asy
   assert.deepEqual(verdicts, { referee: true });
 });
 
-test('OpenRouter keeps the typed adapter, on the path that actually exists', async () => {
+test('a provider with a typed API uses it, and one without falls back to chat', async () => {
   const paths: string[] = [];
   const fetcher = (async (url: string) => {
     paths.push(new URL(String(url)).pathname);
@@ -157,16 +157,29 @@ test('OpenRouter keeps the typed adapter, on the path that actually exists', asy
   const ask = async (endpointId: string) => {
     const endpoint = byokEndpoint(endpointId);
     assert.ok(endpoint, endpointId);
-    return byokProvider(endpoint, 'jev-1.13', () => 'sk-user', fetcher).complete(REQ);
+    return byokProvider(endpoint, 'jev-1.13-free', () => 'sk-user', fetcher).complete(REQ);
   };
 
   await ask('openrouter');
   await ask('opencode-zen');
-  // Not `/api/v1/alpha/decisions`, which is a 404 — the allowlist base carries
-  // `/v1` for /models and /chat/completions, but the typed API is one level up.
-  assert.deepEqual(paths, ['/api/alpha/decisions', '/zen/v1/chat/completions']);
+  await ask('groq');
+  // Neither typed API is at the other one's depth, so these cannot be derived
+  // from one another: OpenRouter's sits above its `/v1`, Zen's inside its own.
+  // Go has no Jev model at all, so it stays on chat completions.
+  assert.deepEqual(paths, ['/api/alpha/decisions', '/zen/v1/systemone', '/openai/v1/chat/completions']);
   assert.equal(typeof JevProvider, 'function');
   assert.notEqual(JevProvider, JevCompatProvider);
+});
+
+test('both typed APIs are recorded as fixed https URLs', () => {
+  // A bare path would be wrong for one of them, so the allowlist carries the
+  // whole URL and this checks it cannot be swapped for something user-supplied.
+  for (const id of ['openrouter', 'opencode-zen']) {
+    const typedUrl = byokEndpoint(id)?.typedUrl;
+    assert.ok(typedUrl, `${id} has a typed API`);
+    assert.match(typedUrl, /^https:\/\/[a-z0-9.-]+\.[a-z]+(\/[\w./-]*)?$/, id);
+  }
+  assert.equal(byokEndpoint('opencode-go')?.typedUrl, undefined, 'Go carries no Jev model');
 });
 
 test('a provider with no questions is rejected rather than sent an empty decision', async () => {
@@ -179,4 +192,54 @@ test('a provider with no questions is rejected rather than sent an empty decisio
     fetcher,
   });
   await assert.rejects(provider.complete({ ...REQ, schema: { name: 'x', schema: { type: 'object' } } }), /at least one/);
+});
+
+test('a refusal is reported in the provider\'s own words, not as a bad key', async () => {
+  // The whole point: a 403 from OpenCode Zen means the key is valid and simply
+  // not allowed to call this from outside OpenCode. "rejected your API key"
+  // would send someone to rotate a working credential.
+  const cases: Array<[number, string, RegExp]> = [
+    [403, '{"type":"error","error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}}', /free tier can only be used from within OpenCode/],
+    [402, '{"error":{"type":"server_error","message":"Upstream request failed: Insufficient account funds"}}', /Insufficient account funds/],
+  ];
+  for (const [status, body, expected] of cases) {
+    const endpoint = byokEndpoint('opencode-zen')!;
+    const fetcher = (async () => new Response(body, { status })) as unknown as typeof fetch;
+    const provider = byokProvider(endpoint, 'jev-1.13', () => 'sk-user-0123456789abcdef', fetcher);
+    await assert.rejects(provider.complete(REQ), expected, `status ${status}`);
+  }
+});
+
+test('a refusal with no readable reason still falls back to the fixed copy', async () => {
+  for (const [status, body] of [[401, '<html>gateway error</html>'], [429, 'not json at all']] as const) {
+    const endpoint = byokEndpoint('opencode-zen')!;
+    const fetcher = (async () => new Response(body, { status })) as unknown as typeof fetch;
+    const provider = byokProvider(endpoint, 'jev-1.13', () => 'sk-user-0123456789abcdef', fetcher);
+    await assert.rejects(provider.complete(REQ), /\(401\)|\(429\)/, `status ${status}`);
+  }
+});
+
+test('a key echoed back by a provider is scrubbed out of the message', async () => {
+  // Provider text is untrusted and this is the one path that shows it rather
+  // than replacing it, so the key must not survive into the message.
+  const key = 'sk-user-0123456789abcdef';
+  const body = JSON.stringify({ error: { message: `bad key ${key} rejected` } });
+  const endpoint = byokEndpoint('opencode-zen')!;
+  const fetcher = (async () => new Response(body, { status: 401 })) as unknown as typeof fetch;
+  const provider = byokProvider(endpoint, 'jev-1.13', () => key, fetcher);
+  await assert.rejects(provider.complete(REQ), (err: Error) => {
+    assert.ok(!err.message.includes(key), `key leaked: ${err.message}`);
+    assert.match(err.message, /\[redacted\]/);
+    return true;
+  });
+});
+
+test('the reason parser reads the two error shapes these gateways use', () => {
+  // OpenCode nests under `error`, most others put `message` at the top.
+  assert.equal(providerErrorReason('{"error":{"message":"nested"}}'), 'nested');
+  assert.equal(providerErrorReason('{"message":"top level"}'), 'top level');
+  assert.equal(providerErrorReason('plain text'), '');
+  assert.equal(providerErrorReason(''), '');
+  assert.equal(providerErrorReason('{"message":42}'), '');
+  assert.equal(providerErrorReason('{"message":"key sk-abcdefghijklmnop is bad"}', ['sk-abcdefghijklmnop']), 'key [redacted] is bad');
 });
