@@ -13,6 +13,21 @@ export interface ByokEndpoint {
   label: string;
   kind: 'openai-compat' | 'anthropic';
   baseUrl: string;
+  /**
+   * Full URL of this provider's typed-decision API, when it has one, and so
+   * can answer the Jev fast path directly with calibrated probabilities.
+   *
+   * A bare path is not enough to record here, because the typed API does not
+   * always sit at the same depth as the chat API. OpenRouter's is one level
+   * *above* the `/v1` its `baseUrl` carries (`/api/alpha/decisions`), while
+   * Zen's sits *inside* it (`/zen/v1/systemone`). Writing the whole URL is the
+   * only form that is true for both, and it is the form that can be checked
+   * against the live endpoint.
+   *
+   * Absent means there is no typed API here, and the fast path falls back to
+   * asking over chat completions.
+   */
+  typedUrl?: string;
 }
 
 /** Fixed hosts only: a user-supplied base URL would let a key holder make this server fetch anything (SSRF). */
@@ -32,9 +47,23 @@ export const BYOK_ENDPOINTS: readonly ByokEndpoint[] = [
   { id: 'cerebras', label: 'Cerebras', kind: 'openai-compat', baseUrl: 'https://api.cerebras.ai/v1' },
   { id: 'together', label: 'Together', kind: 'openai-compat', baseUrl: 'https://api.together.ai/v1' },
   { id: 'fireworks', label: 'Fireworks', kind: 'openai-compat', baseUrl: 'https://api.fireworks.ai/inference/v1' },
-  { id: 'openrouter', label: 'OpenRouter', kind: 'openai-compat', baseUrl: 'https://openrouter.ai/api/v1' },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    kind: 'openai-compat',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    typedUrl: 'https://openrouter.ai/api/alpha/decisions',
+  },
   { id: 'kilo', label: 'Kilo Code', kind: 'openai-compat', baseUrl: 'https://api.kilo.ai/api/gateway' },
-  { id: 'opencode-zen', label: 'OpenCode Zen', kind: 'openai-compat', baseUrl: 'https://opencode.ai/zen/v1' },
+  {
+    id: 'opencode-zen',
+    label: 'OpenCode Zen',
+    kind: 'openai-compat',
+    baseUrl: 'https://opencode.ai/zen/v1',
+    typedUrl: 'https://opencode.ai/zen/v1/systemone',
+  },
+  // No `typedUrl`: Go's model list carries no Jev, and its chat endpoint wants
+  // a per-conversation `x-opencode-session` header that this app does not send.
   { id: 'opencode-go', label: 'OpenCode Go', kind: 'openai-compat', baseUrl: 'https://opencode.ai/zen/go/v1' },
 ];
 
@@ -56,14 +85,48 @@ const REJECTED_COPY: Record<number, string> = {
   429: 'Your provider is rate-limiting your API key or it is out of quota',
 };
 
-/** The provider refused the user's own key; the message is fixed copy, never provider text, so it cannot carry key material. */
+/**
+ * Pulls a human-readable reason out of a provider's error body.
+ *
+ * Status alone lies often enough to be worth decoding. OpenCode Zen answers
+ * `403 {"type":"FreeTierError","message":"…can only be used from within
+ * OpenCode"}` and `400 {"type":"MissingSessionID",…}` — a perfectly good key
+ * that simply may not make that call, which "rejected your API key" sends you
+ * to fix by rotating a key that is not broken. OpenCode's 402 is
+ * `"Insufficient account funds"`, which is at least actionable.
+ *
+ * Only the `message` is read, and it is still scrubbed of the key before it
+ * reaches anyone: provider text is untrusted, and this path is the one place
+ * such text is shown rather than replaced.
+ */
+export function providerErrorReason(body: string, known: readonly string[] = []): string {
+  const text = body.slice(0, 2000);
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const message =
+      (parsed as { message?: unknown } | null)?.message ??
+      (parsed as { error?: { message?: unknown } } | null)?.error?.message;
+    if (typeof message === 'string' && message.trim()) return scrubSecrets(message.trim().slice(0, 200), known);
+  } catch {
+    // Not JSON, or truncated by the slice. Fall through to the fixed copy.
+  }
+  return '';
+}
+
+/**
+ * The provider refused the request. Fixed copy by status, unless the body said
+ * something more specific that would otherwise send someone to fix the wrong
+ * thing.
+ */
 export class ProviderKeyRejectedError extends Error {
   readonly status: number;
   readonly keySource = 'own' as const;
 
-  constructor(status: number) {
+  constructor(status: number, reason = '') {
     super(
-      `${REJECTED_COPY[status] ?? 'Your provider refused the request made with your API key'} (${status}). Check it in Settings → Configure providers.`,
+      reason
+        ? `${reason} (${status}). Check it in Settings → Configure providers.`
+        : `${REJECTED_COPY[status] ?? 'Your provider refused the request made with your API key'} (${status}). Check it in Settings → Configure providers.`,
     );
     this.name = 'ProviderKeyRejectedError';
     this.status = status;
@@ -106,14 +169,14 @@ export function byokProvider(
       // Read per call, so a lock or delete between two calls of one turn stops the second.
       const apiKey = secret();
       const opts = { apiKey, baseUrl: endpoint.baseUrl, model, capabilities, fetcher: guarded };
-      // OpenRouter has a typed Decisions API and keeps the dedicated adapter.
-      // Every other provider gets the same questions asked over chat completions
-      // — see `JevCompatProvider` for why that is a different trade, and why it
-      // is the user's call which one they use.
+      // A provider with a typed-decision API keeps the dedicated adapter, which
+      // returns calibrated probabilities. Only the ones without one fall back
+      // to asking over chat completions — and there the number is the model's
+      // own say-so, which is a weaker guarantee. See `JevCompatProvider`.
       const inner =
         req.role === 'jev-fastpath'
-          ? endpoint.id === 'openrouter'
-            ? new JevProvider(opts)
+          ? endpoint.typedUrl
+            ? new JevProvider({ ...opts, url: endpoint.typedUrl })
             : new JevCompatProvider(endpoint.id, opts)
           : endpoint.kind === 'anthropic'
             ? new AnthropicProvider(opts)
@@ -121,8 +184,12 @@ export function byokProvider(
       try {
         return await inner.complete(req);
       } catch (err) {
-        if (err instanceof ProviderHttpError && err.status in REJECTED_COPY)
-          throw new ProviderKeyRejectedError(err.status);
+        if (err instanceof ProviderHttpError && err.status in REJECTED_COPY) {
+          // Prefer the provider's own reason when it gave one: a 403 here can
+          // mean "good key, wrong caller" rather than "bad key", and the fixed
+          // copy would send someone to rotate a working credential.
+          throw new ProviderKeyRejectedError(err.status, providerErrorReason(err.body ?? '', [apiKey]));
+        }
         throw new Error(scrubSecrets(err instanceof Error ? err.message : String(err), [apiKey]));
       }
     },
