@@ -488,20 +488,89 @@ export function MyUsagePanel() {
       </div>
     );
   }
+  const daily = Array.from(
+    data.rows.reduce((days, row) => {
+      const day = days.get(row.day) ?? { day: row.day, calls: 0, tokensIn: 0, tokensOut: 0 };
+      day.calls += row.calls;
+      day.tokensIn += row.tokensIn;
+      day.tokensOut += row.tokensOut;
+      days.set(row.day, day);
+      return days;
+    }, new Map<string, { day: string; calls: number; tokensIn: number; tokensOut: number }>()),
+    ([, value]) => value,
+  ).sort((a, b) => a.day.localeCompare(b.day));
+  const maxTokens = Math.max(...daily.map((day) => day.tokensIn + day.tokensOut), 1);
+  const chart = { width: 760, height: 220, left: 52, right: 12, top: 14, bottom: 48 };
+  const plotWidth = chart.width - chart.left - chart.right;
+  const plotHeight = chart.height - chart.top - chart.bottom;
+  const slotWidth = plotWidth / daily.length;
+  const barWidth = Math.min(22, slotWidth * 0.62);
+  const compact = (value: number) =>
+    new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+
   return (
     <div className="card">
       <h3>your usage · last {data.days} days</h3>
-      {data.rows.map((r) => (
-        <div key={`${r.day}|${r.model}|${r.keySource}`} className="row small">
-          <span className="grow dim">
-            {r.day} · {r.model}
-          </span>
-          <span className="tag">{r.keySource === 'own' ? 'your key' : 'server'}</span>
-          <span className="mono dimmer">
-            {r.calls}× {r.tokensIn.toLocaleString()}→{r.tokensOut.toLocaleString()}
-          </span>
-        </div>
-      ))}
+      <div className="small dim">Daily tokens · {daily.reduce((sum, day) => sum + day.calls, 0).toLocaleString()} calls</div>
+      <div style={{ overflowX: 'auto', marginTop: 'var(--s3)' }}>
+        <svg
+          viewBox={`0 0 ${chart.width} ${chart.height}`}
+          role="img"
+          aria-label={`Daily token usage over ${daily.length} active days. Input and output tokens are shown separately.`}
+          style={{ display: 'block', width: '100%', minWidth: 420, height: 'auto' }}
+        >
+          {[0, 0.5, 1].map((fraction) => {
+            const y = chart.top + plotHeight * (1 - fraction);
+            return (
+              <g key={fraction}>
+                <line x1={chart.left} x2={chart.width - chart.right} y1={y} y2={y} stroke="var(--rule)" />
+                <text x={chart.left - 8} y={y + 4} textAnchor="end" fill="var(--ink-3)" fontSize="11">
+                  {compact(maxTokens * fraction)}
+                </text>
+              </g>
+            );
+          })}
+          {daily.map((day, index) => {
+            const x = chart.left + slotWidth * index + (slotWidth - barWidth) / 2;
+            const inputHeight = (day.tokensIn / maxTokens) * plotHeight;
+            const outputHeight = (day.tokensOut / maxTokens) * plotHeight;
+            const baseY = chart.top + plotHeight;
+            const label = new Date(`${day.day}T00:00:00Z`).toLocaleDateString(undefined, {
+              month: 'short',
+              day: 'numeric',
+              timeZone: 'UTC',
+            });
+            return (
+              <g key={day.day}>
+                <title>{`${day.day}: ${day.tokensIn.toLocaleString()} input tokens, ${day.tokensOut.toLocaleString()} output tokens, ${day.calls} calls`}</title>
+                <rect x={x} y={baseY - inputHeight} width={barWidth} height={inputHeight} fill="var(--accent)" rx="2" />
+                <rect x={x} y={baseY - inputHeight - outputHeight} width={barWidth} height={outputHeight} fill="var(--ink-3)" rx="2" />
+                {(daily.length <= 10 || index % Math.ceil(daily.length / 6) === 0 || index === daily.length - 1) && (
+                  <text x={x + barWidth / 2} y={baseY + 20} textAnchor="middle" fill="var(--ink-3)" fontSize="11">
+                    {label}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+      <div className="row small" aria-hidden="true">
+        <span className="dim"><span style={{ color: 'var(--accent)' }}>■</span> input</span>
+        <span className="dim"><span style={{ color: 'var(--ink-3)' }}>■</span> output</span>
+      </div>
+      <details>
+        <summary className="small">usage by model</summary>
+        {data.rows.map((r) => (
+          <div key={`${r.day}|${r.model}|${r.keySource}`} className="row small">
+            <span className="grow dim">{r.day} · {r.model}</span>
+            <span className="tag">{r.keySource === 'own' ? 'your key' : 'server'}</span>
+            <span className="mono dimmer">
+              {r.calls}× {r.tokensIn.toLocaleString()}→{r.tokensOut.toLocaleString()}
+            </span>
+          </div>
+        ))}
+      </details>
     </div>
   );
 }
