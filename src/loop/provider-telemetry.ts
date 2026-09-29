@@ -1,3 +1,5 @@
+import type { ProviderFinishReason } from '../providers/provider.ts';
+
 /** Privacy-safe timing data for one text-provider attempt. */
 export interface ProviderCallTelemetry {
   role: string;
@@ -8,6 +10,11 @@ export interface ProviderCallTelemetry {
   /** Character counts only; generated text is never logged. */
   responseChars?: number;
   streamChars?: number;
+  /** Per-role retry number and requested output budget; no prompt data is recorded. */
+  attempt?: number;
+  maxTokens?: number;
+  streaming?: boolean;
+  finishReason?: ProviderFinishReason;
   durationMs: number;
   ok: boolean;
   errorKind?: string;

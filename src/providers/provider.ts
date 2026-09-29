@@ -63,6 +63,33 @@ export interface CompletionResult {
   model: string;
   /** True when the provider guaranteed schema conformance rather than us parsing it. */
   schemaEnforced: boolean;
+  /** Normalized provider termination status; safe to include in diagnostic logs. */
+  finishReason?: ProviderFinishReason;
+}
+
+export type ProviderFinishReason = 'stop' | 'length' | 'content_filter' | 'tool_calls' | 'function_call' | 'other';
+
+/** Reduce provider-specific finish statuses to an allowlisted diagnostic value. */
+export function normalizeFinishReason(value: unknown): ProviderFinishReason | undefined {
+  if (typeof value !== 'string' || !value) return undefined;
+  switch (value) {
+    case 'stop':
+    case 'end_turn':
+    case 'stop_sequence':
+      return 'stop';
+    case 'length':
+    case 'max_tokens':
+      return 'length';
+    case 'content_filter':
+      return 'content_filter';
+    case 'tool_calls':
+    case 'tool_use':
+      return 'tool_calls';
+    case 'function_call':
+      return 'function_call';
+    default:
+      return 'other';
+  }
 }
 
 export interface JsonSchema {

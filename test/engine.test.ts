@@ -54,10 +54,12 @@ class BlockingNarratorProvider extends MockProvider {
 
 class EmptyStreamingNarratorProvider extends MockProvider {
   streamingNarrations = 0;
+  initialNarrationMaxTokens = 0;
 
   override async complete(req: CompletionRequest): Promise<CompletionResult> {
     if (req.role === 'narrate' && req.onToken) {
       this.streamingNarrations += 1;
+      this.initialNarrationMaxTokens = req.maxTokens ?? 0;
       const result = await super.complete({ ...req, onToken: undefined });
       return { ...result, text: '' };
     }
@@ -210,6 +212,7 @@ test('an empty streaming narration retries without streaming instead of committi
   assert.equal(out.kind, 'narrated');
   if (out.kind !== 'narrated') return;
   assert.equal(provider.streamingNarrations, 1);
+  assert.equal(provider.initialNarrationMaxTokens, 1400);
   assert.ok(out.prose.length > 0);
   assert.equal(tokens.join(''), out.prose);
   assert.equal(world.chronicle.turns()[0]?.bookProse, out.prose);
