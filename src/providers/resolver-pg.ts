@@ -238,16 +238,9 @@ export class ProviderResolver {
   }
 
   async saveAssignments(user: SessionUser, assignments: ProviderModelAssignment[]): Promise<ProviderModelAssignment[]> {
-    if (assignments.some((assignment) => assignment.role === 'jev-fastpath')) {
-      const keys = new Map((await providerKeysFor(this.db, user.id)).map((row) => [row.id, row]));
-      for (const assignment of assignments) {
-        if (assignment.role !== 'jev-fastpath') continue;
-        const key = keys.get(assignment.providerKeyId);
-        if (key && key.endpointId !== 'openrouter') {
-          throw new ProviderKeyInputError('Jev fast checks require an OpenRouter provider');
-        }
-      }
-    }
+    // No endpoint is special-cased here any more: any saved provider can take
+    // the optional Jev fast check, and which one is the user's decision. The
+    // foreign-key check below still rejects a provider that is not theirs.
     try {
       await saveProviderModelAssignments(this.db, user.id, assignments);
     } catch (err) {
@@ -442,7 +435,7 @@ export class ProviderResolver {
 
   private providerFor(userId: string, row: ProviderKeyRow, model: string, role: string): Provider {
     const endpoint = byokEndpoint(row.endpointId);
-    if (!endpoint || (role === 'jev-fastpath' && endpoint.id !== 'openrouter')) {
+    if (!endpoint) {
       return this.unavailableProvider(role, model);
     }
     return {

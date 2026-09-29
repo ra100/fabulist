@@ -428,7 +428,6 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
                 >
                   <option value="">use fallback</option>
                   {state.keys
-                    .filter(({ key }) => role !== 'jev-fastpath' || key.endpointId === 'openrouter')
                     .map(({ key }) => (
                       <option key={key.id} value={key.id}>
                         {providerName(key)}
