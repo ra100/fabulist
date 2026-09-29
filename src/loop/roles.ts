@@ -491,7 +491,12 @@ export async function narrate(
   // provider's ordinary completion path, then fail loudly if it is still empty.
   if (!prose && onToken) {
     const { onToken: _stream, ...nonStreamingReq } = req;
-    res = await provider.complete(nonStreamingReq);
+    const retryReq = {
+      ...nonStreamingReq,
+      // Leave room for reasoning tokens before the provider emits visible prose.
+      maxTokens: Math.max(1024, (nonStreamingReq.maxTokens ?? 512) * 2),
+    };
+    res = await provider.complete(retryReq);
     prose = res.text.trim();
     if (prose) onToken(prose);
   }
