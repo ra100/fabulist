@@ -212,7 +212,7 @@ test('an empty streaming narration retries without streaming instead of committi
   assert.equal(out.kind, 'narrated');
   if (out.kind !== 'narrated') return;
   assert.equal(provider.streamingNarrations, 1);
-  assert.equal(provider.initialNarrationMaxTokens, 1400);
+  assert.equal(provider.initialNarrationMaxTokens, 2200);
   assert.ok(out.prose.length > 0);
   assert.equal(tokens.join(''), out.prose);
   assert.equal(world.chronicle.turns()[0]?.bookProse, out.prose);

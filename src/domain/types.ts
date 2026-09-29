@@ -595,7 +595,7 @@ export function defaultStyleContract(): StyleContract {
     genreLens: 'literary',
     humor: 'dry',
     pacing: 'steady',
-    sceneTarget: 350,
+    sceneTarget: 275,
     comparables: [],
     forbidden: [],
     contentBounds: [],
