@@ -471,18 +471,18 @@ principle could put your GitHub account at risk. It is implemented because it is
 credential on your machine, but nothing reaches it unless you opt in explicitly. If you
 want a supported keyless option, Bedrock and Vertex are both first-class here.
 
-**Jev fast checks** are optional and, since the gateway work, no longer OpenRouter-only. Any
-provider you have saved can take the role, and picking the model is yours. OpenRouter keeps
-its dedicated adapter because it has a typed Decisions API; every other provider is asked the
-same two questions over chat completions.
+**Jev fast checks** are optional, and OpenCode Zen is one of the two places that serve them
+properly. OpenRouter exposes a typed decision API at `/api/alpha/decisions`; Zen exposes one
+at `/zen/v1/systemone`; both return values *and calibrated probabilities*, which is what the
+0.995/0.999 cutoffs are written against. Either can take the role, and picking the model is
+yours — `jev-1.13-free` on Zen is genuinely free, while `jev-1.13` costs $0.042/1M input.
 
-That difference is worth understanding before you point it somewhere. The typed API returns a
-*calibrated* probability and the fast path only clears an action at 0.995 or above. A chat
-model asked for a confidence returns its own say-so, which is not the same number — a model
-that answers 1.0 to everything will clear actions that deserved full review. So routing Jev
-through a non-OpenRouter provider is a way to spend less, not a way to be safer. If a reply
-is malformed or unparsable, both checks fall back to the full referee and integrity routes, so
-the failure mode is a slower turn rather than a wrong one.
+For a provider with neither typed API, the fast path still works, but the questions are asked
+over chat completions instead. That is a weaker guarantee and worth knowing about: a chat
+model asked for a confidence returns its own say-so, which is not a calibrated probability, and
+a model that answers 1.0 to everything will clear actions that deserved full review. Treat it
+as a way to spend less, not a way to be safer. A malformed reply falls back to the full referee
+and integrity routes either way, so the failure mode is a slower turn rather than a wrong one.
 
 **OpenCode Zen** and **OpenCode Go** are OpenCode's two hosted model gateways. Both are
 plain OpenAI-compatible, so each is one entry in your own provider list — paste a key from
@@ -493,6 +493,14 @@ a flat monthly subscription capped by dollar usage rather than per-token. One ke
 both. They are user-key entries like mistral, xai, groq, together or OpenRouter, not
 operator presets: no `OPENCODE_API_KEY` is exported for you, because a shared key would put
 one person's Zen balance in front of every user.
+
+One catch worth knowing before you point anything at Zen. The models marked free are served
+to OpenCode itself, so a *free-tier* key calling `/zen/v1/chat/completions` from elsewhere
+gets `FreeTierError`, even though the same key lists models and answers a Jev question over
+`/zen/v1/systemone` without complaint. Add credit to Zen and the chat models open up; the
+free Jev model does not need it. Go is a separate subscription and additionally wants a
+per-conversation `x-opencode-session` header, which this app does not send, so it serves
+models but not the fast path.
 
 Worth knowing if you reach for `opencode serve` instead: that is a *local* headless agent
 server, not a gateway, and its `/v1/*` paths return the web app rather than an API. It is
