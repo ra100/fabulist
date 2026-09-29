@@ -62,6 +62,121 @@ async function postJson(
   }
 }
 
+interface JevQuestion {
+  instructions?: unknown;
+  criteria?: unknown;
+}
+
+/**
+ * The answer shape `loop/jev-fastpath.ts` reads back: one entry per role, each
+ * naming a choice and a confidence for every choice. Built for a plain chat
+ * model, which is why it asks for a probability at all — the typed Decisions
+ * API returns calibrated ones, and this does not (see `JevCompatProvider`).
+ */
+function jevAnswerSchema(properties: Record<string, JevQuestion>): Record<string, unknown> {
+  const answers: Record<string, unknown> = {};
+  for (const [role, definition] of Object.entries(properties)) {
+    const criteria = recordOfStrings(definition.criteria);
+    answers[role] = {
+      type: 'object',
+      properties: {
+        choice: { type: 'string', enum: Object.keys(criteria) },
+        probabilities: {
+          type: 'object',
+          additionalProperties: { type: 'number', minimum: 0, maximum: 1 },
+        },
+      },
+      required: ['choice', 'probabilities'],
+    };
+  }
+  return {
+    type: 'object',
+    properties: { answers: { type: 'object', properties: answers } },
+    required: ['answers'],
+  };
+}
+
+function recordOfStrings(value: unknown): Record<string, string> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === 'string') out[key] = entry;
+  }
+  return out;
+}
+
+/** Renders the typed questions as prose for a model that has no typed API. */
+function jevPrompt(questions: Record<string, JevQuestion>): string {
+  const blocks = Object.entries(questions).map(([role, definition]) => {
+    const criteria = Object.entries(recordOfStrings(definition.criteria))
+      .map(([choice, meaning]) => `  - ${choice}: ${meaning}`)
+      .join('\n');
+    return [
+      `Question "${role}":`,
+      String(definition.instructions ?? ''),
+      'Choose exactly one of:',
+      criteria,
+    ].join('\n');
+  });
+  return [
+    'You are adjudicating whether a player action is safe to accept without further review.',
+    'Answer every question below independently. For each one, name your choice and give a',
+    'confidence between 0 and 1 for each choice. Answer with JSON only, no prose.',
+    '',
+    ...blocks,
+  ].join('\n');
+}
+
+/**
+ * Serves the Jev fast path on a provider that has no typed-decision API.
+ *
+ * The decision about *whether* an action is safe is unchanged — it is the same
+ * questions, the same `extractJson`, and the same probability cutoffs in
+ * `jev-fastpath.ts`. What differs is where the answer comes from, and that
+ * matters: the typed API returns a *calibrated* probability, and a chat model
+ * asked for one returns its own say-so, which is not the same number and does
+ * not mean the same thing. A model that answers 1.0 to everything will clear
+ * the cutoffs on actions that deserve full review.
+ *
+ * So this is a cost optimisation, not a safety improvement, and picking the
+ * model is the user's call — which is why the provider is the user's to choose
+ * and the fast path stays optional either way. A malformed or unparsable reply
+ * falls back to the full referee and integrity routes, so the failure mode is
+ * a slower turn rather than a wrong one.
+ */
+export class JevCompatProvider implements Provider {
+  readonly id: string;
+  readonly model: string;
+  readonly capabilities: ProviderCapabilities;
+  private inner: OpenAICompatProvider;
+
+  constructor(id: string, opts: HttpOptions) {
+    this.id = id;
+    this.model = opts.model;
+    // `json_object` is near-universal and materially improves the odds of a
+    // parseable reply; a server that refuses it errors, and the caller treats
+    // an error as a fallback. Claiming it is therefore safe, and claiming
+    // `native-schema` would not be — a full JSON Schema contract is honoured by
+    // far fewer endpoints, and one that ignores it silently returns prose.
+    this.capabilities =
+      opts.capabilities.structuredOutput === 'none'
+        ? { ...opts.capabilities, structuredOutput: 'json-mode' }
+        : opts.capabilities;
+    this.inner = new OpenAICompatProvider(id, { ...opts, capabilities: this.capabilities });
+  }
+
+  async complete(req: CompletionRequest): Promise<CompletionResult> {
+    const questions = (req.schema?.schema.properties ?? {}) as Record<string, JevQuestion>;
+    if (Object.keys(questions).length === 0) throw new Error('Jev requires at least one typed decision question');
+    const result = await this.inner.complete({
+      ...req,
+      messages: [...req.messages, { role: 'user', content: jevPrompt(questions) }],
+      schema: { name: req.schema?.name ?? 'jev_fast_checks', schema: jevAnswerSchema(questions) },
+    });
+    return { ...result, schemaEnforced: false };
+  }
+}
+
 /** OpenRouter's typed-decision endpoint, which does not speak chat completions. */
 export class JevProvider implements Provider {
   readonly id = 'openrouter';
@@ -105,8 +220,14 @@ export class JevProvider implements Provider {
     if (Object.keys(questions).length === 0) throw new Error('Jev requires at least one typed decision question');
 
     const state = req.messages.map((message) => message.content).join('\n\n');
+    // The typed API hangs off the account root, one level above the `/v1` that
+    // the allowlist base carries for /models and /chat/completions. Sending
+    // `/api/v1/alpha/decisions` is a 404, so Jev on a user's own OpenRouter key
+    // has been failing on every call rather than being unavailable — and it
+    // failed as a provider error, which reads like a bad key.
+    const base = this.baseUrl.replace(/\/v1$/, '');
     const payload = (await postJson(
-      `${this.baseUrl}/alpha/decisions`,
+      `${base}/alpha/decisions`,
       { authorization: `Bearer ${this.apiKey}` },
       { model: this.model, state, questions },
       this.fetcher,

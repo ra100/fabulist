@@ -1,4 +1,11 @@
-import { AnthropicProvider, JevProvider, OpenAICompatProvider, ProviderHttpError, caps } from './http.ts';
+import {
+  AnthropicProvider,
+  JevCompatProvider,
+  JevProvider,
+  OpenAICompatProvider,
+  ProviderHttpError,
+  caps,
+} from './http.ts';
 import type { CompletionRequest, CompletionResult, Provider } from './provider.ts';
 
 export interface ByokEndpoint {
@@ -99,9 +106,15 @@ export function byokProvider(
       // Read per call, so a lock or delete between two calls of one turn stops the second.
       const apiKey = secret();
       const opts = { apiKey, baseUrl: endpoint.baseUrl, model, capabilities, fetcher: guarded };
+      // OpenRouter has a typed Decisions API and keeps the dedicated adapter.
+      // Every other provider gets the same questions asked over chat completions
+      // — see `JevCompatProvider` for why that is a different trade, and why it
+      // is the user's call which one they use.
       const inner =
-        req.role === 'jev-fastpath' && endpoint.id === 'openrouter'
-          ? new JevProvider(opts)
+        req.role === 'jev-fastpath'
+          ? endpoint.id === 'openrouter'
+            ? new JevProvider(opts)
+            : new JevCompatProvider(endpoint.id, opts)
           : endpoint.kind === 'anthropic'
             ? new AnthropicProvider(opts)
             : new OpenAICompatProvider(endpoint.id, opts);

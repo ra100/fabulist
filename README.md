@@ -471,6 +471,19 @@ principle could put your GitHub account at risk. It is implemented because it is
 credential on your machine, but nothing reaches it unless you opt in explicitly. If you
 want a supported keyless option, Bedrock and Vertex are both first-class here.
 
+**Jev fast checks** are optional and, since the gateway work, no longer OpenRouter-only. Any
+provider you have saved can take the role, and picking the model is yours. OpenRouter keeps
+its dedicated adapter because it has a typed Decisions API; every other provider is asked the
+same two questions over chat completions.
+
+That difference is worth understanding before you point it somewhere. The typed API returns a
+*calibrated* probability and the fast path only clears an action at 0.995 or above. A chat
+model asked for a confidence returns its own say-so, which is not the same number — a model
+that answers 1.0 to everything will clear actions that deserved full review. So routing Jev
+through a non-OpenRouter provider is a way to spend less, not a way to be safer. If a reply
+is malformed or unparsable, both checks fall back to the full referee and integrity routes, so
+the failure mode is a slower turn rather than a wrong one.
+
 **OpenCode Zen** and **OpenCode Go** are OpenCode's two hosted model gateways. Both are
 plain OpenAI-compatible, so each is one entry in your own provider list — paste a key from
 [opencode.ai/auth](https://opencode.ai/auth) and assign it to roles like any other.
