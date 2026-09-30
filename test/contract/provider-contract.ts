@@ -22,6 +22,9 @@ import { describe, it } from 'node:test';
 import type { Provider, ProviderCapabilities } from '../../src/providers/provider.ts';
 import { extractJson, normalizeFinishReason } from '../../src/providers/provider.ts';
 
+/** One streaming payload: a bare string, or an AWS event-stream framed event. */
+export type StreamFrame = string | { event: string; data: unknown };
+
 /**
  * How a provider's streaming bytes are framed. The harness has to speak each
  * one or Bedrock cannot be held to the same bars as the SSE providers.
@@ -34,7 +37,7 @@ export interface ScriptedResponse {
   /** Response body for a non-streaming call. */
   json?: unknown;
   /** Stream payloads for a streaming call, already shaped for this provider's API. */
-  frames?: string[];
+  frames?: StreamFrame[];
   /** Raw body text, for error paths. */
   bodyText?: string;
 }
@@ -74,8 +77,15 @@ export interface ProviderContract {
    * returning text does.
    */
   structuredValue?: unknown;
-  /** `data:` payloads for a streaming completion, already shaped for this provider's API. */
-  frames(over?: { tokensIn?: number; tokensOut?: number; finishReason?: string }): string[];
+  /**
+   * Stream payloads for a streaming completion, already shaped for this provider's API.
+   *
+   * A payload may be a bare string, or `{ event, data }` when the transport
+   * needs an AWS event-stream `:event-type` header to dispatch on. That matters
+   * for Bedrock: its SDK decoder routes frames by header, so a frame without one
+   * is parsed and then dropped — silently, with no error.
+   */
+  frames(over?: { tokensIn?: number; tokensOut?: number; finishReason?: string }): StreamFrame[];
   /**
    * How those payloads reach the client. Defaults to `sse`.
    *
@@ -92,39 +102,79 @@ export interface ProviderContract {
   streaming?: boolean;
 }
 
+/** CRC-32 (IEEE), as AWS's event-stream prelude and message checksums use. */
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/** One AWS event-stream header: length-prefixed name, then a string value. */
+function encodeHeader(name: string, value: string): Buffer {
+  const n = Buffer.from(name, 'utf8');
+  const v = Buffer.from(value, 'utf8');
+  // Layout: [name length][name][type 7][value length: 2 bytes BE][value].
+  const out = Buffer.alloc(1 + n.length + 1 + 2 + v.length);
+  out.writeUInt8(n.length, 0);
+  n.copy(out, 1);
+  out.writeUInt8(7, 1 + n.length);
+  out.writeUInt16BE(v.length, 2 + n.length);
+  v.copy(out, 4 + n.length);
+  return out;
+}
+
 /**
  * Encodes AWS's `application/vnd.amazon.eventstream` framing: a 12-byte prelude
  * (total length, headers length, prelude CRC, big-endian), the headers, the
  * payload as bare JSON, then a trailing message CRC.
  *
- * The reader in `src/providers/stream.ts` skips CRC verification, so zero
- * bytes are fine here — but the *lengths* must be right, because getting them
- * wrong yields a stream that parses as nothing at all rather than as an error.
+ * Two things here are stricter than `readAwsEventStream` in
+ * `src/providers/stream.ts`, which reads lengths and ignores both headers and
+ * checksums — correctly, since a corrupt frame surviving TLS is not worth a
+ * checksum. The SDK's decoder does not skip either: a wrong checksum throws,
+ * and a frame with no `:event-type` is parsed and then dropped without a sound.
+ * Silently is the reason this encodes them properly rather than the same way
+ * twice.
  */
-function encodeAwsFrame(payload: string): Buffer {
+function encodeAwsFrame(payload: string, eventType?: string): Buffer {
   const body = Buffer.from(payload, 'utf8');
-  const total = 16 + body.length;
+  const headers = eventType
+    ? Buffer.concat([encodeHeader(':message-type', 'event'), encodeHeader(':event-type', eventType)])
+    : Buffer.alloc(0);
+  const total = 16 + body.length + headers.length;
   const out = Buffer.alloc(total);
   out.writeUInt32BE(total, 0);
-  out.writeUInt32BE(0, 4); // no headers
-  out.writeUInt32BE(0, 8); // prelude CRC, unverified
-  body.copy(out, 12);
-  out.writeUInt32BE(0, total - 4); // message CRC, unverified
+  out.writeUInt32BE(headers.length, 4);
+  out.writeUInt32BE(crc32(out.subarray(0, 8)), 8); // prelude CRC, over the first 8 bytes
+  headers.copy(out, 12);
+  body.copy(out, 12 + headers.length);
+  // The message checksum is one running CRC over the whole message up to the
+  // trailing field: smithy's encoder accumulates the prelude and then the rest
+  // without resetting, and its decoder checks it the same way.
+  out.writeUInt32BE(crc32(out.subarray(0, total - 4)), total - 4);
   return out;
 }
 
-function streamBody(frames: string[], framing: StreamFraming): Response {
+type Frame = string | { event: string; data: unknown };
+
+const asPayload = (frame: Frame) => (typeof frame === 'string' ? frame : JSON.stringify(frame.data));
+
+function streamBody(frames: Frame[], framing: StreamFraming): Response {
   if (framing === 'ndjson') {
-    return new Response(frames.map((f) => `${f}\n`).join(''), {
+    return new Response(frames.map((f) => `${asPayload(f)}\n`).join(''), {
       headers: { 'content-type': 'application/x-ndjson' },
     });
   }
   if (framing === 'aws-eventstream') {
-    return new Response(Buffer.concat(frames.map(encodeAwsFrame)), {
-      headers: { 'content-type': 'application/vnd.amazon.eventstream' },
-    });
+    return new Response(
+      Buffer.concat(frames.map((f) => encodeAwsFrame(asPayload(f), typeof f === 'string' ? undefined : f.event))),
+      { headers: { 'content-type': 'application/vnd.amazon.eventstream' } },
+    );
   }
-  return new Response(frames.map((f) => `data: ${f}\n\n`).join(''), {
+  return new Response(frames.map((f) => `data: ${asPayload(f)}\n\n`).join(''), {
     headers: { 'content-type': 'text/event-stream' },
   });
 }

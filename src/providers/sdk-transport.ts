@@ -36,6 +36,23 @@ export function asProviderError(err: unknown, secret: string): unknown {
  * What `streamText` accepts. The two handlers are optional there and are
  * overridden below, so the callers pass a plain request.
  */
+/**
+ * Reads a structured result, yielding `undefined` instead of throwing when the
+ * model answered with something that is not the requested shape.
+ *
+ * `result.output` is a getter that throws `NoOutputGeneratedError` on access, so
+ * `Promise.resolve(result.output).catch(...)` does not catch it — the throw
+ * happens while evaluating the argument. Fabulist's own validator decides
+ * whether a bad shape is worth repairing, so this must not become a failed turn.
+ */
+export async function readStructuredOutput(result: { readonly output: unknown }): Promise<unknown> {
+  try {
+    return await Promise.resolve(result.output);
+  } catch {
+    return undefined;
+  }
+}
+
 type StreamRequest = Parameters<typeof streamText>[0];
 
 /**

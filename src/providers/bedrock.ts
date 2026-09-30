@@ -253,7 +253,7 @@ export function bedrockHint(status: number, body: string, model: string, region:
  * Converse rejects consecutive messages with the same role, which is easy to
  * produce once system prompts have been folded in for other providers.
  */
-function collapse(messages: Array<{ role: string; content: Array<{ text: string }> }>): Array<{ role: string; content: Array<{ text: string }> }> {
+export function collapse(messages: Array<{ role: string; content: Array<{ text: string }> }>): Array<{ role: string; content: Array<{ text: string }> }> {
   const out: Array<{ role: string; content: Array<{ text: string }> }> = [];
   for (const message of messages) {
     const last = out[out.length - 1];
