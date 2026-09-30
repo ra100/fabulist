@@ -476,6 +476,7 @@ export class AnthropicProvider implements Provider {
       this.timeoutMs,
     )) as {
       content?: Array<{ text?: string }>;
+      stop_reason?: unknown;
       usage?: { input_tokens?: number; output_tokens?: number };
     };
 
@@ -489,6 +490,9 @@ export class AnthropicProvider implements Provider {
       tokensOut: json.usage?.output_tokens ?? 0,
       model: this.model,
       schemaEnforced: false,
+      // `end_turn` and `max_tokens` are the two shapes this can arrive in;
+      // `normalizeFinishReason` reduces both onto the shared allowlist.
+      finishReason: normalizeFinishReason(json.stop_reason),
     };
   }
 
@@ -514,6 +518,7 @@ export class AnthropicProvider implements Provider {
       let text = '';
       let tokensIn = 0;
       let tokensOut = 0;
+      let finishReason: CompletionResult['finishReason'];
       for await (const payload of readSse(res.body)) {
         const event = parseJsonSafe(payload);
         if (!event) continue;
@@ -530,11 +535,13 @@ export class AnthropicProvider implements Provider {
           tokensIn = usage?.input_tokens ?? tokensIn;
         }
         if (event.type === 'message_delta') {
+          const delta = event.delta as { stop_reason?: unknown } | undefined;
+          if (delta?.stop_reason != null) finishReason = normalizeFinishReason(delta.stop_reason);
           const usage = event.usage as { output_tokens?: number } | undefined;
           tokensOut = usage?.output_tokens ?? tokensOut;
         }
       }
-      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
+      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false, finishReason };
     } finally {
       clearTimeout(timer);
     }
@@ -581,6 +588,7 @@ export class OllamaProvider implements Provider {
 
     const json = (await postJson(`${this.baseUrl}/api/chat`, {}, body, this.fetcher, this.timeoutMs)) as {
       message?: { content?: string };
+      done_reason?: unknown;
       prompt_eval_count?: number;
       eval_count?: number;
     };
@@ -591,6 +599,7 @@ export class OllamaProvider implements Provider {
       tokensOut: json.eval_count ?? 0,
       model: this.model,
       schemaEnforced: !!req.schema,
+      finishReason: normalizeFinishReason(json.done_reason),
     };
   }
 
@@ -609,6 +618,7 @@ export class OllamaProvider implements Provider {
       let text = '';
       let tokensIn = 0;
       let tokensOut = 0;
+      let finishReason: CompletionResult['finishReason'];
       // Ollama streams newline-delimited JSON rather than SSE.
       for await (const line of readNdjson(res.body)) {
         const event = parseJsonSafe(line);
@@ -620,8 +630,10 @@ export class OllamaProvider implements Provider {
         }
         if (typeof event.prompt_eval_count === 'number') tokensIn = event.prompt_eval_count;
         if (typeof event.eval_count === 'number') tokensOut = event.eval_count;
+        // Only the final NDJSON line carries `done_reason`; earlier ones omit it.
+        if (event.done_reason != null) finishReason = normalizeFinishReason(event.done_reason);
       }
-      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
+      return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false, finishReason };
     } finally {
       clearTimeout(timer);
     }

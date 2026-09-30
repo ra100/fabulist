@@ -20,6 +20,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readSse, parseJsonSafe } from './stream.ts';
 import type { CompletionRequest, CompletionResult, Provider, ProviderCapabilities } from './provider.ts';
+import { normalizeFinishReason } from './provider.ts';
 
 export interface GoogleEnvironment {
   env: Record<string, string | undefined>;
@@ -215,7 +216,7 @@ export interface VertexOptions {
 }
 
 interface GenerateResponse {
-  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: unknown }>;
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
 }
 
@@ -300,6 +301,9 @@ export class VertexProvider implements Provider {
       tokensOut: json.usageMetadata?.candidatesTokenCount ?? 0,
       model: this.model,
       schemaEnforced: !!req.schema,
+      // Gemini names its stops `STOP` / `MAX_TOKENS`; anything else reduces to
+      // `other` rather than leaking a vendor string into diagnostics.
+      finishReason: normalizeFinishReason(json.candidates?.[0]?.finishReason),
     };
   }
 
@@ -307,6 +311,7 @@ export class VertexProvider implements Provider {
     let text = '';
     let tokensIn = 0;
     let tokensOut = 0;
+    let finishReason: CompletionResult['finishReason'];
 
     for await (const payload of readSse(res.body)) {
       const event = parseJsonSafe(payload) as GenerateResponse | null;
@@ -320,8 +325,12 @@ export class VertexProvider implements Provider {
         tokensIn = event.usageMetadata.promptTokenCount ?? tokensIn;
         tokensOut = event.usageMetadata.candidatesTokenCount ?? tokensOut;
       }
+      // Only the terminal frame carries `finishReason`.
+      if (event.candidates?.[0]?.finishReason != null) {
+        finishReason = normalizeFinishReason(event.candidates[0].finishReason);
+      }
     }
-    return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
+    return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false, finishReason };
   }
 
   async whoami(): Promise<{ source: string; project: string | null; location: string }> {

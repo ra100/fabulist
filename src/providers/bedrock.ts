@@ -14,6 +14,7 @@ import { signRequest } from './sigv4.ts';
 import { readAwsEventStream, parseJsonSafe } from './stream.ts';
 import { AwsCredentialProvider, type AwsEnvironment } from './aws.ts';
 import type { CompletionRequest, CompletionResult, Provider, ProviderCapabilities } from './provider.ts';
+import { normalizeFinishReason } from './provider.ts';
 
 export interface BedrockOptions {
   modelId: string;
@@ -149,6 +150,9 @@ export class BedrockProvider implements Provider {
       tokensOut: json.usage?.outputTokens ?? 0,
       model: this.model,
       schemaEnforced: !!toolUse,
+      // Converse reports `end_turn` / `max_tokens` / `tool_use`, all of which
+      // `normalizeFinishReason` already reduces onto the shared allowlist.
+      finishReason: normalizeFinishReason(json.stopReason),
     };
   }
 
@@ -160,6 +164,7 @@ export class BedrockProvider implements Provider {
     let text = '';
     let tokensIn = 0;
     let tokensOut = 0;
+    let finishReason: CompletionResult['finishReason'];
 
     for await (const payload of readAwsEventStream(res.body)) {
       const event = parseJsonSafe(payload);
@@ -174,8 +179,9 @@ export class BedrockProvider implements Provider {
         tokensIn = usage.inputTokens ?? tokensIn;
         tokensOut = usage.outputTokens ?? tokensOut;
       }
+      if (event.stopReason != null) finishReason = normalizeFinishReason(event.stopReason);
     }
-    return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false };
+    return { text, tokensIn, tokensOut, model: this.model, schemaEnforced: false, finishReason };
   }
 
   /** Reports which identity would be used, for the provider doctor. */
