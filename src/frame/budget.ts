@@ -19,6 +19,7 @@ export const Priority = {
   playerSheet: 114,
   locationCard: 90,
   openThreads: 80,
+  turnSummaries: 75,
   recentProse: 70,
   epistemicMask: 60,
   neighbourhood: 50,

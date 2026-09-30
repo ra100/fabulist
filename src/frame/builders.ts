@@ -17,6 +17,7 @@ import type {
   SessionState,
   Thread,
 } from '../domain/types.ts';
+import { summaryForTurn } from '../domain/turn-summary.ts';
 import type { World } from '../store/index.ts';
 import { storyLayout } from '../loop/history.ts';
 import { assembleFrame, Priority, type SlotSpec } from './budget.ts';
@@ -272,6 +273,15 @@ function recentProse(ctx: FrameContext, maxTurns = 8): string {
     .join('\n\n');
 }
 
+function turnSummaries(ctx: FrameContext, maxTurns = 32): string {
+  return ctx.world.chronicle
+    .recentTurns(maxTurns)
+    .map((turn) => ({ turn, summary: summaryForTurn(turn) }))
+    .filter(({ summary }) => summary)
+    .map(({ turn, summary }) => `turn ${turn.scene}.${turn.turn}: ${summary}`)
+    .join('\n');
+}
+
 function sceneSummaries(ctx: FrameContext): string {
   const completedScenes = new Set(storyLayout(ctx.world).turns.filter((turn) => turn.scene < ctx.session.scene).map((turn) => turn.scene));
   return ctx.world.chronicle
@@ -357,6 +367,7 @@ export function buildIntegrityFrame(ctx: FrameContext, actorId: EntityId): Frame
       evictable: false,
       maxTokens: 900,
     },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(ctx), maxTokens: 1200, preserveEnd: true },
     { name: 'recent-behaviour', priority: Priority.recentProse, content: recentProse(ctx, 3), maxTokens: 600 },
     { name: 'player-input', priority: Priority.agreedBeat, content: ctx.rawInput ?? '', evictable: false },
   ];
@@ -370,6 +381,7 @@ export function buildRefereeFrame(ctx: FrameContext): Frame {
     { name: 'location', priority: Priority.locationCard, content: locationCard(ctx), maxTokens: 500 },
     { name: 'present-cast', priority: Priority.presentCast, content: presentCastBlock(ctx, ids), evictable: false, maxTokens: 2000 },
     { name: 'neighbourhood', priority: Priority.neighbourhood, content: neighbourhood(ctx, ids, 1), maxTokens: 1400 },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(ctx), maxTokens: 1200, preserveEnd: true },
     { name: 'epistemic-mask', priority: Priority.epistemicMask, content: epistemicMask(ctx), maxTokens: 700 },
     { name: 'divergences', priority: Priority.sceneSummaries, content: ctx.world.chronicle.divergences().slice(-6).map((d) => `${d.kind}: ${d.detail}`).join('\n'), maxTokens: 300 },
     { name: 'player-input', priority: Priority.agreedBeat, content: ctx.rawInput ?? '', evictable: false },
@@ -391,6 +403,7 @@ export function buildDirectorFrame(ctx: FrameContext): Frame {
     { name: 'directives', priority: Priority.styleContract, content: world.directives.active().map((d) => `[${d.strength}] ${d.text}`).join('\n'), evictable: false, maxTokens: 300 },
     { name: 'present-cast', priority: Priority.presentCast, content: ids.map((id) => { const e = world.graph.get(id); return e ? thumbnail(e) : ''; }).filter(Boolean).join('\n'), maxTokens: 600 },
     { name: 'pending-arrivals', priority: Priority.pendingArrivals, content: arrivals, maxTokens: 500 },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(ctx), maxTokens: 1200, preserveEnd: true },
     { name: 'epistemic-mask', priority: Priority.epistemicMask, content: epistemicMask(ctx), maxTokens: 600 },
     { name: 'scene-summaries', priority: Priority.sceneSummaries, content: sceneSummaries(ctx), maxTokens: 800 },
     { name: 'knobs', priority: Priority.styleContract, content: `danger=${session.knobs.danger} pacing=${session.knobs.pacing} npcAgency=${session.knobs.npcAgency}`, evictable: false },
@@ -417,6 +430,7 @@ export function buildNarratorFrame(ctx: FrameContext): Frame {
       name: 'recent-prose', priority: Priority.recentProse, content: recentProse(ctx, 6),
       maxTokens: 2200, preserveEnd: true,
     },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(ctx), maxTokens: 1200, preserveEnd: true },
     { name: 'epistemic-mask', priority: Priority.epistemicMask, content: epistemicMask(ctx), maxTokens: 700 },
     { name: 'scene-summaries', priority: Priority.sceneSummaries, content: sceneSummaries(ctx), maxTokens: 900 },
     { name: 'cast-thumbnails', priority: Priority.castThumbnails, content: others.map(thumbnail).join('\n'), maxTokens: 500 },

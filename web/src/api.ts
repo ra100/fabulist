@@ -246,6 +246,7 @@ export type Outcome =
   | { kind: 'answered'; text: string };
 
 export interface TurnMeta {
+  summary?: string;
   move: string | null;
   integrity: { distance: string; reasoning: string; violatedVows: string[] } | null;
   referee: { ruling: string; reasoning: string; cost: string | null } | null;

@@ -90,6 +90,37 @@ test('committed turn checkpoint is retained when authoring checkpoints are recor
   world.close();
 });
 
+test('committed turn stores a deterministic summary of canonical changes', () => {
+  const world = World.open(':memory:');
+  const delta = {
+    ...emptyDelta(),
+    events: [{
+      text: 'Anselm took the lantern.',
+      participants: ['char:anselm'],
+      locationId: 'loc:scriptorium',
+      significance: 0.4,
+    }],
+    factsLearned: [{
+      text: 'The oil is nearly gone.',
+      knownBy: ['char:anselm'],
+      suspectedBy: [],
+    }],
+  };
+
+  const { turn } = commitTurn(world, {
+    ...turnInput(1),
+    rawInput: 'take the lantern',
+    delta,
+    bookProse: 'Anselm lifted the lantern from its hook.',
+  });
+
+  assert.equal(
+    (turn.meta as Turn['meta'] & { summary?: string }).summary,
+    'Anselm took the lantern. Fact: The oil is nearly gone.',
+  );
+  world.close();
+});
+
 test('recordAuthoringCheckpointTx rolls back a mutation that fails partway through', async () => {
   const world = World.open(':memory:');
   const turnCount = () => (world.db.prepare(`SELECT COUNT(*) AS count FROM turns`).get() as { count: number }).count;
