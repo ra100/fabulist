@@ -7,12 +7,19 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { OpenAICompatProvider, PRESETS, buildProvider, caps } from '../src/providers/http.ts';
+import {
+  OpenAICompatProvider,
+  PRESETS,
+  TRANSPORT_DECISION_TABLE,
+  buildProvider,
+  caps,
+  resolveTransport,
+} from '../src/providers/http.ts';
 import { OpenAISdkProvider } from '../src/providers/openai-sdk.ts';
 import type { ProviderSpec } from '../src/providers/http.ts';
 import { scrubSecrets } from '../src/providers/byok.ts';
 
-const ENV = { OPENAI_API_KEY: 'sk-live-0123456789abcdefghij' };
+const ENV: Record<string, string> = { OPENAI_API_KEY: 'sk-live-0123456789abcdefghij' };
 
 function spec(over: Partial<ProviderSpec> = {}): ProviderSpec {
   return {
@@ -47,33 +54,78 @@ const COMPLETION = {
 
 // ------------------------------------------------------------ the switch
 
-test('openai-compat keeps the hand-rolled transport unless asked otherwise', () => {
-  const provider = buildProvider(spec(), ENV);
-  assert.ok(provider instanceof OpenAICompatProvider, 'default is unchanged, so the rollback path is deleting one field');
-  assert.ok(!(provider instanceof OpenAISdkProvider));
+// -------------------------------------------------------- the decision table
+
+test('a dialect always keeps the hand-rolled transport', () => {
+  // The whole point of `dialect` is to record "OpenAI-shaped but not
+  // OpenAI-behaved", so it is the one signal that overrides the default.
+  for (const dialect of ['vllm', 'llamacpp'] as const) {
+    assert.equal(resolveTransport({ dialect }), 'legacy', dialect);
+    const provider = buildProvider(spec({ dialect }), ENV);
+    assert.ok(provider instanceof OpenAICompatProvider, `${dialect} keeps its own shaping`);
+  }
 });
 
-test('transport sdk opts a single spec onto the AI SDK adapter', () => {
-  const provider = buildProvider(spec({ transport: 'sdk' }), ENV);
+test('a standard endpoint uses the AI SDK adapter by default', () => {
+  assert.equal(resolveTransport({}), 'sdk');
+  const provider = buildProvider(spec(), ENV);
   assert.ok(provider instanceof OpenAISdkProvider);
   assert.equal(provider.id, 'gpt-4o', 'the same id the legacy adapter derives, so routing and attribution are untouched');
   assert.equal(provider.model, 'gpt-4o');
 });
 
-test('transport sdk refuses a dialect rather than sending a shape the endpoint ignores', () => {
+test('every shipped preset routes to the transport the table says', () => {
+  for (const [key, preset] of Object.entries(PRESETS)) {
+    if (preset.kind !== 'openai-compat') continue;
+    const expected = preset.dialect ? 'legacy' : 'sdk';
+    assert.equal(resolveTransport(preset, {}), expected, key);
+    assert.equal(preset.transport, undefined, `${key} pins no transport, so the table stays in charge`);
+  }
+});
+
+test('the decision table covers every openai-compat target in the presets', () => {
+  const classes = new Set(TRANSPORT_DECISION_TABLE.map((row) => row.transport));
+  assert.equal(classes.size, 2, 'both transports are represented');
+  for (const row of TRANSPORT_DECISION_TABLE) assert.ok(row.why.length > 20, `${row.class} explains itself`);
+});
+
+test('every preset still builds, on whichever transport it decided', () => {
+  // The migration must not leave a preset that only one transport can construct.
+  for (const [key, preset] of Object.entries(PRESETS)) {
+    if (preset.kind === 'jev') continue;
+    const env = { ...ENV };
+    if (preset.apiKeyEnv) env[preset.apiKeyEnv] = env[preset.apiKeyEnv] ?? 'sk-test-0123456789abcdef';
+    // Copilot's own acknowledgement gate, which the migration does not touch.
+    const provider = buildProvider({ ...preset, allowUnofficial: true }, env);
+    assert.ok(provider.id, key);
+  }
+});
+
+// ------------------------------------------------------------ the rollback
+
+test('a single spec can roll back to the hand-rolled adapter', () => {
+  assert.equal(resolveTransport({ transport: 'legacy' }), 'legacy');
+  assert.ok(buildProvider(spec({ transport: 'legacy' }), ENV) instanceof OpenAICompatProvider);
+});
+
+test('the operator-wide switch rolls every compatible target back at once', () => {
+  // The incident lever: one env var, no config rewrite, no per-target edits.
+  assert.equal(resolveTransport({}, { FABULIST_PROVIDER_TRANSPORT: 'legacy' }), 'legacy');
+  assert.ok(buildProvider(spec(), { ...ENV, FABULIST_PROVIDER_TRANSPORT: 'legacy' }) instanceof OpenAICompatProvider);
+  assert.equal(resolveTransport({}, { FABULIST_PROVIDER_TRANSPORT: 'sdk' }), 'sdk');
+});
+
+test('an explicit transport beats the operator-wide switch', () => {
+  // Otherwise the rollback could not be undone for one target without an edit.
+  assert.equal(resolveTransport({ transport: 'sdk' }, { FABULIST_PROVIDER_TRANSPORT: 'legacy' }), 'sdk');
+});
+
+test('transport sdk still refuses a dialect rather than sending a shape the endpoint ignores', () => {
   for (const dialect of ['vllm', 'llamacpp'] as const) {
     assert.throws(
       () => buildProvider(spec({ transport: 'sdk', dialect }), ENV),
       new RegExp(`does not support the ${dialect} dialect`),
     );
-  }
-});
-
-test('every preset builds identically with transport unset', () => {
-  // The opt-in is additive: no shipped preset names it, so nothing a user has
-  // already configured changes shape.
-  for (const [key, preset] of Object.entries(PRESETS)) {
-    assert.equal(preset.transport, undefined, `${key} does not opt in`);
   }
 });
 

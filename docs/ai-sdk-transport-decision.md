@@ -173,8 +173,53 @@ deliberately, not as parity.
 ## Phase 1 status
 
 `transport: 'sdk'` on an `openai-compat` spec opts that one spec onto the SDK
-adapter. Unset — the default, and every shipped preset — keeps the hand-rolled
-adapter, so rollback is deleting one field and existing configuration is
-untouched. `transport: 'sdk'` is refused for the `vllm` and `llamacpp`
-dialects rather than sending a `response_format` those endpoints ignore.
+adapter. `transport: 'sdk'` is refused for the `vllm` and `llamacpp` dialects
+rather than sending a `response_format` those endpoints ignore.
+
+## Phase 2: the decision table
+
+The SDK adapter is now the default for compatible OpenAI-shaped endpoints.
+`resolveTransport` is the table, and it prefers a *stated* difference over an
+inferred one — a base URL says nothing about behaviour, while `dialect` exists
+precisely to record "OpenAI-shaped but not OpenAI-behaved".
+
+| Endpoint class | Transport | Why |
+| --- | --- | --- |
+| standard chat completions | `sdk` | `/chat/completions` with `response_format` is what it speaks |
+| configured gateway (any baseUrl, no dialect) | `sdk` | the base URL does not change the wire shape |
+| vLLM | `legacy` | constrains via `guided_json`, silently ignores `response_format` |
+| llama.cpp | `legacy` | takes a bare schema under `json_schema` |
+| Ollama | `legacy` | a different kind: `/api/chat`, `format`, NDJSON stream |
+
+Precedence: explicit `transport` (that is the per-target rollback), then
+`dialect`, then `FABULIST_PROVIDER_TRANSPORT=legacy`, then `sdk`. Asking for
+`sdk` *and* a dialect is a contradiction and throws rather than silently
+honouring either.
+
+BYOK routes through the same adapter. The per-call `secret()` read is preserved
+by handing the SDK adapter a resolver rather than a value, so a lock or delete
+between two calls of one turn still stops the second call.
+
+Rollback for one release cycle: `transport: 'legacy'` on a single spec, or
+`FABULIST_PROVIDER_TRANSPORT=legacy` for everything at once.
+
+### Findings from phase 2
+
+1. **`streamText` swallows the API error.** With no `onError` handler, a 401
+   during a streaming turn surfaces as `NoOutputGeneratedError` — "no output
+   generated. Check the stream for errors." `byok.ts` decides "your key was
+   rejected" from `status`, so a rejected key during narration would have been
+   reported as an empty turn and sent to the user as a quiet, blank scene. The
+   adapter now captures `onError` and rebuilds the `ProviderHttpError`. This
+   is the single most dangerous difference the contract suite caught, and it
+   was invisible until a BYOK test exercised the streaming error path.
+2. **The BYOK test doubles were not `Response`s.** They returned
+   `{ ok, status, json }`, which no SDK can consume. They now build real
+   `Response` objects, so those tests prove something about the path that ships
+   rather than about the transport that was replaced.
+3. **A test double that returns a model-list body for a chat request** was
+   tolerated by the hand-rolled adapter and rejected by the SDK. The
+   hand-rolled adapter was reading `choices[0].message.content` out of a
+   `{ data: [] }` payload and getting `''`. Fixed in the double.
+
 
