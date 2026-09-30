@@ -1,5 +1,6 @@
-import { AnthropicProvider, JevCompatProvider, JevProvider, caps } from './http.ts';
+import { JevCompatProvider, JevProvider, caps } from './http.ts';
 import { OpenAISdkProvider } from './openai-sdk.ts';
+import { AnthropicSdkProvider } from './anthropic-sdk.ts';
 import { ProviderHttpError, scrubSecrets, type CompletionRequest, type CompletionResult, type Provider } from './provider.ts';
 
 // Re-exported so existing callers keep one obvious home for credential handling.
@@ -161,7 +162,14 @@ export function byokProvider(
             ? new JevProvider({ ...opts, url: endpoint.typedUrl })
             : new JevCompatProvider(endpoint.id, opts)
           : endpoint.kind === 'anthropic'
-            ? new AnthropicProvider(opts)
+            ? new AnthropicSdkProvider({
+                // Resolved per call for the same reason as below.
+                apiKey: () => apiKey,
+                baseUrl: endpoint.baseUrl,
+                model,
+                capabilities,
+                fetcher: guarded,
+              })
             : new OpenAISdkProvider({
                 id: endpoint.id,
                 // Already read once for this call; the adapter resolves per

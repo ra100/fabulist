@@ -28,7 +28,23 @@ function spyFetch(status: number, body: unknown, text = '') {
   const fetcher = (async (url: string, init: RequestInit = {}) => {
     seen.push({ url: String(url), headers: Object.fromEntries(new Headers(init.headers).entries()) });
     const streamed = String(init.body ?? '').includes('"stream":true');
-    const payload = text || JSON.stringify(body);
+    // The Anthropic Messages API and the OpenAI chat API are not the same JSON,
+    // and the SDK's parser is strict where the hand-rolled one was forgiving.
+    const anthropic = url.includes('/v1/messages');
+    const payload =
+      text ||
+      (anthropic
+        ? JSON.stringify({
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: 'm',
+            content: [{ type: 'text', text: 'hi' }],
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            usage: { input_tokens: 4, output_tokens: 2 },
+          })
+        : JSON.stringify(body));
     if (streamed && status < 400) {
       const frame = JSON.stringify({
         id: 'chatcmpl-test',
@@ -181,9 +197,21 @@ test('byok calls refuse redirects so the key and prompt never follow one cross-o
     redirects.push(init.redirect);
     // Each endpoint is asked for two different things here — a completion and a
     // model list — and both bodies must be well-formed for the call to finish.
-    const payload = url.endsWith('/models')
-      ? { data: [] }
-      : { id: 'x', model: 'm', choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }] };
+    const payload =
+      url.endsWith('/models')
+        ? { data: [] }
+        : url.includes('/v1/messages')
+          ? {
+              id: 'msg_test',
+              type: 'message',
+              role: 'assistant',
+              model: 'm',
+              content: [{ type: 'text', text: 'hi' }],
+              stop_reason: 'end_turn',
+              stop_sequence: null,
+              usage: { input_tokens: 4, output_tokens: 2 },
+            }
+          : { id: 'x', model: 'm', choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }] };
     return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as unknown as typeof fetch;
   for (const id of ['openai', 'anthropic']) {
