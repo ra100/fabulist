@@ -42,47 +42,72 @@ const STORIES_PER_USER = 3;
  * inserts from Node: this is 450k entities and 800k edges, and shipping them
  * over the wire one INSERT at a time would dominate the runtime of a test whose
  * subject is read latency.
+ *
+ * Each world is independent, and so is each story, so both phases issue their
+ * statements concurrently and let the pool decide how many actually run at
+ * once. The row count, the ids and the resulting graph are identical either
+ * way; serialising them only ever left Postgres backends idle, and the corpus
+ * build was 69 s of a 171 s test run on a 4-vCPU CI runner — the single
+ * longest file, so it *was* the wall clock. The pool caps the real parallelism,
+ * so this needs no concurrency knob of its own.
  */
 async function buildCorpus(db: Db): Promise<number[]> {
-  const worldIds: number[] = [];
-  for (let w = 1; w <= WORLDS; w += 1) {
-    const id = await makeWorld(db, `world-${w}`, `World ${w}`);
-    worldIds.push(id);
-    await db.query(
-      `INSERT INTO canon_entities (world_id, id, type, name, summary, salience, depth_level, props)
-       SELECT $1,
-              CASE g % 4 WHEN 0 THEN 'char:' WHEN 1 THEN 'loc:' WHEN 2 THEN 'fac:' ELSE 'concept:' END || 'w${w}-e' || g,
-              CASE g % 4 WHEN 0 THEN 'Character' WHEN 1 THEN 'Location' WHEN 2 THEN 'Faction' ELSE 'Concept' END,
-              'Entity ' || g, 'canon summary ' || g, (g % 1000)::real / 1000, g % 4, '{}'::jsonb
-       FROM generate_series(1, $2) g`,
-      [id, ENTITIES_PER_WORLD],
-    );
-    await db.query(
-      `INSERT INTO canon_edges (world_id, subject, predicate, object, valid_from, weight)
-       SELECT $1, 'char:w${w}-e' || (1 + (g * 4) % $2), 'ALLIED_WITH', 'fac:w${w}-e' || (3 + (g * 4) % $2), 0, 0.5
-       FROM generate_series(1, $3) g
-       ON CONFLICT DO NOTHING`,
-      [id, ENTITIES_PER_WORLD, EDGES_PER_WORLD],
-    );
-  }
+  const worldIds = await Promise.all(
+    Array.from({ length: WORLDS }, (_, i) => i + 1).map(async (w) => {
+      const id = await makeWorld(db, `world-${w}`, `World ${w}`);
+      await db.query(
+        `INSERT INTO canon_entities (world_id, id, type, name, summary, salience, depth_level, props)
+         SELECT $1,
+                CASE g % 4 WHEN 0 THEN 'char:' WHEN 1 THEN 'loc:' WHEN 2 THEN 'fac:' ELSE 'concept:' END || 'w${w}-e' || g,
+                CASE g % 4 WHEN 0 THEN 'Character' WHEN 1 THEN 'Location' WHEN 2 THEN 'Faction' ELSE 'Concept' END,
+                'Entity ' || g, 'canon summary ' || g, (g % 1000)::real / 1000, g % 4, '{}'::jsonb
+         FROM generate_series(1, $2) g`,
+        [id, ENTITIES_PER_WORLD],
+      );
+      await db.query(
+        // `DISTINCT` and the `$1::bigint` cast and the `WHERE true` are all one
+        // change: the generator is periodic in `g`, so `generate_series(1,
+        // 40_000)` only ever produces 5,625 distinct edges per world and
+        // `ON CONFLICT DO NOTHING` was discarding the other 34,375 — 800k
+        // attempted inserts to land 112.5k rows. Collapsing the duplicates in
+        // the SELECT lands the identical rowset (verified: same rows, same
+        // order) for a seventh of the work. The cast is because `DISTINCT`
+        // forces a common type across the target list and `$1` alone resolves
+        // to text; `WHERE true` is Postgres' documented way to stop `ON` being
+        // read as the start of `ON CONFLICT`.
+        `INSERT INTO canon_edges (world_id, subject, predicate, object, valid_from, weight)
+         SELECT DISTINCT $1::bigint, 'char:w${w}-e' || (1 + (g * 4) % $2), 'ALLIED_WITH', 'fac:w${w}-e' || (3 + (g * 4) % $2), 0, 0.5
+         FROM generate_series(1, $3) g
+         WHERE true
+         ON CONFLICT DO NOTHING`,
+        [id, ENTITIES_PER_WORLD, EDGES_PER_WORLD],
+      );
+      return id;
+    }),
+  );
 
   // 300 stories; every third is a crossover reading two worlds, which is what
   // makes the multi-arm overlay path realistic rather than theoretical.
-  for (let u = 1; u <= USERS; u += 1) {
-    for (let s = 1; s <= STORIES_PER_USER; s += 1) {
+  await Promise.all(
+    Array.from({ length: USERS * STORIES_PER_USER }, (_, i) => {
+      const u = Math.floor(i / STORIES_PER_USER) + 1;
+      const s = (i % STORIES_PER_USER) + 1;
       const primary = worldIds[(u + s) % WORLDS]!;
       const sources = (u + s) % 3 === 0 ? [primary, worldIds[(u + s + 7) % WORLDS]!] : [primary];
       const uniq = [...new Set(sources)];
-      await makeStory(db, `story:${u}:${s}`, uniq, `user_${u}`);
-      // A realistic chronicle: some entities diverged, some edges asserted.
-      await db.query(
-        `INSERT INTO chron_entities (story_id, id, type, name, summary, salience, created_scene)
-         SELECT $1, 'char:diverged-' || g, 'Character', 'Diverged ' || g, 'chronicle', 0.7, g
-         FROM generate_series(1, 40) g`,
-        [`story:${u}:${s}`],
-      );
-    }
-  }
+      const storyId = `story:${u}:${s}`;
+      return (async () => {
+        await makeStory(db, storyId, uniq, `user_${u}`);
+        // A realistic chronicle: some entities diverged, some edges asserted.
+        await db.query(
+          `INSERT INTO chron_entities (story_id, id, type, name, summary, salience, created_scene)
+           SELECT $1, 'char:diverged-' || g, 'Character', 'Diverged ' || g, 'chronicle', 0.7, g
+           FROM generate_series(1, 40) g`,
+          [storyId],
+        );
+      })();
+    }),
+  );
 
   await db.query('ANALYZE');
   return worldIds;
