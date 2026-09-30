@@ -10,6 +10,7 @@
  */
 import {
   normalizeFinishReason,
+  ProviderHttpError,
   type CompletionRequest,
   type CompletionResult,
   type Provider,
@@ -19,6 +20,7 @@ import { readNdjson, readSse, parseJsonSafe } from './stream.ts';
 import { BedrockProvider } from './bedrock.ts';
 import { VertexProvider } from './google.ts';
 import { CopilotProvider } from './copilot.ts';
+import { OpenAISdkProvider } from './openai-sdk.ts';
 
 interface HttpOptions {
   /** Empty for local servers, which have nothing to authenticate against. */
@@ -29,25 +31,6 @@ interface HttpOptions {
   /** Injectable for tests. */
   fetcher?: typeof fetch;
   timeoutMs?: number;
-}
-
-/** A non-2xx provider answer; `status` lets a BYOK wrapper tell a rejected key from an outage. */
-export class ProviderHttpError extends Error {
-  readonly status: number;
-  /**
-   * The response body, kept raw and short. A status alone cannot tell a bad key
-   * from a key that is fine but not allowed to make this call, and several
-   * providers put the difference only in the body — so the caller gets to read
-   * it rather than reverse-engineering it back out of the message.
-   */
-  readonly body: string;
-
-  constructor(status: number, message: string, body = '') {
-    super(message);
-    this.name = 'ProviderHttpError';
-    this.status = status;
-    this.body = body;
-  }
 }
 
 async function postJson(
@@ -682,6 +665,15 @@ export interface ProviderSpec {
   auth?: AuthMode;
   capabilities?: Partial<ProviderCapabilities>;
   dialect?: OpenAIDialect;
+  /**
+   * Which transport carries an `openai-compat` request.
+   *
+   * Defaults to `legacy`, the hand-rolled adapter, until phase 2 proves the
+   * parity contract green across the compatible endpoint classes. `sdk` is the
+   * opt-in for the AI SDK adapter; it is refused outright for a non-default
+   * dialect rather than silently sending a wire shape that endpoint ignores.
+   */
+  transport?: 'legacy' | 'sdk';
   /** AWS: overrides AWS_PROFILE and the resolved region. */
   profile?: string;
   region?: string;
@@ -959,7 +951,27 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
             return new UnslothAuth({ baseUrl: root }).authHeader();
           }
         : undefined;
-      return new OpenAICompatProvider(spec.model.split(':')[0] ?? 'openai', {
+      const id = spec.model.split(':')[0] ?? 'openai';
+      if (spec.transport === 'sdk') {
+        if (spec.dialect) {
+          // vLLM and llama.cpp constrain decoding through their own fields, and
+          // the SDK adapter does not shape those. Failing loudly beats sending a
+          // `response_format` the endpoint ignores and getting prose back.
+          throw new Error(
+            `transport 'sdk' does not support the ${spec.dialect} dialect for ${spec.model}; ` +
+              `leave transport unset to use the dialect-aware adapter`,
+          );
+        }
+        return new OpenAISdkProvider({
+          id,
+          apiKey,
+          baseUrl: base,
+          model: spec.model,
+          capabilities,
+          ...(authHeader ? { authHeader } : {}),
+        });
+      }
+      return new OpenAICompatProvider(id, {
         apiKey,
         baseUrl: base,
         model: spec.model,

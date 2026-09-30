@@ -103,6 +103,47 @@ export interface JsonSchema {
   schema: Record<string, unknown>;
 }
 
+/**
+ * A non-2xx provider answer.
+ *
+ * Lives beside the contract rather than in `http.ts` so an SDK-backed adapter
+ * can raise the same error without importing the hand-rolled transport:
+ * `byok.ts` branches on `status` and reads `body` to tell a rejected key from
+ * an outage, and that branch must not care which transport produced it.
+ */
+export class ProviderHttpError extends Error {
+  readonly status: number;
+  /**
+   * The response body, kept raw and short. A status alone cannot tell a bad key
+   * from a key that is fine but not allowed to make this call, and several
+   * providers put the difference only in the body — so the caller gets to read
+   * it rather than reverse-engineer it back out of the message.
+   */
+  readonly body: string;
+
+  constructor(status: number, message: string, body = '') {
+    super(message);
+    this.name = 'ProviderHttpError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+const KEY_SHAPES: readonly RegExp[] = [
+  /\bBearer\s+[^\s"',}]+/gi,
+  /\b(?:sk|pk|rk|gsk|xai|fw|csk|key)[-_][A-Za-z0-9_-]{12,}/g,
+  /\bAIza[0-9A-Za-z_-]{20,}/g,
+  /\b[A-Za-z0-9_-]{40,}\b/g,
+];
+
+/** Removes `known` secrets and anything shaped like an API key from provider error text. */
+export function scrubSecrets(text: string, known: readonly string[] = []): string {
+  let out = text;
+  for (const secret of known) if (secret.length >= 8) out = out.split(secret).join('[redacted]');
+  for (const shape of KEY_SHAPES) out = out.replace(shape, '[redacted]');
+  return out;
+}
+
 export interface Provider {
   readonly id: string;
   readonly model: string;

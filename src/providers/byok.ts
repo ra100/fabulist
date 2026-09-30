@@ -3,10 +3,12 @@ import {
   JevCompatProvider,
   JevProvider,
   OpenAICompatProvider,
-  ProviderHttpError,
   caps,
 } from './http.ts';
-import type { CompletionRequest, CompletionResult, Provider } from './provider.ts';
+import { ProviderHttpError, scrubSecrets, type CompletionRequest, type CompletionResult, type Provider } from './provider.ts';
+
+// Re-exported so existing callers keep one obvious home for credential handling.
+export { scrubSecrets } from './provider.ts';
 
 export interface ByokEndpoint {
   id: string;
@@ -131,21 +133,6 @@ export class ProviderKeyRejectedError extends Error {
     this.name = 'ProviderKeyRejectedError';
     this.status = status;
   }
-}
-
-const KEY_SHAPES: readonly RegExp[] = [
-  /\bBearer\s+[^\s"',}]+/gi,
-  /\b(?:sk|pk|rk|gsk|xai|fw|csk|key)[-_][A-Za-z0-9_-]{12,}/g,
-  /\bAIza[0-9A-Za-z_-]{20,}/g,
-  /\b[A-Za-z0-9_-]{40,}\b/g,
-];
-
-/** Removes `known` secrets and anything shaped like an API key from provider error text. */
-export function scrubSecrets(text: string, known: readonly string[] = []): string {
-  let out = text;
-  for (const secret of known) if (secret.length >= 8) out = out.split(secret).join('[redacted]');
-  for (const shape of KEY_SHAPES) out = out.replace(shape, '[redacted]');
-  return out;
 }
 
 // A redirect would carry the user's key and prompt to wherever the Location points.
