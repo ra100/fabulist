@@ -269,5 +269,57 @@ Anthropic-specific behaviours are preserved deliberately:
 for all of them. `AnthropicProvider` is referenced only by that path and by its
 own unit tests, so removing it in phase 6 is a deletion, not a refactor.
 
+## Phase 4: Bedrock Converse
+
+`BedrockSdkProvider` replaces the transport in `BedrockProvider`. What matters
+most here is what did **not** move:
+
+**Credentials stay entirely in Fabulist.** `createAmazonBedrock` takes a
+`credentialProvider` callback, so `AwsCredentialProvider` — and therefore the
+precedence chain (environment, credentials file, `credential_process`, SSO,
+assume-role) and the five-minute-early refresh — is still what decides who is
+calling. The adapter asks for credentials and never sees a profile, a file, or a
+role chain. Region is resolved once at construction, which is equivalent: it
+reads only the environment and config files.
+
+**SigV4 is not removed.** `sigv4.ts` now has two callers instead of three:
+`bedrockImage.ts`, which still signs its own image requests, and `aws.ts`,
+which uses it for `credential_process`/SSO/assume-role exchanges. It becomes
+caller-free only when image signing moves too, which is out of scope here.
+
+Preserved deliberately: message collapsing (Converse still requires alternating
+turns), the four-sequence stop cap, prose-only streaming, and the
+**fixed-temperature omission** — `fixedTemperature` still sends no temperature
+field at all, which is the whole reason the capability exists.
+
+Structured output uses `structuredOutputMode: 'jsonTool'`, the SDK's name for
+forced tool use. The tool is always called `json` rather than the schema's name,
+which Fabulist does not depend on, since it validates the parsed object.
+
+### Findings from phase 4
+
+1. **`result.output` is a getter that throws synchronously.**
+   `Promise.resolve(result.output).catch(...)` does not catch it — the throw
+   happens while evaluating the argument — so a model that answered with the
+   wrong shape would have failed the whole turn instead of falling through to
+   Fabulist's validator. This bug was present in the OpenAI and Anthropic
+   adapters too and simply had not been triggered. One helper,
+   `readStructuredOutput`, now guards all three.
+2. **The SDK's AWS event-stream decoder is stricter than Fabulist's.**
+   `readAwsEventStream` reads lengths and deliberately skips both headers and
+   checksums. The SDK's smithy-based decoder *verifies* both CRCs and
+   *dispatches on the `:event-type` header*, and a frame without one is parsed
+   and then dropped — silently, with no error, yielding an empty stream. The
+   contract harness now writes real checksums and headers; getting the
+   `v.length` offset wrong in its own encoder produced exactly the silent
+   failure it was written to catch.
+3. **Bedrock's Converse request and response shapes are stricter than the flat
+   ones the hand-rolled adapter read.** `usage.totalTokens` is required on
+   every response, message content must be `{type:'text'}` blocks rather than
+   bare `{text}`, and the streaming events are enveloped (`contentBlockDelta`,
+   `messageStop`, `metadata`) with the payload supplied *bare* — the SDK wraps
+   it as `{[eventType]: parsed}` itself, so pre-wrapping fails validation.
+
+
 
 

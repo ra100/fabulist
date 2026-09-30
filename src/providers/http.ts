@@ -22,6 +22,7 @@ import { VertexProvider } from './google.ts';
 import { CopilotProvider } from './copilot.ts';
 import { OpenAISdkProvider } from './openai-sdk.ts';
 import { AnthropicSdkProvider } from './anthropic-sdk.ts';
+import { BedrockSdkProvider } from './bedrock-sdk.ts';
 
 interface HttpOptions {
   /** Empty for local servers, which have nothing to authenticate against. */
@@ -950,13 +951,17 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
     }
     case 'ollama':
       return new OllamaProvider({ baseUrl: spec.baseUrl ?? 'http://127.0.0.1:11434', model: spec.model, capabilities });
-    case 'bedrock':
-      return new BedrockProvider({
+    case 'bedrock': {
+      const bedrockOpts = {
         modelId: spec.model,
         capabilities,
         ...(spec.profile ? { profile: spec.profile } : {}),
         ...(spec.region ? { region: spec.region } : {}),
-      });
+      };
+      return resolveTransport(spec, env) === 'sdk'
+        ? new BedrockSdkProvider(bedrockOpts)
+        : new BedrockProvider(bedrockOpts);
+    }
     case 'google':
       return new VertexProvider({
         model: spec.model,

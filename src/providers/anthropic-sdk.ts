@@ -25,7 +25,7 @@ import {
   type Provider,
   type ProviderCapabilities,
 } from './provider.ts';
-import { asProviderError, streamProse } from './sdk-transport.ts';
+import { asProviderError, readStructuredOutput, streamProse } from './sdk-transport.ts';
 
 export interface AnthropicSdkOptions {
   apiKey: string | (() => string | Promise<string>);
@@ -123,7 +123,7 @@ export class AnthropicSdkProvider implements Provider {
         ...(output ? { output } : {}),
       });
       // A shape mismatch must not throw: the caller validates and decides.
-      if (output) await Promise.resolve(result.output).catch(() => undefined);
+      if (output) await readStructuredOutput(result);
 
       let text = result.text;
       // Put back the brace we prefilled so the parser sees a whole object.

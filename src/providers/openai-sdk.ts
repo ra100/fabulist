@@ -28,7 +28,7 @@ import {
   type Provider,
   type ProviderCapabilities,
 } from './provider.ts';
-import { asProviderError, streamProse } from './sdk-transport.ts';
+import { asProviderError, readStructuredOutput, streamProse } from './sdk-transport.ts';
 
 export interface OpenAISdkOptions {
   id: string;
@@ -143,8 +143,7 @@ export class OpenAISdkProvider implements Provider {
       const result = await generateText({ ...this.request(req), ...(output ? { output } : {}) });
       // A shape mismatch must not throw here: the caller validates and decides
       // whether to repair or fail, and a thrown error would skip that entirely.
-      // `result.output` is only thenable when an output spec was supplied.
-      if (output) await Promise.resolve(result.output).catch(() => undefined);
+      if (output) await readStructuredOutput(result);
       return {
         text: result.text,
         tokensIn: result.usage.inputTokens ?? 0,
