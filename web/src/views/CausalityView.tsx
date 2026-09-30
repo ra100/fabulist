@@ -11,6 +11,9 @@ export function CausalityView() {
   const collapsed: Array<Consequence & { count: number }> = [];
   const seen = new Map<string, Consequence & { count: number }>();
   for (const consequence of byDepth) {
+    // Significance is deliberately absent: it is a per-seed float, so two rows
+    // the reader cannot tell apart never collided and every repetition showed
+    // up as its own line. Show the group's largest instead.
     const key = [
       consequence.createdScene,
       consequence.depth,
@@ -18,13 +21,13 @@ export function CausalityView() {
       consequence.action,
       consequence.maturity,
       consequence.visibility,
-      consequence.significance.toFixed(2),
       consequence.firedScene ?? '',
       JSON.stringify(consequence.trigger),
     ].join('|');
     const existing = seen.get(key);
     if (existing) {
       existing.count += 1;
+      if (consequence.significance > existing.significance) existing.significance = consequence.significance;
     } else {
       const row = { ...consequence, count: 1 };
       seen.set(key, row);

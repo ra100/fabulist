@@ -9,7 +9,10 @@ import {
   transmitRumours,
   worldTick,
 } from '../src/consequence/propagate.ts';
-import type { StoryEvent } from '../src/domain/types.ts';
+import { commitTurn } from '../src/loop/commit.ts';
+import { rollback, truncateToScene } from '../src/loop/branch.ts';
+import { recordAuthoringCheckpointTx } from '../src/loop/history.ts';
+import { emptyDelta, type StoryEvent } from '../src/domain/types.ts';
 
 function setup() {
   const world = World.open(':memory:');
@@ -502,5 +505,103 @@ test('a scene-3 act still has traceable descendants many scenes later', () => {
   assert.ok(reached.length > 0, 'the causality map has something to draw');
   const late = world.chronicle.events().filter((e) => e.fromConsequenceId !== null && e.scene > 5);
   assert.ok(late.length > 0, 'scene-3 kindness is why scene-19 went the way it did');
+  world.close();
+});
+
+// ------------------------------------------------------------ scene attribution
+
+const TURN_META = { integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [] };
+
+/**
+ * Plays `scenes` scenes the way the real loop does: the turn commits, the
+ * session advances, and only then are consequences seeded and ticked. Every
+ * scene but the last gets two turns, so the scene-closing turn — the one that
+ * would seed into the wrong scene if attribution were off — is exercised.
+ */
+async function playScenes(world: World, scenes: number): Promise<string[]> {
+  const turnIds: string[] = [];
+  for (let scene = 1; scene <= scenes; scene++) {
+    const turns = scene === scenes ? 1 : 2;
+    for (let turnNo = 1; turnNo <= turns; turnNo++) {
+      await recordAuthoringCheckpointTx(world, async (w) => {
+        const { commit, turn } = commitTurn(w, {
+          rawInput: `turn ${turnNo} of scene ${scene}`,
+          intent: null,
+          delta: {
+            ...emptyDelta(),
+            sceneAdvance: turnNo === turns,
+            events: [
+              {
+                text: 'Reyes Okafor moves against the responsible party',
+                participants: ['char:novice-tem'],
+                locationId: 'loc:the-scriptorium',
+                significance: 0.9,
+              },
+            ],
+          },
+          bookProse: `Prose for scene ${scene}, turn ${turnNo}.`,
+          meta: TURN_META,
+        });
+        turnIds.push(turn.id);
+        seedConsequences(w, emptyDelta(), commit.events);
+        tickConsequences(w);
+      }, 'tool:consequences');
+    }
+  }
+  return turnIds;
+}
+
+test('a consequence is filed under the scene of the turn that caused it, not the next one', async () => {
+  const world = setup();
+  await playScenes(world, 4);
+
+  const events = world.chronicle.events();
+  for (const consequence of world.consequences.all()) {
+    const cause = events.find((e) => e.id === consequence.causeEventId);
+    if (!cause) continue;
+    assert.equal(
+      consequence.createdScene,
+      cause.scene,
+      `a consequence caused in scene ${cause.scene} was filed under scene ${consequence.createdScene}`,
+    );
+  }
+  world.close();
+});
+
+test('removing a scene\'s only turn takes exactly that scene\'s causality with it', async () => {
+  const world = setup();
+  const turnIds = await playScenes(world, 4);
+  const doomedScene = world.chronicle.turns().at(-1)!.scene;
+  const before = world.consequences.all();
+  assert.ok(before.some((c) => c.createdScene >= doomedScene), 'there was causality to strand');
+
+  rollback(world, { turnId: turnIds.at(-1)!, mode: 'destructive', includeTarget: true });
+
+  const after = world.consequences.all();
+  assert.ok(
+    after.every((c) => c.createdScene < doomedScene),
+    `no consequence may outlive the scene that seeded it; got scenes ${[...new Set(after.map((c) => c.createdScene))].join(', ')}`,
+  );
+  assert.equal(
+    after.length,
+    before.filter((c) => c.createdScene < doomedScene).length,
+    'and nothing else went missing with it',
+  );
+  world.close();
+});
+
+test('the same holds for a scene-boundary rollback', async () => {
+  const world = setup();
+  await playScenes(world, 4);
+  const doomedScene = world.chronicle.turns().at(-1)!.scene;
+  assert.ok(world.consequences.all().some((c) => c.createdScene >= doomedScene), 'there was causality to strand');
+
+  truncateToScene(world, doomedScene);
+
+  const after = world.consequences.all();
+  assert.ok(
+    after.every((c) => c.createdScene < doomedScene),
+    `truncation must drop the discarded scene's causality; got ${[...new Set(after.map((c) => c.createdScene))].join(', ')}`,
+  );
   world.close();
 });

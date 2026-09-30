@@ -441,6 +441,41 @@ test('out-of-depth consequences are not persisted on Postgres', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('a consequence takes the scene of its cause, not the session, on Postgres', async (t) => {
+  const ran = await withPg(async (db) => {
+    const { world } = await setup(db);
+    for (const id of ['char:pc', 'char:kin']) {
+      await world.graph.upsert({ id, type: 'Character', name: id }, 'canon');
+    }
+    await world.graph.assertEdge({ subject: 'char:kin', predicate: 'SIBLING_OF', object: 'char:pc', weight: 0.9 }, 1, 'canon');
+    // The session has already advanced past the turn that caused the event —
+    // exactly the state a scene-closing turn leaves behind.
+    await world.session.set({ scene: 6 });
+
+    const seeded = await seedConsequences(world, emptyDelta(), [
+      {
+        id: 'ev:1',
+        scene: 5,
+        turn: 2,
+        text: 'The player is struck.',
+        participants: ['char:pc'],
+        locationId: null,
+        significance: 0.9,
+        visibility: 'onscreen' as const,
+        fromConsequenceId: null,
+      },
+    ]);
+
+    assert.ok(seeded.length > 0, 'the act ripples');
+    assert.deepEqual(
+      [...new Set(seeded.map((c) => c.createdScene))],
+      [5],
+      'filing it under the advanced session scene strands it past a rollback of scene 5',
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('the tick ripens, then fires, then chains, then expires', async (t) => {
   const ran = await withPg(async (db) => {
     const { world } = await setup(db);

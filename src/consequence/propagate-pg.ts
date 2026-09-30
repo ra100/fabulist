@@ -202,7 +202,8 @@ export async function seedConsequences(
             maturity: trigger.kind === 'immediate' ? 'ripening' : 'pending',
             depth: 1,
             significance,
-            createdScene: ctx.scene,
+            // See `propagate.ts`: the causing event's scene, not the session's.
+            createdScene: event.scene,
           }),
         );
 

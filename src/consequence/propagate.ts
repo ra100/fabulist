@@ -98,7 +98,11 @@ export function seedConsequences(
             maturity: trigger.kind === 'immediate' ? 'ripening' : 'pending',
             depth: 1,
             significance,
-            createdScene: scene,
+            // The causing event's scene, not the session's: a turn that closes
+            // its scene advances the session before seeding runs, and filing
+            // its consequences under the *next* scene makes them outlive a
+            // rollback of the turn that actually caused them.
+            createdScene: event.scene,
           }),
         );
 
