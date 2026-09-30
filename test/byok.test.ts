@@ -15,11 +15,33 @@ import { errorBody, statusForError } from '../src/server/http.ts';
 
 const ask: CompletionRequest = { role: 'narrate', messages: [{ role: 'user', content: 'hello' }] };
 
+/**
+ * Returns real `Response` objects rather than duck-typed ones.
+ *
+ * The transport under test reads `.headers` and `.body`, so a hand-rolled
+ * `{ ok, status, json }` stub would prove nothing about the SDK path. A
+ * streaming request gets a real SSE body so the streaming assertions still
+ * exercise a genuine parse.
+ */
 function spyFetch(status: number, body: unknown, text = '') {
   const seen: Array<{ url: string; headers: Record<string, string> }> = [];
   const fetcher = (async (url: string, init: RequestInit = {}) => {
-    seen.push({ url: String(url), headers: (init.headers ?? {}) as Record<string, string> });
-    return { ok: status < 400, status, json: async () => body, text: async () => text } as unknown as Response;
+    seen.push({ url: String(url), headers: Object.fromEntries(new Headers(init.headers).entries()) });
+    const streamed = String(init.body ?? '').includes('"stream":true');
+    const payload = text || JSON.stringify(body);
+    if (streamed && status < 400) {
+      const frame = JSON.stringify({
+        id: 'chatcmpl-test',
+        model: 'm',
+        choices: [{ delta: { content: 'hi' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 3, completion_tokens: 1 },
+      });
+      return new Response(`data: ${frame}\n\n`, {
+        status,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    }
+    return new Response(payload, { status, headers: { 'content-type': 'application/json' } });
   }) as unknown as typeof fetch;
   return { fetcher, seen };
 }
@@ -155,9 +177,14 @@ test('a key the provider rejects on a turn is a scrubbed 4xx naming the status, 
 
 test('byok calls refuse redirects so the key and prompt never follow one cross-origin', async () => {
   const redirects: Array<RequestRedirect | undefined> = [];
-  const fetcher = (async (_url: string, init: RequestInit = {}) => {
+  const fetcher = (async (url: string, init: RequestInit = {}) => {
     redirects.push(init.redirect);
-    return { ok: true, status: 200, json: async () => ({ data: [] }), text: async () => '' } as unknown as Response;
+    // Each endpoint is asked for two different things here — a completion and a
+    // model list — and both bodies must be well-formed for the call to finish.
+    const payload = url.endsWith('/models')
+      ? { data: [] }
+      : { id: 'x', model: 'm', choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }] };
+    return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as unknown as typeof fetch;
   for (const id of ['openai', 'anthropic']) {
     await byokProvider(byokEndpoint(id)!, 'm', () => 'sk-0123456789abcdef', fetcher).complete(ask);

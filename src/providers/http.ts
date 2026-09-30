@@ -666,14 +666,10 @@ export interface ProviderSpec {
   capabilities?: Partial<ProviderCapabilities>;
   dialect?: OpenAIDialect;
   /**
-   * Which transport carries an `openai-compat` request.
-   *
-   * Defaults to `legacy`, the hand-rolled adapter, until phase 2 proves the
-   * parity contract green across the compatible endpoint classes. `sdk` is the
-   * opt-in for the AI SDK adapter; it is refused outright for a non-default
-   * dialect rather than silently sending a wire shape that endpoint ignores.
+   * Overrides which transport carries an `openai-compat` request. Leave unset
+   * to follow `resolveTransport`; set `legacy` to roll back a single target.
    */
-  transport?: 'legacy' | 'sdk';
+  transport?: OpenAITransport;
   /** AWS: overrides AWS_PROFILE and the resolved region. */
   profile?: string;
   region?: string;
@@ -707,6 +703,44 @@ export function defaultAuth(kind: ProviderKind): AuthMode {
     default:
       return 'api-key';
   }
+}
+
+export type OpenAITransport = 'sdk' | 'legacy';
+
+/** Endpoint classes the AI SDK adapter carries. */
+export const TRANSPORT_DECISION_TABLE: ReadonlyArray<{ class: string; transport: OpenAITransport; why: string }> = [
+  { class: 'standard chat completions', transport: 'sdk', why: '`/chat/completions` with `response_format` is exactly what it speaks' },
+  { class: 'configured gateway (any baseUrl, no dialect)', transport: 'sdk', why: 'nothing about the base URL changes the wire shape' },
+  { class: 'vLLM', transport: 'legacy', why: 'constrains via `guided_json` and silently ignores `response_format`' },
+  { class: 'llama.cpp', transport: 'legacy', why: 'takes a bare schema under `json_schema`, not the OpenAI envelope' },
+  { class: 'Ollama', transport: 'legacy', why: 'a different kind entirely: `/api/chat`, `format`, and an NDJSON stream' },
+];
+
+/**
+ * Decides which transport carries an `openai-compat` request.
+ *
+ * Wire compatibility is not assumed from a base URL. The one signal that
+ * distinguishes an endpoint is `dialect`, because a dialect exists precisely to
+ * record "this server is OpenAI-shaped but not OpenAI-behaved".
+ *
+ * Precedence: an explicit `transport` wins (that is the per-target rollback),
+ * then the dialect, then the operator-wide override, then `sdk`.
+ */
+export function resolveTransport(
+  spec: Pick<ProviderSpec, 'dialect' | 'transport'>,
+  env: Record<string, string | undefined> = process.env,
+): OpenAITransport {
+  // Asking for both is a contradiction rather than a preference, and silently
+  // honouring either one would leave the operator believing they got the other.
+  if (spec.transport === 'sdk' && spec.dialect) {
+    throw new Error(
+      `transport 'sdk' does not support the ${spec.dialect} dialect: ` +
+        `use transport 'legacy', or drop it to let the dialect decide`,
+    );
+  }
+  if (spec.dialect) return 'legacy';
+  if (spec.transport) return spec.transport;
+  return env.FABULIST_PROVIDER_TRANSPORT === 'legacy' ? 'legacy' : 'sdk';
 }
 
 /**
@@ -952,16 +986,7 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
           }
         : undefined;
       const id = spec.model.split(':')[0] ?? 'openai';
-      if (spec.transport === 'sdk') {
-        if (spec.dialect) {
-          // vLLM and llama.cpp constrain decoding through their own fields, and
-          // the SDK adapter does not shape those. Failing loudly beats sending a
-          // `response_format` the endpoint ignores and getting prose back.
-          throw new Error(
-            `transport 'sdk' does not support the ${spec.dialect} dialect for ${spec.model}; ` +
-              `leave transport unset to use the dialect-aware adapter`,
-          );
-        }
+      if (resolveTransport(spec, env) === 'sdk') {
         return new OpenAISdkProvider({
           id,
           apiKey,

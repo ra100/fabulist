@@ -20,7 +20,15 @@
  *     returned as text rather than thrown.
  */
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { APICallError, Output, generateText, jsonSchema, streamText, type LanguageModel } from 'ai';
+import {
+  APICallError,
+  NoOutputGeneratedError,
+  Output,
+  generateText,
+  jsonSchema,
+  streamText,
+  type LanguageModel,
+} from 'ai';
 import {
   ProviderHttpError,
   scrubSecrets,
@@ -176,28 +184,50 @@ export class OpenAISdkProvider implements Provider {
   }
 
   private async stream(req: CompletionRequest): Promise<CompletionResult> {
+    const chunks: string[] = [];
+    let failure: unknown;
+
+    const result = streamText({
+      ...this.request(req),
+      // Fires as each delta arrives. Buffering these and replaying them after
+      // the stream resolves would satisfy an ordering assertion while silently
+      // destroying the progressive display the narrator depends on.
+      onChunk: ({ chunk }) => {
+        if (chunk.type !== 'text-delta') return;
+        chunks.push(chunk.text);
+        req.onToken?.(chunk.text);
+      },
+      // Without this the SDK replaces a 401 with "no output generated", which
+      // drops the status that `byok.ts` needs to tell a rejected key from an
+      // outage — a rate limit would surface as an empty turn.
+      onError: ({ error }) => {
+        failure ??= error;
+      },
+    });
+
     try {
-      const result = streamText({
-        ...this.request(req),
-        // Fires as each delta arrives. Buffering these and replaying them after
-        // the stream resolves would satisfy an ordering assertion while silently
-        // destroying the progressive display the narrator depends on.
-        onChunk: ({ chunk }) => {
-          if (chunk.type === 'text-delta') req.onToken?.(chunk.text);
-        },
-      });
-      const text = await result.text;
-      const usage = await result.usage;
-      return {
-        text,
-        tokensIn: usage.inputTokens ?? 0,
-        tokensOut: usage.outputTokens ?? 0,
-        model: this.model,
-        schemaEnforced: false,
-        finishReason: normalizeFinishReason(await result.finishReason),
-      };
+      await result.text;
     } catch (err) {
-      throw asProviderError(err, await this.resolveKey());
+      // An empty stream is not an incident: the hand-rolled adapter returned
+      // empty prose and callers treat a quiet turn as normal. Anything else is
+      // a real parse or transport failure and must not pass silently.
+      if (failure === undefined && !(err instanceof NoOutputGeneratedError)) {
+        throw asProviderError(err, await this.resolveKey());
+      }
     }
+    if (failure !== undefined) throw asProviderError(failure, await this.resolveKey());
+
+    // Read from the accumulated deltas rather than `result.text`, so a stream
+    // that died part-way still yields the prose the writer already saw.
+    // Both are PromiseLike rather than Promise, hence the explicit wrap.
+    const usage = await Promise.resolve(result.usage).catch(() => undefined);
+    return {
+      text: chunks.join(''),
+      tokensIn: usage?.inputTokens ?? 0,
+      tokensOut: usage?.outputTokens ?? 0,
+      model: this.model,
+      schemaEnforced: false,
+      finishReason: normalizeFinishReason(await Promise.resolve(result.finishReason).catch(() => undefined)),
+    };
   }
 }
