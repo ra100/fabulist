@@ -76,11 +76,17 @@ export function normalizeFinishReason(value: unknown): ProviderFinishReason | un
     case 'stop':
     case 'end_turn':
     case 'stop_sequence':
+    // Gemini reports in SCREAMING_SNAKE and upper case.
+    case 'STOP':
+    case 'MODEL_STOP':
       return 'stop';
     case 'length':
     case 'max_tokens':
+    case 'MAX_TOKENS':
       return 'length';
     case 'content_filter':
+    case 'SAFETY':
+    case 'RECITATION':
       return 'content_filter';
     case 'tool_calls':
     case 'tool_use':

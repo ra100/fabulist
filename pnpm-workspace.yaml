@@ -1,6 +1,18 @@
 allowBuilds:
   esbuild: true
 
+minimumReleaseAgeExclude:
+  - '@ai-sdk/amazon-bedrock@5.0.103'
+  - '@ai-sdk/anthropic@4.0.70'
+  - '@ai-sdk/gateway@4.0.102'
+  - '@ai-sdk/google-vertex@5.0.100'
+  - '@ai-sdk/google@4.0.87'
+  - '@ai-sdk/openai-compatible@3.0.61'
+  - '@ai-sdk/openai@4.0.83'
+  - '@ai-sdk/provider-utils@5.0.53'
+  - '@ai-sdk/provider@4.0.21'
+  - ai@7.0.124
+
 # Vite needs esbuild's native binary, so its build script must be approved.
 onlyBuiltDependencies:
   - esbuild
