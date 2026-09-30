@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HeuristicTokenizer, tokenizerFor } from '../src/frame/tokenizer.ts';
 import { assembleFrame, FrameBudgetExceededError, inputBudget, Priority } from '../src/frame/budget.ts';
-import { renderProps, renderSheet, thumbnail } from '../src/frame/builders.ts';
+import { buildNarratorFrame, renderProps, renderSheet, thumbnail } from '../src/frame/builders.ts';
+import { World } from '../src/store/index.ts';
 import type { CharacterSheet, Entity } from '../src/domain/types.ts';
 
 const tk = new HeuristicTokenizer({ charsPerToken: 4 });
@@ -151,6 +152,33 @@ test('a full 64k narrator budget stays inside the window', () => {
     { budget, tokenizer: t },
   );
   assert.ok(frame.log.used <= budget, `${frame.log.used} <= ${budget}`);
+});
+
+test('narrator recent prose keeps the newest turn when the slot is capped', () => {
+  const world = World.open(':memory:');
+  try {
+    for (let turn = 1; turn <= 6; turn++) {
+      world.chronicle.addTurn({
+        scene: 1, turn, rawInput: `action ${turn}`, intent: null, delta: null,
+        bookProse: `${'Story detail. '.repeat(320)} TURN-${turn}-END`,
+        pinned: false,
+        meta: {
+          integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [],
+        },
+      });
+    }
+    world.session.set({ scene: 1, turn: 6 });
+
+    const frame = buildNarratorFrame({
+      world, session: world.session.get(), tokenizer: tk, budget: 1_000,
+    });
+    const recent = frame.slots.find((slot) => slot.name === 'recent-prose');
+
+    assert.ok(recent, 'recent prose slot exists');
+    assert.match(recent.content, /TURN-6-END/, 'the latest committed turn remains in context');
+  } finally {
+    world.close();
+  }
 });
 
 // ------------------------------------------------------------- props rendering
