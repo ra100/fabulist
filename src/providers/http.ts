@@ -23,6 +23,7 @@ import { CopilotProvider } from './copilot.ts';
 import { OpenAISdkProvider } from './openai-sdk.ts';
 import { AnthropicSdkProvider } from './anthropic-sdk.ts';
 import { BedrockSdkProvider } from './bedrock-sdk.ts';
+import { VertexSdkProvider } from './vertex-sdk.ts';
 
 interface HttpOptions {
   /** Empty for local servers, which have nothing to authenticate against. */
@@ -962,13 +963,17 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
         ? new BedrockSdkProvider(bedrockOpts)
         : new BedrockProvider(bedrockOpts);
     }
-    case 'google':
-      return new VertexProvider({
+    case 'google': {
+      const vertexOpts = {
         model: spec.model,
         capabilities,
         ...(spec.project ? { project: spec.project } : {}),
         ...(spec.location ? { location: spec.location } : {}),
-      });
+      };
+      return resolveTransport(spec, env) === 'sdk'
+        ? new VertexSdkProvider(vertexOpts)
+        : new VertexProvider(vertexOpts);
+    }
     case 'copilot':
       return new CopilotProvider({
         model: spec.model,
