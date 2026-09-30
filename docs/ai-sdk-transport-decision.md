@@ -139,3 +139,42 @@ fixed, and confirmed one property that was previously only assumed:
    `requestBodyValues` escape. `scrubSecrets` stays the last gate.
 
 Routing, capability policy, credential handling, and metering are unchanged.
+
+## Findings from phase 1
+
+Running the phase 0 contract against `OpenAISdkProvider` found four SDK-7
+behaviours that differ from the hand-rolled adapter. All four are the kind that
+passes a smoke test and fails in production.
+
+1. **System messages are rejected outright.** AI SDK 7 refuses `role: 'system'`
+   inside `messages` unless `allowSystemInMessages: true`. Without it, *every*
+   provider declaring `systemRole: true` — which is most of them — throws
+   `InvalidPromptError` on the first turn. Set explicitly, because moving
+   system turns to `instructions` would re-order them against the conversation
+   that `adaptRequest` was written to produce.
+2. **The SDK retries by default (`maxRetries: 2`).** A 429 took 6s instead of
+   failing fast, and each retry is a billable call that Fabulist's meter would
+   count separately. Pinned to `0`: retry policy is the caller's, not the
+   transport's.
+3. **`result.output` is only a promise when an output spec was supplied.**
+   Calling `.catch` on it unconditionally throws `TypeError`. The guard also
+   lets a shape mismatch fall through as text, preserving the existing
+   behaviour where Fabulist's own validator decides whether to repair or fail.
+4. **This provider requires a `finish_reason` to terminate a stream**, whereas
+   the hand-rolled adapter never needed one.
+
+Plus one that is ours rather than the SDK's: a provider that echoes a rejected
+key back in its error body would have leaked it, since the hand-rolled adapter
+quotes a truncated upstream body verbatim. The SDK adapter now scrubs the key it
+resolved, so `byok.ts`'s shape-based gate is a second line rather than the only
+one. This makes the SDK adapter *safer* than the one it replaces — recorded
+deliberately, not as parity.
+
+## Phase 1 status
+
+`transport: 'sdk'` on an `openai-compat` spec opts that one spec onto the SDK
+adapter. Unset — the default, and every shipped preset — keeps the hand-rolled
+adapter, so rollback is deleting one field and existing configuration is
+untouched. `transport: 'sdk'` is refused for the `vllm` and `llamacpp`
+dialects rather than sending a `response_format` those endpoints ignore.
+
