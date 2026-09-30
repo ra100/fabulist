@@ -20,24 +20,15 @@
  *     returned as text rather than thrown.
  */
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { Output, generateText, jsonSchema, type LanguageModel } from 'ai';
 import {
-  APICallError,
-  NoOutputGeneratedError,
-  Output,
-  generateText,
-  jsonSchema,
-  streamText,
-  type LanguageModel,
-} from 'ai';
-import {
-  ProviderHttpError,
-  scrubSecrets,
   normalizeFinishReason,
   type CompletionRequest,
   type CompletionResult,
   type Provider,
   type ProviderCapabilities,
 } from './provider.ts';
+import { asProviderError, streamProse } from './sdk-transport.ts';
 
 export interface OpenAISdkOptions {
   id: string;
@@ -62,22 +53,6 @@ export interface OpenAISdkOptions {
   /** Injectable for tests, and for BYOK's redirect policy. */
   fetcher?: typeof fetch;
   timeoutMs?: number;
-}
-
-/**
- * Rebuilds a provider error without leaking the prompt or an unbounded body.
- *
- * `APICallError` carries an untruncated `responseBody` *and* a
- * `requestBodyValues` holding the entire prompt; neither may reach a log line
- * or a user. `secret` is redacted too, because some providers echo a bad key
- * back inside their own error text. `byok.ts` scrubs again on the way out —
- * two gates, because this one knows the exact key rather than guessing at it.
- */
-function asProviderError(err: unknown, secret: string): unknown {
-  if (!(err instanceof APICallError)) return err;
-  const body = scrubSecrets((err.responseBody ?? '').slice(0, 300), [secret]);
-  const status = err.statusCode ?? 502;
-  return new ProviderHttpError(status, `${err.url ?? 'provider'} returned ${status}: ${body}`, body);
 }
 
 export class OpenAISdkProvider implements Provider {
@@ -183,51 +158,7 @@ export class OpenAISdkProvider implements Provider {
     }
   }
 
-  private async stream(req: CompletionRequest): Promise<CompletionResult> {
-    const chunks: string[] = [];
-    let failure: unknown;
-
-    const result = streamText({
-      ...this.request(req),
-      // Fires as each delta arrives. Buffering these and replaying them after
-      // the stream resolves would satisfy an ordering assertion while silently
-      // destroying the progressive display the narrator depends on.
-      onChunk: ({ chunk }) => {
-        if (chunk.type !== 'text-delta') return;
-        chunks.push(chunk.text);
-        req.onToken?.(chunk.text);
-      },
-      // Without this the SDK replaces a 401 with "no output generated", which
-      // drops the status that `byok.ts` needs to tell a rejected key from an
-      // outage — a rate limit would surface as an empty turn.
-      onError: ({ error }) => {
-        failure ??= error;
-      },
-    });
-
-    try {
-      await result.text;
-    } catch (err) {
-      // An empty stream is not an incident: the hand-rolled adapter returned
-      // empty prose and callers treat a quiet turn as normal. Anything else is
-      // a real parse or transport failure and must not pass silently.
-      if (failure === undefined && !(err instanceof NoOutputGeneratedError)) {
-        throw asProviderError(err, await this.resolveKey());
-      }
-    }
-    if (failure !== undefined) throw asProviderError(failure, await this.resolveKey());
-
-    // Read from the accumulated deltas rather than `result.text`, so a stream
-    // that died part-way still yields the prose the writer already saw.
-    // Both are PromiseLike rather than Promise, hence the explicit wrap.
-    const usage = await Promise.resolve(result.usage).catch(() => undefined);
-    return {
-      text: chunks.join(''),
-      tokensIn: usage?.inputTokens ?? 0,
-      tokensOut: usage?.outputTokens ?? 0,
-      model: this.model,
-      schemaEnforced: false,
-      finishReason: normalizeFinishReason(await Promise.resolve(result.finishReason).catch(() => undefined)),
-    };
+  private stream(req: CompletionRequest): Promise<CompletionResult> {
+    return streamProse(this.request(req), this.model, this.resolveKey, (chunk) => req.onToken?.(chunk));
   }
 }

@@ -74,13 +74,17 @@ const anthropic: ProviderContract = {
     }),
   body: (over = {}) => ({
     content: [{ type: 'text', text: over.text ?? 'a plain answer' }],
-    stop_reason: over.finishReason ?? 'end_turn',
+    stop_reason: over.finishReason === 'length' ? 'max_tokens' : 'end_turn',
     usage: { input_tokens: 11, output_tokens: 4 },
   }),
   frames: (over = {}) => [
     { type: 'message_start', message: { usage: { input_tokens: over.tokensIn ?? 11 } } },
     ...CHUNKS.map((text) => ({ type: 'content_block_delta', delta: { type: 'text_delta', text } })),
-    { type: 'message_delta', delta: { stop_reason: over.finishReason ?? 'end_turn' }, usage: { output_tokens: over.tokensOut ?? 4 } },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: over.finishReason === 'length' ? 'max_tokens' : 'end_turn' },
+      usage: { output_tokens: over.tokensOut ?? 4 },
+    },
   ].map((event) => JSON.stringify(event)),
 };
 
@@ -147,7 +151,7 @@ const bedrock: ProviderContract = {
   body: (over = {}) => ({
     output: { message: { role: 'assistant', content: [{ text: over.text ?? 'a plain answer' }] } },
     usage: { inputTokens: 11, outputTokens: 4 },
-    stopReason: over.finishReason ?? 'end_turn',
+    stopReason: over.finishReason === 'length' ? 'max_tokens' : 'end_turn',
   }),
   structuredBody: () => ({
     output: {
@@ -164,7 +168,11 @@ const bedrock: ProviderContract = {
   frames: (over = {}) => [
     { delta: { text: 'Once ' }, usage: { inputTokens: over.tokensIn ?? 11 } },
     { delta: { text: 'upon ' } },
-    { delta: { text: 'a time' }, usage: { outputTokens: over.tokensOut ?? 4 }, stopReason: over.finishReason ?? 'end_turn' },
+    {
+      delta: { text: 'a time' },
+      usage: { outputTokens: over.tokensOut ?? 4 },
+      stopReason: over.finishReason === 'length' ? 'max_tokens' : 'end_turn',
+    },
   ].map((event) => JSON.stringify(event)),
 };
 

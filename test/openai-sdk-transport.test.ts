@@ -16,6 +16,8 @@ import {
   resolveTransport,
 } from '../src/providers/http.ts';
 import { OpenAISdkProvider } from '../src/providers/openai-sdk.ts';
+import { AnthropicSdkProvider } from '../src/providers/anthropic-sdk.ts';
+import { AnthropicProvider } from '../src/providers/http.ts';
 import type { ProviderSpec } from '../src/providers/http.ts';
 import { scrubSecrets } from '../src/providers/byok.ts';
 
@@ -169,8 +171,8 @@ test('a refusal carries neither the key nor the prompt', async () => {
   await assert.rejects(
     () => provider.complete({ role: 'narrate', messages: [{ role: 'user', content: secretLine }] }),
     (err: Error) => {
-      assert.doesNotMatch(err.message, new RegExp(key), 'the key is redacted');
-      assert.doesNotMatch(err.message, new RegExp('wardens'), 'the prompt is never echoed');
+      assert.doesNotMatch(err.message, /sk-live-0123456789abcdefghij/, 'the key is redacted');
+      assert.doesNotMatch(err.message, /wardens/, 'the prompt is never echoed');
       assert.match(err.message, /401/, 'and the status survives, which is what BYOK branches on');
       assert.equal(scrubSecrets(err.message, [key]), err.message, 'so the outer gate has nothing left to do');
       return true;
@@ -266,4 +268,129 @@ test('the adapter does not retry, so one call costs one call', async () => {
 
   await assert.rejects(() => provider.complete({ role: 'narrate', messages: [{ role: 'user', content: 'x' }] }));
   assert.equal(attempts, 1, 'retry policy belongs to the caller, not the transport');
+});
+
+// ------------------------------------------------------------- anthropic
+
+test('anthropic routes to the SDK adapter by default and can roll back', () => {
+  assert.equal(resolveTransport({}), 'sdk', 'anthropic declares no dialect, so the default applies');
+  const spec: ProviderSpec = {
+    kind: 'anthropic',
+    model: 'claude-sonnet-4-20250514',
+    baseUrl: 'https://api.anthropic.com',
+    apiKeyEnv: 'ANTHROPIC_API_KEY',
+  };
+  const env = { ANTHROPIC_API_KEY: 'sk-ant-0123456789abcdef' };
+  assert.ok(buildProvider(spec, env) instanceof AnthropicSdkProvider);
+  assert.ok(buildProvider({ ...spec, transport: 'legacy' }, env) instanceof AnthropicProvider);
+  assert.ok(
+    buildProvider(spec, { ...env, FABULIST_PROVIDER_TRANSPORT: 'legacy' }) instanceof AnthropicProvider,
+    'the operator-wide rollback reaches anthropic too',
+  );
+});
+
+test('the anthropic preset builds on the SDK adapter without changing its id or model', () => {
+  const provider = buildProvider(PRESETS['anthropic:sonnet']!, { ANTHROPIC_API_KEY: 'sk-ant-0123456789abcdef' });
+  assert.equal(provider.id, 'anthropic');
+  assert.equal(provider.model, 'claude-sonnet-4-20250514');
+  assert.ok(provider instanceof AnthropicSdkProvider);
+});
+
+test('an anthropic key still travels in x-api-key, never as a bearer token', async () => {
+  const { fetcher, seen } = spyFetch({
+    id: 'msg_test',
+    type: 'message',
+    role: 'assistant',
+    model: 'm',
+    content: [{ type: 'text', text: 'ok' }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 4, output_tokens: 2 },
+  });
+  const provider = new AnthropicSdkProvider({
+    apiKey: 'sk-ant-0123456789abcdef',
+    baseUrl: 'https://api.anthropic.test',
+    model: 'm',
+    capabilities: caps({ structuredOutput: 'none' }),
+    fetcher,
+  });
+
+  await provider.complete({ role: 'narrate', messages: [{ role: 'user', content: 'x' }] });
+
+  assert.equal(seen[0]?.headers['x-api-key'], 'sk-ant-0123456789abcdef');
+  assert.equal(seen[0]?.headers.authorization, undefined);
+  assert.doesNotMatch(seen[0]?.headers['x-api-key'] ?? '', /resolved-per-request/, 'the placeholder never reaches the wire');
+});
+
+test('the system prompt stays a top-level field, not a message', async () => {
+  const { fetcher, seen } = spyFetch({
+    id: 'msg_test',
+    type: 'message',
+    role: 'assistant',
+    model: 'm',
+    content: [{ type: 'text', text: 'ok' }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 4, output_tokens: 2 },
+  });
+  const provider = new AnthropicSdkProvider({
+    apiKey: 'sk-ant-0123456789abcdef',
+    baseUrl: 'https://api.anthropic.test',
+    model: 'm',
+    capabilities: caps({ structuredOutput: 'none' }),
+    fetcher,
+  });
+
+  await provider.complete({
+    role: 'narrate',
+    messages: [
+      { role: 'system', content: 'SYS-A' },
+      { role: 'system', content: 'SYS-B' },
+      { role: 'user', content: 'U' },
+    ],
+  });
+
+  // Anthropic takes the system prompt as a top-level content block rather than a
+  // message, and joined with a blank line — the same text the hand-rolled
+  // adapter sent, in the block form this API documents.
+  const system = seen[0]?.body.system as Array<{ text: string }>;
+  assert.equal(system.map((block) => block.text).join(''), 'SYS-A\n\nSYS-B');
+  assert.doesNotMatch(JSON.stringify(seen[0]?.body.messages), /SYS-A/, 'and it is not carried as a message');
+});
+
+test('a provider with no constrained decoding still gets the prefilled brace', async () => {
+  // Anthropic's preset is `structuredOutput: 'none'`, and forcing tool use onto
+  // a model documented to reject it is worse than the brace trick.
+  const { fetcher, seen } = spyFetch({
+    id: 'msg_test',
+    type: 'message',
+    role: 'assistant',
+    model: 'm',
+    // The model continues the prefilled `{`, so it emits the rest of the object
+    // and closes it itself — the adapter only restores the opening brace.
+    content: [{ type: 'text', text: '"verdict":"yes"}' }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 4, output_tokens: 2 },
+  });
+  const provider = new AnthropicSdkProvider({
+    apiKey: 'sk-ant-0123456789abcdef',
+    baseUrl: 'https://api.anthropic.test',
+    model: 'm',
+    capabilities: caps({ structuredOutput: 'none' }),
+    fetcher,
+  });
+
+  const res = await provider.complete({
+    role: 'extract',
+    messages: [{ role: 'user', content: 'x' }],
+    schema: { name: 'probe', schema: { type: 'object', properties: { verdict: { type: 'string' } } } },
+  });
+
+  const messages = seen[0]?.body.messages as Array<{ role: string; content: Array<{ text: string }> }>;
+  assert.equal(messages.at(-1)?.role, 'assistant');
+  assert.equal(messages.at(-1)?.content.map((block) => block.text).join(''), '{');
+  assert.equal(res.text, '{"verdict":"yes"}', 'the parser sees a whole object');
+  assert.equal(res.schemaEnforced, false, 'Fabulist validates it, not the provider');
+  assert.equal(seen[0]?.body.tools, undefined, 'and no tool use was forced');
 });

@@ -21,6 +21,7 @@ import { BedrockProvider } from './bedrock.ts';
 import { VertexProvider } from './google.ts';
 import { CopilotProvider } from './copilot.ts';
 import { OpenAISdkProvider } from './openai-sdk.ts';
+import { AnthropicSdkProvider } from './anthropic-sdk.ts';
 
 interface HttpOptions {
   /** Empty for local servers, which have nothing to authenticate against. */
@@ -666,10 +667,10 @@ export interface ProviderSpec {
   capabilities?: Partial<ProviderCapabilities>;
   dialect?: OpenAIDialect;
   /**
-   * Overrides which transport carries an `openai-compat` request. Leave unset
-   * to follow `resolveTransport`; set `legacy` to roll back a single target.
+   * Overrides which transport carries this request. Leave unset to follow
+   * `resolveTransport`; set `legacy` to roll back a single target.
    */
-  transport?: OpenAITransport;
+  transport?: ProviderTransport;
   /** AWS: overrides AWS_PROFILE and the resolved region. */
   profile?: string;
   region?: string;
@@ -705,10 +706,10 @@ export function defaultAuth(kind: ProviderKind): AuthMode {
   }
 }
 
-export type OpenAITransport = 'sdk' | 'legacy';
+export type ProviderTransport = 'sdk' | 'legacy';
 
 /** Endpoint classes the AI SDK adapter carries. */
-export const TRANSPORT_DECISION_TABLE: ReadonlyArray<{ class: string; transport: OpenAITransport; why: string }> = [
+export const TRANSPORT_DECISION_TABLE: ReadonlyArray<{ class: string; transport: ProviderTransport; why: string }> = [
   { class: 'standard chat completions', transport: 'sdk', why: '`/chat/completions` with `response_format` is exactly what it speaks' },
   { class: 'configured gateway (any baseUrl, no dialect)', transport: 'sdk', why: 'nothing about the base URL changes the wire shape' },
   { class: 'vLLM', transport: 'legacy', why: 'constrains via `guided_json` and silently ignores `response_format`' },
@@ -729,7 +730,7 @@ export const TRANSPORT_DECISION_TABLE: ReadonlyArray<{ class: string; transport:
 export function resolveTransport(
   spec: Pick<ProviderSpec, 'dialect' | 'transport'>,
   env: Record<string, string | undefined> = process.env,
-): OpenAITransport {
+): ProviderTransport {
   // Asking for both is a contradiction rather than a preference, and silently
   // honouring either one would leave the operator believing they got the other.
   if (spec.transport === 'sdk' && spec.dialect) {
@@ -940,8 +941,13 @@ export function buildProvider(spec: ProviderSpec, env: Record<string, string | u
   }
 
   switch (spec.kind) {
-    case 'anthropic':
-      return new AnthropicProvider({ apiKey, baseUrl: spec.baseUrl ?? 'https://api.anthropic.com', model: spec.model, capabilities });
+    case 'anthropic': {
+      const anthropicBase = spec.baseUrl ?? 'https://api.anthropic.com';
+      if (resolveTransport(spec, env) === 'sdk') {
+        return new AnthropicSdkProvider({ apiKey, baseUrl: anthropicBase, model: spec.model, capabilities });
+      }
+      return new AnthropicProvider({ apiKey, baseUrl: anthropicBase, model: spec.model, capabilities });
+    }
     case 'ollama':
       return new OllamaProvider({ baseUrl: spec.baseUrl ?? 'http://127.0.0.1:11434', model: spec.model, capabilities });
     case 'bedrock':

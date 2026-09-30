@@ -222,4 +222,52 @@ Rollback for one release cycle: `transport: 'legacy'` on a single spec, or
    hand-rolled adapter was reading `choices[0].message.content` out of a
    `{ data: [] }` payload and getting `''`. Fixed in the double.
 
+## Phase 3: Anthropic Messages
+
+`AnthropicSdkProvider` replaces the transport in `AnthropicProvider`, which
+stays for one release cycle as the `transport: 'legacy'` rollback. Two
+Anthropic-specific behaviours are preserved deliberately:
+
+- The system prompt is a **top-level field, not a message**, joined with blank
+  lines. The SDK sends it as a content block rather than a bare string; both are
+  valid on this API and the text is identical, so nothing downstream changes.
+- A provider declaring `structuredOutput: 'none'` — which is Anthropic's shipped
+  preset — still gets the **prefilled assistant brace**, and the brace is
+  restored on the way back. Tool use is not forced onto a model documented to
+  reject it; `Output.object` is used only where a spec declares native schema
+  support.
+
+### Findings from phase 3
+
+1. **`createAnthropic` refuses to construct without an apiKey.** `loadApiKey`
+   throws before the fetch wrapper is ever reached. The adapter passes a
+   placeholder and the wrapper deletes it before setting the real per-call key,
+   and *fails closed* — with no key the request goes out unauthenticated rather
+   than carrying the placeholder. `createOpenAICompatible` does not have this
+   requirement, which is why the OpenAI adapter needed nothing.
+2. **The SDK's Anthropic stream parser tracks message state across events.** A
+   three-frame fixture (`message_start`, deltas, `message_delta`) parses as
+   "no usage, no finish reason" rather than as an error — the parser needs
+   `message_start.message.id` before it accepts a `content_block_delta`, and
+   `content_block_start` / `message_stop` to close the message. A contract that
+   passed because a stub happened to be forgiving would have hidden that.
+3. **Two contract fixtures passed through the wrong finish-reason vocabulary.**
+   `body()` is handed a *Fabulist* finish reason, and Anthropic and Bedrock both
+   want `max_tokens` where the contract was sending `length`. The hand-rolled
+   adapters tolerated it because they passed the string through
+   `normalizeFinishReason`; the SDK parses Anthropic's own vocabulary. Corrected
+   in the fixtures, and it is now visible that each provider declares its wire
+   vocabulary explicitly.
+4. **Anthropic's Messages API and OpenAI's chat API are not the same JSON**, and
+   the SDK's parser is strict where the hand-rolled adapter was forgiving. The
+   BYOK test double now answers per endpoint instead of returning an OpenAI
+   body for Anthropic.
+
+## Phase 3 rollback
+
+`transport: 'legacy'` on an Anthropic spec, or `FABULIST_PROVIDER_TRANSPORT=legacy`
+for all of them. `AnthropicProvider` is referenced only by that path and by its
+own unit tests, so removing it in phase 6 is a deletion, not a refactor.
+
+
 
