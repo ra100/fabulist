@@ -96,8 +96,9 @@ starting single-process — don't build for a scaling problem you don't have yet
 ## 3. Auth
 
 The codebase's own style is "implement the protocol directly, no framework" (see
-`src/providers/sigv4.ts`, `google.ts`, `copilot.ts` — hand-rolled SigV4 and OAuth
-rather than an SDK). Consistent with that:
+`src/providers/copilot.ts` and `google.ts` — hand-rolled OAuth rather than an SDK;
+`src/providers/sigv4.ts` still signs image requests and the AWS credential chain,
+though text requests to Bedrock now sign through the AI SDK). Consistent with that:
 
 - **Password auth**: `users(email, password_hash)`, hashed with `node:crypto.scrypt`
   (built into Node, zero new dependency — matches the "no native deps" stack

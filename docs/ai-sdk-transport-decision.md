@@ -365,6 +365,66 @@ cap, prose-only streaming, and project/location discovery precedence.
   token, the client secret, the minted token, nor the prompt appears in a thrown
   error's message.
 
+## Phase 6: consolidation
+
+### Nothing became dead — and that is the finding
+
+The obvious cleanup step has nothing to do. Every hand-rolled helper is still
+reachable, because the rollback switch keeps the legacy adapters reachable:
+
+| helper | still used by |
+| --- | --- |
+| `readAwsEventStream` | `BedrockProvider` (legacy) and its tests |
+| `readSse`, `readNdjson`, `parseJsonSafe` | the legacy Anthropic, Ollama and Vertex adapters |
+| `toGeminiSchema` | `VertexProvider` (legacy) |
+| `collapse` | both Bedrock adapters |
+| `bedrockHint` | both Bedrock adapters *and* image signing |
+| `sigv4.ts` | image signing *and* the AWS credential chain |
+
+Removing any of it now would delete the rollback that phase 2 promised for one
+release cycle. So the removal is deferred to that expiry, and
+`test/transport-rollback.test.ts` makes the expiry explicit: it fails if a legacy
+adapter is removed without retiring the switch, if a provider kind stops resolving
+to a transport, or if the retained custom paths drop out of the README.
+
+### Retained paths, as documented rather than assumed
+
+`README.md` now carries a **Transports** section naming the SDK adapters and the
+four retained bespoke paths — vLLM, llama.cpp and Ollama (dialects the SDK would
+silently get wrong), GitHub Copilot (undocumented internal endpoint; unofficial
+packages explicitly not adopted), and image generation. The stale claims it
+replaced:
+
+- "SigV4 is signed here rather than pulled from the AWS SDK" — no longer true for
+  text; still true for images and the credential chain.
+- "Gemini schemas are translated on the way out" — still true only on the `legacy`
+  path; the provider package does it on the SDK path.
+- The `src/providers/` layout listing, which named none of the new files.
+
+### Dependency audit
+
+225 packages installed. Exactly two exist at more than one version:
+`@rolldown/pluginutils` (vite build tooling) and `content-type` (a header parser
+pulled in by `google-auth-library`). **No duplicate HTTP or AI client** — one
+`ai`, one `@ai-sdk/provider`, one `@ai-sdk/provider-utils`, one `@smithy/core`,
+one `google-auth-library`.
+
+Worth knowing rather than fixing: `@ai-sdk/google-vertex` hard-depends on
+`google-auth-library`, and this app does not use it. Vertex credentials go through
+`googleAuthOptions.authClient` instead, so that package is present and idle. It
+cannot be pruned without a patch or a pnpm override, and it is not on the request
+path.
+
+`pnpm audit --prod` reports 3 moderate advisories, all
+`@modelcontextprotocol/sdk → express-rate-limit → ip-address`. Identical before
+this work; unrelated to the transport migration.
+
+### Verification at phase 6
+
+Full suite, type-check, lint, format, production web build, and the dependency
+audit above. Lint and format counts match the pre-migration baseline exactly.
+
+
 
 
 

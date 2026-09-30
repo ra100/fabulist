@@ -353,6 +353,30 @@ Then set a profile in `fabulist.config.json`:
 An unavailable profile falls back to the mock with a note rather than failing — an
 unconfigured provider should not stop you playing.
 
+### Transports
+
+Everything in that table speaks to its provider through the [Vercel AI SDK](https://ai-sdk.dev)
+(`ai` plus one provider package each) rather than hand-rolled HTTP: OpenAI-shaped chat
+completions, Anthropic Messages, Bedrock Converse, and Vertex Gemini. The SDK covers the
+wire format; it does not cover the parts that are Fabulist's — which key is used, how a
+role routes, how tokens are metered, how a malformed answer is repaired, and how a secret is
+redacted. Those stayed put, and the same tests run against both transports.
+
+Four paths are **deliberately still bespoke**, because no supported module provides parity:
+
+| path | why it stays |
+|---|---|
+| **vLLM and llama.cpp** | constrain decoding through their own fields (`guided_json`, a bare `json_schema`) and ignore `response_format`, so sending it yields prose instead of JSON |
+| **Ollama** | a different API shape entirely: `/api/chat`, a `format` constraint, and an NDJSON stream |
+| **GitHub Copilot** | an internal, unversioned endpoint; the unofficial Copilot packages are explicitly not adopted |
+| **Image generation** | a separate model surface, still signed with this repo's own SigV4 |
+
+`transport` on a provider spec picks the implementation: `sdk` (the default for compatible
+endpoints) or `legacy`. `FABULIST_PROVIDER_TRANSPORT=legacy` rolls every compatible target
+back at once, which is the lever to reach for if a provider starts misbehaving after an
+upgrade. Both paths are covered by the same parity contract, so the switch is safe to keep
+until the next minor release; it is not a permanent escape hatch.
+
 **Everything here is editable in the UI.** Settings covers the whole of
 `fabulist.config.json`: which profile is active, which model handles each role, provider
 specs including local base URLs and model ids, the lint threshold, and your blocklist.
@@ -421,8 +445,7 @@ ollama serve
 Unsloth models are served through vLLM, so `unsloth:local` is the same endpoint and dialect
 with a different label. Set `model` to whatever id the server was launched with.
 
-**AWS Bedrock** uses `AWS_PROFILE`, not a key. SigV4 is signed here rather than pulled from
-the AWS SDK, and it is checked against AWS's own published test vector. The credential
+**AWS Bedrock** uses `AWS_PROFILE`, not a key. Credential *discovery* is this repo's, so the
 chain is the one a work laptop actually needs, first hit wins:
 
 1. environment variables
@@ -441,6 +464,10 @@ model per region, so a 403 here points you at the Bedrock console rather than at
 Requests go through the **Converse** API, which is one body shape for every model family,
 and structured output uses a forced tool call since Bedrock has no `response_format`.
 
+Request signing for text is the AI SDK's. `src/providers/sigv4.ts` is still here and still
+tested against AWS's own published test vector, because **image** requests are signed with it
+and because the credential chain needs it for `credential_process`, SSO and assume-role.
+
 **Google Gemini** uses OAuth via Vertex AI:
 
 ```bash
@@ -455,7 +482,10 @@ print-access-token` is the fallback for impersonation and external account types
 
 Gemini's `responseSchema` is OpenAPI-flavoured rather than JSON Schema — it rejects
 `additionalProperties` and union types like `["string","null"]`, both of which the engine's
-schemas use — so schemas are translated on the way out.
+schemas use. On the SDK transport that translation is the provider package's job; the
+hand-rolled translation in `src/providers/google.ts` only serves the `legacy` rollback.
+Access tokens still come from this repo's own discovery, so `gcloud auth print-access-token`
+remains the fallback for impersonation and external account types.
 
 **GitHub Copilot** reuses the OAuth token your editor already stored, and is **off by
 default**:
@@ -471,8 +501,9 @@ principle could put your GitHub account at risk. It is implemented because it is
 credential on your machine, but nothing reaches it unless you opt in explicitly. If you
 want a supported keyless option, Bedrock and Vertex are both first-class here.
 
-**Jev fast checks** are optional, and OpenCode Zen is one of the two places that serve them
-properly. OpenRouter exposes a typed decision API at `/api/alpha/decisions`; Zen exposes one
+**Jev fast checks** are optional and stay on a bespoke adapter — they return calibrated
+probabilities rather than chat completions, which no SDK transport speaks. OpenCode Zen is
+one of the two places that serve them properly. OpenRouter exposes a typed decision API at `/api/alpha/decisions`; Zen exposes one
 at `/zen/v1/systemone`; both return values *and calibrated probabilities*, which is what the
 0.995/0.999 cutoffs are written against. Either can take the role, and picking the model is
 yours — `jev-1.13-free` on Zen is genuinely free, while `jev-1.13` costs $0.042/1M input.
@@ -886,8 +917,11 @@ src/domain/       types; the delta contract lives here
 src/db/           schema.sql and the connection
 src/store/        canon/chronicle overlay, cast, chronicle, threads, consequences, illustrations,
                   referential integrity check, safe backup
-src/providers/    adapter interface, capability matrix, mock, http, bedrock,
-                  google, copilot, sigv4, aws credential chain, probe;
+src/providers/    adapter interface, capability matrix, mock, bedrock, google, copilot,
+                  aws credential chain, probe;
+                  transports: openai-sdk, anthropic-sdk, bedrock-sdk, vertex-sdk (AI SDK)
+                  and http/bedrock/google (hand-rolled, the `legacy` rollback);
+                  dialect-only: http, ollama, jev; sigv4 (image signing + credential chain);
                   image: mock, comfyui, bedrock stability
 src/illustration/ prompt composer, generation service (see .design/ILLUSTRATIONS.md)
 src/frame/        tokenizer and budgeted per-role frame assembly
