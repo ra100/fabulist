@@ -320,6 +320,52 @@ which Fabulist does not depend on, since it validates the parsed object.
    `messageStop`, `metadata`) with the payload supplied *bare* — the SDK wraps
    it as `{[eventType]: parsed}` itself, so pre-wrapping fails validation.
 
+## Phase 5: Vertex Gemini
+
+`VertexSdkProvider` replaces the transport in `VertexProvider`.
+
+### The decision the issue asks for: `GoogleAuth` stays the boundary
+
+`createVertex` offers `googleAuthOptions`, which would hand credential discovery
+to the SDK's own `google-auth-library`. That would be a regression: the
+discovery this app implements — Application Default Credentials, service-account
+keys, refresh-token exchange, and a `gcloud auth print-access-token` fallback for
+impersonation and external account types — is deterministic, tested, and partly
+ours. So the token still comes from `GoogleAuth.accessToken()`.
+
+Two findings made the wiring non-obvious:
+
+1. **The SDK builds its own `GoogleAuth` regardless.** `createGoogleVertex`
+   unconditionally constructs one from `googleAuthOptions` and awaits it inside
+   its `headers` resolver, *before* any request is made. With no ADC on the
+   machine that throws — so a wrapped `fetch`, which every other adapter here
+   uses for credentials, never runs. Suppressing it means going through
+   `googleAuthOptions.authClient`, the documented seam, which the SDK passes
+   straight through to its own `GoogleAuth`. A three-line shim whose
+   `getAccessToken()` returns the token from our resolver replaces the SDK's
+   entire discovery path. That is the injection boundary: ours, not theirs.
+2. **Construction must not require a project.** The project is baked into the
+   request URL, so the first version resolved it in the constructor and threw
+   there. That broke `buildProvider` for a keyless Vertex preset — the setup
+   wizard builds every preset in order to *list* the unavailable ones, so
+   throwing takes down the whole provider list rather than one row. The model is
+   now built on first use and cached per project, so an undiscoverable project
+   fails on the call, naming the fix, exactly as the hand-rolled adapter did.
+
+Preserved: `systemInstruction` for the system prompt, the five-stop-sequence
+cap, prose-only streaming, and project/location discovery precedence.
+
+### Findings from phase 5
+
+- Vertex reports its stops as `STOP` / `MAX_TOKENS`, which the phase 0 contract
+  already forced `normalizeFinishReason` to learn. Without that fix every Vertex
+  turn would have logged `other`.
+- Secrets stay out of errors: the adapter resolves the token from our resolver
+  and passes no secret into the SDK, and tests assert that neither the refresh
+  token, the client secret, the minted token, nor the prompt appears in a thrown
+  error's message.
+
+
 
 
 
