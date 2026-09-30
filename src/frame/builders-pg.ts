@@ -556,7 +556,10 @@ export function buildNarratorFrame(ctx: FrameContext, data: FrameData): Frame {
     { name: 'agreed-beat', priority: Priority.agreedBeat, content: ctx.agreedBeat ?? '', evictable: false },
     { name: 'present-cast', priority: Priority.presentCast, content: presentCastBlock(data, ids), evictable: false, maxTokens: 2600 },
     { name: 'location', priority: Priority.locationCard, content: locationCard(data, ctx.session), maxTokens: 600 },
-    { name: 'recent-prose', priority: Priority.recentProse, content: recentProse(data, 6), maxTokens: 2200 },
+    {
+      name: 'recent-prose', priority: Priority.recentProse, content: recentProse(data, 6),
+      maxTokens: 2200, preserveEnd: true,
+    },
     { name: 'epistemic-mask', priority: Priority.epistemicMask, content: epistemicMask(data), maxTokens: 700 },
     { name: 'scene-summaries', priority: Priority.sceneSummaries, content: sceneSummaries(data, ctx.session.scene), maxTokens: 900 },
     { name: 'cast-thumbnails', priority: Priority.castThumbnails, content: data.others.map(thumbnail).join('\n'), maxTokens: 500 },

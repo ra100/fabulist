@@ -34,6 +34,8 @@ export interface SlotSpec {
   content: string;
   /** Hard cap for this slot regardless of remaining budget. */
   maxTokens?: number;
+  /** Keep the newest content when truncating chronological text. */
+  preserveEnd?: boolean;
   evictable?: boolean;
   compressible?: boolean;
 }
@@ -64,6 +66,25 @@ export class FrameBudgetExceededError extends Error {
   }
 }
 
+function truncate(content: string, maxTokens: number, tokenizer: Tokenizer, preserveEnd: boolean): string {
+  if (!preserveEnd) return tokenizer.truncate(content, maxTokens);
+  if (maxTokens <= 0) return '';
+  if (tokenizer.count(content) <= maxTokens) return content;
+
+  let lo = 0;
+  let hi = content.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (tokenizer.count(content.slice(mid)) <= maxTokens) hi = mid;
+    else lo = mid + 1;
+  }
+  const cut = content.slice(lo);
+  const boundaries = [cut.indexOf('. '), cut.indexOf('\n'), cut.indexOf('! '), cut.indexOf('? ')]
+    .filter((index) => index >= 0);
+  const boundary = boundaries.length ? Math.min(...boundaries) : -1;
+  return boundary >= 0 && boundary < cut.length * 0.4 ? cut.slice(boundary + 1).trimStart() : cut;
+}
+
 /**
  * Fits slots into the budget.
  *
@@ -75,13 +96,14 @@ export class FrameBudgetExceededError extends Error {
 export function assembleFrame(specs: SlotSpec[], opts: BudgetOptions): Frame {
   const { budget, tokenizer } = opts;
   const minSlotTokens = opts.minSlotTokens ?? 24;
+  const preserveEnd = new WeakSet<FrameSlot>();
 
   const slots: FrameSlot[] = specs
     .filter((s) => s.content.trim().length > 0)
     .map((s) => {
       const capped =
-        s.maxTokens !== undefined ? tokenizer.truncate(s.content, s.maxTokens) : s.content;
-      return {
+        s.maxTokens !== undefined ? truncate(s.content, s.maxTokens, tokenizer, s.preserveEnd ?? false) : s.content;
+      const slot: FrameSlot = {
         name: s.name,
         priority: s.priority,
         content: capped,
@@ -89,6 +111,8 @@ export function assembleFrame(specs: SlotSpec[], opts: BudgetOptions): Frame {
         evictable: s.evictable ?? s.priority < 100,
         compressible: s.compressible ?? true,
       };
+      if (s.preserveEnd) preserveEnd.add(slot);
+      return slot;
     });
 
   const evicted: string[] = [];
@@ -106,7 +130,7 @@ export function assembleFrame(specs: SlotSpec[], opts: BudgetOptions): Frame {
       if (!slot.compressible) continue;
       const target = Math.max(minSlotTokens, slot.tokens - over);
       if (target >= slot.tokens) continue;
-      slot.content = tokenizer.truncate(slot.content, target);
+      slot.content = truncate(slot.content, target, tokenizer, preserveEnd.has(slot));
       slot.tokens = tokenizer.count(slot.content);
       compressed.push(slot.name);
     }
