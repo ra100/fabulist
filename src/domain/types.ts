@@ -494,6 +494,8 @@ export interface Intent {
 }
 
 export interface TurnMeta {
+  /** Compact canonical changes supplied to the following turn's role frames. */
+  summary?: string;
   integrity: IntegrityVerdict | null;
   referee: RefereeVerdict | null;
   move: string | null;

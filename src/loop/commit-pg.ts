@@ -28,6 +28,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Delta, EntityId, StoryEvent, Turn, Visibility } from '../domain/types.ts';
+import { summarizeDelta } from '../domain/turn-summary.ts';
 import { ACTIVE_THREAD_BUDGET, mergeOpenThread } from '../domain/thread-policy.ts';
 import type { Db } from '../db/pg.ts';
 import { World } from '../store/index-pg.ts';
@@ -255,7 +256,7 @@ async function commitTurnOn(w: World, input: CommitTurnInput): Promise<CommitTur
     delta: input.delta,
     bookProse: input.bookProse,
     pinned: false,
-    meta: input.meta,
+    meta: { ...input.meta, summary: summarizeDelta(input.delta) },
   });
   if (input.threadId) await w.threads.adjustTension(input.threadId, STEER_BUMP);
   if (input.delta.sceneAdvance) {

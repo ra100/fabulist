@@ -2,9 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HeuristicTokenizer, tokenizerFor } from '../src/frame/tokenizer.ts';
 import { assembleFrame, FrameBudgetExceededError, inputBudget, Priority } from '../src/frame/budget.ts';
-import { buildNarratorFrame, renderProps, renderSheet, thumbnail } from '../src/frame/builders.ts';
+import {
+  buildDirectorFrame,
+  buildIntegrityFrame,
+  buildNarratorFrame,
+  buildRefereeFrame,
+  renderProps,
+  renderSheet,
+  thumbnail,
+} from '../src/frame/builders.ts';
 import { World } from '../src/store/index.ts';
-import type { CharacterSheet, Entity } from '../src/domain/types.ts';
+import { emptyDelta, type CharacterSheet, type Entity } from '../src/domain/types.ts';
 
 const tk = new HeuristicTokenizer({ charsPerToken: 4 });
 
@@ -176,6 +184,72 @@ test('narrator recent prose keeps the newest turn when the slot is capped', () =
 
     assert.ok(recent, 'recent prose slot exists');
     assert.match(recent.content, /TURN-6-END/, 'the latest committed turn remains in context');
+  } finally {
+    world.close();
+  }
+});
+
+test('next-turn role frames include deterministic summaries of prior turns', () => {
+  const world = World.open(':memory:');
+  try {
+    const changes = [
+      'The lamp went dark.',
+      'Mira found the hidden stair.',
+    ];
+    for (const [index, text] of changes.entries()) {
+      const turn = index + 1;
+      world.chronicle.addTurn({
+        scene: 1,
+        turn,
+        rawInput: `action ${turn}`,
+        intent: null,
+        delta: {
+          ...emptyDelta(),
+          events: [{
+            text,
+            participants: ['char:mira'],
+            locationId: 'loc:tower',
+            significance: 0.5,
+          }],
+        },
+        bookProse: turn === 1
+          ? 'The flame narrowed to a blue thread and vanished.'
+          : 'Mira found the seam behind the tapestry and pressed.',
+        pinned: false,
+        meta: {
+          integrity: null, referee: null, move: null, frameLog: null, lint: null, providerCalls: [],
+        },
+      });
+    }
+    world.session.set({ scene: 1, turn: 2 });
+
+    const ctx = {
+      world,
+      session: world.session.get(),
+      tokenizer: tk,
+      budget: 10_000,
+      rawInput: 'I descend.',
+      agreedBeat: 'Mira starts down the hidden stair.',
+    };
+    const frames = [
+      ['integrity', buildIntegrityFrame(ctx, 'char:mira')],
+      ['referee', buildRefereeFrame(ctx)],
+      ['director', buildDirectorFrame(ctx)],
+      ['narrator', buildNarratorFrame(ctx)],
+    ] as const;
+
+    for (const [role, frame] of frames) {
+      assert.equal(
+        frame.slots.find((slot) => slot.name === 'turn-summaries')?.content,
+        'turn 1.1: The lamp went dark.\nturn 1.2: Mira found the hidden stair.',
+        `${role} receives the canonical turn history`,
+      );
+    }
+    assert.match(
+      frames[3][1].slots.find((slot) => slot.name === 'recent-prose')?.content ?? '',
+      /The flame narrowed to a blue thread/,
+      'the narrator still receives full prose for voice continuity',
+    );
   } finally {
     world.close();
   }

@@ -42,6 +42,7 @@ import type {
   Thread,
   Turn,
 } from '../domain/types.ts';
+import { summaryForTurn } from '../domain/turn-summary.ts';
 import type { World } from '../store/index-pg.ts';
 import { storyLayout } from '../loop/history-pg.ts';
 import { assembleFrame, Priority, type SlotSpec } from './budget.ts';
@@ -324,7 +325,7 @@ export async function loadFrameData(
   const [neighbours, recentTurns, scenes, layout, knowledgeRaw, hiddenFacts, divergencesRaw, anchorsRaw, threads, directives, pending, othersRaw] =
     await Promise.all([
       world.graph.neighboursMany(seedIds, session.scene),
-      world.chronicle.recentTurns(opts.recentTurns ?? 8),
+      world.chronicle.recentTurns(opts.recentTurns ?? 32),
       world.chronicle.scenes(),
       storyLayout(world),
       session.playerCharacterId ? world.chronicle.knowledgeOf(session.playerCharacterId) : Promise.resolve([]),
@@ -405,6 +406,15 @@ function recentProse(data: FrameData, maxTurns = 8): string {
     .filter((t) => t.bookProse)
     .map((t) => t.bookProse)
     .join('\n\n');
+}
+
+function turnSummaries(data: FrameData, maxTurns = 32): string {
+  return data.recentTurns
+    .slice(-maxTurns)
+    .map((turn) => ({ turn, summary: summaryForTurn(turn) }))
+    .filter(({ summary }) => summary)
+    .map(({ turn, summary }) => `turn ${turn.scene}.${turn.turn}: ${summary}`)
+    .join('\n');
 }
 
 function sceneSummaries(data: FrameData, currentScene: number): string {
@@ -507,6 +517,7 @@ export function buildIntegrityFrame(ctx: FrameContext, data: FrameData, actorId:
       evictable: false,
       maxTokens: 900,
     },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(data), maxTokens: 1200, preserveEnd: true },
     { name: 'recent-behaviour', priority: Priority.recentProse, content: recentProse(data, 3), maxTokens: 600 },
     { name: 'player-input', priority: Priority.agreedBeat, content: ctx.rawInput ?? '', evictable: false },
   ];
@@ -520,6 +531,7 @@ export function buildRefereeFrame(ctx: FrameContext, data: FrameData): Frame {
     { name: 'location', priority: Priority.locationCard, content: locationCard(data, ctx.session), maxTokens: 500 },
     { name: 'present-cast', priority: Priority.presentCast, content: presentCastBlock(data, ids), evictable: false, maxTokens: 2000 },
     { name: 'neighbourhood', priority: Priority.neighbourhood, content: neighbourhood(data, ids, 1), maxTokens: 1400 },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(data), maxTokens: 1200, preserveEnd: true },
     { name: 'epistemic-mask', priority: Priority.epistemicMask, content: epistemicMask(data), maxTokens: 700 },
     { name: 'divergences', priority: Priority.sceneSummaries, content: data.divergences.slice(-6).map((d) => `${d.kind}: ${d.detail}`).join('\n'), maxTokens: 300 },
     { name: 'player-input', priority: Priority.agreedBeat, content: ctx.rawInput ?? '', evictable: false },
@@ -539,6 +551,7 @@ export function buildDirectorFrame(ctx: FrameContext, data: FrameData): Frame {
     { name: 'directives', priority: Priority.styleContract, content: data.directives.map((d) => `[${d.strength}] ${d.text}`).join('\n'), evictable: false, maxTokens: 300 },
     { name: 'present-cast', priority: Priority.presentCast, content: ids.map((id) => { const e = data.entities.get(id); return e ? thumbnail(e) : ''; }).filter(Boolean).join('\n'), maxTokens: 600 },
     { name: 'pending-arrivals', priority: Priority.pendingArrivals, content: arrivals, maxTokens: 500 },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(data), maxTokens: 1200, preserveEnd: true },
     { name: 'epistemic-mask', priority: Priority.epistemicMask, content: epistemicMask(data), maxTokens: 600 },
     { name: 'scene-summaries', priority: Priority.sceneSummaries, content: sceneSummaries(data, session.scene), maxTokens: 800 },
     { name: 'knobs', priority: Priority.styleContract, content: `danger=${session.knobs.danger} pacing=${session.knobs.pacing} npcAgency=${session.knobs.npcAgency}`, evictable: false },
@@ -560,6 +573,7 @@ export function buildNarratorFrame(ctx: FrameContext, data: FrameData): Frame {
       name: 'recent-prose', priority: Priority.recentProse, content: recentProse(data, 6),
       maxTokens: 2200, preserveEnd: true,
     },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(data), maxTokens: 1200, preserveEnd: true },
     { name: 'epistemic-mask', priority: Priority.epistemicMask, content: epistemicMask(data), maxTokens: 700 },
     { name: 'scene-summaries', priority: Priority.sceneSummaries, content: sceneSummaries(data, ctx.session.scene), maxTokens: 900 },
     { name: 'cast-thumbnails', priority: Priority.castThumbnails, content: data.others.map(thumbnail).join('\n'), maxTokens: 500 },
