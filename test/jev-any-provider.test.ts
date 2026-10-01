@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { JevCompatProvider, JevProvider, caps } from '../src/providers/http.ts';
 import { byokEndpoint, byokProvider, providerErrorReason } from '../src/providers/byok.ts';
 import { checkWithJev } from '../src/loop/jev-fastpath.ts';
+import { redactEchoes } from '../src/loop/provider-telemetry.ts';
 import { jevTestCapabilities } from './jev-fixtures.ts';
 import type { CompletionRequest, CompletionResult } from '../src/providers/provider.ts';
 
@@ -274,6 +275,28 @@ test('a Jev call that never reached the provider logs the network error code', a
     { optionalProvider: () => provider, log: () => {}, onProviderCall: (call) => calls.push({ ...call }) },
     { rawInput: 'I copy the page.', refereeState: 'The scriptorium is open.' },
   );
-  assert.equal(calls[0]?.errorDetail, 'ENOTFOUND');
+  assert.equal(calls[0]?.errorDetail, 'fetch failed (ENOTFOUND)');
   assert.equal(calls[0]?.errorStatus, undefined);
+});
+
+test('a provider error that echoes the request logs its wording, not what was sent', async () => {
+  const echoed = JSON.stringify({
+    error: { message: 'Invalid value for state: "The Scriptorium is   OPEN." exceeds the limit' },
+  });
+  const fetcher = (async () => new Response(echoed, { status: 422 })) as unknown as typeof fetch;
+  const provider = byokProvider(byokEndpoint('openrouter')!, 'typesafe/jev-1.13', () => 'sk-user', fetcher);
+  const calls: Array<Record<string, unknown>> = [];
+  await checkWithJev(
+    { optionalProvider: () => provider, log: () => {}, onProviderCall: (call) => calls.push({ ...call }) },
+    { rawInput: 'I copy the page.', refereeState: 'The scriptorium is open.' },
+  );
+  assert.equal(calls[0]?.errorStatus, 422);
+  const detail = String(calls[0]?.errorDetail);
+  assert.match(detail, /^Invalid value for state: "\[redacted\]" exceeds the limit$/);
+  assert.doesNotMatch(detail, /scriptorium/i);
+});
+
+test('echo redaction leaves text the request never contained', () => {
+  assert.equal(redactEchoes('Model does not exist', ['The scriptorium is open.']), 'Model does not exist');
+  assert.equal(redactEchoes('saw: the scriptorium is open. done', ['The Scriptorium  is open.']), 'saw: [redacted] done');
 });

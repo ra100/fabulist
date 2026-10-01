@@ -106,7 +106,7 @@ async function callJson(
         provider: provider.id,
         durationMs: Date.now() - started,
         ok: false,
-        ...providerErrorFields(err),
+        ...providerErrorFields(err, req),
       });
       throw err;
     }
@@ -534,7 +534,7 @@ export async function narrate(
       streaming: !!req.onToken,
       durationMs: Date.now() - started,
       ok: false,
-      ...providerErrorFields(err),
+      ...providerErrorFields(err, req),
     });
     throw err;
   }
@@ -579,7 +579,7 @@ export async function narrate(
         streaming: false,
         durationMs: Date.now() - retryStarted,
         ok: false,
-        ...providerErrorFields(err),
+        ...providerErrorFields(err, retryReq),
       });
       throw err;
     }
