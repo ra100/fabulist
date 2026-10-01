@@ -94,7 +94,7 @@ export async function checkWithJev(
       provider: provider.id,
       durationMs: Date.now() - started,
       ok: false,
-      ...providerErrorFields(error),
+      ...providerErrorFields(error, req),
     });
     return {};
   }
