@@ -20,46 +20,58 @@ const bob = sessionUser('bob');
 const admin = sessionUser('admin');
 const ask = (role: string): CompletionRequest => ({ role, messages: [{ role: 'user', content: 'hello' }] });
 
+/**
+ * Real `Response` objects, and real `Headers`.
+ *
+ * The provider adapters resolve credentials by wrapping `fetch` and setting a
+ * `Headers` instance, and the AI SDK transports read `response.headers` and
+ * `response.body`. A duck-typed `{ ok, status, json }` stub answers neither, so
+ * the test would fail for a reason that says nothing about the behaviour it is
+ * checking.
+ */
 function stubFetch(status = 200) {
   const calls: Array<{ url: string; authorization: string; apiKey: string; model: string }> = [];
   const fetcher = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input);
-    const headers = (init.headers ?? {}) as Record<string, string>;
+    const headers = new Headers(init.headers);
     const body = init.body ? (JSON.parse(String(init.body)) as { model?: string }) : {};
     calls.push({
       url,
-      authorization: headers.authorization ?? '',
-      apiKey: headers['x-api-key'] ?? '',
+      authorization: headers.get('authorization') ?? '',
+      apiKey: headers.get('x-api-key') ?? '',
       model: body.model ?? '',
     });
     if (url.endsWith('/models')) {
-      return {
-        ok: status >= 200 && status < 300,
+      return new Response(JSON.stringify({ data: [{ id: 'gpt-b' }, { id: 'gpt-a' }] }), {
         status,
-        json: async () => ({ data: [{ id: 'gpt-b' }, { id: 'gpt-a' }] }),
-        text: async () => '',
-      } as unknown as Response;
+        headers: { 'content-type': 'application/json' },
+      });
     }
     if (url.endsWith('/messages')) {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
+      // Anthropic's Messages envelope, which its SDK parser validates strictly.
+      return new Response(
+        JSON.stringify({
+          id: 'msg_stub',
+          type: 'message',
+          role: 'assistant',
+          model: body.model ?? 'm',
           content: [{ type: 'text', text: 'ready' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
           usage: { input_tokens: 7, output_tokens: 1 },
         }),
-        text: async () => '',
-      } as unknown as Response;
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
     }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        choices: [{ message: { content: 'ready' } }],
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-stub',
+        model: body.model ?? 'm',
+        choices: [{ message: { content: 'ready' }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 7, completion_tokens: 1 },
       }),
-      text: async () => '',
-    } as unknown as Response;
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
   }) as typeof fetch;
   return { fetcher, calls };
 }

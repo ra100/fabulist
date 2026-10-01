@@ -424,8 +424,39 @@ this work; unrelated to the transport migration.
 Full suite, type-check, lint, format, production web build, and the dependency
 audit above. Lint and format counts match the pre-migration baseline exactly.
 
+### The validation that was missed the first time
 
+The first pass reported "0 fail" while **293 tests were silently skipped** — every
+PostgreSQL suite, gated on `FABULIST_TEST_PG`. They were skipped in the baseline
+too, so the number looked unremarkable, and it was reported as a pass. It was not
+one.
 
+Running them exposed two real failures in `pg-provider-resolver.test.ts`, whose
+`stubFetch` returned duck-typed `{ ok, status, json }` objects. The adapters
+resolve credentials by wrapping `fetch` and setting a real `Headers`, and the SDK
+transports read `response.headers` and `response.body`, so the stub answered
+neither:
 
+```
+Error: response.headers is not iterable
+```
 
+The same defect in the same shape was already found and fixed in
+`test/byok.test.ts` during phase 2. It was not looked for anywhere else, and a
+green "0 fail" was reported without noticing that the count behind it had nearly
+300 fewer tests than the suite contains.
 
+The rule worth keeping: **a skip is not a pass.** A test count is only evidence if
+you checked what it was counting.
+
+### Final accounting
+
+| gate | result |
+| --- | --- |
+| `pnpm test` (Postgres + scale) | **1747 pass, 0 fail, 0 skipped** |
+| `pnpm typecheck` | clean |
+| `pnpm lint` | 4 errors, 27 warnings — matches pre-migration baseline |
+| `pnpm format:check` | 21 — matches baseline |
+| `pnpm build:web` | ok |
+| dependency audit | 225 packages, 2 duplicate versions, no duplicate client |
+| `pnpm audit --prod` | 3 pre-existing moderate, unchanged |
