@@ -103,12 +103,14 @@ import {
 import {
   createEncryptionEnrollment,
   eraseUnlockedStoryKeys,
+  importMasterKey,
   providerKeyHandoff,
   storyKeyHandoff,
   unlockWithPassphrase,
   unlockWithRecoveryCode,
   type EncryptionEnrollment,
 } from './crypto/keys.ts';
+import { earliestGrantExpiry, forgetMasterKey, rememberMasterKey } from './crypto/session.ts';
 
 type Tab = AppTab;
 
@@ -621,7 +623,7 @@ function PrivateStoragePanel({
 
   const prepare = async () => {
     if (passphrase !== confirmation) {
-      setError('the passphrase confirmation does not match');
+      setError('the passcode confirmation does not match');
       return;
     }
     setBusy(true);
@@ -675,6 +677,11 @@ function PrivateStoragePanel({
         : [];
       const result = await unlockMutation.mutateAsync({ storyKeys: storyKeyHandoff(unlocked.storyKeys), providerKeys });
       if (!result.grants.length && !result.providerGrants.length) throw new Error('no private stories were unlocked');
+      rememberMasterKey(
+        user.id,
+        await importMasterKey(unlocked.masterKey),
+        earliestGrantExpiry([...result.grants, ...result.providerGrants]),
+      );
       setUnlockSecret('');
       await onChanged();
       if (unlocked.failedStoryKeys.length) {
@@ -696,6 +703,7 @@ function PrivateStoragePanel({
     setError(null);
     try {
       await lockMutation.mutateAsync();
+      forgetMasterKey();
       setUnlockSecret('');
       window.location.reload();
     } catch (err) {
@@ -758,7 +766,7 @@ function PrivateStoragePanel({
             {grants.length
               ? `The temporary processing grant expires at ${expiry}. Lock it when you finish using MCP.`
               : migrationComplete
-                ? 'Unlock when you want Fabulist or an MCP client to process your encrypted stories.'
+                ? 'Unlock when you want Fabulist or an MCP client to process your encrypted stories. The same passcode unlocks your passcode-protected provider keys.'
                 : 'Unlock to migrate your existing stories and grant temporary private-story processing access.'}
           </p>
         </div>
@@ -870,7 +878,7 @@ function PrivateStoragePanel({
         <div className="private-recovery">
           <span className="eyebrow">your recovery code</span>
           <p className="private-recovery-intro">
-            Save this somewhere you control. It is displayed once and can restore access if you forget the passphrase.
+            Save this somewhere you control. It is displayed once and can restore access if you forget the passcode.
           </p>
           <div className="private-recovery-code">
             <code className="mono">{draft.recoveryCode}</code>

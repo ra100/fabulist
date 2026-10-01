@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   createEncryptionEnrollment,
   eraseUnlockedStoryKeys,
+  importMasterKey,
   providerKeyHandoff,
   storyKeyHandoff,
   unlockWithPassphrase,
@@ -112,4 +113,24 @@ test('a provider key wrap round-trips only for the same user and key id', async 
   const bad = await wrapProviderKey(userId, unlocked.masterKey, 'key-3', ' sk-leading-space');
   assert.deepEqual(await providerKeyHandoff(userId, unlocked.masterKey, [{ keyId: 'key-3', wrap: bad }]), [], 'a key the server rejects is not handed off');
   eraseUnlockedStoryKeys(unlocked);
+});
+
+test('the passcode unlock opens provider keys through the same non-extractable master key', async () => {
+  const enrollment = await createEncryptionEnrollment(userId, passphrase, storyIds);
+  const unlocked = await unlockWithPassphrase(userId, enrollment.userKey, enrollment.storyKeys, passphrase);
+  const session = await importMasterKey(unlocked.masterKey);
+  const apiKey = 'sk-live-provider-secret-4567';
+  const savedEarlier = await wrapProviderKey(userId, unlocked.masterKey, 'key-1', apiKey);
+  eraseUnlockedStoryKeys(unlocked);
+
+  assert.equal(session.extractable, false);
+  assert.deepEqual(await providerKeyHandoff(userId, session, [{ keyId: 'key-1', wrap: savedEarlier }]), [
+    { keyId: 'key-1', key: apiKey },
+  ]);
+  const savedNow = await wrapProviderKey(userId, session, 'key-2', apiKey);
+  const again = await unlockWithPassphrase(userId, enrollment.userKey, [], passphrase);
+  assert.deepEqual(await providerKeyHandoff(userId, again.masterKey, [{ keyId: 'key-2', wrap: savedNow }]), [
+    { keyId: 'key-2', key: apiKey },
+  ]);
+  eraseUnlockedStoryKeys(again);
 });
