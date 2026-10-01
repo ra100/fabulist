@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JevCompatProvider, JevProvider, caps } from '../src/providers/http.ts';
-import { byokEndpoint, byokProvider, providerErrorReason } from '../src/providers/byok.ts';
+import { byokEndpoint, byokProvider, isJevDecisionModel, providerErrorReason } from '../src/providers/byok.ts';
 import { checkWithJev } from '../src/loop/jev-fastpath.ts';
 import { redactEchoes } from '../src/loop/provider-telemetry.ts';
 import { jevTestCapabilities } from './jev-fixtures.ts';
@@ -299,4 +299,32 @@ test('a provider error that echoes the request logs its wording, not what was se
 test('echo redaction leaves text the request never contained', () => {
   assert.equal(redactEchoes('Model does not exist', ['The scriptorium is open.']), 'Model does not exist');
   assert.equal(redactEchoes('saw: the scriptorium is open. done', ['The Scriptorium  is open.']), 'saw: [redacted] done');
+});
+
+test('OpenRouter\'s jev-router is a chat model, so it is not sent to the typed API', async () => {
+  // The catalog lists `typesafe/jev-router`, and the typed API answers it with
+  // `400 Model … does not exist`; only the decision model goes there.
+  const paths: string[] = [];
+  const fetcher = (async (url: string) => {
+    paths.push(new URL(String(url)).pathname);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(CLEAR) } }], ...CLEAR }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+  const endpoint = byokEndpoint('openrouter')!;
+  for (const model of ['typesafe/jev-1.13', '~typesafe/jev-latest', 'jev-latest', 'typesafe/jev-router']) {
+    await byokProvider(endpoint, model, () => 'sk-user', fetcher).complete(REQ);
+  }
+  assert.deepEqual(paths, ['/api/alpha/decisions', '/api/alpha/decisions', '/api/alpha/decisions', '/api/v1/chat/completions']);
+  assert.equal(isJevDecisionModel('typesafe/jev-router'), false);
+  assert.equal(isJevDecisionModel('openai/gpt-4o'), false);
+});
+
+test('a stock phrase the story happens to contain is not redacted from the reason', () => {
+  const story = ['The tower does not exist on any map the guild keeps.'];
+  assert.equal(
+    redactEchoes('Model typesafe/jev-router does not exist', story),
+    'Model typesafe/jev-router does not exist',
+  );
 });

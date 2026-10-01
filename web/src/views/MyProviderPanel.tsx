@@ -23,6 +23,9 @@ import {
 
 const UNLOCK_FIRST = 'Unlock private storage with your passcode to save or unlock passcode-protected keys.';
 
+/** The decision-model ids OpenRouter's typed API accepts; its catalog lists only the chat router. */
+const JEV_DECISION_MODELS = ['typesafe/jev-1.13', '~typesafe/jev-latest'];
+
 const ROLE_OPTIONS: Array<{ role: ProviderModelRole; label: string }> = [
   { role: 'narrate', label: 'Narration' },
   { role: 'classify', label: 'Classify' },
@@ -388,7 +391,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
         {!state.keys.length ? <p className="empty">Save a provider credential before assigning models.</p> : null}
         {ROLE_OPTIONS.map(({ role, label: roleLabel }) => {
           const draft = modelDrafts[role];
-          const listId = `${role === 'image' ? 'provider-image-models-' : 'provider-models-'}${draft.providerKeyId}`;
+          const listId = `${role === 'image' ? 'provider-image-models-' : role === 'jev-fastpath' ? 'provider-jev-models-' : 'provider-models-'}${draft.providerKeyId}`;
           const choices =
             role === 'image' ? state.keys.filter(({ key }) => IMAGE_ENDPOINTS.has(key.endpointId)) : state.keys;
           return (
@@ -396,7 +399,9 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
               <h4>{roleLabel}</h4>
               {role === 'jev-fastpath' ? (
                 <p className="small dim">
-                  Optional OpenRouter check. Use <span className="mono">typesafe/jev-1.13</span>; unclear or unsafe results use your full Integrity and Referee routes.
+                  Optional OpenRouter check. Use <span className="mono">typesafe/jev-1.13</span>, not{' '}
+                  <span className="mono">typesafe/jev-router</span>, which is a chat router rather than the decision model;
+                  unclear or unsafe results use your full Integrity and Referee routes.
                 </p>
               ) : null}
               {role === 'image' ? (
@@ -457,6 +462,15 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
             {(catalogs[key.id] ?? []).map((model) => (
               <option key={model} value={model} />
             ))}
+          </datalist>
+        ))}
+        {state.keys.map(({ key }) => (
+          <datalist id={`provider-jev-models-${key.id}`} key={`jev-${key.id}`}>
+            {[...JEV_DECISION_MODELS, ...(catalogs[key.id] ?? []).filter((model) => !JEV_DECISION_MODELS.includes(model))].map(
+              (model) => (
+                <option key={model} value={model} />
+              ),
+            )}
           </datalist>
         ))}
         {state.keys
