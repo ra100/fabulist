@@ -56,7 +56,7 @@ pnpm integrity            # check a save for dangling references
 ```
 
 ```bash
-pnpm test                 # 564 tests, offline
+pnpm test                 # the whole suite, offline, in parallel processes
 pnpm typecheck
 pnpm lint                 # biome, TypeScript only
 ```
@@ -72,6 +72,14 @@ FABULIST_TEST_PG='postgres://postgres@localhost:5433/fabulist_test?host=/tmp' \
   FABULIST_REQUIRE_TEST_PG=1 FABULIST_TEST_PG_SCALE=1 pnpm test
 pnpm pg:stop
 ```
+
+`pnpm test` (`test/run.ts`) runs the files in a few parallel processes, each
+holding several files, balanced by `test/timings.json`; pass paths to run just
+those, or run one file alone with `node --test <file>`. After adding or
+reshaping slow tests, `node test/run.ts --record` refreshes the timings. The
+Postgres tests reuse a small pool of `tpool_*` schemas in the test database
+rather than building one per test (see `test/pg-harness.ts`); `pnpm pg:reset`
+clears them along with everything else.
 
 Provided as-is, free, no paid tier, no ads, no analytics
 (`.design/SAAS-MULTIUSER.md` §7). [`docs/privacy-policy.md`](docs/privacy-policy.md),
