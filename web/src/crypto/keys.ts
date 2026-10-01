@@ -121,6 +121,15 @@ async function importAesKey(bytes: Uint8Array): Promise<CryptoKey> {
   return requireCrypto().subtle.importKey('raw', bufferSource(bytes), 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
+/** A non-extractable handle on the unlocked master key, so it can outlive the erased byte array. */
+export function importMasterKey(masterKey: Uint8Array): Promise<CryptoKey> {
+  return importAesKey(masterKey);
+}
+
+function masterCryptoKey(masterKey: Uint8Array | CryptoKey): Promise<CryptoKey> {
+  return masterKey instanceof Uint8Array ? importAesKey(masterKey) : Promise.resolve(masterKey);
+}
+
 async function derivePassphraseKey(passphrase: string, salt: Uint8Array, iterations = PBKDF2_ITERATIONS): Promise<CryptoKey> {
   if (passphrase.length < 12) throw new Error('choose a passphrase of at least 12 characters');
   const material = await requireCrypto().subtle.importKey('raw', aad(passphrase), 'PBKDF2', false, ['deriveKey']);
@@ -288,21 +297,21 @@ export function storyKeyHandoff(storyKeys: Map<string, Uint8Array>): StoryKeyHan
 /** Wraps a provider API key under the unlocked master key; the server only ever stores the result. */
 export async function wrapProviderKey(
   userId: string,
-  masterKey: Uint8Array,
+  masterKey: Uint8Array | CryptoKey,
   keyId: string,
   apiKey: string,
 ): Promise<EncryptedKeyEnvelope> {
   if (!keyId || !apiKey) throw new Error('a provider key needs an id and a value');
-  return encrypt(await importAesKey(masterKey), encoder.encode(apiKey), providerAad(userId, keyId));
+  return encrypt(await masterCryptoKey(masterKey), encoder.encode(apiKey), providerAad(userId, keyId));
 }
 
 /** Unwraps provider keys for the one-request unlock handoff; an unreadable wrap is skipped so story unlock still works. */
 export async function providerKeyHandoff(
   userId: string,
-  masterKey: Uint8Array,
+  masterKey: Uint8Array | CryptoKey,
   records: ProviderKeyRecord[],
 ): Promise<ProviderKeyHandoff[]> {
-  const master = await importAesKey(masterKey);
+  const master = await masterCryptoKey(masterKey);
   const out: ProviderKeyHandoff[] = [];
   for (const record of records) {
     const bytes = await decrypt(master, record.wrap, providerAad(userId, record.keyId)).catch(() => null);

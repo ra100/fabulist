@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { providerSecretSchema } from '../../../src/server/contracts.ts';
 import { api, type CurrentUser, type ProviderModelRole } from '../api.ts';
-import { eraseUnlockedStoryKeys, providerKeyHandoff, unlockWithPassphrase, wrapProviderKey } from '../crypto/keys.ts';
+import { providerKeyHandoff, wrapProviderKey } from '../crypto/keys.ts';
+import { useUnlockedMasterKey } from '../crypto/session.ts';
 import { effectiveTrust, keyHintFor, providerStatusLine, TRUST_COPY, unlockHandoffNote } from '../my-provider.ts';
 import {
   encryptionKeys,
@@ -19,6 +20,8 @@ import {
   useUnlockMutation,
   useUsageByUserQuery,
 } from '../queries.ts';
+
+const UNLOCK_FIRST = 'Unlock private storage with your passcode to save or unlock passcode-protected keys.';
 
 const ROLE_OPTIONS: Array<{ role: ProviderModelRole; label: string }> = [
   { role: 'narrate', label: 'Narration' },
@@ -56,12 +59,12 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
   const listSavedModels = useProviderModelsSavedMutation();
   const saveAssignments = useSaveProviderModelAssignmentsMutation();
   const unlock = useUnlockMutation();
+  const masterKey = useUnlockedMasterKey(user.id);
 
   const [endpointId, setEndpointId] = useState('');
   const [label, setLabel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [trust, setTrust] = useState<'unlock' | 'sealed'>('unlock');
-  const [passphrase, setPassphrase] = useState('');
   const [providerNote, setProviderNote] = useState<string | null>(null);
   const [providerBusy, setProviderBusy] = useState(false);
   const [typedModels, setTypedModels] = useState<string[]>([]);
@@ -130,28 +133,21 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
       if (mode === 'sealed') {
         await save.mutateAsync({ id, label: providerLabel, endpointId: endpoint, trust: 'sealed', key });
       } else {
-        const bundle = await queryClient.fetchQuery({ queryKey: encryptionKeys.keys, queryFn: api.encryption.keys });
-        if (!bundle.userKey) throw new Error('Set up private storage first, or choose server-sealed storage.');
-        const unlocked = await unlockWithPassphrase(user.id, bundle.userKey, [], passphrase);
-        try {
-          const wrap = await wrapProviderKey(user.id, unlocked.masterKey, id, key);
-          await save.mutateAsync({
-            id,
-            label: providerLabel,
-            endpointId: endpoint,
-            trust: 'unlock',
-            wrap,
-            keyHint: keyHintFor(key),
-          });
-          note = await unlockHandoffNote(() =>
-            unlock.mutateAsync({ storyKeys: [], providerKeys: [{ keyId: id, key }] }),
-          );
-        } finally {
-          eraseUnlockedStoryKeys(unlocked);
-        }
+        if (!masterKey) throw new Error(UNLOCK_FIRST);
+        const wrap = await wrapProviderKey(user.id, masterKey, id, key);
+        await save.mutateAsync({
+          id,
+          label: providerLabel,
+          endpointId: endpoint,
+          trust: 'unlock',
+          wrap,
+          keyHint: keyHintFor(key),
+        });
+        note = await unlockHandoffNote(() =>
+          unlock.mutateAsync({ storyKeys: [], providerKeys: [{ keyId: id, key }] }),
+        );
       }
       setApiKey('');
-      setPassphrase('');
       setLabel('');
       setTypedModels([]);
       setProviderNote(note);
@@ -165,26 +161,20 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
 
   const unlockProvider = (id: string) =>
     runProvider(async () => {
+      if (!masterKey) throw new Error(UNLOCK_FIRST);
       const bundle = await queryClient.fetchQuery({ queryKey: encryptionKeys.keys, queryFn: api.encryption.keys });
-      if (!bundle.userKey) throw new Error('Private storage is not set up.');
       const record = bundle.providerKeys?.find((item) => item.keyId === id);
       if (!record) throw new Error('The saved encrypted credential is no longer available.');
-      const unlocked = await unlockWithPassphrase(user.id, bundle.userKey, [], passphrase);
-      try {
-        const providerKeys = await providerKeyHandoff(user.id, unlocked.masterKey, [record]);
-        if (!providerKeys.length) throw new Error('Could not unlock this provider credential.');
-        await unlockHandoffNote(() => unlock.mutateAsync({ storyKeys: [], providerKeys }));
-      } finally {
-        eraseUnlockedStoryKeys(unlocked);
-      }
-      setPassphrase('');
+      const providerKeys = await providerKeyHandoff(user.id, masterKey, [record]);
+      if (!providerKeys.length) throw new Error('Could not unlock this provider credential.');
+      await unlockHandoffNote(() => unlock.mutateAsync({ storyKeys: [], providerKeys }));
       setProviderNote('Provider credential unlocked.');
     });
 
   const canSave =
     !providerBusy &&
     typedKeyValid &&
-    (mode === 'sealed' ? !!state?.sealedAvailable : enrolled && passphrase.length >= 12);
+    (mode === 'sealed' ? !!state?.sealedAvailable : enrolled && masterKey !== null);
 
   if (!state) {
     return (
@@ -279,7 +269,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
                   {key.trust === 'unlock' && status === 'locked' ? (
                     <button
                       type="button"
-                      disabled={providerBusy || passphrase.length < 12}
+                      disabled={providerBusy || !masterKey}
                       onClick={() => void unlockProvider(key.id)}
                     >
                       unlock
@@ -355,7 +345,7 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
               disabled={providerBusy || !enrolled}
               onChange={() => setTrust('unlock')}
             />
-            <span>with my passphrase — {TRUST_COPY.unlock}</span>
+            <span>with my passcode — {TRUST_COPY.unlock}</span>
           </label>
           <label className="private-recovery-check">
             <input
@@ -371,17 +361,8 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
         {mode === null ? (
           <p className="small dim">Set up private storage or enable server-sealed keys before saving a credential.</p>
         ) : null}
-        {mode === 'unlock' ? (
-          <label className="field-row">
-            <span>passphrase</span>
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={passphrase}
-              disabled={providerBusy}
-              onChange={(event) => setPassphrase(event.target.value)}
-            />
-          </label>
+        {mode === 'unlock' && !masterKey ? (
+          <p className="small dim">{UNLOCK_FIRST}</p>
         ) : null}
         <button type="button" disabled={!canSave} onClick={() => void saveProvider()}>
           save provider
