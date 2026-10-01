@@ -29,17 +29,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build:web
 
-  # The suite is ~99 files, each already its own `node --test` process with its
-  # own throwaway database schema, so the files are independent and splitting
-  # them across runners is free correctness-wise. Measured on one 4-vCPU
-  # runner the whole step took 171s and was CPU-bound from start to finish —
-  # raising `--test-concurrency` from 3 to 10 moved it by 5%, because four
-  # cores were already saturated. More runners is the only thing that moves it.
-  #
-  # Shards are round-robin over the file list, which spreads the expensive
-  # `pg-*` files rather than giving one shard all of them. Nothing is skipped
-  # and nothing is excluded: shard N of M runs file i for every i where
-  # i % M == N, so the six shards together are exactly `pnpm test`.
+  # Six runners, each running its share of `test/*.test.ts` through
+  # `test/run.ts`: the files are dealt out by recorded cost (`test/timings.json`)
+  # so the expensive `pg-*` files are spread evenly, and within a runner they run
+  # in one long-lived process per vCPU (`--test-isolation=none`) rather than one
+  # process per file, which used to re-load the app's module graph ~100 times.
+  # Nothing is skipped and nothing is excluded: the six shards together are
+  # exactly the files listed here.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -65,10 +61,9 @@ jobs:
       FABULIST_TEST_PG: postgres://postgres:postgres@127.0.0.1:5432/fabulist_test
       FABULIST_REQUIRE_TEST_PG: '1'
       FABULIST_TEST_PG_SCALE: '1'
-      # `node --test` runs every file in its own process, so the same ~100-file
-      # TypeScript module graph was compiled from scratch for each one. The
-      # compile cache is shared by all of them. Kept out of the repo — the
-      # runner is thrown away afterwards.
+      # Each test process compiles the same TypeScript module graph; the compile
+      # cache is shared by all of them. Kept out of the repo — the runner is
+      # thrown away afterwards.
       NODE_COMPILE_CACHE: /tmp/fabulist-node-compile-cache
     steps:
       - uses: actions/checkout@v7
@@ -103,8 +98,4 @@ jobs:
             "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('fsync','full_page_writes','synchronous_commit') ORDER BY name"
 
       - name: run test shard ${{ matrix.shard }}/6
-        run: |
-          set -euo pipefail
-          mapfile -t files < <(ls test/*.test.ts | awk -v s="${{ matrix.shard }}" -v n=6 'NR % n == s')
-          echo "shard ${{ matrix.shard }}/6 — ${#files[@]} files"
-          node --disable-warning=ExperimentalWarning --import ./test/setup.ts --test "${files[@]}"
+        run: node test/run.ts --shard=${{ matrix.shard }}/6 test/*.test.ts
