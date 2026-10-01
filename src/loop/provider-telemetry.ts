@@ -33,8 +33,12 @@ export function providerErrorKind(error: unknown): string {
 
 /** Longest error text `ai.call` keeps. */
 const ERROR_DETAIL_MAX = 300;
-/** A run this long copied from the request is treated as the request's content. */
-const ECHO_MIN = 12;
+/**
+ * A run this long copied from the request is treated as the request's content.
+ * Shorter runs are mostly stock phrases ("does not exist") that story text
+ * happens to share, and redacting them hid the provider's actual reason.
+ */
+const ECHO_MIN = 20;
 
 /**
  * What `ai.call` records about a failure: the error class, the HTTP status, and

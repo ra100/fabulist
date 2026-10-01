@@ -131,6 +131,18 @@ export class ProviderKeyRejectedError extends Error {
   }
 }
 
+/**
+ * Whether `model` names the Jev decision model itself, which only the typed
+ * API serves: `typesafe/jev-1.13`, `~typesafe/jev-latest`, `jev-latest`.
+ *
+ * OpenRouter's model catalog also lists `typesafe/jev-router`, a chat model
+ * that uses Jev to pick *another* model. The typed API answers it with
+ * `400 Model … does not exist`, so any other id goes over chat completions.
+ */
+export function isJevDecisionModel(model: string): boolean {
+  return /^~?(?:typesafe\/)?jev-(?:\d[\w.-]*|latest)$/i.test(model.trim());
+}
+
 // A redirect would carry the user's key and prompt to wherever the Location points.
 function noRedirects(fetcher: typeof fetch = fetch): typeof fetch {
   return (input, init) => fetcher(input, { ...init, redirect: 'error' });
@@ -158,7 +170,7 @@ export function byokProvider(
       // own say-so, which is a weaker guarantee. See `JevCompatProvider`.
       const inner =
         req.role === 'jev-fastpath'
-          ? endpoint.typedUrl
+          ? endpoint.typedUrl && isJevDecisionModel(model)
             ? new JevProvider({ ...opts, url: endpoint.typedUrl })
             : new JevCompatProvider(endpoint.id, opts)
           : endpoint.kind === 'anthropic'
