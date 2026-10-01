@@ -47,6 +47,7 @@ import {
   narrate,
   referee,
   type RoleDeps,
+  suggestOptions,
 } from './roles.ts';
 import type { ValidationResult } from './validate.ts';
 import type { ProviderCallTelemetry } from './provider-telemetry.ts';
@@ -731,6 +732,17 @@ export class Engine {
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  /**
+   * Next-step options for the player character, on request. Reads the story and
+   * writes nothing: the options go back to the player, who picks one, edits it,
+   * or ignores them all, and only what they then send becomes a turn.
+   */
+  async suggestNext(opts: { world?: World } = {}): Promise<{ options: string[] }> {
+    const world = opts.world ?? this.getWorld();
+    if (!world.session.get().playerCharacterId) throw new Error('no player character yet; start the story first');
+    return { options: await suggestOptions(this.deps(world, [])) };
   }
 
   /** Answers a world question from state without advancing the story. */

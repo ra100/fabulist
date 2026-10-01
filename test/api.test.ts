@@ -345,6 +345,19 @@ test('pinned prose survives a re-render attempt', async () => {
   });
 });
 
+test('the suggest endpoint returns next-step options and writes nothing', async () => {
+  await withServer(async (base, world) => {
+    await send(base, 'POST', '/api/play', { input: 'i keep copying' });
+    const turnsBefore = world.chronicle.turns().length;
+
+    const res = await send(base, 'POST', '/api/suggest', {});
+    assert.equal(res.status, 200);
+    const { options } = res.body as { options: string[] };
+    assert.ok(Array.isArray(options) && options.length > 0);
+    assert.equal(world.chronicle.turns().length, turnsBefore, 'asking for options is not a turn');
+  });
+});
+
 test('the regenerate endpoint rewrites prose without touching the committed delta', async () => {
   await withServer(async (base, world) => {
     await send(base, 'POST', '/api/play', { input: 'i keep copying' });

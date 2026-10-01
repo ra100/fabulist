@@ -96,6 +96,19 @@ export const directorSchema: JsonSchema = {
   },
 };
 
+/** Next-step options for the player: a short list of in-character moves, never a decision. */
+export const suggestSchema: JsonSchema = {
+  name: 'suggest',
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['options'],
+    properties: {
+      options: { type: 'array', items: { type: 'string' } },
+    },
+  },
+};
+
 export const deltaSchema: JsonSchema = {
   name: 'delta',
   schema: {

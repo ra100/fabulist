@@ -48,6 +48,7 @@ import {
   narrate,
   referee,
   type RoleDeps,
+  suggestOptions,
 } from './roles-pg.ts';
 import type { ValidationResult } from './validate-pg.ts';
 import type { ProviderCallTelemetry } from './provider-telemetry.ts';
@@ -830,6 +831,22 @@ export class Engine {
     const session = await world.session.get();
     const data = await loadFrameData(world, session);
     return { turn, session, data, fingerprint: narratorFrameFingerprint(turn, session, data) };
+  }
+
+  /**
+   * Next-step options for the player character, on request. Reads the story and
+   * writes nothing: the options go back to the player, who picks one, edits it,
+   * or ignores them all, and only what they then send becomes a turn.
+   */
+  async suggestNext(
+    opts: { world?: World; providers?: Registry; onProviderCall?: (call: ProviderCallTelemetry) => void } = {},
+  ): Promise<{ options: string[] }> {
+    const world = opts.world ?? (await this.getWorld());
+    const session = await world.session.get();
+    if (!session.playerCharacterId) throw new Error('no player character yet; start the story first');
+    const data = await loadFrameData(world, session);
+    const deps = this.deps(world, session, data, [], {}, this.registryFor(opts.providers), opts.onProviderCall);
+    return { options: await suggestOptions(deps) };
   }
 
   /** Answers a world question from state without advancing the story. */

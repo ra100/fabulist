@@ -314,6 +314,7 @@ const PAID_ROUTES = new Set<string>([
   'POST /api/play',
   'POST /api/play/stream',
   'POST /api/turn/:id/regenerate',
+  'POST /api/suggest',
   'POST /api/compact',
   'POST /api/scene/close',
   'POST /api/illustrate/portrait/:id',
@@ -921,6 +922,26 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { db, engine, world,
     if (message.includes('pinned') || message.includes('changed while prose was being rendered'))
       return send(res, 409, { error: message });
     if (message.startsWith('no turn ')) return send(res, 404, { error: message });
+    throw err;
+  }
+});
+
+/**
+ * Next-step options for the player character, asked for by hand after a turn.
+ * Writes nothing: the player picks one into the composer, edits it, and plays it
+ * like anything else they type.
+ */
+route('POST', '/api/suggest', async (_req, res, { engine, world, providers, requestId }) => {
+  try {
+    const result = await engine.suggestNext({
+      world,
+      providers,
+      onProviderCall: (call) => logProviderCall(requestId, call),
+    });
+    send(res, 200, result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith('no player character')) return send(res, 409, { error: message });
     throw err;
   }
 });

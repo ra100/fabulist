@@ -439,6 +439,27 @@ export function buildNarratorFrame(ctx: FrameContext): Frame {
   return assembleFrame(specs, { budget: ctx.budget, tokenizer: ctx.tokenizer });
 }
 
+/**
+ * What the player could do next: their own sheet and who is with them, where
+ * they are, how the scene has been reading, and the threads with an opening.
+ * Seen only by the suggestion role, which proposes and never commits.
+ */
+export function buildSuggestFrame(ctx: FrameContext): Frame {
+  const ids = presentIds(ctx);
+  const { world } = ctx;
+  const specs: SlotSpec[] = [
+    { name: 'player', priority: Priority.agreedBeat, content: ctx.session.playerCharacterId, evictable: false },
+    { name: 'present-cast', priority: Priority.presentCast, content: presentCastBlock(ctx, ids), evictable: false, maxTokens: 2000 },
+    { name: 'location', priority: Priority.locationCard, content: locationCard(ctx), maxTokens: 600 },
+    { name: 'recent-prose', priority: Priority.recentProse, content: recentProse(ctx, 3), maxTokens: 1500, preserveEnd: true },
+    { name: 'threads', priority: Priority.openThreads, content: renderThreads(world.threads.open(ACTIVE_THREAD_BUDGET)), maxTokens: 800 },
+    { name: 'directives', priority: Priority.styleContract, content: world.directives.active().map((d) => `[${d.strength}] ${d.text}`).join('\n'), maxTokens: 300 },
+    { name: 'epistemic-mask', priority: Priority.epistemicMask, content: epistemicMask(ctx), maxTokens: 500 },
+    { name: 'turn-summaries', priority: Priority.turnSummaries, content: turnSummaries(ctx, 12), maxTokens: 600, preserveEnd: true },
+  ];
+  return assembleFrame(specs, { budget: ctx.budget, tokenizer: ctx.tokenizer });
+}
+
 /** Extraction sees the prose it must convert, plus ids it may reference. */
 export function buildExtractFrame(ctx: FrameContext, prose: string): Frame {
   const ids = presentIds(ctx);

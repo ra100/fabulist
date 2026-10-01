@@ -68,6 +68,7 @@ import {
   useProvidersQuery,
   useRebuildCanonMutation,
   useRegenerateMutation,
+  useSuggestMutation,
   useRemoveStoryMutation,
   useRemoveWorldMutation,
   useRenameStoryMutation,
@@ -1021,6 +1022,11 @@ function BookTab({
   const [rerollNote, setRerollNote] = useState('');
   /** Which turn is mid-reroll, so its button can say so and nothing else races it. */
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
+  /** Next-step options, asked for by hand, and the turn they were read from. */
+  const [suggestions, setSuggestions] = useState<{ turnId: string | null; options: string[] } | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestError, setSuggestError] = useState<string | null>(null);
+  const composerInput = useRef<HTMLTextAreaElement>(null);
   /**
    * Only reachable below 960px, where `.side-toggle` is a real disclosure
    * rather than the `display: contents` pass-through it is on desktop — see
@@ -1045,6 +1051,7 @@ function BookTab({
   const rollbackMutation = useRollbackMutation();
   const splitSceneMutation = useSplitSceneMutation();
   const regenerateMutation = useRegenerateMutation();
+  const suggestMutation = useSuggestMutation();
   const pinMutation = usePinMutation();
   const addAnchorMutation = useAddAnchorMutation();
 
@@ -1101,6 +1108,38 @@ function BookTab({
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' });
   }, [turns.length, awaiting]);
+
+  // Options describe the moment after one turn; once the next lands they are stale.
+  useEffect(() => {
+    setSuggestions((prev) => (prev && prev.turnId !== lastTurnId ? null : prev));
+    setSuggestError(null);
+  }, [lastTurnId]);
+
+  async function requestOptions() {
+    if (suggesting || busy || !turns.length) return;
+    const turnId = lastTurnId;
+    setSuggesting(true);
+    setSuggestError(null);
+    try {
+      const { options } = await suggestMutation.mutateAsync();
+      setSuggestions({ turnId, options });
+      if (!options.length) setSuggestError('no options came back; try again');
+    } catch (e) {
+      setSuggestError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSuggesting(false);
+    }
+  }
+
+  /** Puts an option in the composer for editing; it is not played until the player sends it. */
+  function pickOption(option: string) {
+    setInput(option);
+    const el = composerInput.current;
+    if (el) {
+      el.focus();
+      requestAnimationFrame(() => el.setSelectionRange(option.length, option.length));
+    }
+  }
 
   async function play(text: string, override = false) {
     if (!text.trim() || busy || !beginMutation()) return;
@@ -1633,7 +1672,34 @@ function BookTab({
               )
             ) : null}
 
+            {turns.length && !busy && !interrupt ? (
+              <div className="suggestions" aria-live="polite">
+                <div className="row">
+                  <b className="grow">what could you do next</b>
+                  <button
+                    type="button"
+                    title="suggest what your character could do next; nothing is played until you send it"
+                    disabled={mutationPending || suggesting}
+                    onClick={() => void requestOptions()}
+                  >
+                    {suggesting ? 'thinking…' : suggestions?.options.length ? 'more options' : 'request options'}
+                  </button>
+                </div>
+                {suggestions?.options.length ? (
+                  <div className="opts">
+                    {suggestions.options.map((o) => (
+                      <button key={o} type="button" title="put this in the composer to edit" onClick={() => pickOption(o)}>
+                        {o}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                {suggestError ? <div className="small dim">{suggestError}</div> : null}
+              </div>
+            ) : null}
+
             <textarea
+              ref={composerInput}
               value={input}
               placeholder="Write roughly. The book gets the worked version."
               onChange={(e) => setInput(e.target.value)}
