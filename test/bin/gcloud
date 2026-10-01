@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for the Google Cloud CLI during tests; see test/setup.ts.
+echo "gcloud is stubbed out in the test suite" >&2
+exit 1

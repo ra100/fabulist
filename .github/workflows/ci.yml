@@ -107,4 +107,4 @@ jobs:
           set -euo pipefail
           mapfile -t files < <(ls test/*.test.ts | awk -v s="${{ matrix.shard }}" -v n=6 'NR % n == s')
           echo "shard ${{ matrix.shard }}/6 — ${#files[@]} files"
-          node --disable-warning=ExperimentalWarning --test "${files[@]}"
+          node --disable-warning=ExperimentalWarning --import ./test/setup.ts --test "${files[@]}"
