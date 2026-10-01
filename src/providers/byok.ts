@@ -1,7 +1,7 @@
 import { JevCompatProvider, JevProvider, caps } from './http.ts';
 import { OpenAISdkProvider } from './openai-sdk.ts';
 import { AnthropicSdkProvider } from './anthropic-sdk.ts';
-import { ProviderHttpError, scrubSecrets, type CompletionRequest, type CompletionResult, type Provider } from './provider.ts';
+import { ProviderHttpError, scrubProviderError, scrubSecrets, type CompletionRequest, type CompletionResult, type Provider } from './provider.ts';
 
 // Re-exported so existing callers keep one obvious home for credential handling.
 export { scrubSecrets } from './provider.ts';
@@ -190,7 +190,7 @@ export function byokProvider(
           // copy would send someone to rotate a working credential.
           throw new ProviderKeyRejectedError(err.status, providerErrorReason(err.body ?? '', [apiKey]));
         }
-        throw new Error(scrubSecrets(err instanceof Error ? err.message : String(err), [apiKey]));
+        throw scrubProviderError(err, [apiKey]);
       }
     },
   };

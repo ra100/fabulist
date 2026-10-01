@@ -144,6 +144,19 @@ export function scrubSecrets(text: string, known: readonly string[] = []): strin
   return out;
 }
 
+/**
+ * Rebuilds a provider failure with secrets scrubbed, keeping what diagnosis
+ * needs: an HTTP failure stays a `ProviderHttpError` with its status and body,
+ * and anything else keeps its `cause`, which is where a fetch failure says why.
+ */
+export function scrubProviderError(err: unknown, known: readonly string[] = []): Error {
+  if (err instanceof ProviderHttpError) {
+    return new ProviderHttpError(err.status, scrubSecrets(err.message, known), scrubSecrets(err.body, known));
+  }
+  const message = scrubSecrets(err instanceof Error ? err.message : String(err), known);
+  return err instanceof Error && err.cause !== undefined ? new Error(message, { cause: err.cause }) : new Error(message);
+}
+
 export interface Provider {
   readonly id: string;
   readonly model: string;

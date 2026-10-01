@@ -1,5 +1,5 @@
-import { ProviderKeyLockedError, ProviderKeyRejectedError, scrubSecrets } from './byok.ts';
-import type { CompletionRequest, CompletionResult, Provider, Registry } from './provider.ts';
+import { ProviderKeyLockedError, ProviderKeyRejectedError } from './byok.ts';
+import { scrubProviderError, type CompletionRequest, type CompletionResult, type Provider, type Registry } from './provider.ts';
 
 export type UsageSink = (call: {
   role: string;
@@ -29,7 +29,7 @@ function metered(inner: Provider, sink: UsageSink): Provider {
         result = await inner.complete(req);
       } catch (err) {
         if (err instanceof ProviderKeyLockedError || err instanceof ProviderKeyRejectedError) throw err;
-        throw new Error(scrubSecrets(err instanceof Error ? err.message : String(err)));
+        throw scrubProviderError(err);
       }
       if (inner.id !== 'mock') {
         // Not awaited: the caller may hold a pooled connection in a tx, and waiting on a second one can deadlock the pool.

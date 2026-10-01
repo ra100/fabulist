@@ -243,3 +243,37 @@ test('the reason parser reads the two error shapes these gateways use', () => {
   assert.equal(providerErrorReason('{"message":42}'), '');
   assert.equal(providerErrorReason('{"message":"key sk-abcdefghijklmnop is bad"}', ['sk-abcdefghijklmnop']), 'key [redacted] is bad');
 });
+
+test('a failed Jev call logs the status and the provider\'s reason, not just "Error"', async () => {
+  // Anything but a key refusal used to be rewrapped as a bare Error, so a 400
+  // for a bad model id logged as `errorKind: "Error"` with nothing else to go on.
+  const key = 'sk-user-0123456789abcdef';
+  const body = JSON.stringify({ error: { code: 400, message: `Model does not exist (key ${key})` } });
+  const fetcher = (async () => new Response(body, { status: 400 })) as unknown as typeof fetch;
+  const provider = byokProvider(byokEndpoint('openrouter')!, 'typesafe/jev-1.13', () => key, fetcher);
+  const calls: Array<Record<string, unknown>> = [];
+  const verdicts = await checkWithJev(
+    { optionalProvider: () => provider, log: () => {}, onProviderCall: (call) => calls.push({ ...call }) },
+    { rawInput: 'I copy the page.', refereeState: 'The scriptorium is open.' },
+  );
+  assert.deepEqual(verdicts, {});
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.ok, false);
+  assert.equal(calls[0]?.errorKind, 'ProviderHttpError');
+  assert.equal(calls[0]?.errorStatus, 400);
+  assert.equal(calls[0]?.errorDetail, 'Model does not exist (key [redacted])');
+});
+
+test('a Jev call that never reached the provider logs the network error code', async () => {
+  const fetcher = (async () => {
+    throw new TypeError('fetch failed', { cause: Object.assign(new Error('getaddrinfo'), { code: 'ENOTFOUND' }) });
+  }) as unknown as typeof fetch;
+  const provider = byokProvider(byokEndpoint('openrouter')!, 'typesafe/jev-1.13', () => 'sk-user', fetcher);
+  const calls: Array<Record<string, unknown>> = [];
+  await checkWithJev(
+    { optionalProvider: () => provider, log: () => {}, onProviderCall: (call) => calls.push({ ...call }) },
+    { rawInput: 'I copy the page.', refereeState: 'The scriptorium is open.' },
+  );
+  assert.equal(calls[0]?.errorDetail, 'ENOTFOUND');
+  assert.equal(calls[0]?.errorStatus, undefined);
+});
