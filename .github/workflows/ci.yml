@@ -98,4 +98,4 @@ jobs:
             "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('fsync','full_page_writes','synchronous_commit') ORDER BY name"
 
       - name: run test shard ${{ matrix.shard }}/6
-        run: node test/run.ts --shard=${{ matrix.shard }}/6 test/*.test.ts
+        run: node test/run.ts --record --shard=${{ matrix.shard }}/6 test/*.test.ts && echo TIMINGS-JSON && cat test/timings.json
