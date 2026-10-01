@@ -38,7 +38,7 @@ import {
 import { adaptRequest, extractJson, type CompletionResult, type Provider } from '../providers/provider.ts';
 import type { World } from '../store/index-pg.ts';
 import { narrationOutputTokenBudget, narrationWordRange } from './narration-budget.ts';
-import { providerErrorKind, type ProviderCallTelemetry } from './provider-telemetry.ts';
+import { providerErrorFields, type ProviderCallTelemetry } from './provider-telemetry.ts';
 import { checkWithJev, type JevFastPathResult } from './jev-fastpath.ts';
 import {
   coerceAgentDelta,
@@ -106,7 +106,7 @@ async function callJson(
         provider: provider.id,
         durationMs: Date.now() - started,
         ok: false,
-        errorKind: providerErrorKind(err),
+        ...providerErrorFields(err),
       });
       throw err;
     }
@@ -534,7 +534,7 @@ export async function narrate(
       streaming: !!req.onToken,
       durationMs: Date.now() - started,
       ok: false,
-      errorKind: providerErrorKind(err),
+      ...providerErrorFields(err),
     });
     throw err;
   }
@@ -579,7 +579,7 @@ export async function narrate(
         streaming: false,
         durationMs: Date.now() - retryStarted,
         ok: false,
-        errorKind: providerErrorKind(err),
+        ...providerErrorFields(err),
       });
       throw err;
     }

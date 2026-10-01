@@ -85,5 +85,7 @@ export function logProviderCall(requestId: string, call: ProviderCallTelemetry):
     durationMs: call.durationMs,
     ok: call.ok,
     errorKind: call.errorKind,
+    errorStatus: call.errorStatus,
+    errorDetail: call.errorDetail,
   });
 }

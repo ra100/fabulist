@@ -1,6 +1,6 @@
 import type { CompletionRequest, Provider } from '../providers/provider.ts';
 import { extractJson } from '../providers/provider.ts';
-import { providerErrorKind, type ProviderCallTelemetry } from './provider-telemetry.ts';
+import { providerErrorFields, type ProviderCallTelemetry } from './provider-telemetry.ts';
 
 export interface JevFastPathResult {
   integrity?: true;
@@ -94,7 +94,7 @@ export async function checkWithJev(
       provider: provider.id,
       durationMs: Date.now() - started,
       ok: false,
-      errorKind: providerErrorKind(error),
+      ...providerErrorFields(error),
     });
     return {};
   }
