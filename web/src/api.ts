@@ -658,7 +658,8 @@ export type ProviderModelRole =
   | 'summarize'
   | 'setup'
   | 'extract'
-  | 'passb';
+  | 'passb'
+  | 'image';
 
 export interface ProviderModelAssignment {
   role: ProviderModelRole;

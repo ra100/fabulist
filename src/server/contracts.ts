@@ -300,13 +300,14 @@ export const providerModelAssignmentsBodySchema = z
               'setup',
               'extract',
               'passb',
+              'image',
             ]),
             providerKeyId: providerKeyIdSchema,
             model: providerModelIdSchema,
           })
           .strict(),
       )
-      .max(11),
+      .max(12),
   })
   .strict()
   .superRefine((body, context) => {

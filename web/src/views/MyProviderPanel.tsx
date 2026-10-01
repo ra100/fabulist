@@ -35,7 +35,12 @@ const ROLE_OPTIONS: Array<{ role: ProviderModelRole; label: string }> = [
   { role: 'setup', label: 'Setup' },
   { role: 'extract', label: 'Extract' },
   { role: 'passb', label: 'Pass B' },
+  { role: 'image', label: 'Images' },
 ];
+
+/** Saved credentials that can make images; mirrors `IMAGE_CAPABLE_ENDPOINTS` on the server. */
+const IMAGE_ENDPOINTS = new Set(['openai']);
+const isImageModel = (model: string) => /image|dall-e/i.test(model);
 
 interface ModelDraft {
   providerKeyId: string;
@@ -383,13 +388,21 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
         {!state.keys.length ? <p className="empty">Save a provider credential before assigning models.</p> : null}
         {ROLE_OPTIONS.map(({ role, label: roleLabel }) => {
           const draft = modelDrafts[role];
-          const listId = 'provider-models-' + draft.providerKeyId;
+          const listId = `${role === 'image' ? 'provider-image-models-' : 'provider-models-'}${draft.providerKeyId}`;
+          const choices =
+            role === 'image' ? state.keys.filter(({ key }) => IMAGE_ENDPOINTS.has(key.endpointId)) : state.keys;
           return (
             <div className="provider-model-role" key={role}>
               <h4>{roleLabel}</h4>
               {role === 'jev-fastpath' ? (
                 <p className="small dim">
                   Optional OpenRouter check. Use <span className="mono">typesafe/jev-1.13</span>; unclear or unsafe results use your full Integrity and Referee routes.
+                </p>
+              ) : null}
+              {role === 'image' ? (
+                <p className="small dim">
+                  Portraits and scene illustrations. Uses an OpenAI credential and does not fall back to Narration;
+                  without an assignment, images keep the server's image setting.
                 </p>
               ) : null}
               <label className="field-row">
@@ -407,13 +420,12 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
                     }))
                   }
                 >
-                  <option value="">use fallback</option>
-                  {state.keys
-                    .map(({ key }) => (
-                      <option key={key.id} value={key.id}>
-                        {providerName(key)}
-                      </option>
-                    ))}
+                  <option value="">{role === 'image' ? 'use server image setting' : 'use fallback'}</option>
+                  {choices.map(({ key }) => (
+                    <option key={key.id} value={key.id}>
+                      {providerName(key)}
+                    </option>
+                  ))}
                 </select>
               </label>
               <label className="field-row">
@@ -421,7 +433,9 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
                 <input
                   list={draft.providerKeyId ? listId : undefined}
                   value={draft.model}
-                  placeholder={role === 'jev-fastpath' ? 'typesafe/jev-1.13' : undefined}
+                  placeholder={
+                    role === 'jev-fastpath' ? 'typesafe/jev-1.13' : role === 'image' ? 'gpt-image-1' : undefined
+                  }
                   disabled={!draft.providerKeyId || modelBusy}
                   onChange={(event) =>
                     setModelDrafts((previous) => ({ ...previous, [role]: { ...draft, model: event.target.value } }))
@@ -445,6 +459,15 @@ export function MyProviderPanel({ user }: { user: CurrentUser }) {
             ))}
           </datalist>
         ))}
+        {state.keys
+          .filter(({ key }) => IMAGE_ENDPOINTS.has(key.endpointId))
+          .map(({ key }) => (
+            <datalist id={`provider-image-models-${key.id}`} key={`image-${key.id}`}>
+              {(catalogs[key.id] ?? []).filter(isImageModel).map((model) => (
+                <option key={model} value={model} />
+              ))}
+            </datalist>
+          ))}
         <button type="button" disabled={!assignmentCanSave} onClick={() => void saveModelAssignments()}>
           save model assignments
         </button>

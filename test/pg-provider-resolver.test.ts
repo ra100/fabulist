@@ -356,3 +356,69 @@ test('an explicit assignment cannot be saved to a credential owned by another us
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('an image assignment routes illustrations through the saved OpenAI credential, separately from text', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    const imageCalls: Array<{ url: string; authorization: string; model: string }> = [];
+    const fetcher = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const body = JSON.parse(String(init.body)) as { model: string };
+      imageCalls.push({
+        url: String(input),
+        authorization: new Headers(init.headers).get('authorization') ?? '',
+        model: body.model,
+      });
+      return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('png').toString('base64') }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const { resolver } = resolverFor(roles.play, { fetcher });
+
+    assert.equal(await resolver.imageProviderFor(alice), null, 'no assignment keeps the server image profile');
+    assert.equal(await resolver.imageProviderFor(null), null);
+
+    await resolver.save(alice, sealed(40));
+    await resolver.saveAssignments(alice, [{ role: 'image', providerKeyId: keyId(40), model: 'gpt-image-1' }]);
+    assert.equal(await resolver.status(alice), 'server', 'an image-only assignment does not claim the text roles');
+    assert.equal((await resolver.forRequest(alice)).get('narrate').id, 'server-stub');
+
+    const image = await resolver.imageProviderFor(alice);
+    assert.ok(image);
+    await image.generate({ prompt: 'a lighthouse' });
+    assert.deepEqual(imageCalls, [
+      {
+        url: 'https://api.openai.com/v1/images/generations',
+        authorization: `Bearer ${ALICE_KEY}`,
+        model: 'gpt-image-1',
+      },
+    ]);
+    assert.equal(await resolver.imageProviderFor(bob), null, 'another user never gets this assignment');
+
+    await resolver.remove(alice, keyId(40));
+    assert.equal(await resolver.imageProviderFor(alice), null, 'removing the credential clears its image assignment');
+    assert.deepEqual(await resolver.assignments(alice), []);
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
+test('the image role refuses a credential that cannot make images and a locked one', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    const { resolver } = resolverFor(roles.play);
+    await resolver.save(alice, sealed(41, 'anthropic', ANTHROPIC_KEY));
+    await assert.rejects(
+      resolver.saveAssignments(alice, [{ role: 'image', providerKeyId: keyId(41), model: 'claude' }]),
+      ProviderKeyInputError,
+    );
+
+    await resolver.save(alice, unlockMode(42));
+    await resolver.saveAssignments(alice, [{ role: 'image', providerKeyId: keyId(42), model: 'gpt-image-1' }]);
+    const image = await resolver.imageProviderFor(alice);
+    assert.ok(image);
+    await assert.rejects(
+      image.generate({ prompt: 'p' }),
+      ProviderKeyLockedError,
+      'a locked key is not swapped for the server profile',
+    );
+  });
+  if (!ran) t.skip('no Postgres configured');
+});

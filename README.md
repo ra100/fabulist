@@ -369,7 +369,7 @@ Four paths are **deliberately still bespoke**, because no supported module provi
 | **vLLM and llama.cpp** | constrain decoding through their own fields (`guided_json`, a bare `json_schema`) and ignore `response_format`, so sending it yields prose instead of JSON |
 | **Ollama** | a different API shape entirely: `/api/chat`, a `format` constraint, and an NDJSON stream |
 | **GitHub Copilot** | an internal, unversioned endpoint; the unofficial Copilot packages are explicitly not adopted |
-| **Image generation** | a separate model surface, still signed with this repo's own SigV4 |
+| **Image generation** | a separate model surface: Bedrock is still signed with this repo's own SigV4, and a user's own OpenAI key calls the Images API directly |
 
 `transport` on a provider spec picks the implementation: `sdk` (the default for compatible
 endpoints) or `legacy`. `FABULIST_PROVIDER_TRANSPORT=legacy` rolls every compatible target
@@ -574,6 +574,11 @@ sheet gets a portrait generator, every turn in the book gets an "illustrate this
 button. Five styles — realistic, drawing, sketch, draft, animation — independent of the
 prose register, so a noir mystery can still be drawn as `drawing` rather than forced into
 `realistic` because the tone is grim.
+
+When sign-in is on, each user can also pick their own image model under **Settings →
+configure models → Images**, using a saved OpenAI credential (for example `gpt-image-1`).
+That assignment is separate from the text roles and never falls back to Narration. Without
+one, images keep using the server's image setting; removing the credential clears it.
 
 Three levers solve the consistency problem that breaks most illustrated interactive
 fiction, stacked rather than assumed alone sufficient:

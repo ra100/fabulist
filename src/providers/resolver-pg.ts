@@ -24,8 +24,10 @@ import {
   ProviderKeyRejectedError,
 } from './byok.ts';
 export { ProviderKeyLockedError };
+import type { ImageProvider } from './image.ts';
 import { MeteredRegistry, type UsageSink } from './metered.ts';
 import { MockProvider } from './mock.ts';
+import { IMAGE_CAPABLE_ENDPOINTS, OpenAIImageProvider } from './openaiImage.ts';
 import {
   ProviderRegistry,
   type CompletionRequest,
@@ -163,6 +165,7 @@ export class ProviderResolver {
   async status(user: SessionUser): Promise<ProviderStatus> {
     const { source, assignments, keys } = await this.resolve(user);
     if (source !== 'own') return source;
+    // `assignments` here are the text roles only; the image role reports through `/api/images/status`.
     const byId = new Map(keys.map((row) => [row.id, row]));
     for (const assignment of assignments) {
       const row = byId.get(assignment.providerKeyId);
@@ -241,6 +244,14 @@ export class ProviderResolver {
     // No endpoint is special-cased here any more: any saved provider can take
     // the optional Jev fast check, and which one is the user's decision. The
     // foreign-key check below still rejects a provider that is not theirs.
+    const image = assignments.find(({ role }) => role === 'image');
+    if (image) {
+      const { keys } = await this.cached(user.id);
+      const row = keys.find((key) => key.id === image.providerKeyId);
+      if (row && !IMAGE_CAPABLE_ENDPOINTS.has(row.endpointId)) {
+        throw new ProviderKeyInputError('image generation currently works with an OpenAI credential only');
+      }
+    }
     try {
       await saveProviderModelAssignments(this.db, user.id, assignments);
     } catch (err) {
@@ -251,6 +262,31 @@ export class ProviderResolver {
     }
     this.invalidate(user.id);
     return this.assignments(user);
+  }
+
+  /**
+   * The user's own image provider, or null when they have not assigned one, in
+   * which case illustration keeps using the server-configured profile. A
+   * missing or unsupported credential yields a provider that refuses rather
+   * than silently spending the server's image budget instead.
+   */
+  async imageProviderFor(user: SessionUser | null): Promise<ImageProvider | null> {
+    if (!user) return null;
+    const { keys, assignments } = await this.cached(user.id);
+    const assignment = assignments.find(({ role }) => role === 'image');
+    if (!assignment) return null;
+    const row = keys.find((key) => key.id === assignment.providerKeyId);
+    const endpoint = row ? byokEndpoint(row.endpointId) : undefined;
+    if (!row || !endpoint || !IMAGE_CAPABLE_ENDPOINTS.has(endpoint.id)) {
+      return unavailableImageProvider(assignment.model);
+    }
+    return new OpenAIImageProvider({
+      model: assignment.model,
+      apiKey: () => this.secretFor(user.id, row),
+      baseUrl: endpoint.baseUrl,
+      fetcher: this.fetcher,
+      keyId: row.id,
+    });
   }
 
   lock(userId: string, keyId?: string): boolean {
@@ -367,7 +403,10 @@ export class ProviderResolver {
 
   private async resolve(user: SessionUser | null, storyId?: string): Promise<Resolution> {
     if (!user) return { registry: this.server, source: 'server', assignments: [], keys: [] };
-    const own = await this.cached(user.id);
+    const cached = await this.cached(user.id);
+    // The image role never routes text, so a user whose only assignment is an
+    // image model still gets the server (or mock) text fallback.
+    const own = { ...cached, assignments: textAssignments(cached.assignments) };
     if (!own.assignments.length) {
       const fallback = this.fallback(user);
       return {
@@ -462,4 +501,19 @@ export class ProviderResolver {
       return recordUsage(this.db, { userId, storyId: storyId ?? null, keySource: source ?? keySource, ...usage });
     };
   }
+}
+
+function textAssignments(assignments: ProviderModelAssignment[]): ProviderModelAssignment[] {
+  return assignments.filter(({ role }) => role !== 'image');
+}
+
+function unavailableImageProvider(model: string): ImageProvider {
+  return {
+    id: 'unavailable',
+    model,
+    capabilities: { imageConditioning: false, seedControl: false, costTier: 'mid', qualityTier: 0 },
+    async generate() {
+      throw new ProviderKeyLockedError('the credential assigned to image generation is missing or cannot make images');
+    },
+  };
 }
