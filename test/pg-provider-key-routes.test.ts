@@ -365,3 +365,33 @@ test('key test distinguishes success, rejection, unsupported catalogs, and netwo
   });
   if (!ran) t.skip('no Postgres configured');
 });
+
+test('an image model assignment is saved by role and makes illustration available to that user only', async (t) => {
+  const ran = await withPg(async (_db, _schema, roles) => {
+    await withKeyServer(roles, async (as) => {
+      assert.deepEqual(body(await as('alice', 'GET', '/api/images/status')), { profile: 'none', ready: false });
+      const saved = await as('alice', 'POST', '/api/provider-keys', {
+        id: KEY1,
+        label: 'Images',
+        endpointId: 'openai',
+        trust: 'sealed',
+        key: ALICE_KEY,
+      });
+      assert.equal(saved.status, 201, JSON.stringify(saved.body));
+      const assigned = await as('alice', 'PUT', '/api/provider-models', {
+        assignments: [{ role: 'image', providerKeyId: KEY1, model: 'gpt-image-1' }],
+      });
+      assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+      assert.deepEqual(body(assigned).assignments, [{ role: 'image', providerKeyId: KEY1, model: 'gpt-image-1' }]);
+
+      assert.deepEqual(body(await as('alice', 'GET', '/api/images/status')), { profile: 'own', ready: true });
+      assert.deepEqual(body(await as('bob', 'GET', '/api/images/status')), { profile: 'none', ready: false });
+      assert.equal(body(await as('alice', 'GET', '/api/provider-keys')).status, 'server');
+
+      assert.equal((await as('alice', 'DELETE', `/api/provider-keys/${KEY1}`)).status, 200);
+      assert.deepEqual(body(await as('alice', 'GET', '/api/provider-models')).assignments, []);
+      assert.deepEqual(body(await as('alice', 'GET', '/api/images/status')), { profile: 'none', ready: false });
+    });
+  });
+  if (!ran) t.skip('no Postgres configured');
+});

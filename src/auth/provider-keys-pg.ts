@@ -15,6 +15,7 @@ export const PROVIDER_MODEL_ROLES = [
   'setup',
   'extract',
   'passb',
+  'image',
 ] as const;
 export type ProviderModelRole = (typeof PROVIDER_MODEL_ROLES)[number];
 

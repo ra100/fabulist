@@ -1198,7 +1198,9 @@ function parseVisualStyle(v: unknown): VisualStyle | undefined {
 }
 
 /** User-visible illustration availability, separate from the admin-only provider probe below. */
-route('GET', '/api/images/status', async (_req, res, { imageRegistry }) => {
+route('GET', '/api/images/status', async (_req, res, { imageRegistry, user, providerResolver }) => {
+  const own = await providerResolver?.imageProviderFor(user);
+  if (own) return send(res, 200, { profile: 'own', ready: true });
   const profile = imageRegistry?.profile() ?? 'none';
   send(res, 200, { profile, ready: profile !== 'none' });
 });
@@ -1284,55 +1286,65 @@ route('GET', '/api/illustrate/scene/:turnId/prompt', async (_req, res, { world, 
 });
 
 /** Generates or regenerates a character's portrait. Sets `appearance.referenceImagePath` on success (see `IllustrationService`). */
-route('POST', '/api/illustrate/portrait/:id', async (_req, res, { world, illustrations, params, body }) => {
-  const svc = requireIllustrations(res, illustrations);
-  if (!svc) return;
-  const entityId = decodeURIComponent(params.id ?? '');
-  const { visualStyle: style } = parseBody(illustrationBodySchema, body);
-  try {
-    // `world` explicitly, not the service's own captured getter: this is
-    // the per-request world (per-user when login is on, via
-    // `currentStory.worldFor(user, ...)` above) — see
-    // `IllustrationService.illustratePortrait`'s own doc comment for why
-    // that distinction matters once two users can be generating against
-    // two different stories at once.
-    send(res, 200, await svc.illustratePortrait(entityId, style, world));
-  } catch (err) {
-    send(res, err instanceof NoImageProviderError ? 400 : 500, {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-});
+route(
+  'POST',
+  '/api/illustrate/portrait/:id',
+  async (_req, res, { world, illustrations, params, body, user, providerResolver }) => {
+    const svc = requireIllustrations(res, illustrations);
+    if (!svc) return;
+    const entityId = decodeURIComponent(params.id ?? '');
+    const { visualStyle: style } = parseBody(illustrationBodySchema, body);
+    try {
+      // `world` explicitly, not the service's own captured getter: this is
+      // the per-request world (per-user when login is on, via
+      // `currentStory.worldFor(user, ...)` above) — see
+      // `IllustrationService.illustratePortrait`'s own doc comment for why
+      // that distinction matters once two users can be generating against
+      // two different stories at once.
+      const own = await providerResolver?.imageProviderFor(user);
+      send(res, 200, await svc.illustratePortrait(entityId, style, world, own));
+    } catch (err) {
+      send(res, err instanceof NoImageProviderError ? 400 : 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+);
 
 /** Generates a scene image for an already-committed turn. */
-route('POST', '/api/illustrate/scene/:turnId', async (_req, res, { world, illustrations, params, body }) => {
-  const svc = requireIllustrations(res, illustrations);
-  if (!svc) return;
-  const turnId = decodeURIComponent(params.turnId ?? '');
-  const turn = await world.chronicle.getTurn(turnId);
-  if (!turn) return send(res, 404, { error: 'no such turn' });
-  const { visualStyle: style } = parseBody(illustrationBodySchema, body);
+route(
+  'POST',
+  '/api/illustrate/scene/:turnId',
+  async (_req, res, { world, illustrations, params, body, user, providerResolver }) => {
+    const svc = requireIllustrations(res, illustrations);
+    if (!svc) return;
+    const turnId = decodeURIComponent(params.turnId ?? '');
+    const turn = await world.chronicle.getTurn(turnId);
+    if (!turn) return send(res, 404, { error: 'no such turn' });
+    const { visualStyle: style } = parseBody(illustrationBodySchema, body);
 
-  // Present cast and location come from the delta the turn already committed,
-  // not from a fresh player-supplied list — the illustration must depict what
-  // actually happened, and the delta is the one place that is recorded.
-  const firstEvent = turn.delta?.events[0];
-  const locationId = firstEvent?.locationId ?? (await world.session.get()).currentLocationId ?? null;
-  const presentIds = firstEvent?.participants ?? [];
+    // Present cast and location come from the delta the turn already committed,
+    // not from a fresh player-supplied list — the illustration must depict what
+    // actually happened, and the delta is the one place that is recorded.
+    const firstEvent = turn.delta?.events[0];
+    const locationId = firstEvent?.locationId ?? (await world.session.get()).currentLocationId ?? null;
+    const presentIds = firstEvent?.participants ?? [];
 
-  try {
-    // `world` explicitly here too, same reasoning as the portrait route above.
-    send(
-      res,
-      200,
-      await svc.illustrateScene(turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style, world),
-    );
-  } catch (err) {
-    send(res, err instanceof NoImageProviderError ? 400 : 500, {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-});
+    try {
+      // `world` explicitly here too, same reasoning as the portrait route above.
+      const own = await providerResolver?.imageProviderFor(user);
+      send(
+        res,
+        200,
+        await svc.illustrateScene(turnId, locationId, presentIds, turn.bookProse.slice(0, 400), style, world, own),
+      );
+    } catch (err) {
+      send(res, err instanceof NoImageProviderError ? 400 : 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+);
 
 route('GET', '/api/illustrations/turn/:turnId', async (_req, res, { world, params }) => {
   send(res, 200, await world.illustrations.forTurn(decodeURIComponent(params.turnId ?? '')));
@@ -2853,7 +2865,12 @@ export function createApiServer(opts: ServerOptions) {
         selected = storyId;
       },
       engine,
-      ...(providerResolver ? { providers: (storyId?: string) => providerResolver.forRequest(user, storyId) } : {}),
+      ...(providerResolver
+        ? {
+            providers: (storyId?: string) => providerResolver.forRequest(user, storyId),
+            imageProvider: () => providerResolver.imageProviderFor(user),
+          }
+        : {}),
       setup,
       illustrations,
       dataRoot,

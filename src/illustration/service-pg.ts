@@ -128,12 +128,14 @@ export class IllustrationService {
     entityId: EntityId,
     overrideStyle?: VisualStyle,
     worldOverride?: World,
+    providerOverride?: ImageProvider | null,
   ): Promise<Illustration> {
     // Resolved in the body rather than as a parameter default: the getter may
     // return a promise now (see `serve-pg.ts` on why it must not be cached), and a
     // parameter initializer cannot await.
     const world = worldOverride ?? (await this.getWorld());
-    const provider = this.providers.get();
+    // The caller's own image assignment, when they have one; otherwise the server profile.
+    const provider = providerOverride ?? this.providers.get();
     if (!provider) throw new NoImageProviderError();
 
     const [entity, sheet, style] = await Promise.all([
@@ -206,9 +208,10 @@ export class IllustrationService {
     sceneDetail: string,
     overrideStyle?: VisualStyle,
     worldOverride?: World,
+    providerOverride?: ImageProvider | null,
   ): Promise<Illustration> {
     const world = worldOverride ?? (await this.getWorld());
-    const provider = this.providers.get();
+    const provider = providerOverride ?? this.providers.get();
     if (!provider) throw new NoImageProviderError();
 
     const { location, present, style } = await this.sceneSubjects(world, locationId, presentIds, overrideStyle);

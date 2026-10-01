@@ -45,6 +45,7 @@ import type { SessionUser } from '../auth/config.ts';
 import type { Directive, StyleContract, Knobs, VisualStyle, EntityId, EntityType, Trigger, Visibility } from '../domain/types.ts';
 import { commitNarration, playTurn, recommitNarration } from '../application/play-pg.ts';
 import { appliedCounts, buildGuide, upkeepFor } from './upkeep.ts';
+import type { ImageProvider } from '../providers/image.ts';
 import type { Registry } from '../providers/provider.ts';
 import { usageForUser } from '../store/usage-pg.ts';
 
@@ -100,6 +101,8 @@ export interface McpToolContext {
   lintBlocklist?: () => string[];
   /** This connection's text providers (own key, shared server, or mock); absent uses the engine's. */
   providers?: (storyId?: string) => Promise<Registry>;
+  /** This connection's own image provider, or null to use the server profile; absent always uses the server's. */
+  imageProvider?: () => Promise<ImageProvider | null>;
 }
 
 export async function requestRegistry(ctx: McpToolContext, world: World): Promise<Registry> {
@@ -1163,7 +1166,12 @@ export async function generatePortraitTool(ctx: McpToolContext, args: { entityId
   }
   const style = parseVisualStyle(args.visualStyle);
   try {
-    return await ctx.illustrations.illustratePortrait(args.entityId, style, await ctx.world());
+    return await ctx.illustrations.illustratePortrait(
+      args.entityId,
+      style,
+      await ctx.world(),
+      await ctx.imageProvider?.(),
+    );
   } catch (err) {
     if (err instanceof NoImageProviderError) throw new Error('generate_portrait: no image provider configured');
     throw err;
@@ -1200,6 +1208,7 @@ export async function generateSceneIllustrationTool(
       turn.bookProse.slice(0, 400),
       style,
       world,
+      await ctx.imageProvider?.(),
     );
   } catch (err) {
     if (err instanceof NoImageProviderError)
