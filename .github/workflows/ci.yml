@@ -29,20 +29,14 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build:web
 
-  # Six runners, each running its share of `test/*.test.ts` through
-  # `test/run.ts`: the files are dealt out by recorded cost (`test/timings.json`)
-  # so the expensive `pg-*` files are spread evenly, and within a runner they run
-  # in one long-lived process per vCPU (`--test-isolation=none`) rather than one
+  # One runner for the whole of `test/*.test.ts`, through `test/run.ts`: the
+  # files are dealt out by recorded cost (`test/timings.json`) into one
+  # long-lived process per vCPU (`--test-isolation=none`) rather than one
   # process per file, which used to re-load the app's module graph ~100 times.
-  # Nothing is skipped and nothing is excluded: the six shards together are
-  # exactly the files listed here.
+  # `--shard=i/n` still splits the same files across runners if one gets slow.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5]
     services:
       postgres:
         image: postgres:18-alpine
@@ -97,5 +91,5 @@ jobs:
           psql "$FABULIST_TEST_PG" -Atc \
             "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('fsync','full_page_writes','synchronous_commit') ORDER BY name"
 
-      - name: run test shard ${{ matrix.shard }}/6
-        run: node test/run.ts --shard=${{ matrix.shard }}/6 test/*.test.ts
+      - name: run tests
+        run: node test/run.ts test/*.test.ts
