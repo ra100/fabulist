@@ -463,6 +463,21 @@ route('POST', '/api/turn/:id/regenerate', async (_req, res, { engine, world, par
   }
 });
 
+/**
+ * Next-step options for the player character, asked for by hand after a turn.
+ * Writes nothing: the player picks one into the composer, edits it, and plays it
+ * like anything else they type.
+ */
+route('POST', '/api/suggest', async (_req, res, { engine, world }) => {
+  try {
+    send(res, 200, await engine.suggestNext({ world }));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith('no player character')) return send(res, 409, { error: message });
+    throw err;
+  }
+});
+
 route('POST', '/api/play', async (_req, res, { engine, world, body }) => {
   const { input, overrideIntegrity } = parseBody(playBodySchema, body);
 

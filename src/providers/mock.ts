@@ -117,9 +117,17 @@ export class MockProvider implements Provider {
         return this.setup(prompt);
       case 'summarize':
         return this.summarize(prompt);
+      case 'suggest':
+        return this.suggest();
       default:
         return JSON.stringify({ ok: true });
     }
+  }
+
+  private suggest(): string {
+    return JSON.stringify({
+      options: ['look around for anything out of place', 'ask the nearest person what happened here', 'press on toward the next landmark', 'wait and listen'],
+    });
   }
 
   private classify(input: string): string {

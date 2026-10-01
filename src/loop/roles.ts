@@ -23,6 +23,7 @@ import {
   buildIntegrityFrame,
   buildNarratorFrame,
   buildRefereeFrame,
+  buildSuggestFrame,
   presentIds,
   type FrameContext,
 } from '../frame/builders.ts';
@@ -39,6 +40,7 @@ import {
   integritySchema,
   intentSchema,
   refereeSchema,
+  suggestSchema,
   validateDelta,
   type ValidationResult,
 } from './validate.ts';
@@ -59,8 +61,10 @@ async function callJson(
   user: string,
   schema: { name: string; schema: Record<string, unknown> },
   retries = 1,
+  providerRole = role,
+  temperature = 0,
 ): Promise<unknown> {
-  const provider = deps.provider(role);
+  const provider = deps.provider(providerRole);
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     const messages = [
@@ -75,7 +79,7 @@ async function callJson(
         content: `Your previous reply could not be parsed as JSON matching the schema. Reply with only the JSON object.`,
       });
     }
-    const req = adaptRequest({ messages, role, schema, temperature: 0 }, provider.capabilities);
+    const req = adaptRequest({ messages, role, schema, temperature }, provider.capabilities);
     const started = Date.now();
     let res: CompletionResult;
     try {
@@ -380,6 +384,53 @@ export async function direct(deps: RoleDeps, rawInput: string): Promise<Director
     beat: typeof raw.beat === 'string' ? raw.beat : 'continue',
     reasoning: typeof raw.reasoning === 'string' ? raw.reasoning : '',
   };
+}
+
+// ------------------------------------------------------------------ suggest
+
+/** How many next-step options the player is offered. */
+export const SUGGESTION_COUNT = 4;
+
+const SUGGEST_SYSTEM = `You help the player of a role-play session decide what their
+character might do next. You propose; you never decide, and nothing you write
+enters the book.
+
+Offer ${SUGGESTION_COUNT} distinct options the player character could plausibly try right
+now, given where they are, who is with them, what they know, and what just
+happened. Vary them: mix a bold move, a careful one, a social one, and one that
+pursues an open thread. Keep each true to the character's sheet and vows.
+
+Write each option as a short imperative in the player's shorthand, under fifteen
+words, with no numbering and no explanation (for example: "ask the ferryman who
+paid for the crossing"). Never invent world facts the scene has not established,
+and never decide how an option turns out.
+
+Reply with JSON only.`;
+
+/**
+ * Next-step options for the player character, on request. Runs on the
+ * Director's provider: it is the role already reading the scene for openings,
+ * and routing it there keeps a BYOK user's own key paying for it rather than
+ * falling through to the server's default. Sampled warm, unlike the other
+ * JSON roles, so asking again offers something new.
+ */
+export async function suggestOptions(deps: RoleDeps): Promise<string[]> {
+  const ctx = deps.ctx('director');
+  const frame = buildSuggestFrame(ctx);
+  const raw = (await callJson(deps, 'suggest', SUGGEST_SYSTEM, frame.text, suggestSchema, 1, 'director', 0.8)) as {
+    options?: unknown;
+  };
+  const seen = new Set<string>();
+  const options: string[] = [];
+  for (const o of Array.isArray(raw.options) ? raw.options : []) {
+    if (typeof o !== 'string') continue;
+    const text = o.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, '').trim();
+    if (!text || seen.has(text.toLowerCase())) continue;
+    seen.add(text.toLowerCase());
+    options.push(text.slice(0, 200));
+    if (options.length === SUGGESTION_COUNT) break;
+  }
+  return options;
 }
 
 // ------------------------------------------------------------------ narrator

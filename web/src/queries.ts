@@ -351,6 +351,10 @@ export function useRegenerateMutation() {
   return useMutation({ mutationFn: (vars: { id: string; note?: string }) => api.regenerate(vars.id, vars.note) });
 }
 
+export function useSuggestMutation() {
+  return useMutation({ mutationFn: () => api.suggest() });
+}
+
 export function usePinMutation() {
   return useMutation({ mutationFn: (vars: { id: string; pinned: boolean }) => api.pin(vars.id, vars.pinned) });
 }

@@ -39,6 +39,7 @@ export {
   integritySchema,
   intentSchema,
   refereeSchema,
+  suggestSchema,
 } from './validate.ts';
 export type { ValidationIssue, ValidationResult, ValidationTier } from './validate.ts';
 

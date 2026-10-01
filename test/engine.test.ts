@@ -542,6 +542,46 @@ test('a world question is answered from state without advancing the story', asyn
   world.close();
 });
 
+// -------------------------------------------------------------------- suggest
+
+test('suggestNext offers options on the director provider and writes nothing', async () => {
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const narrator = new MockProvider();
+  const director = new MockProvider();
+  const engine = new Engine({ world, providers: new ProviderRegistry(narrator, { director }) });
+  const out = await engine.takeTurn('i keep copying');
+  if (out.kind !== 'narrated') throw new Error('expected narration');
+  const turnsBefore = world.chronicle.turns().length;
+  const eventsBefore = world.chronicle.events().length;
+
+  const { options } = await engine.suggestNext();
+
+  assert.ok(options.length > 0 && options.length <= 4, `got ${options.length} options`);
+  assert.ok(options.every((o) => o.trim().length > 0));
+  assert.ok(director.calls.some((c) => c.role === 'suggest'), 'routed with the director');
+  assert.ok(!narrator.calls.some((c) => c.role === 'suggest'), 'not on the narrator');
+  assert.equal(world.chronicle.turns().length, turnsBefore, 'no turn written');
+  assert.equal(world.chronicle.events().length, eventsBefore, 'no event written');
+  world.close();
+});
+
+test('suggestNext trims list markers and duplicates from what the model sends back', async () => {
+  class ListyProvider extends MockProvider {
+    override async complete(req: CompletionRequest): Promise<CompletionResult> {
+      if (req.role !== 'suggest') return super.complete(req);
+      const text = JSON.stringify({ options: ['1. hide', '- Hide', '  ', 42, '10 paces back', 'a', 'b', 'c'] });
+      return { text, tokensIn: 1, tokensOut: 1, model: 'mock', schemaEnforced: true };
+    }
+  }
+  const world = World.open(':memory:');
+  seedWorld(world);
+  const engine = new Engine({ world, providers: new ProviderRegistry(new ListyProvider()) });
+  const { options } = await engine.suggestNext();
+  assert.deepEqual(options, ['hide', '10 paces back', 'a', 'b']);
+  world.close();
+});
+
 // -------------------------------------------------------------------- reroll
 
 test('regenerateProse rewrites bookProse and leaves the committed delta untouched', async () => {

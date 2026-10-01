@@ -889,6 +889,8 @@ export const api = {
       `/turn/${encodeURIComponent(id)}/regenerate`,
       note ? { note } : {},
     ),
+  /** Next-step options for the player character; writes nothing to the book. */
+  suggest: () => post<{ options: string[] }>('/suggest', {}),
   threads: () => req<Thread[]>('/threads'),
   /** §11's "you cannot create a thread by hand" — retitle/close already went through `updateThread`. */
   createThread: (title: string, stakes: string) => post<Thread>('/threads', { title, stakes }),

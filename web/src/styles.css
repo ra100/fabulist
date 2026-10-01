@@ -1756,6 +1756,22 @@ hr {
   margin-right: var(--s1);
 }
 
+.suggestions {
+  border-left: 2px solid var(--accent-muted);
+  padding: 2px 0 2px var(--s3);
+  margin-bottom: var(--s3);
+}
+.suggestions b {
+  font-family: var(--sans);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+}
+.suggestions .opts { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s1); }
+.suggestions .opts button { text-align: left; white-space: normal; }
+
 /* --------------------------------------------------------------------- graph */
 /* The deliberate departure: a plate, bled to the panel edge. */
 

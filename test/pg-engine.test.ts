@@ -350,6 +350,22 @@ test('a reroll replaces prose without touching what happened', async (t) => {
   if (!ran) t.skip('no Postgres configured');
 });
 
+test('next-step options are read from the story without writing to it', async (t) => {
+  const ran = await withPg(async (db) => {
+    const world = await seed(db);
+    const engine = engineFor(db, world);
+
+    const out = await engine.takeTurn('i trim the wick');
+    assert.equal(out.kind, 'narrated');
+    const turnsBefore = (await world.chronicle.turns()).length;
+
+    const { options } = await engine.suggestNext({ world });
+    assert.ok(options.length > 0 && options.length <= 4, `got ${options.length} options`);
+    assert.equal((await world.chronicle.turns()).length, turnsBefore, 'asking for options is not a turn');
+  });
+  if (!ran) t.skip('no Postgres configured');
+});
+
 test('several turns accumulate a book, and it exports', async (t) => {
   const ran = await withPg(async (db) => {
     const world = await seed(db);
