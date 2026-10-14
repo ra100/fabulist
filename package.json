@@ -72,7 +72,7 @@
     "@ai-sdk/anthropic": "4.0.70",
     "@ai-sdk/google-vertex": "5.0.100",
     "@ai-sdk/openai-compatible": "3.0.61",
-    "@modelcontextprotocol/sdk": "1.30.1",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@tanstack/react-query": "^5.104.0",
     "@workos-inc/node": "^10.14.0",
     "ai": "7.0.124",
