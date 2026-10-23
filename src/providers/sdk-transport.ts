@@ -73,6 +73,9 @@ export async function streamProse(
 
   const result = streamText({
     ...request,
+    // Pins the full-result overload: the low-memory variant has no `text`,
+    // and `StreamRequest` alone leaves the return type a union of both.
+    experimental_lowMemory: false,
     onChunk: ({ chunk }) => {
       if (chunk.type !== 'text-delta') return;
       chunks.push(chunk.text);

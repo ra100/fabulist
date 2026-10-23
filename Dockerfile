@@ -11,7 +11,7 @@
 # runs only what was reviewed rather than whatever the tag or `latest` names
 # that day. Dependabot (.github/dependabot.yml) proposes the bumps.
 
-FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS build
+FROM node:26.12.1-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec AS build
 WORKDIR /app
 
 # Install first, from the lockfile alone, so an app-code-only change doesn't
@@ -27,7 +27,7 @@ RUN pnpm build:web
 
 # ---------------------------------------------------------------------------
 
-FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1
+FROM node:26.12.1-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec
 WORKDIR /app
 ENV NODE_ENV=production
 
