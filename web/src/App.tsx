@@ -96,6 +96,7 @@ import {
   useWorldsQuery,
 } from './queries.ts';
 import { appTabs, pathForTab, tabForPath, type AppTab } from './navigation.ts';
+import { MobileNav } from './MobileNav.tsx';
 import {
   isPrivateStoryLockedError,
   privateStoragePresentation,
@@ -410,7 +411,7 @@ export function App() {
               drift apart — and the mark is a corner crop, so it needs the tile's bounds
               and cannot be inlined as artwork on transparency. */}
           <img className="masthead-badge" src="/favicon.svg" width={30} height={30} alt="" />
-          {state?.worldTitle ?? 'Fabulist'}
+          <span className="masthead-title">{state?.worldTitle ?? 'Fabulist'}</span>
           {serverVersion ? (
             <span className="mono dimmer app-version" title="package.json version on the running server">
               v{serverVersion}
@@ -534,6 +535,13 @@ export function App() {
           onPrivateStorageChanged={refreshAfterPrivateStorageChange}
         />
       ) : null}
+
+      <MobileNav
+        tab={tab}
+        onNavigate={navigateToTab}
+        account={currentUser ? (currentUser.firstName ?? currentUser.email) : null}
+        onSignOut={() => void signOut()}
+      />
     </div>
   );
 }
@@ -1010,7 +1018,7 @@ function BookTab({
   // Prose as it arrives, plus which gate the turn is currently passing through.
   const [streaming, setStreaming] = useState('');
   const [stage, setStage] = useState('');
-  const bottom = useRef<HTMLDivElement>(null);
+  const bookScroller = useRef<HTMLDivElement>(null);
   /** The words already committed, waiting for their prose. */
   const [awaiting, setAwaiting] = useState<string | null>(null);
   /** Which turn just landed, so only that one animates in. */
@@ -1028,8 +1036,8 @@ function BookTab({
   const [suggestError, setSuggestError] = useState<string | null>(null);
   const composerInput = useRef<HTMLTextAreaElement>(null);
   /**
-   * Only reachable below 960px, where `.side-toggle` is a real disclosure
-   * rather than the `display: contents` pass-through it is on desktop — see
+   * Only reachable below 960px, where `.side-toggle` opens as a bottom sheet
+   * over the book rather than rendering inline as it does on desktop — see
    * the comment on `.side-toggle` in styles.css. Closed by default there:
    * a phone screen shorter than this panel's natural height was forcing the
    * book itself to 0px height, which is the bug this whole toggle exists
@@ -1105,9 +1113,29 @@ function BookTab({
     return () => window.clearTimeout(h);
   }, [turns]);
 
+  // Scrolls the book's own scrollers, not `scrollIntoView`: that walks every
+  // scrollable ancestor up to the document, and on a phone — where the
+  // browser's toolbar makes `100vh` taller than what is visible — it scrolled
+  // the whole shell and pushed the topbar off the screen with no way back.
+  // Every container up to `.main` is a candidate because a phone on its side
+  // scrolls book and composer together in `.main` itself (see styles.css);
+  // whichever ones are not scrollable at the current size ignore the call.
   useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: 'smooth' });
+    for (let el: HTMLElement | null = bookScroller.current; el; el = el.parentElement) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+      if (el.classList.contains('main')) break;
+    }
   }, [turns.length, awaiting]);
+
+  // The side panel is a bottom sheet on a phone; Escape closes it like any other dialog.
+  useEffect(() => {
+    if (!sideOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSideOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sideOpen]);
 
   // Options describe the moment after one turn; once the next lands they are stale.
   useEffect(() => {
@@ -1386,7 +1414,7 @@ function BookTab({
   }
 
   return (
-    <div className="main">
+    <div className="main book-main">
       {turnError ? (
         <div className="turn-error-overlay" role="alert" aria-live="assertive">
           <div>
@@ -1399,7 +1427,7 @@ function BookTab({
         </div>
       ) : null}
       <div className="pane" style={{ display: 'flex', flexDirection: 'column', padding: 0 }}>
-        <div className="pane" style={{ flex: 1 }}>
+        <div className="pane" style={{ flex: 1 }} ref={bookScroller}>
           <div className="book">
             {hasPlayer === false ? (
               <div className="notice" role="status">
@@ -1613,7 +1641,6 @@ function BookTab({
                 </div>
               </div>
             ) : null}
-            <div ref={bottom} />
           </div>
         </div>
 
@@ -1688,7 +1715,12 @@ function BookTab({
                 {suggestions?.options.length ? (
                   <div className="opts">
                     {suggestions.options.map((o) => (
-                      <button key={o} type="button" title="put this in the composer to edit" onClick={() => pickOption(o)}>
+                      <button
+                        key={o}
+                        type="button"
+                        title="put this in the composer to edit"
+                        onClick={() => pickOption(o)}
+                      >
                         {o}
                       </button>
                     ))}
@@ -1709,45 +1741,48 @@ function BookTab({
             />
             <div className="row" style={{ marginTop: 'var(--s2)' }}>
               <span className="hint grow" style={{ marginTop: 0 }}>
-                ⌘↵ to play · shorthand is fine · leading “ooc” for a directive
+                <span className="hint-keys">⌘↵ to play · </span>shorthand is fine · leading “ooc” for a directive
               </span>
-              <a
-                className="button-like"
-                title="download the book as markdown"
-                href={turns.length ? api.exportUrl('markdown') : undefined}
-                aria-disabled={!turns.length}
-                onClick={(e) => {
-                  if (!turns.length) e.preventDefault();
-                }}
-              >
-                export .md
-              </a>
-              <a
-                className="button-like"
-                title="download the book as plain text"
-                href={turns.length ? api.exportUrl('text') : undefined}
-                aria-disabled={!turns.length}
-                onClick={(e) => {
-                  if (!turns.length) e.preventDefault();
-                }}
-              >
-                export .txt
-              </a>
-              <button
-                className={rollbackOpen ? 'primary' : ''}
-                title="undo the last chapter or scene"
-                disabled={mutationPending || !turns.length}
-                onClick={openRollback}
-              >
-                roll back…
-              </button>
-              <button
-                title="close the current scene and summarise it"
-                disabled={mutationPending || !turns.length}
-                onClick={() => void closeScene()}
-              >
-                {closingScene ? 'closing…' : 'close scene'}
-              </button>
+              {/* One scrolling chip row on a phone, so the actions share a line with `play`; unboxed above that. */}
+              <div className="composer-secondary">
+                <a
+                  className="button-like"
+                  title="download the book as markdown"
+                  href={turns.length ? api.exportUrl('markdown') : undefined}
+                  aria-disabled={!turns.length}
+                  onClick={(e) => {
+                    if (!turns.length) e.preventDefault();
+                  }}
+                >
+                  export .md
+                </a>
+                <a
+                  className="button-like"
+                  title="download the book as plain text"
+                  href={turns.length ? api.exportUrl('text') : undefined}
+                  aria-disabled={!turns.length}
+                  onClick={(e) => {
+                    if (!turns.length) e.preventDefault();
+                  }}
+                >
+                  export .txt
+                </a>
+                <button
+                  className={rollbackOpen ? 'primary' : ''}
+                  title="undo the last chapter or scene"
+                  disabled={mutationPending || !turns.length}
+                  onClick={openRollback}
+                >
+                  roll back…
+                </button>
+                <button
+                  title="close the current scene and summarise it"
+                  disabled={mutationPending || !turns.length}
+                  onClick={() => void closeScene()}
+                >
+                  {closingScene ? 'closing…' : 'close scene'}
+                </button>
+              </div>
               <button className="primary" disabled={mutationPending || !input.trim()} onClick={() => void play(input)}>
                 {busy ? 'writing…' : 'play'}
               </button>
@@ -1768,7 +1803,8 @@ function BookTab({
           `.side-toggle-body` is always rendered, so desktop sees exactly
           what it always did.
         */}
-        <div className="side-toggle">
+        {sideOpen ? <div className="sheet-scrim" onClick={() => setSideOpen(false)} aria-hidden="true" /> : null}
+        <div className={`side-toggle${sideOpen ? ' open' : ''}`}>
           <button
             type="button"
             className="side-toggle-summary"
@@ -2038,7 +2074,7 @@ function GraphTab() {
   return (
     <div className="main">
       <div className="pane">
-        <div className="row" style={{ marginBottom: 11 }}>
+        <div className="row wrap" style={{ marginBottom: 11 }}>
           <div className="search-box">
             <input
               value={query}
