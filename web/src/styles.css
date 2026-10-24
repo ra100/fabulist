@@ -944,6 +944,13 @@ hr {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* `dvh` tracks the visible viewport as a phone's toolbar shows and hides;
+     plain `vh` is the toolbar-hidden height, so the shell was taller than
+     the screen and the document itself scrolled — taking the topbar with it. */
+  height: 100dvh;
+  /* The shell never scrolls; its panes do. Nothing inside can push the
+     document sideways or drag the topbar out of view. */
+  overflow: hidden;
 }
 
 .topbar {
@@ -961,6 +968,7 @@ hr {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   font-family: var(--serif);
   font-size: 18px;
   font-weight: 600;
@@ -1133,6 +1141,9 @@ hr {
   flex: 1;
   min-width: 0;
   overflow: auto;
+  /* a scroll that reaches the end stops there, instead of chaining into the
+     shell behind it or setting off the browser's pull-to-refresh */
+  overscroll-behavior: contain;
   padding: var(--s5) var(--s4) var(--s7);
 }
 /* tool views obey a measure; they do not stretch to the window. Centred in
@@ -1151,6 +1162,7 @@ hr {
   width: 336px;
   flex-shrink: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   background: var(--surface-1);
   border-left: 1px solid var(--rule);
   padding: var(--s4);
@@ -2112,7 +2124,8 @@ td.actions button { flex: none; }
 
 .cast-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(25rem, 1fr));
+  /* `min(…, 100%)` so one column never asks for more than a phone is wide */
+  grid-template-columns: repeat(auto-fill, minmax(min(25rem, 100%), 1fr));
   gap: var(--s3);
   align-items: stretch;
   max-width: 84rem;
@@ -2677,7 +2690,6 @@ button.link:hover { background: none; color: var(--ink); }
     border-left: none;
     border-top: 1px solid var(--rule);
   }
-  .graph-wrap { height: 60vh; }
 }
 
 /*
@@ -2720,11 +2732,6 @@ button.link:hover { background: none; color: var(--ink); }
 .side-toggle-body[hidden] { display: block; }
 
 @media (max-width: 960px) {
-  .side-toggle {
-    /* the toggle owns the aside's padding at its own edges, so the summary
-       can bleed to the true edge and read as a header bar, not a card */
-    margin: calc(var(--s4) * -1);
-  }
   .side-toggle-summary {
     display: flex;
     width: 100%;
@@ -2777,52 +2784,292 @@ button.link:hover { background: none; color: var(--ink); }
   .turn { padding-left: 0; }
   .turn.pinned::before { left: 0; }
   .turn.pinned { padding-left: var(--s3); }
-  .topbar { gap: var(--s3); padding: 0 var(--s3); }
-  .meta { display: none; }
-  .tabs button { padding: 7px 8px; }
-  /* Same reasoning as `.meta` just above: a phone's topbar has no room for
-     an email address once the icon, title and tab scroller are on it. The
-     sign-out button itself stays visible — losing the "signed in as X"
-     glance costs nothing a user cannot still get from tapping it, but
-     losing the ability to sign out at all on a phone would. */
-  .account-who { display: none; }
   .private-storage-indicator-name { display: none; }
 
-  /* The composer's action row: hint copy plus two buttons on one line was
+  /* The composer's action row: hint copy plus five buttons on one line was
      already tight at 375px and overlapping by 320px. The hint takes the
-     full first line so both buttons get a real tap target on the second,
-     rather than three things fighting for one row. */
-  .composer .row:has(.hint) { flex-wrap: wrap; }
-  .composer .hint { flex-basis: 100%; order: -1; margin-bottom: var(--s1); }
+     full first line; below it the four secondary actions share one
+     sideways-scrolling chip row with `play`, which stays pinned at the
+     right edge where the thumb rests, instead of wrapping into two more
+     rows that cost the book a quarter of the screen. */
+  .composer { padding: var(--s2) var(--s3) var(--s3); }
+  .composer .row:has(.hint) { flex-wrap: wrap; gap: var(--s2); }
+  .composer .hint { flex-basis: 100%; order: -1; }
+  .composer-secondary {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    gap: var(--s2);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 16px), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - 16px), transparent);
+  }
+  .composer-secondary::-webkit-scrollbar { display: none; }
+  .composer-secondary > * { flex-shrink: 0; white-space: nowrap; font-size: 12px; }
+  .composer-secondary > :last-child { margin-right: 16px; }
+  .composer .row:has(.hint) > button.primary { flex-shrink: 0; min-width: 72px; }
+
+  /* The turn's footer — gm move, chapter, then up to four tools — was one
+     unwrapping row, so at 390px the move label folded into a four-line
+     column and the tools ran off the right edge. The spacer that pushes
+     the tools right becomes a line break instead. */
+  .turn-tools { flex-wrap: wrap; row-gap: var(--s2); }
+  .turn-tools .grow { flex-basis: 100%; height: 0; }
+  .scene-illustration { margin-left: 0; }
 }
 
 /*
-  Eight tabs in one row was designed for a pointer that can read "causality"
-  at 12px, not a thumb on a phone screen — the row measured 399px wide
-  against a 390px portrait viewport and dragged the entire page into
-  horizontal scroll (`document.documentElement.scrollWidth` came back 574px
-  against a 390px `clientWidth`). The same failure reappears in landscape at
-  844×390 (899px of content against 844px of viewport), so this shares the
-  960px breakpoint where `.main` already goes to a single column, rather
-  than the narrower 640px used for prose-only adjustments — the tabs
-  overflow by *width*, not by portrait-vs-landscape.
+  Phone layout: a fixed app shell with navigation at the bottom.
 
-  `.tabs` gets its own scroller instead of the page: `min-width: 0` lets the
-  flex item actually shrink below its content size (the flex default floor
-  is content width, not zero), and the overflow it can no longer avoid
-  scrolls sideways in place, edge-veiled so the cut-off is legible rather
-  than an abrupt clip.
+  Before this, the topbar carried the masthead, the meta strip, nine tabs,
+  the private-storage pill and the account row in one 48px line. On a
+  390px portrait screen that measured 563px wide: the document scrolled
+  sideways, the tab row started off-screen, and with a long world title
+  the visible part of the tab scroller was a sliver showing one letter.
+  Scrolling the book to its newest turn then dragged the whole shell —
+  topbar included — out of view, and there was nothing left on screen to
+  navigate with.
+
+  The shape that replaces it is the one Material's navigation bar and
+  Apple's tab bar both settle on for compact windows, for the reasons
+  Luke Wroblewski and Steven Hoober's grip studies give: on a tall phone
+  the bottom edge is where the thumb already is, and visible labelled
+  destinations beat a hidden menu (NN/g measured hidden navigation being
+  used about half as often). So:
+
+  - the topbar keeps only the masthead and the private-storage pill;
+  - four destinations plus "more" sit in a bottom bar, each a full-height
+    56px target with a visible label;
+  - the shell is pinned to the dynamic viewport (`100dvh`) and never
+    scrolls itself; each view scrolls inside `.main`, contained, so the
+    topbar and the bar are always on screen;
+  - secondary panels open as bottom sheets over a scrim rather than
+    stacking into the same column and squeezing the book;
+  - every edge pads by `env(safe-area-inset-*)` (`viewport-fit=cover` in
+    index.html), so nothing sits under a notch or the home indicator.
 */
+.bottom-nav,
+.sheet-scrim,
+.sheet { display: none; }
+/* Unboxed above the phone breakpoint, so desktop's composer row is untouched. */
+@media (min-width: 641px) {
+  .composer-secondary { display: contents; }
+}
+
+@keyframes sheet-in {
+  from { transform: translateY(24px); opacity: 0; }
+}
+@keyframes scrim-in {
+  from { opacity: 0; }
+}
+
 @media (max-width: 960px) {
-  .tabs {
-    min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
-    -webkit-mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 12px), transparent);
-    mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 12px), transparent);
+  :root { --nav-h: 56px; }
+
+  .topbar {
+    gap: var(--s3);
+    height: calc(48px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) max(var(--s3), env(safe-area-inset-right)) 0
+      max(var(--s3), env(safe-area-inset-left));
   }
-  .tabs::-webkit-scrollbar { display: none; }
-  .tabs button { flex-shrink: 0; }
+  .topbar h1 { flex: 1; font-size: 17px; }
+  .masthead-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .masthead-badge { width: 26px; height: 26px; }
+  .topbar .tabs,
+  .topbar .account,
+  .meta,
+  .app-version { display: none; }
+
+  /* Every view but the book scrolls as one column: its pane and its aside
+     stack and scroll together, rather than each keeping its own scroller
+     and the aside's natural height starving the pane to nothing. */
+  .main {
+    flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .main > .pane,
+  .main > .side {
+    flex: none;
+    overflow: visible;
+  }
+  /* The book keeps its own scroller with the composer pinned under it. */
+  .book-main { overflow: hidden; }
+  .book-main > .pane {
+    flex: 1 1 0%;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .book-main > .side {
+    flex: none;
+    overflow: visible;
+    padding: 0;
+  }
+  .composer {
+    padding-left: max(var(--s3), env(safe-area-inset-left));
+    padding-right: max(var(--s3), env(safe-area-inset-right));
+  }
+
+  .bottom-nav {
+    display: flex;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 42;
+    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    background: var(--surface-1);
+    border-top: 1px solid var(--rule);
+    box-shadow: var(--elev-panel);
+  }
+  .bottom-nav button {
+    flex: 1 1 0%;
+    min-width: 0;
+    height: var(--nav-h);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 4px 2px;
+    background: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    color: var(--ink-3);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .bottom-nav button span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .bottom-nav button:hover:not(:disabled) { background: none; color: var(--ink-2); }
+  .bottom-nav button.active { color: var(--ink); font-weight: 600; }
+  /* the active indicator is a pill behind the icon, not an underline: it
+     reads at a glance from the corner of the eye, in every palette */
+  .nav-icon {
+    box-sizing: content-box;
+    padding: 3px 14px;
+    border-radius: 999px;
+    transition: background-color var(--dur-fast) var(--ease-standard);
+  }
+  .bottom-nav button.active .nav-icon {
+    background: var(--accent-veil);
+    color: var(--accent);
+  }
+
+  .sheet-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: color-mix(in oklch, var(--ground) 40%, oklch(0 0 0 / 0.45));
+    animation: scrim-in var(--dur-normal) var(--ease-standard);
+  }
+  /* One bottom-sheet surface for "more" and for the book's side panel. It
+     stops above the nav bar, so the bar — and the button that opened the
+     sheet — stays visible and tappable to close it. */
+  .sheet,
+  .side-toggle.open {
+    display: block;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--nav-h) + env(safe-area-inset-bottom));
+    z-index: 41;
+    max-height: calc(100dvh - var(--nav-h) - env(safe-area-inset-bottom) - 72px);
+    margin: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--surface-1);
+    border-top: 1px solid var(--rule-strong);
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    box-shadow: 0 -8px 32px oklch(0 0 0 / 0.18);
+    animation: sheet-in var(--dur-enter) var(--ease-enter);
+  }
+  .side-toggle.open .side-toggle-summary {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+  }
+  .sheet-grip {
+    width: 36px;
+    height: 4px;
+    margin: var(--s2) auto var(--s1);
+    border-radius: 2px;
+    background: var(--rule-strong);
+  }
+  .more-sheet ul {
+    list-style: none;
+    margin: 0;
+    padding: var(--s1) max(var(--s2), env(safe-area-inset-right)) var(--s2) max(var(--s2), env(safe-area-inset-left));
+  }
+  .more-sheet li button {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    width: 100%;
+    min-height: 48px;
+    padding: 0 var(--s3);
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: var(--ink-2);
+    font-size: 15px;
+    text-align: left;
+  }
+  .more-sheet li button .nav-icon { padding: 0; }
+  .more-sheet li button.active { color: var(--ink); font-weight: 600; background: var(--accent-veil); }
+  .more-sheet li button.active .nav-icon { color: var(--accent); }
+  .more-sheet-account {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s3) var(--s4) var(--s4);
+    border-top: 1px solid var(--rule);
+    font-size: 13px;
+  }
+  .more-sheet-account span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .graph-wrap { height: calc(100dvh - 48px - var(--nav-h) - 120px); min-height: 320px; }
+}
+
+/* A phone on its side has width to spare and no height: the bars go
+   compact — icon beside label — so the book keeps most of a 390px screen. */
+@media (max-width: 960px) and (max-height: 500px) {
+  :root { --nav-h: 44px; }
+  .topbar { height: calc(40px + env(safe-area-inset-top)); }
+  .bottom-nav button { flex-direction: row; gap: 6px; font-size: 12px; }
+  .nav-icon { padding: 2px 8px; }
+  /* A pinned composer is ~180px — most of what is left. Here the book, the
+     composer and the side panel's bar scroll together instead, as one page
+     ending in the input. */
+  .book-main { overflow-y: auto; }
+  .book-main > .pane,
+  .book-main > .pane > .pane { flex: none; overflow: visible; }
+  .composer { padding-top: var(--s2); padding-bottom: var(--s2); }
+  .composer textarea { min-height: 40px; }
+}
+
+/* iOS zooms the whole page into any focused field set below 16px and does
+   not zoom back out, which on a phone strands the reader mid-screen. */
+@media (max-width: 960px) and (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select { font-size: 16px; }
+}
+/* "⌘↵" means nothing without a keyboard. */
+@media (hover: none) and (pointer: coarse) {
+  .hint-keys { display: none; }
 }
 
 /*
