@@ -30,8 +30,8 @@ importers:
         specifier: ^5.104.5
         version: 5.104.5(@types/react@19.3.0)(react@19.3.1)
       '@workos-inc/node':
-        specifier: ^11.0.0
-        version: 11.0.0
+        specifier: ^12.0.0
+        version: 12.0.0
       ai:
         specifier: 7.0.146
         version: 7.0.146(zod@4.6.7)
@@ -664,8 +664,8 @@ packages:
   '@workflow/serde@4.1.0':
     resolution: {integrity: sha512-pav4F2BoirECWR7Nf1TKt+2eETcBj7jj4cBefQ8VXQCA6NPkaKeLfj/zMgi+3zYV5ZIBT4GuUiphsj0/b9hPQQ==}
 
-  '@workos-inc/node@11.0.0':
-    resolution: {integrity: sha512-swUT6CbkuVQXMOtUpI70LZ8usjSg8OXcKMjKdoYLeqCApRI0Oo97l+nZ0lKzZ5GxjxgcVZGGVK025h7z9WyCJg==}
+  '@workos-inc/node@12.0.0':
+    resolution: {integrity: sha512-ujB+xdaOHUrfHe5oMnNOrHV/g+AzZ+5VPCGayDLC4mHWTBHCZg6U5e9X8EDCmKSir8pSXAmJaJylTJNRZ+BSew==}
     engines: {node: '>=22.11.0'}
 
   accepts@2.0.0:
@@ -1758,7 +1758,7 @@ snapshots:
 
   '@workflow/serde@4.1.0': {}
 
-  '@workos-inc/node@11.0.0': {}
+  '@workos-inc/node@12.0.0': {}
 
   accepts@2.0.0:
     dependencies:
